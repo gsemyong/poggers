@@ -1,0 +1,13 @@
+node_modules
+dist
+.DS_Store
+.env
+.app
+.chat-snapshot.json
+.chat-events.jsonl
+.chat-snapshot.json.tmp
+.chat-events.jsonl.tmp
+.na-client-snapshot.json
+.na-client-events.jsonl
+.na-worker-snapshot.json
+.na-worker-events.jsonl

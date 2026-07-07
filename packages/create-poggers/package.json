@@ -1,0 +1,15 @@
+{
+  "name": "create-poggers",
+  "version": "0.0.0",
+  "description": "Create a Poggers Kit app without installing a global CLI.",
+  "bin": {
+    "create-poggers": "./src/index.js"
+  },
+  "files": [
+    "src"
+  ],
+  "type": "module",
+  "engines": {
+    "bun": ">=1.2.0"
+  }
+}

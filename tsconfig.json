@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "lib": ["ESNext", "DOM", "WebWorker"],
+    "target": "ESNext",
+    "module": "Preserve",
+    "moduleDetection": "force",
+    "jsx": "react-jsx",
+    "allowJs": true,
+    "types": ["bun"],
+    "moduleResolution": "bundler",
+    "verbatimModuleSyntax": true,
+    "noEmit": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "paths": {
+      "@poggers/kit": ["./packages/kit/src/index.ts"],
+      "@poggers/kit/*": ["./packages/kit/src/*"],
+      "apps/*": ["./apps/*"],
+      "infra/*": ["./packages/kit/src/infra/*"],
+      "tests/*": ["./tests/*"]
+    }
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "compilerOptions": {
+    "lib": ["ESNext", "DOM", "WebWorker"],
+    "target": "ESNext",
+    "module": "Preserve",
+    "moduleDetection": "force",
+    "jsx": "react-jsx",
+    "jsxImportSource": "@poggers/kit",
+    "allowJs": true,
+    "allowImportingTsExtensions": true,
+    "types": ["bun"],
+    "moduleResolution": "bundler",
+    "verbatimModuleSyntax": true,
+    "noEmit": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "ignoreDeprecations": "6.0",
+    "paths": {
+      "@poggers/app": [
+        "./.app/types/@poggers/app/index.tsx",
+        "./node_modules/@poggers/kit/app-types/index.d.ts",
+        "../../packages/kit/app-types/index.d.ts"
+      ]
+    }
+  }
+}
