@@ -43,7 +43,7 @@ export function PartList({ parts }: { parts: AIPart[] }) {
                 <For each={part.items}>
                   {(question, questionIndex) => (
                     <Part.Item>
-                      {questionIndex() + 1}. {question}
+                      {questionIndex + 1}. {question}
                     </Part.Item>
                   )}
                 </For>

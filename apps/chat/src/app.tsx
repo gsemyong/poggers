@@ -1,8 +1,9 @@
 import { defineApp } from "@poggers/kit";
+import type { AppDefinition } from "@poggers/app";
 import { ChatScreen } from "./components/chat-screen";
-import type { App, DisplayMessage } from "./types";
+import type { DisplayMessage } from "./types";
 
-export default defineApp<App>({
+const app: AppDefinition = {
   version: 1,
 
   app: {
@@ -216,4 +217,6 @@ export default defineApp<App>({
   ui() {
     return <ChatScreen />;
   },
-});
+};
+
+export default defineApp(app);

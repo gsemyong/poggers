@@ -96,10 +96,10 @@ function files({ appName, kitVersion }) {
         type: "module",
         scripts: {
           dev: "poggers dev",
-          bundle: "poggers bundle --outdir .app/build/web",
           build: "poggers build --outfile dist/app",
           start: "./dist/app",
-          check: "poggers check",
+          lint: "poggers check",
+          check: "bun run typecheck && bun run lint",
           typecheck: "poggers typecheck",
         },
         dependencies: {
@@ -240,7 +240,6 @@ export type App = {
 `,
     "src/app.tsx": `import { defineApp } from "@poggers/kit";
 import { Root } from "./components/root";
-import { createDeps } from "./helpers/deps/createDeps";
 import type { App } from "./types";
 
 export default defineApp<App>({
@@ -261,10 +260,6 @@ export default defineApp<App>({
   navigation: {
     home: "/",
     settings: "/settings",
-  },
-
-  deps: {
-    server: createDeps,
   },
 
   resources: {
@@ -584,18 +579,14 @@ export function SettingsScreen() {
   );
 }
 `,
-    "src/helpers/deps/createDeps.ts": `import type { ServerDeps } from "../../types";
+    "deps.ts": `import type { ServerDeps } from "./src/types";
 
-export function createDeps(): ServerDeps {
+export function createServerDeps(): ServerDeps {
   return {
     clock: {
       now: () => Date.now(),
     },
   };
-}
-`,
-    "src/helpers/ids/createId.ts": `export function createId(prefix: string): string {
-  return \`\${prefix}-\${crypto.randomUUID()}\`;
 }
 `,
   };

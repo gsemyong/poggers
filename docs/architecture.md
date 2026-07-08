@@ -105,13 +105,11 @@ export type App = {
 };
 ```
 
-`app.tsx` owns resource handlers, PWA metadata, navigation, programs, dependencies, and root UI composition:
+`app.tsx` owns resource handlers, PWA metadata, navigation, programs, and root UI composition. Server-only dependencies live in root `deps.ts` so they do not enter the app `src` type graph:
 
 ```tsx
-/** @jsxImportSource @poggers/kit */
 import { defineApp } from "@poggers/kit";
-import { NoteScreen } from "./components/screens/NoteScreen";
-import { createServerDeps } from "./helpers/deps/createDeps";
+import { NoteScreen } from "./components/note-screen";
 import type { App } from "./types";
 
 export default defineApp<App>({
@@ -132,10 +130,6 @@ export default defineApp<App>({
   navigation: {
     home: "/",
     note: "/notes/:noteId",
-  },
-
-  deps: {
-    server: createServerDeps,
   },
 
   resources: {
@@ -279,7 +273,6 @@ Built-in stores:
 | Store                | Use                                     |
 | -------------------- | --------------------------------------- |
 | `createFileStore`    | default local server store under `.app` |
-| `createLocalStore`   | LMDB-backed local server store          |
 | `createBrowserStore` | IndexedDB client snapshot store         |
 
 ## Migrations

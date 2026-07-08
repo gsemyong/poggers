@@ -149,8 +149,8 @@ Rules:
 - [x] `bun run lint`
 - [x] `bun run typecheck`
 - [x] `bun test`
-- [x] `bun test packages/kit/src/infra/style.spec.ts`
-- [x] `bun test packages/kit/src/infra/runtime-style.spec.ts`
+- [x] `bun test packages/kit/tests/style.spec.ts`
+- [x] `bun test packages/kit/tests/runtime.spec.ts`
 
 ### Build Gates
 

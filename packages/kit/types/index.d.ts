@@ -46,11 +46,12 @@ export {
   type SemanticProgramHooks,
   type SemanticUIHooks,
   type SyncMeta,
+  type TypedAppDefinition,
   type UIResource,
   type UISignal,
   type PwaDef,
   type PwaIconDef,
-} from "./infra/app";
+} from "./app";
 export {
   createHooks,
   defineStyles,
@@ -91,4 +92,12 @@ export {
   type ThemeParamName,
   type ThemeParamValue,
   type ThemeValues,
-} from "./infra/style";
+  type TypedStyleDefinition,
+} from "./style";
+export {
+  createBrowserStore,
+  createFileClientStore,
+  createFileStore,
+  type ClientStore,
+  type Store,
+} from "./storage";

@@ -1,14 +1,14 @@
-export { Fragment, jsx, jsxs } from "./infra/ui";
-export type { Child } from "./infra/ui";
+export { Fragment, jsx, jsxs } from "./ui";
+export type { Child } from "./ui";
 export type {
   CSSProperties,
   CustomElementAttributes,
   HTMLAttributes,
   IntrinsicElements,
   SVGAttributes,
-} from "./infra/jsx-types";
+} from "./jsx-types";
 export declare namespace JSX {
-  type Element = import("./infra/ui").Child;
+  type Element = import("./ui").Child;
   type ElementClass = never;
   type ElementChildrenAttribute = {
     children: unknown;
@@ -16,5 +16,5 @@ export declare namespace JSX {
   type IntrinsicAttributes = {
     key?: string | number;
   };
-  type IntrinsicElements = import("./infra/jsx-types").IntrinsicElements;
+  type IntrinsicElements = import("./jsx-types").IntrinsicElements;
 }

@@ -13,10 +13,8 @@ bun run check
 Focused gates:
 
 ```bash
-bun test packages/kit/src/infra
-bun test packages/kit/src/infra/store tests/contracts
-bun test tests/integration
-bun test tests/e2e
+bun test packages/kit/tests
+bun --cwd packages/kit run test
 ```
 
 Generated app gate:
@@ -50,14 +48,12 @@ Browser gate:
 
 ## Organization
 
-| Path                           | Purpose                                 |
-| ------------------------------ | --------------------------------------- |
-| `packages/kit/src/infra`       | Runtime unit tests beside source        |
-| `packages/kit/src/infra/store` | File, browser, LMDB, and adapter tests  |
-| `tests/contracts`              | Shared store/pubsub/sequencer contracts |
-| `tests/integration`            | Fake-WebSocket client/server tests      |
-| `tests/e2e`                    | Real Bun.serve WebSocket tests          |
-| `tests/helpers`                | Shared memory stores and test utilities |
+| Path                                 | Purpose                                 |
+| ------------------------------------ | --------------------------------------- |
+| `packages/kit/src`                   | Production package source only          |
+| `packages/kit/tests/*.spec.ts`       | Package and cross-module behavior specs |
+| `packages/kit/tests/*.typecheck.tsx` | Type-only JSX/style fixtures            |
+| `packages/kit/tests/helpers`         | Shared memory stores and test utilities |
 
 ## Main Guarantees
 
@@ -94,7 +90,7 @@ import {
   createFailingMemoryStore,
   createMemoryClientStore,
   createMemoryStore,
-} from "tests/helpers/memory-storage";
+} from "./helpers/memory-storage";
 ```
 
 For store failures, prefer targeted failure modes such as `appendEvents`, `saveSnapshot`, or `compactEvents`.

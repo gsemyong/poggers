@@ -70,6 +70,6 @@ export function createChatMessage(
 
 ## Verification
 
-- `runtime-style.spec.ts` asserts generated exports use named aliases.
-- `runtime-style.spec.ts` asserts JSDoc is copied from `types.ts`.
+- `runtime.spec.ts` asserts generated exports use named aliases.
+- `runtime.spec.ts` asserts JSDoc is copied from `types.ts`.
 - `typecheck` covers the generated aliases in app code.

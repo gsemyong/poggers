@@ -4,10 +4,10 @@
   "type": "module",
   "scripts": {
     "dev": "poggers dev",
-    "bundle": "poggers bundle --outdir .app/build/web",
     "build": "poggers build --outfile dist/chat",
     "start": "./dist/chat",
-    "check": "poggers check",
+    "lint": "poggers check",
+    "check": "bun run typecheck && bun run lint",
     "typecheck": "poggers typecheck"
   },
   "dependencies": {

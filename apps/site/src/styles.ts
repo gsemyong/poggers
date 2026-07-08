@@ -1,7 +1,7 @@
 import { defineStyles } from "@poggers/kit/style";
-import type { App } from "./types";
+import type { StyleDefinition } from "@poggers/app";
 
-export default defineStyles<App>({
+const styles: StyleDefinition = {
   defaultPreset: "system",
   presets: {
     system: {
@@ -132,4 +132,6 @@ export default defineStyles<App>({
       },
     },
   },
-});
+};
+
+export default defineStyles(styles);

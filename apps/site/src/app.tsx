@@ -1,9 +1,9 @@
 import { defineApp } from "@poggers/kit";
+import type { AppDefinition } from "@poggers/app";
 import { Root } from "./components/app-root";
-import { fallbackPage, pages } from "./helpers/content/pages";
-import type { App } from "./types";
+import { fallbackPage, pages } from "./pages";
 
-export default defineApp<App>({
+const app: AppDefinition = {
   version: 1,
 
   app: {
@@ -79,4 +79,6 @@ export default defineApp<App>({
   ui() {
     return <Root />;
   },
-});
+};
+
+export default defineApp(app);

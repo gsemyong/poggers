@@ -9,6 +9,10 @@
     "src"
   ],
   "type": "module",
+  "scripts": {
+    "lint": "oxlint src",
+    "check": "bun run lint"
+  },
   "engines": {
     "bun": ">=1.2.0"
   }

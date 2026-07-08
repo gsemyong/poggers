@@ -11,7 +11,7 @@ The target shape:
 - `apps/*` are runnable private apps that use the kit like external users would.
 - `apps/site` is the documentation and marketing site, built with Poggers Kit itself.
 - `apps/chat` is the dogfood/example app.
-- The store layer has a simple file default, an LMDB local option, and memory test stores.
+- The store layer has a filesystem server store, an IndexedDB browser snapshot store, and memory test stores.
 - Durable truth is latest snapshot plus the event tail after that snapshot.
 
 ## Non-Goals
@@ -49,7 +49,6 @@ packages/
           types.ts
           fs.ts
           idb.ts
-          lmdb.ts
           single-node.ts
         worker.ts
         testing.ts
@@ -191,9 +190,9 @@ Checklist:
 
 - [ ] Create `packages/kit/src`.
 - [ ] Move root `src/index.ts`, `src/react.ts`, `src/worker.ts`, `src/testing.ts`, `src/app.ts` into `packages/kit/src`.
-- [ ] Move `src/infra` into `packages/kit/src/infra`.
+- [ ] Move kit implementation files into `packages/kit/src`.
 - [ ] Move root package export map into `packages/kit/package.json`.
-- [ ] Preserve the `poggers` bin at `packages/kit/src/infra/cli.ts`.
+- [ ] Preserve the `poggers` bin at `packages/kit/src/cli.ts`.
 - [ ] Update internal relative imports after the move.
 - [ ] Update TypeScript paths:
   - [ ] `@poggers/kit` -> `packages/kit/src/index.ts`
@@ -204,7 +203,7 @@ Checklist:
 Verification:
 
 - [ ] `bun run typecheck`
-- [ ] `bun test packages/kit/src/infra`
+- [ ] `bun test packages/kit/tests`
 - [ ] `npm pack --dry-run --json` inside `packages/kit` includes only kit files.
 
 ### Phase 2: Move Chat Into `apps/chat`
@@ -340,29 +339,14 @@ Recommended names:
 
 ### Production Store Decision
 
-We should have one production store. Current candidates:
-
-- LMDB-backed `LocalStore`.
-- Another embedded transactional store only if it beats LMDB for our specific constraints.
+We should have one server persistence store.
 
 Recommendation:
 
-- Use LMDB as the first blessed production engine.
-- Keep filesystem JSONL out of the product runtime.
-- Keep memory store for tests.
-
-Reasoning:
-
-- We need embedded single-node durability.
-- We need fast reads for snapshots and views.
-- We need ordered key scans for event tails.
-- We need atomic writes for event batches, command ids, and compaction metadata.
-- LMDB is designed around memory-mapped embedded transactional storage, but write transactions are serialized. That is acceptable if our runtime schedules and batches writes explicitly.
-
-Research gate:
-
-- [ ] Confirm write transaction/concurrency behavior against primary LMDB docs and the Node package used by this repo.
-- [ ] Benchmark our real workload before making stronger claims about throughput.
+- Use filesystem JSONL/snapshot persistence as the product runtime.
+- Keep IndexedDB for browser client snapshots.
+- Keep memory stores for tests.
+- Reconsider an embedded database only if a measured workload proves the filesystem store is insufficient.
 
 ### Store API Shape
 
@@ -512,9 +496,9 @@ Checklist:
 
 - [x] Rename `storage` folder to `store`.
 - [x] Use the simple `Store` name for the server store type.
-- [x] Use `createLocalStore` for the LMDB-backed local store.
+- [x] Use `createFileStore` for the local server store.
 - [ ] Move test memory store into kit test helpers or `store/memory.ts`.
-- [ ] Remove filesystem store from production runtime.
+- [x] Keep filesystem store as the production runtime.
 - [x] Replace event clearing with sequence-bounded compaction.
 - [x] Add stream writer scheduling.
 - [x] Make worker durability checkpoint-aware per scope.

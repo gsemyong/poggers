@@ -43,7 +43,6 @@ Move the infra layer from broadly tested and mostly reliable to reliable under e
 | ---------------------- | ----------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
 | Define batch semantics | Treat `Store.appendEvents(key, events)` as all-or-nothing for one command batch.                            | Contract test: thrown append leaves no partial events.                                |
 | FS event batches       | Store one JSONL record per batch, for example `{ "type": "events", "events": [...] }`, and flatten on read. | Corrupt tail ignores only the partial batch; corrupt middle stops after valid prefix. |
-| LMDB event batches     | Store one batch record keyed by first seq, or use LMDB transactions if available.                           | Multi-event batch is fully present or absent.                                         |
 | Memory event batches   | Make existing atomic behavior explicit in the contract.                                                     | Shared storage contract covers it.                                                    |
 | Recovery continuity    | Server replay requires contiguous seqs and complete batches.                                                | Snapshot plus batch log with gaps/duplicates behaves predictably.                     |
 
@@ -70,11 +69,11 @@ Short-term recommendation: keep synchronous commands, add command IDs, acks, ret
 ## Phase 5: Client Persistence Reliability
 
 | Task                         | Implementation                                                                  | Tests                                                   |
-| ---------------------------- | ------------------------------------------------------------------------------- | ------------------------------------------------------- | --------------------------------------------------- |
+| ---------------------------- | ------------------------------------------------------------------------------- | ------------------------------------------------------- |
 | Catch `loadSnapshot` failure | `connect()` proceeds with empty state when storage load throws or rejects.      | Failing client storage load still connects.             |
 | Retry failed save            | Set `dirty = false` only after save succeeds. Async rejection keeps dirty true. | Failed save retries on the next interval.               |
 | Handle in-flight persist     | Track `persistInFlight`; if state changes during save, schedule another save.   | Later state is not lost when save races with an update. |
-| Console suppression helper   | Use `withSuppressedConsole("error"                                              | "warn", fn)`with`try/finally`.                          | Console methods are restored even if a test throws. |
+| Console suppression helper   | Use `withSuppressedConsole("error", "warn", fn)` with `try`/`finally`.          | Console methods are restored even if a test throws.     |
 
 ## Phase 6: Protocol Hardening
 
@@ -126,7 +125,7 @@ Short-term recommendation: keep synchronous commands, add command IDs, acks, ret
 - `bun run check` passes.
 - Coverage remains at or above current level, ideally with thresholds.
 - Expected error paths produce no noisy test output.
-- No accidental `.only`; only intentional LMDB skip is allowed.
+- No accidental `.only`.
 - Client never advances cursor past unapplied events.
 - Multi-event command commits all events or none.
 - Duplicate command delivery produces one visible state change, including after server restart.

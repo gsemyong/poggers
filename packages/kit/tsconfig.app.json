@@ -17,20 +17,9 @@
     "noFallthroughCasesInSwitch": true,
     "noUncheckedIndexedAccess": true,
     "noImplicitOverride": true,
-    "ignoreDeprecations": "6.0",
     "paths": {
-      "@poggers/app": [
-        "${configDir}/.app/types/@poggers/app/index.d.ts",
-        "${configDir}/.app/types/@poggers/app/index.tsx",
-        "${configDir}/node_modules/@poggers/kit/app-types/index.d.ts",
-        "${configDir}/../../packages/kit/app-types/index.d.ts",
-        "./app-types/index.d.ts"
-      ]
+      "@poggers/app": ["${configDir}/src/poggers-app.d.ts"]
     }
   },
-  "include": [
-    "${configDir}/src/**/*.ts",
-    "${configDir}/src/**/*.tsx",
-    "${configDir}/.app/types/**/*.d.ts"
-  ]
+  "include": ["${configDir}/src/**/*.ts", "${configDir}/src/**/*.tsx", "${configDir}/src/**/*.d.ts"]
 }

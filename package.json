@@ -7,44 +7,29 @@
   ],
   "type": "module",
   "scripts": {
-    "typecheck": "bun run --filter '@poggers/*' --parallel typecheck",
+    "typecheck": "turbo run typecheck",
     "fmt": "oxfmt",
     "fmt:check": "oxfmt --check",
-    "lint": "oxlint && bun packages/kit/src/infra/cli.ts check apps/chat && bun packages/kit/src/infra/cli.ts check apps/site",
+    "lint": "turbo run lint",
     "lint:fix": "oxlint --fix",
-    "test": "bun test",
-    "test:unit": "bun test packages/kit/src/infra",
-    "test:contracts": "bun test tests/contracts",
-    "test:integration": "bun test tests/integration",
-    "test:e2e": "bun test tests/e2e",
+    "test": "turbo run test",
     "coverage": "bun test --coverage",
-    "build:web": "bun run --filter @poggers/chat bundle",
-    "build:binary": "bun run --filter @poggers/chat build",
-    "build:chat": "bun run --filter @poggers/chat build",
-    "build:site": "bun run --filter @poggers/site build",
-    "server": "bun run --filter @poggers/chat dev",
-    "site": "bun run --filter @poggers/site dev",
-    "web": "bun run server",
-    "check": "bun run typecheck && bun run lint && bun run fmt:check && bun test"
-  },
-  "dependencies": {
-    "@wterm/dom": "^0.3.0",
-    "@wterm/ghostty": "^0.3.0",
-    "animejs": "^4.5.0"
+    "build": "turbo run build",
+    "dev:chat": "bun run --filter @poggers/chat dev",
+    "dev:site": "bun run --filter @poggers/site dev",
+    "check": "bun run typecheck && bun run lint && bun run fmt:check && bun run test"
   },
   "devDependencies": {
-    "@tailwindcss/cli": "^4.3.2",
     "@types/bun": "^1.3.14",
-    "@types/react": "^19.2.17",
-    "@types/react-dom": "^19.2.3",
     "fake-indexeddb": "^6.2.5",
     "fast-check": "^4.8.0",
-    "oxfmt": "^0.57.0",
-    "oxlint": "^1.72.0",
-    "tailwindcss": "^4.3.2",
+    "oxfmt": "^0.58.0",
+    "oxlint": "^1.73.0",
+    "turbo": "^2.10.4",
     "typescript": "7.0.1-rc"
   },
   "engines": {
-    "bun": ">=1.2.0"
-  }
+    "bun": ">=1.3.0"
+  },
+  "packageManager": "bun@1.3.14"
 }

@@ -147,8 +147,7 @@ The desired primary surface is:
 ```tsx
 import { defineApp } from "@poggers/kit";
 import type { App } from "./types";
-import { Root } from "./components/screens/Root";
-import { createDeps } from "./helpers/deps/createDeps";
+import { Root } from "./components/root";
 
 export default defineApp<App>({
   version: 1,
@@ -185,15 +184,13 @@ export default defineApp<App>({
     },
   },
 
-  deps: {
-    server: createDeps,
-  },
-
   ui(ctx) {
     return <Root ctx={ctx} />;
   },
 });
 ```
+
+Server dependency construction lives in root `deps.ts`, outside `src`, and exports names such as `createServerDeps`.
 
 Important constraints:
 
@@ -425,16 +422,17 @@ Motion rules:
 `create-poggers` should generate:
 
 ```text
-types.ts
-app.tsx
-components/primitives/Button.tsx
-components/layout/AppShell.tsx
-components/motion/Transition.tsx
-components/screens/HomeScreen.tsx
-components/domain/CounterPanel.tsx
-helpers/deps/createDeps.ts
-helpers/ids/createId.ts
-styles.css
+deps.ts
+src/types.ts
+src/app.tsx
+src/styles.ts
+src/components/root.tsx
+src/components/app-shell.tsx
+src/components/button.tsx
+src/components/counter-panel.tsx
+src/components/home-screen.tsx
+src/components/settings-screen.tsx
+src/components/transition.tsx
 ```
 
 Generated app behavior:

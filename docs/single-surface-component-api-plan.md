@@ -417,8 +417,8 @@ Removed generated/public surfaces:
 - [x] `bun run lint`
 - [x] `bun run fmt:check`
 - [x] `bun test`
-- [x] `bun test packages/kit/src/infra/style.spec.ts`
-- [x] `bun test packages/kit/src/infra/app-surface.spec.ts`
+- [x] `bun test packages/kit/tests/style.spec.ts`
+- [x] `bun test packages/kit/tests/app-surface.spec.ts`
 
 ### Build Gates
 

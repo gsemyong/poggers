@@ -1,10 +1,10 @@
-import type { App, AppSpec, EnvironmentDeps, EnvironmentName } from "./infra/app";
+import type { App, AppSpec, EnvironmentDeps, EnvironmentName } from "./app";
 import {
   startProgramRuntime,
   type AppProgram,
   type StartProgramRuntimeOpts,
   type WorkerRuntime,
-} from "./infra/worker";
+} from "./worker";
 
 export type RunProgramOpts<
   Spec extends AppSpec,
