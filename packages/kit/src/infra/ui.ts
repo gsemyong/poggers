@@ -34,9 +34,10 @@ type ResourceFor<
 type ErrorFor<Command> = Command extends { error: infer E } ? E : never;
 
 type ViewShape<Spec extends AppSpec, Resource extends ResourceName<Spec>> = {
-  [View in keyof ResourceFor<Spec, Resource>["Views"]]: Signal<
-    ResourceFor<Spec, Resource>["Views"][View]
-  >;
+  readonly [View in keyof ResourceFor<Spec, Resource>["Views"]]: ResourceFor<
+    Spec,
+    Resource
+  >["Views"][View];
 };
 
 type CommandShape<Spec extends AppSpec, Resource extends ResourceName<Spec>> = {
@@ -73,7 +74,7 @@ export type NativeResource<Spec extends AppSpec, Resource extends ResourceName<S
   Resource
 > &
   CommandShape<Spec, Resource> & {
-    readonly sync: Signal<SyncMeta>;
+    readonly sync: SyncMeta;
   };
 
 export type NativeUIHooks<Spec extends AppSpec> = {
@@ -107,9 +108,25 @@ export type Signal<T> = {
   (value: T): void;
 };
 
-export type MaybeSignal<T> = T | (() => T);
+export type Readable<T> = {
+  (): T;
+};
+
+export type MaybeSignal<T> = T | Readable<T>;
+
+type ArrayFromMaybeSignal<Source> = Source extends readonly unknown[]
+  ? Source
+  : Source extends Readable<infer Items extends readonly unknown[]>
+    ? Items
+    : never;
 
 export type Child = Node | string | number | boolean | null | undefined | Child[] | (() => Child);
+
+const reactiveValueRead = Symbol.for("poggers.reactiveValue.read");
+
+type ReactiveValue<T> = {
+  readonly [reactiveValueRead]: () => T;
+};
 
 export type Props = Record<string, unknown> & {
   children?: Child;
@@ -266,9 +283,9 @@ export function Fragment(props: { children?: Child }): Child {
   return props.children ?? null;
 }
 
-export function For<T>(props: {
-  each: MaybeSignal<readonly T[]>;
-  children: (item: T, index: () => number) => Child;
+export function For<Source extends MaybeSignal<readonly unknown[]>>(props: {
+  each: Source;
+  children: (item: ArrayFromMaybeSignal<Source>[number], index: () => number) => Child;
   fallback?: Child;
 }): Child {
   const start = document.createComment("poggers:for");
@@ -451,7 +468,48 @@ function replaceBetween(start: Node, end: Node, nodes: Node[]) {
 }
 
 function read<T>(value: MaybeSignal<T>): T {
+  const reactiveReader = reactiveValueReader<T>(value);
+  if (reactiveReader) return reactiveReader();
   return typeof value === "function" ? (value as () => T)() : value;
+}
+
+export function reactiveValue<T>(source: () => T): T {
+  const initial = source();
+  if (initial == null || typeof initial !== "object") return initial;
+
+  const emptyTarget = Array.isArray(initial) ? [] : Object.create(null);
+  return new Proxy(emptyTarget, {
+    get(_target, prop, receiver) {
+      if (prop === reactiveValueRead) return source;
+      const value = source();
+      if (value == null || typeof value !== "object") return undefined;
+      const item = Reflect.get(value as object, prop, receiver);
+      return typeof item === "function" ? item.bind(value) : item;
+    },
+    has(_target, prop) {
+      const value = source();
+      return value != null && typeof value === "object" && prop in value;
+    },
+    ownKeys() {
+      const value = source();
+      return value != null && typeof value === "object" ? Reflect.ownKeys(value) : [];
+    },
+    getOwnPropertyDescriptor(_target, prop) {
+      const value = source();
+      if (value == null || typeof value !== "object") return undefined;
+      const descriptor = Reflect.getOwnPropertyDescriptor(value, prop);
+      return descriptor ? { ...descriptor, configurable: true } : undefined;
+    },
+    getPrototypeOf() {
+      const value = source();
+      return value != null && typeof value === "object" ? Reflect.getPrototypeOf(value) : null;
+    },
+  }) as T;
+}
+
+function reactiveValueReader<T>(value: unknown): (() => T) | undefined {
+  if (value == null || (typeof value !== "object" && typeof value !== "function")) return;
+  return (value as ReactiveValue<T>)[reactiveValueRead];
 }
 
 function stringify(value: unknown): string {
@@ -530,12 +588,16 @@ function createNativeResourceState<Spec extends AppSpec, Resource extends Resour
   const actor = { id: "local" } as ActorOf<Spec>;
   const localState = app.createState(resource);
   const views: Record<string, Signal<unknown>> = {};
+  const viewValues: Record<string, unknown> = {};
   const sync = runtimeSignal<SyncMeta>({ cursor: 0, syncing: true, stale: true, error: null });
+  const syncValue = reactiveValue(() => sync());
 
   for (const viewName of Object.keys(resourceDef.views ?? {})) {
-    views[viewName] = runtimeSignal(
-      cloneViewValue(readLocalView(app, resource, key, localState, viewName)),
-    );
+    const initialView = cloneViewValue(readLocalView(app, resource, key, localState, viewName));
+    views[viewName] = runtimeSignal(initialView);
+    if (isReactiveObject(initialView)) {
+      viewValues[viewName] = reactiveValue(() => views[viewName]!());
+    }
   }
 
   const commands: Record<string, (...args: any[]) => CommandReceipt<any>> = {};
@@ -554,21 +616,17 @@ function createNativeResourceState<Spec extends AppSpec, Resource extends Resour
     };
   }
 
-  const handle = new Proxy(
-    {
-      sync,
+  const handle = new Proxy(Object.create(null), {
+    get(_target, prop: string) {
+      if (prop === "sync") return syncValue;
+      const command = commands[prop];
+      if (command) return command;
+      if (prop in viewValues) return viewValues[prop];
+      const view = views[prop];
+      if (view) return view();
+      return undefined;
     },
-    {
-      get(target, prop: string) {
-        if (prop in target) return (target as any)[prop];
-        const command = commands[prop];
-        if (command) return command;
-        const view = views[prop];
-        if (view) return view;
-        return undefined;
-      },
-    },
-  ) as NativeResource<Spec, Resource>;
+  }) as NativeResource<Spec, Resource>;
 
   runtimeEffect(() => {
     const readyClient = client();
@@ -740,6 +798,10 @@ function cloneViewValue<T>(value: T): T {
     if (Array.isArray(value)) return value.slice() as T;
     return { ...(value as Record<string, unknown>) } as T;
   }
+}
+
+function isReactiveObject(value: unknown): value is object {
+  return value != null && typeof value === "object";
 }
 
 function readLocalView<Spec extends AppSpec, Resource extends ResourceName<Spec>>(

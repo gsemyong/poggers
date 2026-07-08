@@ -1,6 +1,6 @@
 import { createAIPart } from "@poggers/app";
 import { For } from "@poggers/kit/ui";
-import type { AIPart } from "../../types";
+import type { AIPart } from "../types";
 
 export function parseParts(raw: string): AIPart[] | null {
   try {

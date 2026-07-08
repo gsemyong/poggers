@@ -1,5 +1,5 @@
 import { defineApp } from "@poggers/kit";
-import { Root } from "./components/Root";
+import { Root } from "./components/app-root";
 import { fallbackPage, pages } from "./helpers/content/pages";
 import type { App } from "./types";
 
@@ -39,6 +39,40 @@ export default defineApp<App>({
       commands: {
         recordVisit() {},
       },
+    },
+  },
+
+  components: {
+    NavButton({ input, actions }) {
+      return {
+        Root: {
+          type: "button",
+          onClick: actions.navigate,
+        },
+        Label: {
+          children: input.label,
+        },
+      };
+    },
+    PageHero({ derived }) {
+      return {
+        Title: {
+          children: derived.title,
+        },
+        Summary: {
+          children: derived.summary,
+        },
+      };
+    },
+    SectionCard({ input }) {
+      return {
+        Title: {
+          children: input.heading,
+        },
+        Body: {
+          children: input.body,
+        },
+      };
     },
   },
 

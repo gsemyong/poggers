@@ -37,9 +37,7 @@ describe("Poggers app virtual modules", () => {
       join(appDir, "tsconfig.json"),
       JSON.stringify(
         {
-          extends: "@poggers/kit/tsconfig/app",
-          compilerOptions: { baseUrl: "." },
-          include: ["src/**/*.ts", "src/**/*.tsx", ".app/types/**/*.ts", ".app/types/**/*.tsx"],
+          extends: "@poggers/kit/tsconfig",
         },
         null,
         2,
@@ -90,7 +88,7 @@ export default defineStyles<App>({
 `,
     );
     await writeFile(
-      join(appDir, "src/components/Root.tsx"),
+      join(appDir, "src/components/root.tsx"),
       `import { createButton, useCounter } from "@poggers/app";
 
 export function Root() {
@@ -103,7 +101,7 @@ export function Root() {
     await writeFile(
       join(appDir, "src/app.tsx"),
       `import { defineApp } from "@poggers/kit";
-import { Root } from "./components/Root";
+import { Root } from "./components/root";
 import type { App } from "./types";
 
 export default defineApp<App>({
@@ -148,12 +146,11 @@ export default defineApp<App>({
       expect(entry).toContain("import.meta.hot.data");
       expect(entry).toContain("__poggersHotData");
       expect(entry).toContain('window.addEventListener("poggers:render"');
-      const appModule = await readFile(join(appDir, ".app/types/@poggers/app/index.tsx"), "utf8");
-      expect(appModule).toContain('import app from "../../../../src/app.tsx"');
-      expect(appModule).toContain('import styles from "../../../../src/styles.ts"');
-      expect(appModule).toContain('import.meta.hot.accept("../../../../src/app.tsx"');
-      expect(appModule).toContain('import.meta.hot.accept("../../../../src/styles.ts"');
-      expect(appModule).toContain("import.meta.hot.data.hooks");
+      const appModule = await readFile(join(appDir, ".app/types/@poggers/app/index.d.ts"), "utf8");
+      expect(appModule).toContain('import type { App as AppSpec } from "../../../../src/types.ts"');
+      expect(appModule).not.toContain('import app from "../../../../src/app.tsx"');
+      expect(appModule).not.toContain('import styles from "../../../../src/styles.ts"');
+      expect(appModule).not.toContain("import.meta.hot");
       expect(appModule).toContain("/** Counter resource used by the generated useCounter hook. */");
       expect(appModule).toContain("/** Primary counter button component. */");
       expect(appModule).toContain("export type CounterResourceKey");
@@ -247,7 +244,7 @@ export default defineStyles<App>({
     );
 
     await writeFile(
-      join(appDir, "src/components/Root.tsx"),
+      join(appDir, "src/components/root.tsx"),
       `import { createButton, useCounter } from "@poggers/app";
 
 export function Root() {
@@ -268,7 +265,7 @@ export function Root() {
     await writeFile(
       join(appDir, "src/app.tsx"),
       `import { defineApp } from "@poggers/kit";
-import { Root } from "./components/Root";
+import { Root } from "./components/root";
 import type { App } from "./types";
 
 export default defineApp<App>({
@@ -311,7 +308,7 @@ export default defineApp<App>({
     );
 
     const typeFile = await writeAppTypes(appDir);
-    expect(typeFile).toEndWith(".app/types/@poggers/app/index.tsx");
+    expect(typeFile).toEndWith(".app/types/@poggers/app/index.d.ts");
     expect(await readFile(typeFile!, "utf8")).toContain("export function useCounter");
     expect(await readFile(typeFile!, "utf8")).toContain("export function createButton");
 
@@ -347,7 +344,7 @@ export default defineApp<App>({ version: 1, resources: {} });
 `,
     );
     await writeFile(
-      join(appDir, "src/components/Bad.tsx"),
+      join(appDir, "src/components/bad.tsx"),
       `export function Bad() {
   return <div className="raw" />;
 }
@@ -356,10 +353,48 @@ export default defineApp<App>({ version: 1, resources: {} });
 
     expect(checkAppConventions(appDir)).toEqual([
       {
-        file: join(appDir, "src/components/Bad.tsx"),
+        file: join(appDir, "src/components/bad.tsx"),
         message:
           "components must not use class/className in strict style apps; render generated component parts.",
       },
     ]);
+  });
+
+  it("flags nested or non-kebab component module names", async () => {
+    await mkdir(resolve(".app"), { recursive: true });
+    const appDir = await mkdtemp(resolve(".app/runtime-style-lint-"));
+    createdDirs.push(appDir);
+    await mkdir(join(appDir, "src/components/screens"), { recursive: true });
+
+    await writeFile(
+      join(appDir, "src/types.ts"),
+      "export type App = { Resources: {}; Components: {}; Styles: {} };\n",
+    );
+    await writeFile(
+      join(appDir, "src/styles.ts"),
+      "export default { def: { presets: { system: {} } } };\n",
+    );
+    await writeFile(
+      join(appDir, "src/app.tsx"),
+      `import { defineApp } from "@poggers/kit";
+import type { App } from "./types";
+export default defineApp<App>({ version: 1, resources: {} });
+`,
+    );
+    await writeFile(
+      join(appDir, "src/components/screens/HomeScreen.tsx"),
+      "export function HomeScreen() { return null; }\n",
+    );
+
+    const issues = checkAppConventions(appDir);
+    expect(issues).toContainEqual({
+      file: join(appDir, "src/components/screens/HomeScreen.tsx"),
+      message: "component file names must be kebab-case.",
+    });
+    expect(issues).toContainEqual({
+      file: join(appDir, "src/components/screens/HomeScreen.tsx"),
+      message:
+        "component files must live directly in src/components; do not nest component folders.",
+    });
   });
 });

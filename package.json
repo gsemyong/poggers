@@ -7,7 +7,7 @@
   ],
   "type": "module",
   "scripts": {
-    "typecheck": "bun run --filter @poggers/kit typecheck && bun run --filter @poggers/chat typecheck && bun run --filter @poggers/site typecheck",
+    "typecheck": "bun run --filter '@poggers/*' --parallel typecheck",
     "fmt": "oxfmt",
     "fmt:check": "oxfmt --check",
     "lint": "oxlint && bun packages/kit/src/infra/cli.ts check apps/chat && bun packages/kit/src/infra/cli.ts check apps/site",
@@ -29,6 +29,7 @@
   },
   "dependencies": {
     "@wterm/dom": "^0.3.0",
+    "@wterm/ghostty": "^0.3.0",
     "animejs": "^4.5.0"
   },
   "devDependencies": {
@@ -41,7 +42,7 @@
     "oxfmt": "^0.57.0",
     "oxlint": "^1.72.0",
     "tailwindcss": "^4.3.2",
-    "typescript": "^6.0.3"
+    "typescript": "7.0.1-rc"
   },
   "engines": {
     "bun": ">=1.2.0"

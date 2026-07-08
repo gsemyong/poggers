@@ -117,6 +117,17 @@ export type App = {
   Components: {
     /** Full chat screen structure. Style-only parts are generated automatically. */
     ChatLayout: {
+      Derived: {
+        brandText: string;
+        presetSwitchLabel: string;
+        statusText: string;
+        statusMeta: string;
+        understandingText: string;
+        hasUnderstanding: boolean;
+      };
+      Actions: {
+        togglePreset(): void;
+      };
       Parts: {
         Root: "div";
         Topbar: "header";
@@ -138,6 +149,11 @@ export type App = {
       Input: {
         role: "user" | "assistant";
         streaming: boolean;
+      };
+      Derived: {
+        roleLabel: string;
+        contentText: string;
+        hidden: boolean;
       };
       Parts: {
         Root: "div";
@@ -168,6 +184,7 @@ export type App = {
         clear(): void;
         change(value: string): void;
         submit(): void;
+        submitFromKeyboard(event: KeyboardEvent): void;
       };
       Parts: {
         Root: "form";

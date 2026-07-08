@@ -1,11 +1,18 @@
 import type { JsonValue, SessionData } from "./protocol";
-
-export type LocalActor = { id: string };
-
+export type LocalActor = {
+  id: string;
+};
 export type AppSpec = {
-  Actor?: { id: string };
+  Actor?: {
+    id: string;
+  };
   Resources: Record<string, any>;
-  Environments?: Record<string, { Deps?: any }>;
+  Environments?: Record<
+    string,
+    {
+      Deps?: any;
+    }
+  >;
   Navigation?: Record<string, Record<string, any>>;
   Components?: Record<
     string,
@@ -24,11 +31,13 @@ export type AppSpec = {
     };
   };
 };
-
-export type ActorOf<Spec extends AppSpec> = Spec extends { Actor: infer A extends { id: string } }
+export type ActorOf<Spec extends AppSpec> = Spec extends {
+  Actor: infer A extends {
+    id: string;
+  };
+}
   ? A
   : LocalActor;
-
 export type ResourceSpec = {
   Key: JsonValue;
   State: any;
@@ -37,84 +46,83 @@ export type ResourceSpec = {
   Views: Record<string, any>;
   Commands: Record<string, any>;
 };
-
 export type CommandSpec = {
   args: any[];
   event?: string;
   error?: string | [string, any];
 };
-
-type EventNameFor<C> = C extends { event: infer E } ? E : never;
-
-type ErrorFor<C> = C extends { error: infer E } ? E : never;
-
+type EventNameFor<C> = C extends {
+  event: infer E;
+}
+  ? E
+  : never;
+type ErrorFor<C> = C extends {
+  error: infer E;
+}
+  ? E
+  : never;
 export type ResourceName<Spec extends AppSpec> = Extract<keyof Spec["Resources"], string>;
-
 export type ResourceFor<
   Spec extends AppSpec,
   Resource extends ResourceName<Spec>,
 > = Spec["Resources"][Resource] extends ResourceSpec ? Spec["Resources"][Resource] : never;
-
 export type EnvironmentName<Spec extends AppSpec> = Spec extends {
   Environments: infer Environments;
 }
   ? Extract<keyof Environments, string>
   : never;
-
 export type EnvironmentDeps<
   Spec extends AppSpec,
   Env extends EnvironmentName<Spec>,
-> = Spec extends { Environments: infer Environments }
+> = Spec extends {
+  Environments: infer Environments;
+}
   ? Env extends keyof Environments
-    ? Environments[Env] extends { Deps: infer Deps }
+    ? Environments[Env] extends {
+        Deps: infer Deps;
+      }
       ? Deps
       : Record<string, never>
     : never
   : never;
-
 export type NavigationName<Spec extends AppSpec> = Spec extends {
   Navigation: infer Navigation;
 }
   ? Extract<keyof Navigation, string>
   : "home";
-
 export type NavigationParams<
   Spec extends AppSpec,
   Screen extends NavigationName<Spec>,
-> = Spec extends { Navigation: infer Navigation }
+> = Spec extends {
+  Navigation: infer Navigation;
+}
   ? Screen extends keyof Navigation
     ? Navigation[Screen] extends Record<string, any>
       ? Navigation[Screen]
       : Record<string, never>
     : Record<string, never>
   : Record<string, never>;
-
 export type AppScreen<Spec extends AppSpec> = {
   [Screen in NavigationName<Spec>]: {
     readonly name: Screen;
     readonly params: NavigationParams<Spec, Screen>;
   };
 }[NavigationName<Spec>];
-
 export type AppNavigation<Spec extends AppSpec> = {
   [Screen in NavigationName<Spec>]: keyof NavigationParams<Spec, Screen> extends never
     ? (params?: NavigationParams<Spec, Screen>) => void
     : (params: NavigationParams<Spec, Screen>) => void;
 };
-
 export type NavigationDef<Spec extends AppSpec> = {
   [Screen in NavigationName<Spec>]: string;
 };
-
 export type UISignal<T> = {
   (): T;
   (value: T): void;
 };
-
 type ViewShape<Spec extends AppSpec, Resource extends ResourceName<Spec>> = {
   [View in keyof ResourceFor<Spec, Resource>["Views"]]: ResourceFor<Spec, Resource>["Views"][View];
 };
-
 type CommandShape<Spec extends AppSpec, Resource extends ResourceName<Spec>> = {
   [Command in keyof ResourceFor<Spec, Resource>["Commands"]]: (
     ...args: ResourceFor<Spec, Resource>["Commands"][Command] extends CommandSpec
@@ -128,16 +136,13 @@ type CommandShape<Spec extends AppSpec, Resource extends ResourceName<Spec>> = {
       : never
   >;
 };
-
 type HookName<Name extends string> = `use${Capitalize<Name>}`;
-
 type UIResourceViewShape<Spec extends AppSpec, Resource extends ResourceName<Spec>> = {
   readonly [View in keyof ResourceFor<Spec, Resource>["Views"]]: ResourceFor<
     Spec,
     Resource
   >["Views"][View];
 };
-
 export type UIResource<
   Spec extends AppSpec,
   Resource extends ResourceName<Spec>,
@@ -145,7 +150,6 @@ export type UIResource<
   CommandShape<Spec, Resource> & {
     readonly sync: SyncMeta;
   };
-
 export type SemanticUIHooks<Spec extends AppSpec> = {
   [Resource in ResourceName<Spec> as HookName<Resource>]: (
     key: ResourceFor<Spec, Resource>["Key"],
@@ -156,16 +160,13 @@ export type SemanticUIHooks<Spec extends AppSpec> = {
     key: ResourceFor<Spec, Resource>["Key"],
   ) => UIResource<Spec, Resource>;
 };
-
 export type AppUIContext<Spec extends AppSpec> = SemanticUIHooks<Spec> & {
   readonly screen: UISignal<AppScreen<Spec>>;
   readonly nav: AppNavigation<Spec>;
 };
-
 export type AppMetadata = {
   name?: string;
 };
-
 export type PwaIconDef =
   | string
   | {
@@ -174,7 +175,6 @@ export type PwaIconDef =
       type?: string;
       purpose?: string;
     };
-
 export type PwaDef = {
   name: string;
   shortName?: string;
@@ -190,13 +190,11 @@ export type PwaDef = {
     maskable?: PwaIconDef | PwaIconDef[];
   };
 };
-
 export type AppDepsDef<Spec extends AppSpec> = {
   [Env in EnvironmentName<Spec>]?: () =>
     | EnvironmentDeps<Spec, Env>
     | Promise<EnvironmentDeps<Spec, Env>>;
 };
-
 export type ProgramResource<Spec extends AppSpec, Resource extends ResourceName<Spec>> = ViewShape<
   Spec,
   Resource
@@ -204,31 +202,26 @@ export type ProgramResource<Spec extends AppSpec, Resource extends ResourceName<
   CommandShape<Spec, Resource> & {
     readonly view: ViewShape<Spec, Resource>;
   };
-
 export type SemanticProgramHooks<Spec extends AppSpec> = {
   [Resource in ResourceName<Spec> as HookName<Resource>]: (
     key: ResourceFor<Spec, Resource>["Key"],
   ) => ProgramResource<Spec, Resource>;
 };
-
 export type AppEventName<Spec extends AppSpec> = {
   [Resource in ResourceName<Spec>]: {
     [Event in keyof ResourceFor<Spec, Resource>["Events"] & string]: `${Resource}.${Event}`;
   }[keyof ResourceFor<Spec, Resource>["Events"] & string];
 }[ResourceName<Spec>];
-
 export type ResourceFromEventName<
   Spec extends AppSpec,
   Name extends AppEventName<Spec>,
 > = Name extends `${infer Resource}.${string}` ? Resource & ResourceName<Spec> : never;
-
 export type EventFromEventName<
   Spec extends AppSpec,
   Name extends AppEventName<Spec>,
 > = Name extends `${ResourceFromEventName<Spec, Name>}.${infer Event}`
   ? Event & keyof ResourceFor<Spec, ResourceFromEventName<Spec, Name>>["Events"] & string
   : never;
-
 export type ProgramEvent<Spec extends AppSpec, Name extends AppEventName<Spec>> = {
   readonly id: string;
   readonly seq: number;
@@ -243,7 +236,6 @@ export type ProgramEvent<Spec extends AppSpec, Name extends AppEventName<Spec>> 
     ResourceFromEventName<Spec, Name>
   >["Events"][EventFromEventName<Spec, Name>];
 };
-
 export type ProgramEventItem<
   Spec extends AppSpec,
   Name extends AppEventName<Spec>,
@@ -256,7 +248,6 @@ export type ProgramEventItem<
 } & {
   readonly [Current in Resource]: ProgramResource<Spec, Current>;
 };
-
 export type ProgramEventStream<Spec extends AppSpec> = <Name extends AppEventName<Spec>>(
   name: Name,
   options: {
@@ -264,27 +255,22 @@ export type ProgramEventStream<Spec extends AppSpec> = <Name extends AppEventNam
     signal?: AbortSignal;
   },
 ) => AsyncIterable<ProgramEventItem<Spec, Name>>;
-
 export type ProgramContext<Spec extends AppSpec> = SemanticProgramHooks<Spec> & {
   readonly signal: AbortSignal;
   readonly events: ProgramEventStream<Spec>;
 };
-
 export type AppPrograms<Spec extends AppSpec> = {
   [Env in EnvironmentName<Spec>]?: (
     ctx: ProgramContext<Spec>,
     deps: EnvironmentDeps<Spec, Env>,
   ) => void | Promise<void>;
 };
-
 type ComponentsOf<Spec extends AppSpec> = Spec extends {
   Components: infer Components extends Record<string, any>;
 }
   ? Components
   : Record<string, never>;
-
 export type ComponentName<Spec extends AppSpec> = Extract<keyof ComponentsOf<Spec>, string>;
-
 export type ComponentFor<
   Spec extends AppSpec,
   Component extends ComponentName<Spec>,
@@ -293,59 +279,53 @@ export type ComponentFor<
 }
   ? ComponentsOf<Spec>[Component]
   : never;
-
 export type ComponentInput<Spec extends AppSpec, Component extends ComponentName<Spec>> =
   ComponentFor<Spec, Component> extends {
     Input: infer Input extends Record<string, any>;
   }
     ? Input
     : Record<never, never>;
-
 export type ComponentState<Spec extends AppSpec, Component extends ComponentName<Spec>> =
   ComponentFor<Spec, Component> extends {
     State: infer State extends Record<string, any>;
   }
     ? State
     : Record<never, never>;
-
 export type ComponentDerived<Spec extends AppSpec, Component extends ComponentName<Spec>> =
   ComponentFor<Spec, Component> extends {
     Derived: infer Derived extends Record<string, any>;
   }
     ? Derived
     : Record<never, never>;
-
 export type ComponentActions<Spec extends AppSpec, Component extends ComponentName<Spec>> =
   ComponentFor<Spec, Component> extends {
     Actions: infer Actions extends Record<string, (...args: any[]) => any>;
   }
     ? Actions
     : Record<never, never>;
-
 export type ComponentParts<Spec extends AppSpec, Component extends ComponentName<Spec>> =
   ComponentFor<Spec, Component> extends {
     Parts: infer Parts extends Record<string, string>;
   }
     ? Parts
     : Record<never, never>;
-
 export type ComponentPartName<
   Spec extends AppSpec,
   Component extends ComponentName<Spec>,
 > = Extract<keyof ComponentParts<Spec, Component>, string>;
-
 export type ComponentPartElement<
   Spec extends AppSpec,
   Component extends ComponentName<Spec>,
   Part extends ComponentPartName<Spec, Component>,
 > = ComponentParts<Spec, Component>[Part] & string;
-
 export type ComponentActionArgs<Action> = Action extends (...args: infer Args) => any ? Args : [];
-
 type ComponentControllerEvent<T extends EventTarget, E extends Event> = {
-  bivarianceHack(event: E & { readonly currentTarget: T }): void;
+  bivarianceHack(
+    event: E & {
+      readonly currentTarget: T;
+    },
+  ): void;
 }["bivarianceHack"];
-
 type ComponentControllerChild =
   | Node
   | string
@@ -355,7 +335,6 @@ type ComponentControllerChild =
   | undefined
   | ComponentControllerChild[]
   | (() => ComponentControllerChild);
-
 type ComponentControllerCommonProps<T extends Element> = {
   id?: string;
   class?: string;
@@ -372,7 +351,6 @@ type ComponentControllerCommonProps<T extends Element> = {
   onFocus?: ComponentControllerEvent<T, FocusEvent>;
   onBlur?: ComponentControllerEvent<T, FocusEvent>;
 };
-
 type ComponentPartBindingForElement<ElementName extends string> = ElementName extends "button"
   ? ComponentControllerCommonProps<HTMLButtonElement> & {
       disabled?: boolean;
@@ -409,7 +387,6 @@ type ComponentPartBindingForElement<ElementName extends string> = ElementName ex
             : ElementName extends keyof SVGElementTagNameMap
               ? ComponentControllerCommonProps<SVGElementTagNameMap[ElementName]>
               : Record<string, unknown>;
-
 export type ComponentPartBinding<
   Spec extends AppSpec,
   Component extends ComponentName<Spec>,
@@ -418,7 +395,6 @@ export type ComponentPartBinding<
   readonly "data-pg-component": Component;
   readonly "data-pg-part": Part;
 };
-
 export type ComponentControllerContext<
   Spec extends AppSpec,
   Component extends ComponentName<Spec>,
@@ -435,7 +411,6 @@ export type ComponentControllerContext<
     readonly [Part in ComponentPartName<Spec, Component>]?: Element | null;
   };
 };
-
 export type ComponentControllerResult<
   Spec extends AppSpec,
   Component extends ComponentName<Spec>,
@@ -444,13 +419,11 @@ export type ComponentControllerResult<
     ComponentPartBinding<Spec, Component, Part>
   >;
 }>;
-
 export type ComponentControllers<Spec extends AppSpec> = Partial<{
   [Component in ComponentName<Spec>]: (
     ctx: ComponentControllerContext<Spec, Component>,
   ) => ComponentControllerResult<Spec, Component>;
 }>;
-
 export type ResourceDef<Spec extends AppSpec, R extends ResourceSpec> = {
   state: R["State"];
   presence?: R["Presence"];
@@ -482,7 +455,6 @@ export type ResourceDef<Spec extends AppSpec, R extends ResourceSpec> = {
     ) => void;
   };
 };
-
 export type AppDef<Spec extends AppSpec> = {
   version: number;
   app?: AppMetadata;
@@ -500,14 +472,14 @@ export type AppDef<Spec extends AppSpec> = {
     >;
   };
 };
-
 type EventForCmd<R extends ResourceSpec, Cmd extends CommandSpec> =
   EventNameFor<Cmd> extends string
     ? EventNameFor<Cmd> extends keyof R["Events"]
-      ? { [K in EventNameFor<Cmd>]: (payload: R["Events"][K]) => void }
+      ? {
+          [K in EventNameFor<Cmd>]: (payload: R["Events"][K]) => void;
+        }
       : {}
     : {};
-
 export type CommandCtx<
   Spec extends AppSpec,
   R extends ResourceSpec,
@@ -528,28 +500,27 @@ export type CommandCtx<
   id: () => string;
   now: () => number;
 };
-
 export type CommandReceipt<E = never> = Promise<
-  | { ok: true; cursor?: number }
+  | {
+      ok: true;
+      cursor?: number;
+    }
   | {
       ok: false;
       error: E extends string ? E : E extends [infer Code, any] ? Code : never;
       data?: E extends [string, infer Data] ? Data : never;
     }
 >;
-
 export type SyncMeta = {
   cursor: number;
   syncing: boolean;
   stale: boolean;
   error: string | null;
 };
-
 export type Client<Spec extends AppSpec> = {
   connected: boolean;
   dispose: () => void;
 } & ResourceClient<Spec>;
-
 type ResourceClient<Spec extends AppSpec> = {
   [K in keyof Spec["Resources"]]: (
     key: Spec["Resources"][K] extends ResourceSpec ? Spec["Resources"][K]["Key"] : never,
@@ -578,11 +549,9 @@ type ResourceClient<Spec extends AppSpec> = {
       }
     : never;
 };
-
 export type ResolvedAppDef<Spec extends AppSpec> = Omit<AppDef<Spec>, "identify"> & {
   identify: (opts: { token: string }) => ActorOf<Spec> | null;
 };
-
 export type App<Spec extends AppSpec> = {
   def: ResolvedAppDef<Spec>;
   previous?: App<any>;
@@ -607,9 +576,26 @@ export type App<Spec extends AppSpec> = {
       payload: any;
     },
     eventVersion?: number,
-  ) => { name: string; payload: any; version: number };
-  snapshot: (state: any, seq: number) => { version: number; seq: number; data: unknown };
-  restore: (resource: string, snap: { version: number; data: unknown }) => any;
+  ) => {
+    name: string;
+    payload: any;
+    version: number;
+  };
+  snapshot: (
+    state: any,
+    seq: number,
+  ) => {
+    version: number;
+    seq: number;
+    data: unknown;
+  };
+  restore: (
+    resource: string,
+    snap: {
+      version: number;
+      data: unknown;
+    },
+  ) => any;
   runCommand: (
     resource: string,
     state: any,
@@ -629,209 +615,48 @@ export type App<Spec extends AppSpec> = {
     onError: (error: string, data?: any) => void,
   ) => void;
 };
-
 type ResourcesOf<A> =
-  A extends App<infer S> ? (S extends AppSpec & { Resources: infer R } ? R : never) : never;
-
+  A extends App<infer S>
+    ? S extends AppSpec & {
+        Resources: infer R;
+      }
+      ? R
+      : never
+    : never;
 type MigrateDef<Prev extends App<any>> = {
   previous: Prev;
   migrate?: {
     state?: {
       [R in keyof ResourcesOf<Prev>]?: (
-        data: ResourcesOf<Prev>[R] extends { State: infer S } ? S : never,
+        data: ResourcesOf<Prev>[R] extends {
+          State: infer S;
+        }
+          ? S
+          : never,
       ) => any;
     };
     event?: {
       [R in keyof ResourcesOf<Prev>]?: <
-        E extends keyof (ResourcesOf<Prev>[R] extends { Events: infer EV } ? EV : never) & string,
+        E extends keyof (ResourcesOf<Prev>[R] extends {
+          Events: infer EV;
+        }
+          ? EV
+          : never) &
+          string,
       >(
         name: E,
-        payload: ResourcesOf<Prev>[R] extends { Events: infer EV } ? EV[E & keyof EV] : never,
-      ) => { name: string; payload: any };
+        payload: ResourcesOf<Prev>[R] extends {
+          Events: infer EV;
+        }
+          ? EV[E & keyof EV]
+          : never,
+      ) => {
+        name: string;
+        payload: any;
+      };
     };
   };
 };
-
-export function defineApp<Spec extends AppSpec, Prev extends App<any> = never>(
+export declare function defineApp<Spec extends AppSpec, Prev extends App<any> = never>(
   def: AppDef<Spec> & ([Prev] extends [never] ? {} : MigrateDef<Prev>),
-): App<Spec> {
-  const previous: App<any> | undefined = (def as any).previous;
-  const resolvedDef = {
-    ...def,
-    identify: def.identify ?? defaultIdentify,
-  } as ResolvedAppDef<Spec> & ([Prev] extends [never] ? {} : MigrateDef<Prev>);
-  const runtimeDef = resolvedDef as ResolvedAppDef<Spec>;
-  return {
-    def: resolvedDef,
-    previous,
-    createState: (r: string) => {
-      const res = resolvedDef.resources[r];
-      if (!res) return undefined;
-      return structuredClone(res.state);
-    },
-    applyEvent: (r, s, e, ev) => applyEventImpl(runtimeDef, r, s, e, ev, previous),
-    upcastEvent: (r, e, ev) => upcastEventImpl(runtimeDef, r, e, ev, previous),
-    snapshot: (s, seq) => ({ version: resolvedDef.version, seq, data: structuredClone(s) }),
-    restore: (r, snap) => restoreImpl(runtimeDef, r, snap, previous),
-    runCommand: (r, s, a, k, n, args, onE, onSP, onErr) =>
-      runCommandImpl(runtimeDef, r, s, a, k, n, args, onE, onSP, onErr),
-  };
-}
-
-function defaultIdentify<Spec extends AppSpec>({ token }: { token: string }): ActorOf<Spec> {
-  return { id: token || "local" } as ActorOf<Spec>;
-}
-
-function restoreImpl<S extends AppSpec>(
-  def: ResolvedAppDef<S>,
-  resource: string,
-  snap: { version: number; data: unknown },
-  previous?: App<any>,
-): any {
-  const res = def.resources[resource];
-  if (!res) return undefined;
-  const state = structuredClone(res.state);
-  if (!snap) return state;
-  if (snap.version === def.version) return structuredClone(snap.data);
-  if (snap.version < def.version && previous) {
-    const links: App<any>[] = [];
-    let cur: App<any> | undefined = previous;
-    while (cur) {
-      links.push(cur);
-      cur = cur.previous;
-    }
-    links.reverse();
-    const defs: any[] = [];
-    for (const link of links) defs.push(link.def);
-    defs.push(def);
-    let data = structuredClone(snap.data);
-    for (const d of defs) {
-      if (d.version > snap.version && d.version <= def.version) {
-        const migrate = (d as any).migrate;
-        if (migrate?.state?.[resource]) {
-          data = migrate.state[resource](data);
-        }
-      }
-    }
-    if (data !== undefined) return data;
-  }
-  return state;
-}
-
-function applyEventImpl<S extends AppSpec>(
-  def: ResolvedAppDef<S>,
-  resource: string,
-  state: any,
-  event: {
-    id: string;
-    seq: number;
-    at: number;
-    actor: ActorOf<S>;
-    name: string;
-    payload: any;
-  },
-  eventVersion?: number,
-  previous?: App<any>,
-): void {
-  const { name, payload } = upcastEventImpl(
-    def,
-    resource,
-    { name: event.name, payload: event.payload },
-    eventVersion,
-    previous,
-  );
-  const handler = def.resources[resource]?.events[name];
-  if (!handler) return;
-  handler({ state, payload, actor: event.actor, at: event.at, seq: event.seq });
-}
-
-function upcastEventImpl<S extends AppSpec>(
-  def: ResolvedAppDef<S>,
-  resource: string,
-  event: {
-    name: string;
-    payload: any;
-  },
-  eventVersion?: number,
-  previous?: App<any>,
-): { name: string; payload: any; version: number } {
-  let name = event.name;
-  let payload = event.payload;
-  if (eventVersion !== undefined && eventVersion < def.version && previous) {
-    const links: App<any>[] = [];
-    let cur: App<any> | undefined = previous;
-    while (cur) {
-      links.push(cur);
-      cur = cur.previous;
-    }
-    links.reverse();
-    const defs: any[] = [];
-    for (const link of links) defs.push(link.def);
-    defs.push(def);
-    for (const d of defs) {
-      if (d.version > eventVersion && d.version <= def.version) {
-        const migrate = (d as any).migrate;
-        if (migrate?.event?.[resource]) {
-          const upcasted = migrate.event[resource](name, payload);
-          name = upcasted.name;
-          payload = upcasted.payload;
-        }
-      }
-    }
-  }
-  return { name, payload, version: def.version };
-}
-
-function runCommandImpl<S extends AppSpec>(
-  def: ResolvedAppDef<S>,
-  resource: string,
-  state: any,
-  actor: ActorOf<S>,
-  key: any,
-  name: string,
-  args: any[],
-  onEvent: (event: {
-    id: string;
-    seq: number;
-    at: number;
-    actor: ActorOf<S>;
-    name: string;
-    payload: any;
-  }) => void,
-  onSetPresence: (patch: any) => void,
-  onError: (error: string, data?: any) => void,
-): void {
-  const resDef: any = def.resources[resource];
-  if (!resDef) return;
-  const fn = resDef.commands?.[name];
-  if (!fn) return;
-
-  const frozenState = structuredClone(state);
-  let seq = 0;
-
-  const eventMethods: any = {};
-  for (const ek of Object.keys(resDef.events)) {
-    eventMethods[ek] = (payload: any) => {
-      onEvent({ id: nextId(), seq: seq++, at: Date.now(), actor, name: ek, payload });
-    };
-  }
-
-  const ctx: any = {
-    state: frozenState,
-    actor,
-    key,
-    event: eventMethods,
-    setPresence: onSetPresence,
-    error: (code: string, data?: any) => {
-      onError(code, data);
-    },
-    id: nextId,
-    now: () => Date.now(),
-  };
-
-  fn(ctx, ...args);
-}
-
-function nextId() {
-  return crypto.randomUUID();
-}
+): App<Spec>;

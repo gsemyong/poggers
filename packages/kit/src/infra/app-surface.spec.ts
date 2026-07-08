@@ -235,7 +235,7 @@ describe("app surface", () => {
         if (screen.name === "counter") {
           const counter = ctx.useCounter({ id: screen.params.id });
           void counter.increment();
-          counter.count();
+          void counter.count;
         }
         return null;
       },

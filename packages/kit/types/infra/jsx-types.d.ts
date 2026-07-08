@@ -1,19 +1,15 @@
 import type { Child, MaybeSignal } from "./ui";
-
 type AttributeValue<T> = MaybeSignal<T | null | undefined>;
 type PrimitiveAttribute = string | number | boolean | null | undefined;
 type Booleanish = boolean | "true" | "false";
 type CrossOrigin = "anonymous" | "use-credentials" | "";
 type Ref<T extends Element> = (element: T) => void;
-
 type DOMEvent<T extends EventTarget, E extends Event> = E & {
   readonly currentTarget: T;
 };
-
 type EventHandler<T extends EventTarget, E extends Event> = {
   bivarianceHack(event: DOMEvent<T, E>): void;
 }["bivarianceHack"];
-
 type EventHandlerProps<T extends Element> = {
   onAbort?: EventHandler<T, UIEvent>;
   onAnimationCancel?: EventHandler<T, AnimationEvent>;
@@ -111,9 +107,7 @@ type EventHandlerProps<T extends Element> = {
   onWaiting?: EventHandler<T, Event>;
   onWheel?: EventHandler<T, WheelEvent>;
 };
-
 type CSSPropertyValue = string | number | null | undefined;
-
 export type CSSProperties = {
   accentColor?: CSSPropertyValue;
   alignItems?: CSSPropertyValue;
@@ -159,15 +153,12 @@ export type CSSProperties = {
 } & {
   [CustomProperty in `--${string}`]?: CSSPropertyValue;
 };
-
 type DataAttributes = {
   [Key in `data-${string}`]?: AttributeValue<PrimitiveAttribute>;
 };
-
 type AriaAttributes = {
   [Key in `aria-${string}`]?: AttributeValue<string | number | Booleanish>;
 };
-
 type GlobalAttributes<T extends Element> = EventHandlerProps<T> &
   DataAttributes &
   AriaAttributes & {
@@ -211,7 +202,6 @@ type GlobalAttributes<T extends Element> = EventHandlerProps<T> &
     title?: AttributeValue<string>;
     translate?: AttributeValue<"yes" | "no" | boolean>;
   };
-
 type ButtonType = "button" | "submit" | "reset";
 type FormMethod = "dialog" | "get" | "post";
 type FormEncType = "application/x-www-form-urlencoded" | "multipart/form-data" | "text/plain";
@@ -240,7 +230,6 @@ type InputType =
   | "week";
 type Loading = "eager" | "lazy";
 type Target = "_blank" | "_parent" | "_self" | "_top" | (string & {});
-
 type HTMLSpecificAttributes<Tag extends keyof HTMLElementTagNameMap> = Tag extends "a"
   ? {
       download?: AttributeValue<boolean | string>;
@@ -436,14 +425,11 @@ type HTMLSpecificAttributes<Tag extends keyof HTMLElementTagNameMap> = Tag exten
                                     width?: AttributeValue<number | string>;
                                   }
                                 : {};
-
 export type HTMLAttributes<Tag extends keyof HTMLElementTagNameMap> = GlobalAttributes<
   HTMLElementTagNameMap[Tag]
 > &
   HTMLSpecificAttributes<Tag>;
-
 type SVGLength = number | string;
-
 type SVGPresentationAttributes = {
   accentHeight?: AttributeValue<SVGLength>;
   alignmentBaseline?: AttributeValue<string>;
@@ -505,7 +491,6 @@ type SVGPresentationAttributes = {
   wordSpacing?: AttributeValue<SVGLength>;
   writingMode?: AttributeValue<string>;
 };
-
 type SVGCoreAttributes = {
   cx?: AttributeValue<SVGLength>;
   cy?: AttributeValue<SVGLength>;
@@ -528,15 +513,12 @@ type SVGCoreAttributes = {
   y1?: AttributeValue<SVGLength>;
   y2?: AttributeValue<SVGLength>;
 };
-
 export type SVGAttributes<T extends SVGElement> = GlobalAttributes<T> &
   SVGPresentationAttributes &
   SVGCoreAttributes;
-
 export type CustomElementAttributes = GlobalAttributes<HTMLElement> & {
   [AttributeName: string]: unknown;
 };
-
 export type IntrinsicElements = {
   [Tag in keyof HTMLElementTagNameMap]: HTMLAttributes<Tag>;
 } & {

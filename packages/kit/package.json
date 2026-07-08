@@ -17,24 +17,43 @@
     "src/testing.ts",
     "src/ui.ts",
     "src/worker.ts",
+    "types",
     "tsconfig.app.json",
     "src/infra",
     "!src/infra/**/*.spec.ts"
   ],
   "type": "module",
   "exports": {
-    ".": "./src/index.ts",
-    "./jsx-dev-runtime": "./src/jsx-dev-runtime.ts",
-    "./jsx-runtime": "./src/jsx-runtime.ts",
+    ".": {
+      "types": "./types/index.d.ts",
+      "default": "./src/index.ts"
+    },
+    "./jsx-dev-runtime": {
+      "types": "./types/jsx-dev-runtime.d.ts",
+      "default": "./src/jsx-dev-runtime.ts"
+    },
+    "./jsx-runtime": {
+      "types": "./types/jsx-runtime.d.ts",
+      "default": "./src/jsx-runtime.ts"
+    },
     "./react": "./src/react.ts",
     "./program": "./src/program.ts",
-    "./ui": "./src/ui.ts",
-    "./style": "./src/style.ts",
+    "./ui": {
+      "types": "./types/ui.d.ts",
+      "default": "./src/ui.ts"
+    },
+    "./style": {
+      "types": "./types/style.d.ts",
+      "default": "./src/style.ts"
+    },
     "./worker": "./src/worker.ts",
     "./testing": "./src/testing.ts",
-    "./app": "./src/app.ts",
+    "./app": {
+      "types": "./types/app.d.ts",
+      "default": "./src/app.ts"
+    },
     "./app-types": "./app-types/index.d.ts",
-    "./tsconfig/app": "./tsconfig.app.json"
+    "./tsconfig": "./tsconfig.app.json"
   },
   "publishConfig": {
     "access": "public"
@@ -57,7 +76,7 @@
     "fast-check": "^4.8.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
-    "typescript": "^6.0.3"
+    "typescript": "7.0.1-rc"
   },
   "peerDependencies": {
     "react": "^19.0.0",

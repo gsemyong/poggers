@@ -143,9 +143,9 @@ describe("single-surface app hooks", () => {
     const hooks = createHooks({ app, styles, components });
     const counter = hooks.useCounter({ id: "main" });
 
-    expect(counter.count()).toBe(0);
+    expect(counter.count).toBe(0);
     await counter.increment(2);
-    expect(counter.count()).toBe(2);
+    expect(counter.count).toBe(2);
 
     const Button = hooks.createButton({
       input: { tone: "primary", disabled: false },

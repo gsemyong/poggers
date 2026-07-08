@@ -1,6 +1,5 @@
 import { defineApp } from "@poggers/kit";
-import { ChatScreen } from "./components/screens/ChatScreen";
-import { createServerDeps } from "./helpers/deps/createDeps";
+import { ChatScreen } from "./components/chat-screen";
 import type { App, DisplayMessage } from "./types";
 
 export default defineApp<App>({
@@ -17,10 +16,6 @@ export default defineApp<App>({
     themeColor: "#22252a",
     backgroundColor: "#f7f3ea",
     display: "standalone",
-  },
-
-  deps: {
-    server: createServerDeps,
   },
 
   resources: {
@@ -158,6 +153,41 @@ export default defineApp<App>({
   },
 
   components: {
+    ChatLayout({ derived, actions }) {
+      return {
+        BrandText: {
+          children: derived.brandText,
+        },
+        PresetSwitch: {
+          type: "button",
+          onClick: actions.togglePreset,
+          children: derived.presetSwitchLabel,
+        },
+        StatusText: {
+          children: derived.statusText,
+        },
+        StatusMeta: {
+          children: derived.statusMeta,
+        },
+        Understanding: {
+          hidden: !derived.hasUnderstanding,
+          children: `understanding: ${derived.understandingText}`,
+        },
+      };
+    },
+    ChatMessage({ derived }) {
+      return {
+        Root: {
+          hidden: derived.hidden,
+        },
+        Role: {
+          children: derived.roleLabel,
+        },
+        Content: {
+          children: derived.contentText,
+        },
+      };
+    },
     Composer({ state, derived, actions }) {
       return {
         Root: {
@@ -172,10 +202,12 @@ export default defineApp<App>({
           onInput(event) {
             actions.change(event.currentTarget.value);
           },
+          onKeyDown: actions.submitFromKeyboard,
         },
         Send: {
           type: "submit",
           disabled: !derived.canSubmit,
+          children: "Send",
         },
       };
     },

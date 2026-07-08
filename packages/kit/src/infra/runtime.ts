@@ -88,6 +88,7 @@ export type AppPaths = {
   styles?: string;
   styleSource?: string;
   worker?: string;
+  deps?: string;
 };
 
 type BrowserEntrypoint = {
@@ -171,6 +172,12 @@ export function resolveApp(appDir: string): AppPaths {
     resolve(sourceDir, "worker.ts"),
     resolve(resolvedAppDir, "worker.ts"),
   ]);
+  const deps = firstExisting([
+    resolve(sourceDir, "deps.ts"),
+    resolve(sourceDir, "helpers/deps/createDeps.ts"),
+    resolve(resolvedAppDir, "deps.ts"),
+    resolve(resolvedAppDir, "helpers/deps/createDeps.ts"),
+  ]);
 
   if (!ui) {
     throw new Error(`App is missing src/app.tsx or app.tsx in ${resolvedAppDir}.`);
@@ -188,6 +195,7 @@ export function resolveApp(appDir: string): AppPaths {
     styles,
     styleSource,
     worker,
+    deps,
   };
 }
 
@@ -197,6 +205,7 @@ export async function loadApp<Spec extends AppSpec = AppSpec>(
   const paths = resolveApp(appDir);
   await writePoggersAppTypes(paths);
   const apiModule = await importBuiltAppModule(paths);
+  const depsModule = paths.deps ? await import(pathToFileURL(paths.deps).href) : {};
   const api = (apiModule.api ?? apiModule.default) as App<Spec> | undefined;
 
   if (!api?.def?.resources) {
@@ -204,7 +213,13 @@ export async function loadApp<Spec extends AppSpec = AppSpec>(
   }
 
   const worker = paths.worker ? await loadWorker<Spec>(paths.worker, paths.appDir) : undefined;
-  const program = await loadProgram(api, apiModule, selectProgramEnv(api), paths.appDir);
+  const program = await loadProgram(
+    api,
+    apiModule,
+    depsModule,
+    selectProgramEnv(api),
+    paths.appDir,
+  );
 
   return { paths, api, worker, program };
 }
@@ -327,8 +342,10 @@ export function checkAppConventions(appDir: string): AppConventionIssue[] {
     });
   }
 
-  for (const file of sourceFiles(resolve(paths.sourceDir, "components"))) {
+  const componentsDir = resolve(paths.sourceDir, "components");
+  for (const file of sourceFiles(componentsDir)) {
     const source = readFileSync(file, "utf8");
+    collectComponentFileConventions(componentsDir, file, issues);
     collectForbiddenGeneratedSurface(file, source, issues);
     collectForbiddenComponentStyling(file, source, issues);
   }
@@ -435,6 +452,7 @@ async function loadWorker<Spec extends AppSpec>(
 async function loadProgram<Spec extends AppSpec, Env extends EnvironmentName<Spec>>(
   api: App<Spec>,
   apiModule: Record<string, any>,
+  depsModule: Record<string, any>,
   env: Env,
   appDir: string,
 ): Promise<AppEnvironmentProgram<Spec, Env> | undefined> {
@@ -444,23 +462,31 @@ async function loadProgram<Spec extends AppSpec, Env extends EnvironmentName<Spe
   const envName = String(env);
   const capitalizedEnv = capitalize(envName);
   const depsFactory =
-    api.def.deps?.[env] ?? apiModule[`create${capitalizedEnv}Deps`] ?? apiModule.createProgramDeps;
+    api.def.deps?.[env] ??
+    apiModule[`create${capitalizedEnv}Deps`] ??
+    apiModule.createProgramDeps ??
+    depsModule[`create${capitalizedEnv}Deps`] ??
+    depsModule.createProgramDeps;
   const deps =
     typeof depsFactory === "function"
       ? await depsFactory()
       : `${envName}Deps` in apiModule
         ? await apiModule[`${envName}Deps`]
-        : "programDeps" in apiModule
-          ? await apiModule.programDeps
-          : {};
+        : `${envName}Deps` in depsModule
+          ? await depsModule[`${envName}Deps`]
+          : "programDeps" in apiModule
+            ? await apiModule.programDeps
+            : "programDeps" in depsModule
+              ? await depsModule.programDeps
+              : {};
 
   return {
     env,
     program,
     deps,
-    programId: apiModule.programId ?? `${titleFromDir(appDir)}-${envName}`,
-    actor: apiModule.programActor,
-    store: apiModule.programStore,
+    programId: apiModule.programId ?? depsModule.programId ?? `${titleFromDir(appDir)}-${envName}`,
+    actor: apiModule.programActor ?? depsModule.programActor,
+    store: apiModule.programStore ?? depsModule.programStore,
   };
 }
 
@@ -921,12 +947,42 @@ export default Root;
 
 type AppSurfaceResource = {
   name: string;
+  views: string[];
+  commands: AppSurfaceCommand[];
   doc?: string;
+};
+
+type AppSurfaceCommand = {
+  name: string;
+  hasArgs: boolean;
+  hasError: boolean;
+};
+
+type AppSurfaceAction = {
+  name: string;
+  handlerType: string;
+};
+
+type AppSurfaceThemeParam = {
+  name: string;
+  valueType: string;
+};
+
+type AppSurfaceNavigation = {
+  name: string;
+  hasParams: boolean;
+  paramsType: string;
 };
 
 type AppSurfaceComponent = {
   name: string;
   parts: Record<string, string>;
+  hasInput: boolean;
+  hasState: boolean;
+  hasDerived: boolean;
+  hasActions: boolean;
+  derived: string[];
+  actions: AppSurfaceAction[];
   needsInput: boolean;
   doc?: string;
 };
@@ -934,17 +990,45 @@ type AppSurfaceComponent = {
 type AppSurface = {
   resources: AppSurfaceResource[];
   components: Record<string, AppSurfaceComponent>;
+  navigation: AppSurfaceNavigation[];
+  presetType?: string;
+  themeParams: AppSurfaceThemeParam[];
 };
 
 function collectAppSurface(paths: AppPaths): AppSurface {
-  const fallback: AppSurface = { resources: [], components: {} };
+  const fallback: AppSurface = {
+    resources: [],
+    components: {},
+    navigation: [{ name: "home", hasParams: false, paramsType: "EmptyObject" }],
+    themeParams: [],
+  };
   if (!paths.types || !existsSync(paths.types)) return fallback;
 
   const source = readFileSync(paths.types, "utf8");
   const resourcesBlock = extractPropertyBlock(source, "Resources");
   const componentsBlock = extractPropertyBlock(source, "Components");
+  const navigationBlock = extractPropertyBlock(source, "Navigation");
+  const stylesBlock = extractPropertyBlock(source, "Styles");
+  const themeBlock = stylesBlock ? extractPropertyBlock(stylesBlock, "Theme") : undefined;
+  const paramsBlock = themeBlock ? extractPropertyBlock(themeBlock, "Params") : undefined;
   const resources = resourcesBlock
-    ? readObjectMemberEntries(resourcesBlock).map(({ name, doc }) => ({ name, doc }))
+    ? readObjectMemberEntries(resourcesBlock).map(({ name, value, doc }) => {
+        const viewsBlock = resolveTypePropertyBlock(source, value, "Views");
+        const commandsBlock = resolveTypePropertyBlock(source, value, "Commands");
+        const commands = commandsBlock
+          ? readTypeMemberEntries(commandsBlock).map((command) => ({
+              name: command.name,
+              hasArgs: Boolean(extractPropertyValue(command.value, "args")),
+              hasError: Boolean(extractPropertyValue(command.value, "error")),
+            }))
+          : [];
+        return {
+          name,
+          views: viewsBlock ? readTypeMemberNames(viewsBlock) : [],
+          commands,
+          doc,
+        };
+      })
     : [];
   const components: Record<string, AppSurfaceComponent> = {};
 
@@ -952,19 +1036,50 @@ function collectAppSurface(paths: AppPaths): AppSurface {
     const componentMembers = readObjectMemberEntries(componentsBlock);
     for (const { name: componentName, value: componentBlock, doc } of componentMembers) {
       const partsBlock = extractPropertyBlock(componentBlock, "Parts");
+      const derivedBlock = extractPropertyBlock(componentBlock, "Derived");
+      const actionsBlock = extractPropertyBlock(componentBlock, "Actions");
+      const actionEntries = actionsBlock ? readTypeMemberEntries(actionsBlock) : [];
       if (!partsBlock) continue;
+      const hasInput = Boolean(extractPropertyBlock(componentBlock, "Input"));
+      const hasState = Boolean(extractPropertyBlock(componentBlock, "State"));
+      const hasDerived = Boolean(derivedBlock);
+      const hasActions = Boolean(actionsBlock);
       components[componentName] = {
         name: componentName,
         parts: readStringMembers(partsBlock),
-        needsInput: ["Input", "State", "Derived", "Actions"].some((property) =>
-          Boolean(extractPropertyBlock(componentBlock, property)),
-        ),
+        hasInput,
+        hasState,
+        hasDerived,
+        hasActions,
+        derived: derivedBlock ? readTypeMemberNames(derivedBlock) : [],
+        actions: actionEntries.map((action) => ({
+          name: action.name,
+          handlerType: actionHandlerType(action.value),
+        })),
+        needsInput: hasInput || hasState || hasDerived || hasActions,
         doc,
       };
     }
   }
 
-  return { resources, components };
+  return {
+    resources,
+    components,
+    navigation: navigationBlock
+      ? readObjectMemberEntries(navigationBlock).map(({ name, value }) => ({
+          name,
+          hasParams: readTypeMemberEntries(value).length > 0,
+          paramsType: `AppSpec["Navigation"][${JSON.stringify(name)}]`,
+        }))
+      : [{ name: "home", hasParams: false, paramsType: "EmptyObject" }],
+    presetType: stylesBlock ? extractPropertyValue(stylesBlock, "Presets") : undefined,
+    themeParams: paramsBlock
+      ? readTypeMemberEntries(paramsBlock).map((param) => ({
+          name: param.name,
+          valueType: themeParamValueType(param.value),
+        }))
+      : [],
+  };
 }
 
 function componentPartsRecord(surface: AppSurface): Record<string, Record<string, string>> {
@@ -977,6 +1092,29 @@ function componentPartsRecord(surface: AppSurface): Record<string, Record<string
 
 function extractPropertyBlock(source: string, property: string): string | undefined {
   const match = new RegExp(`\\b${property}\\s*:`).exec(source);
+  if (!match) return undefined;
+  const openIndex = source.indexOf("{", match.index + match[0].length);
+  if (openIndex < 0) return undefined;
+  const closeIndex = findMatchingBrace(source, openIndex);
+  return closeIndex < 0 ? undefined : source.slice(openIndex + 1, closeIndex);
+}
+
+function resolveTypePropertyBlock(
+  source: string,
+  ownerBlock: string,
+  property: string,
+): string | undefined {
+  const inline = extractPropertyBlock(ownerBlock, property);
+  if (inline) return inline;
+
+  const value = extractPropertyValue(ownerBlock, property);
+  const alias = /^([A-Za-z_$][\w$]*)$/.exec(value ?? "");
+  return alias ? extractTypeAliasBlock(source, alias[1]!) : undefined;
+}
+
+function extractTypeAliasBlock(source: string, alias: string): string | undefined {
+  const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = new RegExp(`\\b(?:export\\s+)?type\\s+${escaped}\\s*=`).exec(source);
   if (!match) return undefined;
   const openIndex = source.indexOf("{", match.index + match[0].length);
   if (openIndex < 0) return undefined;
@@ -1032,6 +1170,88 @@ function readObjectMemberEntries(
   return result;
 }
 
+function readTypeMemberEntries(
+  block: string,
+): Array<{ name: string; value: string; doc?: string }> {
+  const result: Array<{ name: string; value: string; doc?: string }> = [];
+  let index = 0;
+
+  while (index < block.length) {
+    const trivia = skipTriviaWithJsDoc(block, index);
+    index = trivia.index;
+    const key = readMemberKey(block, index);
+    if (!key) {
+      index++;
+      continue;
+    }
+
+    index = skipTrivia(block, key.end);
+    const separator = block[index];
+    if (separator === ":") {
+      const valueStart = skipTrivia(block, index + 1);
+      const valueEnd = trimMemberValueEnd(block, skipMemberValue(block, valueStart));
+      result.push({
+        name: key.name,
+        value: block.slice(valueStart, valueEnd).trim(),
+        doc: trivia.doc,
+      });
+      index = valueEnd + 1;
+      continue;
+    }
+
+    if (separator === "(") {
+      const valueEnd = trimMemberValueEnd(block, skipMemberValue(block, index));
+      result.push({
+        name: key.name,
+        value: block.slice(index, valueEnd).trim(),
+        doc: trivia.doc,
+      });
+      index = valueEnd + 1;
+      continue;
+    }
+
+    index++;
+  }
+
+  return result;
+}
+
+function readTypeMemberNames(block: string): string[] {
+  return readTypeMemberEntries(block).map((member) => member.name);
+}
+
+function actionHandlerType(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.startsWith("(")) {
+    const closeIndex = findMatchingParen(trimmed, 0);
+    if (closeIndex >= 0) {
+      return `(${trimmed.slice(1, closeIndex).trim()}) => void`;
+    }
+  }
+
+  const arrowIndex = trimmed.indexOf("=>");
+  if (arrowIndex >= 0) {
+    const params = trimmed.slice(0, arrowIndex).trim();
+    return `${params} => void`;
+  }
+
+  if (trimmed.startsWith("[")) return `(...args: ${trimmed}) => void`;
+  return "() => void";
+}
+
+function themeParamValueType(value: string): string {
+  const defaultValue = extractPropertyValue(value, "default");
+  if (defaultValue) {
+    if (/^["'`]/.test(defaultValue)) return "string";
+    if (/^(true|false)\b/.test(defaultValue)) return "boolean";
+    if (/^-?\d+(?:\.\d+)?\b/.test(defaultValue)) return "number";
+  }
+
+  const trimmed = value.trim();
+  if (trimmed === "string" || trimmed === "number" || trimmed === "boolean") return trimmed;
+  return "number";
+}
+
 function readStringMembers(block: string): Record<string, string> {
   const result: Record<string, string> = {};
   let index = 0;
@@ -1064,6 +1284,37 @@ function readStringMembers(block: string): Record<string, string> {
   }
 
   return result;
+}
+
+function extractPropertyValue(source: string, property: string): string | undefined {
+  const match = new RegExp(`\\b${property}\\s*:`).exec(source);
+  if (!match) return undefined;
+  const valueStart = skipTrivia(source, match.index + match[0].length);
+  const valueEnd = trimMemberValueEnd(source, skipMemberValue(source, valueStart));
+  return source.slice(valueStart, valueEnd).trim();
+}
+
+function trimMemberValueEnd(source: string, index: number): number {
+  while (index > 0 && /[\s,;]/.test(source[index - 1] ?? "")) index--;
+  return index;
+}
+
+function findMatchingParen(source: string, openIndex: number): number {
+  let depth = 0;
+  for (let index = openIndex; index < source.length; index++) {
+    const char = source[index];
+    if (char === '"' || char === "'" || char === "`") {
+      const end = readQuotedStringEnd(source, index);
+      index = end < 0 ? source.length : end;
+      continue;
+    }
+    if (char === "(") depth++;
+    if (char === ")") {
+      depth--;
+      if (depth === 0) return index;
+    }
+  }
+  return -1;
 }
 
 function readMemberKey(source: string, index: number): { name: string; end: number } | undefined {
@@ -1192,146 +1443,323 @@ function jsDoc(doc: string | undefined, fallback: string): string {
   return `/** ${fallback} */`;
 }
 
+function resourceTypeDefinitions(resource: AppSurfaceResource): string {
+  const resourceName = JSON.stringify(resource.name);
+  const typeName = pascalIdentifier(resource.name);
+  const viewFields = resource.views.map(
+    (view) => `  readonly ${propertyKey(view)}: ${typeName}ResourceViews[${JSON.stringify(view)}];`,
+  );
+  const commandFields = resource.commands.map((command) => {
+    const commandName = JSON.stringify(command.name);
+    const commandType = `${typeName}ResourceCommands[${commandName}]`;
+    const args = command.hasArgs ? `${commandType}["args"]` : "[]";
+    const error = command.hasError ? `${commandType}["error"]` : "never";
+    return `  ${propertyKey(command.name)}(...args: ${args}): CommandReceipt<${error}>;`;
+  });
+  return `${jsDoc(resource.doc, `Access the ${resource.name} resource.`)}
+type ${typeName}ResourceSpec = AppSpec["Resources"][${resourceName}];
+type ${typeName}ResourceViews = ${typeName}ResourceSpec["Views"];
+type ${typeName}ResourceCommands = ${typeName}ResourceSpec["Commands"];
+export type ${typeName}ResourceKey = ${typeName}ResourceSpec["Key"];
+export type ${typeName}Resource = {
+${[...viewFields, ...commandFields, "  readonly sync: SyncMeta;"].join("\n")}
+};
+export function use${capitalize(resource.name)}(key: ${typeName}ResourceKey): ${typeName}Resource;`;
+}
+
+function navigationTypes(surface: AppSurface): string {
+  const screens = surface.navigation.map(
+    (screen) =>
+      `  | { readonly name: ${JSON.stringify(screen.name)}; readonly params: ${screen.paramsType} }`,
+  );
+  const navFields = surface.navigation.map((screen) => {
+    const params = screen.hasParams
+      ? `params: ${screen.paramsType}`
+      : `params?: ${screen.paramsType}`;
+    return `  ${propertyKey(screen.name)}(${params}): void;`;
+  });
+  return `export type AppScreen =\n${screens.join("\n")};
+export type AppNavigation = {
+${navFields.join("\n")}
+};`;
+}
+
+function componentTypeDefinitions(component: AppSurfaceComponent): string {
+  const componentName = JSON.stringify(component.name);
+  const typeName = pascalIdentifier(component.name);
+  const specType = `AppSpec["Components"][${componentName}]`;
+  const partNames = Object.keys(component.parts);
+  const inputType = component.hasInput ? `${specType}["Input"]` : "EmptyObject";
+  const stateType = component.hasState ? `${specType}["State"]` : "EmptyObject";
+  const derivedType = component.hasDerived ? `${specType}["Derived"]` : "EmptyObject";
+  const actionsType = component.hasActions ? `${specType}["Actions"]` : "EmptyObject";
+  const actionFields = component.actions.map(
+    (action) => `  readonly ${propertyKey(action.name)}: ${action.handlerType};`,
+  );
+  const actionInstanceFields = component.actions.map(
+    (action) =>
+      `  readonly ${propertyKey(action.name)}: ${typeName}ActionHandlers[${JSON.stringify(action.name)}];`,
+  );
+  const derivedFields = component.derived.map(
+    (derived) =>
+      `  readonly ${propertyKey(derived)}: ${typeName}Derived[${JSON.stringify(derived)}];`,
+  );
+  const refFields = partNames.map((part) => `  readonly ${propertyKey(part)}?: Element | null;`);
+  const partFields = Object.entries(component.parts).map(
+    ([partName, elementName]) =>
+      `  readonly ${propertyKey(partName)}: (props?: ${partPropsType(elementName)}) => Child;`,
+  );
+  const optionFields = [
+    component.hasInput ? `  input: ${typeName}Input;` : `  input?: ${typeName}Input;`,
+    component.hasState ? `  state: ${typeName}State;` : `  state?: ${typeName}State;`,
+    component.hasActions
+      ? `  actions: ${typeName}ActionFactory;`
+      : `  actions?: ${typeName}ActionFactory;`,
+    component.hasDerived
+      ? `  derived: ${typeName}DerivedFactory;`
+      : `  derived?: ${typeName}DerivedFactory;`,
+  ];
+  return `${jsDoc(component.doc, `Create a ${component.name} component instance.`)}
+type ${typeName}Input = ${inputType};
+type ${typeName}State = ${stateType};
+type ${typeName}Derived = ${derivedType};
+type ${typeName}Actions = ${actionsType};
+type ${typeName}ActionHandlers = {
+${actionFields.join("\n")}
+};
+type ${typeName}Refs = {
+${refFields.join("\n")}
+};
+type ${typeName}DerivedContext = {
+  readonly preset: AppPreset;
+  readonly theme: AppThemeValues;
+  readonly input: ${typeName}Input;
+  readonly state: ${typeName}State;
+  readonly refs: ${typeName}Refs;
+};
+type ${typeName}Context = {
+  readonly preset: AppPreset;
+  readonly theme: AppThemeValues;
+  readonly input: ${typeName}Input;
+  readonly state: ${typeName}State;
+  readonly derived: ${typeName}Derived;
+  readonly refs: ${typeName}Refs;
+};
+type ${typeName}ActionFactory = (ctx: ${typeName}Context) => ${typeName}ActionHandlers;
+type ${typeName}DerivedFactory = (ctx: ${typeName}DerivedContext) => ${typeName}Derived;
+export type ${typeName}Options = {
+${optionFields.join("\n")}
+};
+export type ${typeName}Instance = {
+  readonly input: ${typeName}Input;
+  readonly state: ${typeName}State;
+  readonly derived: ${typeName}Derived;
+  readonly actions: ${typeName}ActionHandlers;
+  readonly refs: ${typeName}Refs;
+${[...derivedFields, ...actionInstanceFields, ...partFields].join("\n")}
+};
+export function create${capitalize(component.name)}(${component.needsInput ? "input" : "input?"}: ${typeName}Options): ${typeName}Instance;`;
+}
+
+function appPartPropsPrelude(): string {
+  return `type PartValue<T> = T | (() => T | null | undefined) | null | undefined;
+type PartEvent<T extends EventTarget, E extends Event> = {
+  bivarianceHack(event: E & { readonly currentTarget: T }): void;
+}["bivarianceHack"];
+type PartStyle = string | Record<string, string | number | null | undefined>;
+type PartDataAttributes = {
+  [Key in \`data-\${string}\`]?: PartValue<string | number | boolean>;
+};
+type PartAriaAttributes = {
+  [Key in \`aria-\${string}\`]?: PartValue<string | number | boolean>;
+};
+type PartCommonProps<T extends Element> = PartDataAttributes &
+  PartAriaAttributes & {
+    id?: PartValue<string>;
+    class?: PartValue<string | false>;
+    className?: PartValue<string | false>;
+    hidden?: PartValue<boolean | "hidden" | "until-found">;
+    role?: PartValue<string>;
+    style?: PartValue<PartStyle>;
+    tabIndex?: PartValue<number>;
+    tabindex?: PartValue<number>;
+    title?: PartValue<string>;
+    children?: Child;
+    ref?: (element: T) => void;
+    onBlur?: PartEvent<T, FocusEvent>;
+    onChange?: PartEvent<T, Event>;
+    onClick?: PartEvent<T, MouseEvent>;
+    onFocus?: PartEvent<T, FocusEvent>;
+    onInput?: PartEvent<T, InputEvent>;
+    onKeyDown?: PartEvent<T, KeyboardEvent>;
+    onKeyUp?: PartEvent<T, KeyboardEvent>;
+    onMouseDown?: PartEvent<T, MouseEvent>;
+    onMouseUp?: PartEvent<T, MouseEvent>;
+    onPointerDown?: PartEvent<T, PointerEvent>;
+    onPointerUp?: PartEvent<T, PointerEvent>;
+    onSubmit?: PartEvent<T, SubmitEvent>;
+  };
+type PartHtmlProps = PartCommonProps<HTMLElement>;
+type PartButtonProps = PartCommonProps<HTMLButtonElement> & {
+  disabled?: PartValue<boolean>;
+  type?: PartValue<"button" | "submit" | "reset">;
+  value?: PartValue<string | number>;
+};
+type PartInputProps = PartCommonProps<HTMLInputElement> & {
+  checked?: PartValue<boolean>;
+  disabled?: PartValue<boolean>;
+  name?: PartValue<string>;
+  placeholder?: PartValue<string>;
+  type?: PartValue<string>;
+  value?: PartValue<string | number | readonly string[]>;
+};
+type PartTextareaProps = PartCommonProps<HTMLTextAreaElement> & {
+  disabled?: PartValue<boolean>;
+  name?: PartValue<string>;
+  placeholder?: PartValue<string>;
+  rows?: PartValue<number>;
+  value?: PartValue<string | number>;
+};
+type PartSelectProps = PartCommonProps<HTMLSelectElement> & {
+  disabled?: PartValue<boolean>;
+  multiple?: PartValue<boolean>;
+  name?: PartValue<string>;
+  value?: PartValue<string | number | readonly string[]>;
+};
+type PartAnchorProps = PartCommonProps<HTMLAnchorElement> & {
+  href?: PartValue<string>;
+  rel?: PartValue<string>;
+  target?: PartValue<string>;
+};
+type PartFormProps = PartCommonProps<HTMLFormElement> & {
+  action?: PartValue<string>;
+  method?: PartValue<"dialog" | "get" | "post">;
+};
+type PartSvgProps = PartCommonProps<SVGElement> & {
+  d?: PartValue<string>;
+  fill?: PartValue<string>;
+  height?: PartValue<string | number>;
+  stroke?: PartValue<string>;
+  strokeWidth?: PartValue<string | number>;
+  viewBox?: PartValue<string>;
+  width?: PartValue<string | number>;
+};`;
+}
+
+function partPropsType(elementName: string): string {
+  switch (elementName) {
+    case "button":
+      return "PartButtonProps";
+    case "input":
+      return "PartInputProps";
+    case "textarea":
+      return "PartTextareaProps";
+    case "select":
+      return "PartSelectProps";
+    case "a":
+      return "PartAnchorProps";
+    case "form":
+      return "PartFormProps";
+    case "svg":
+    case "path":
+    case "circle":
+    case "rect":
+    case "line":
+    case "polyline":
+    case "polygon":
+    case "g":
+      return "PartSvgProps";
+    default:
+      return "PartHtmlProps";
+  }
+}
+
+function propertyKey(name: string): string {
+  return /^[A-Za-z_$][\w$]*$/.test(name) ? name : JSON.stringify(name);
+}
+
 async function writePoggersAppTypes(paths: AppPaths): Promise<string | undefined> {
   if (!paths.types) return undefined;
 
   const surface = collectAppSurface(paths);
   const typesDir = resolve(paths.appDir, ".app/types/@poggers/app");
-  const output = resolve(typesDir, "index.tsx");
-  const appImport = importSpecifier(output, paths.api);
-  const stylesImport = paths.styleSource
-    ? `import styles from ${JSON.stringify(importSpecifier(output, paths.styleSource))};`
-    : `import { defineStyles } from "@poggers/kit/style";
-const styles = defineStyles({ presets: { default: {} } });`;
+  const output = resolve(typesDir, "index.d.ts");
   const appSpecImport = importSpecifier(output, paths.types);
-  const styleAccept = paths.styleSource
-    ? `  import.meta.hot.accept(${JSON.stringify(importSpecifier(output, paths.styleSource))}, () => {});\n`
-    : "";
   await mkdir(typesDir, { recursive: true });
   await rm(resolve(paths.appDir, ".app/types/poggers-app.d.ts"), { force: true });
-  await rm(resolve(typesDir, "index.d.ts"), { force: true });
+  await rm(resolve(typesDir, "index.tsx"), { force: true });
   await rm(resolve(typesDir, "api.d.ts"), { force: true });
   await rm(resolve(typesDir, "ui.d.ts"), { force: true });
   await rm(resolve(typesDir, "api.ts"), { force: true });
   await rm(resolve(typesDir, "ui.ts"), { force: true });
-  const componentParts = JSON.stringify(componentPartsRecord(surface));
-  const resourceExports = surface.resources
-    .map((resource) => {
-      const resourceName = resource.name;
-      const name = `use${capitalize(resourceName)}`;
-      const typeName = pascalIdentifier(resourceName);
-      return `${jsDoc(resource.doc, `Access the ${resourceName} resource.`)}
-export type ${typeName}ResourceKey = AppSpec["Resources"][${JSON.stringify(resourceName)}]["Key"];
-export type ${typeName}Resource = NativeResource<AppSpec, ${JSON.stringify(resourceName)}>;
-export function ${name}(key: ${typeName}ResourceKey): ${typeName}Resource {
-  return getHooks()[${JSON.stringify(name)}](key);
-}`;
-    })
-    .join("\n\n");
+  const resourceExports = surface.resources.map(resourceTypeDefinitions).join("\n\n");
+  const navigationExports = navigationTypes(surface);
   const componentExports = Object.values(surface.components)
-    .map((component) => {
-      const componentName = component.name;
-      const name = `create${capitalize(componentName)}`;
-      const typeName = pascalIdentifier(componentName);
-      const inputParam = component.needsInput
-        ? `input: ${typeName}Options`
-        : `input?: ${typeName}Options`;
-      return `${jsDoc(component.doc, `Create a ${componentName} component instance.`)}
-export type ${typeName}Options = ComponentInstanceInput<AppSpec, ${JSON.stringify(componentName)}>;
-export type ${typeName}Instance = ComponentInstanceResult<AppSpec, ${JSON.stringify(componentName)}>;
-export function ${name}(${inputParam}): ${typeName}Instance {
-  return getHooks()[${JSON.stringify(name)}](input as never) as ${typeName}Instance;
-}`;
-    })
+    .map(componentTypeDefinitions)
     .join("\n\n");
+  const appPreset = surface.presetType ?? '"default"';
+  const appThemeValues = surface.themeParams.length
+    ? `{\n${surface.themeParams
+        .map((param) => `  readonly ${propertyKey(param.name)}: ${param.valueType};`)
+        .join("\n")}\n}`
+    : "EmptyObject";
+  const setThemeParam = surface.themeParams.length
+    ? surface.themeParams
+        .map(
+          (param) =>
+            `export function setThemeParam(param: ${JSON.stringify(param.name)}, value: ${param.valueType}): void;`,
+        )
+        .join("\n")
+    : "export function setThemeParam(param: never, value: never): void;";
   await writeFile(
     output,
-    `import app from ${JSON.stringify(appImport)};
-${stylesImport}
-import { createHooks } from "@poggers/kit/style";
-import { createBrowserConnectOptions } from "@poggers/kit/ui";
-import type { App as AppSpec } from ${JSON.stringify(appSpecImport)};
-import type { AppNavigation, AppScreen } from "@poggers/kit";
-import type { Child, DefineUIProps } from "@poggers/kit/ui";
-import type { NativeResource } from "@poggers/kit/ui";
-import type {
-  AppHooks,
-  ComponentInstanceInput,
-  ComponentInstanceResult,
-  PresetName,
-  ThemeParamName,
-  ThemeParamValue,
-  ThemeValues,
-} from "@poggers/kit/style";
+    `import type { App as AppSpec } from ${JSON.stringify(appSpecImport)};
 
-let hooks = import.meta.hot
-  ? (import.meta.hot.data.hooks as AppHooks<AppSpec> | undefined)
-  : undefined;
-const components = ${componentParts};
+type EmptyObject = Record<never, never>;
+type Signal<T> = {
+  (): T;
+  (value: T): void;
+};
+type Child = Node | string | number | boolean | null | undefined | Child[] | (() => Child);
+type CommandReceipt<E = never> = Promise<
+  | { ok: true; cursor?: number }
+  | { ok: false; error: E; data?: unknown }
+>;
+type SyncMeta = {
+  cursor: number;
+  syncing: boolean;
+  stale: boolean;
+  error: string | null;
+};
+type AppPreset = ${appPreset};
+type AppThemeValues = ${appThemeValues};
+export type StartConnect = unknown;
+type RootProps = { connect?: StartConnect };
+${appPartPropsPrelude()}
 
-function getHooks(): AppHooks<AppSpec> {
-  hooks ??= createHooks<AppSpec>({ app, styles, components });
-  return hooks;
-}
+${navigationExports}
 
 ${resourceExports}
 
 ${componentExports}
 
-export const nav: AppNavigation<AppSpec> = new Proxy({} as AppNavigation<AppSpec>, {
-  get(_target, prop: keyof AppNavigation<AppSpec>) {
-    return getHooks().nav[prop];
-  },
-});
+export const nav: AppNavigation;
 
-export function useScreen(): AppScreen<AppSpec> {
-  return getHooks().useScreen();
-}
+export function useScreen(): AppScreen;
 
-export function usePreset(): PresetName<AppSpec> {
-  return getHooks().usePreset();
-}
+export function usePreset(): AppPreset;
 
-export function setPreset(preset: PresetName<AppSpec>): void {
-  getHooks().setPreset(preset);
-}
+export function setPreset(preset: AppPreset): void;
 
-export function useTheme(): ThemeValues<AppSpec> {
-  return getHooks().useTheme();
-}
+export function useTheme(): AppThemeValues;
 
-export function setThemeParam<Param extends ThemeParamName<AppSpec>>(
-  param: Param,
-  value: ThemeParamValue<AppSpec, Param>,
-): void {
-  getHooks().setThemeParam(param, value);
-}
+${setThemeParam}
 
-export type StartConnect = DefineUIProps<AppSpec>["connect"];
+export function start(connect?: StartConnect): void;
 
-export function start(connect?: StartConnect): void {
-  getHooks().start(connect ?? createBrowserConnectOptions());
-}
-
-export function Root(props: DefineUIProps<AppSpec> = {}): Child {
-  start(props.connect);
-  if (!app.def.ui) throw new Error("App definition does not include a ui(ctx) function.");
-  return app.def.ui(getHooks()) as Child;
-}
+export function Root(props?: RootProps): Child;
 
 export default Root;
-
-if (import.meta.hot) {
-  import.meta.hot.accept(${JSON.stringify(appImport)}, () => {
-    window.dispatchEvent(new CustomEvent("poggers:render"));
-  });
-${styleAccept}  import.meta.hot.accept(${JSON.stringify(appSpecImport)}, () => {
-    window.dispatchEvent(new CustomEvent("poggers:render"));
-  });
-  import.meta.hot.dispose(() => {
-    import.meta.hot.data.hooks = hooks;
-  });
-}
 `,
     "utf8",
   );
@@ -1634,6 +2062,29 @@ function collectForbiddenComponentStyling(
   }
 }
 
+function collectComponentFileConventions(
+  componentsDir: string,
+  file: string,
+  issues: AppConventionIssue[],
+) {
+  const name = basename(file).replace(/\.[cm]?tsx?$/, "");
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name)) {
+    issues.push({
+      file,
+      message: "component file names must be kebab-case.",
+    });
+  }
+
+  const componentPath = relative(componentsDir, file);
+  if (componentPath.includes("/") || componentPath.includes("\\")) {
+    issues.push({
+      file,
+      message:
+        "component files must live directly in src/components; do not nest component folders.",
+    });
+  }
+}
+
 function sourceFiles(dir: string): string[] {
   if (!existsSync(dir)) return [];
   const files: string[] = [];
@@ -1683,10 +2134,16 @@ const workerConfig = worker
   : undefined;
 `
     : "const workerConfig = undefined;\n";
+  const depsImport = paths.deps
+    ? `import * as depsModule from ${JSON.stringify(importSpecifier(serverEntrypoint, paths.deps))};
+const depsExports = depsModule as Record<string, any>;
+`
+    : "const depsExports = {} as Record<string, any>;\n";
 
   return `import * as apiModule from ${JSON.stringify(importSpecifier(serverEntrypoint, appEntrypoint))};
 import { serveApp } from "@poggers/kit/app";
 ${workerImport}
+${depsImport}
 const apiExports = apiModule as Record<string, any>;
 const api = apiExports.api ?? apiExports.default;
 if (!api) throw new Error("App API module must export api or default.");
@@ -1697,23 +2154,29 @@ const program = serverProgram ?? browserProgram;
 const createProgramDeps = programEnv
   ? api.def?.deps?.[programEnv] ??
     apiExports[\`create\${programEnv[0].toUpperCase()}\${programEnv.slice(1)}Deps\`] ??
-    apiExports.createProgramDeps
+    apiExports.createProgramDeps ??
+    depsExports[\`create\${programEnv[0].toUpperCase()}\${programEnv.slice(1)}Deps\`] ??
+    depsExports.createProgramDeps
   : undefined;
 const programDeps = typeof createProgramDeps === "function"
   ? await createProgramDeps()
   : programEnv && \`\${programEnv}Deps\` in apiExports
     ? await apiExports[\`\${programEnv}Deps\`]
-    : "programDeps" in apiExports
-      ? await apiExports.programDeps
-      : {};
+    : programEnv && \`\${programEnv}Deps\` in depsExports
+      ? await depsExports[\`\${programEnv}Deps\`]
+      : "programDeps" in apiExports
+        ? await apiExports.programDeps
+        : "programDeps" in depsExports
+          ? await depsExports.programDeps
+          : {};
 const programConfig = program && programEnv
   ? {
       env: programEnv,
       program,
       deps: programDeps,
-      programId: apiExports.programId ?? \`${titleFromDir(paths.appDir)}-\${programEnv}\`,
-      actor: apiExports.programActor,
-      store: apiExports.programStore,
+      programId: apiExports.programId ?? depsExports.programId ?? \`${titleFromDir(paths.appDir)}-\${programEnv}\`,
+      actor: apiExports.programActor ?? depsExports.programActor,
+      store: apiExports.programStore ?? depsExports.programStore,
     }
   : undefined;
 

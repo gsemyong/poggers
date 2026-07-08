@@ -1,6 +1,6 @@
 {
   "compilerOptions": {
-    "lib": ["ESNext", "DOM", "WebWorker"],
+    "lib": ["ES2022", "DOM"],
     "target": "ESNext",
     "module": "Preserve",
     "moduleDetection": "force",
@@ -20,10 +20,17 @@
     "ignoreDeprecations": "6.0",
     "paths": {
       "@poggers/app": [
-        "./.app/types/@poggers/app/index.tsx",
-        "./node_modules/@poggers/kit/app-types/index.d.ts",
-        "../../packages/kit/app-types/index.d.ts"
+        "${configDir}/.app/types/@poggers/app/index.d.ts",
+        "${configDir}/.app/types/@poggers/app/index.tsx",
+        "${configDir}/node_modules/@poggers/kit/app-types/index.d.ts",
+        "${configDir}/../../packages/kit/app-types/index.d.ts",
+        "./app-types/index.d.ts"
       ]
     }
-  }
+  },
+  "include": [
+    "${configDir}/src/**/*.ts",
+    "${configDir}/src/**/*.tsx",
+    "${configDir}/.app/types/**/*.d.ts"
+  ]
 }

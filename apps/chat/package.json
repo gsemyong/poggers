@@ -7,17 +7,12 @@
     "bundle": "poggers bundle --outdir .app/build/web",
     "build": "poggers build --outfile dist/chat",
     "start": "./dist/chat",
-    "typegen": "poggers typegen",
     "check": "poggers check",
-    "typecheck": "poggers typegen && tsc --noEmit"
+    "typecheck": "poggers typecheck"
   },
   "dependencies": {
     "@poggers/kit": "workspace:*",
     "ai": "^7.0.16",
     "zod": "^4.4.3"
-  },
-  "devDependencies": {
-    "@types/bun": "^1.3.14",
-    "typescript": "^6.0.3"
   }
 }

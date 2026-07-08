@@ -1,7 +1,3 @@
 {
-  "extends": "@poggers/kit/tsconfig/app",
-  "compilerOptions": {
-    "baseUrl": "."
-  },
-  "include": ["src/**/*.ts", "src/**/*.tsx", ".app/types/**/*.ts", ".app/types/**/*.tsx"]
+  "extends": "@poggers/kit/tsconfig"
 }

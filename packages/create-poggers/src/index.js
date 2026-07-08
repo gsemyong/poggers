@@ -96,18 +96,18 @@ function files({ appName, kitVersion }) {
         type: "module",
         scripts: {
           dev: "poggers dev",
+          bundle: "poggers bundle --outdir .app/build/web",
           build: "poggers build --outfile dist/app",
           start: "./dist/app",
-          typegen: "poggers typegen",
           check: "poggers check",
-          typecheck: "poggers typegen && tsc --noEmit",
+          typecheck: "poggers typecheck",
         },
         dependencies: {
           "@poggers/kit": kitVersion,
         },
         devDependencies: {
           "@types/bun": "latest",
-          typescript: "latest",
+          typescript: "7.0.1-rc",
         },
       },
       null,
@@ -116,11 +116,7 @@ function files({ appName, kitVersion }) {
 `,
     "tsconfig.json": `${JSON.stringify(
       {
-        extends: "@poggers/kit/tsconfig/app",
-        compilerOptions: {
-          baseUrl: ".",
-        },
-        include: ["src/**/*.ts", "src/**/*.tsx", ".app/types/**/*.ts", ".app/types/**/*.tsx"],
+        extends: "@poggers/kit/tsconfig",
       },
       null,
       2,
@@ -204,6 +200,10 @@ export type App = {
       Input: {
         tone: "neutral" | "primary";
         disabled: boolean;
+        label: string;
+      };
+      Actions: {
+        press(): void;
       };
       Parts: {
         Root: "button";
@@ -213,6 +213,9 @@ export type App = {
     Panel: {
       Input: {
         tone: "neutral" | "raised";
+      };
+      Derived: {
+        value: string;
       };
       Parts: {
         Root: "section";
@@ -236,7 +239,7 @@ export type App = {
 };
 `,
     "src/app.tsx": `import { defineApp } from "@poggers/kit";
-import { Root } from "./components/Root";
+import { Root } from "./components/root";
 import { createDeps } from "./helpers/deps/createDeps";
 import type { App } from "./types";
 
@@ -292,11 +295,22 @@ export default defineApp<App>({
   },
 
   components: {
-    Button({ input }) {
+    Button({ input, actions }) {
       return {
         Root: {
           type: "button",
           disabled: input.disabled,
+          onClick: actions.press,
+        },
+        Label: {
+          children: input.label,
+        },
+      };
+    },
+    Panel({ derived }) {
+      return {
+        Value: {
+          children: derived.value,
         },
       };
     },
@@ -412,10 +426,10 @@ export default defineStyles<App>({
   },
 });
 `,
-    "src/components/Root.tsx": `import { useScreen } from "@poggers/app";
-import { AppShell } from "./layout/AppShell";
-import { HomeScreen } from "./screens/HomeScreen";
-import { SettingsScreen } from "./screens/SettingsScreen";
+    "src/components/root.tsx": `import { useScreen } from "@poggers/app";
+import { AppShell } from "./app-shell";
+import { HomeScreen } from "./home-screen";
+import { SettingsScreen } from "./settings-screen";
 
 export function Root() {
   return (
@@ -425,29 +439,33 @@ export function Root() {
   );
 }
 `,
-    "src/components/primitives/Button.tsx": `import { createButton } from "@poggers/app";
-import type { Child } from "@poggers/kit/ui";
+    "src/components/button.tsx": `import { createButton } from "@poggers/app";
 
 type ButtonProps = {
-  children?: Child;
-  onClick?: () => void;
+  label: string;
+  action: () => void;
   tone?: "primary" | "neutral";
   disabled?: boolean;
 };
 
-export function Button({ children, onClick, tone = "neutral", disabled = false }: ButtonProps) {
+export function Button({ label, action, tone = "neutral", disabled = false }: ButtonProps) {
   const Button = createButton({
-    input: { tone, disabled },
+    input: { tone, disabled, label },
+    actions() {
+      return {
+        press: action,
+      };
+    },
   });
 
   return (
-    <Button.Root onClick={onClick}>
-      <Button.Label>{children}</Button.Label>
+    <Button.Root>
+      <Button.Label />
     </Button.Root>
   );
 }
 `,
-    "src/components/layout/AppShell.tsx": `import { createAppShell } from "@poggers/app";
+    "src/components/app-shell.tsx": `import { createAppShell } from "@poggers/app";
 import type { Child } from "@poggers/kit/ui";
 
 export function AppShell({ children }: { children?: Child }) {
@@ -456,19 +474,26 @@ export function AppShell({ children }: { children?: Child }) {
   return <Shell.Root>{children}</Shell.Root>;
 }
 `,
-    "src/components/motion/Transition.tsx": `import type { Child } from "@poggers/kit/ui";
+    "src/components/transition.tsx": `import type { Child } from "@poggers/kit/ui";
 
 export function Transition({ children }: { children?: Child }) {
   return <>{children}</>;
 }
 `,
-    "src/components/domain/CounterPanel.tsx": `import { createPanel, useCounter } from "@poggers/app";
-import { Button } from "../primitives/Button";
+    "src/components/counter-panel.tsx": `import { createPanel, useCounter } from "@poggers/app";
+import { Button } from "./button";
 
 export function CounterPanel() {
   const counter = useCounter({ id: "main" });
   const Panel = createPanel({
     input: { tone: "raised" },
+    derived() {
+      return {
+        get value() {
+          return String(counter.count);
+        },
+      };
+    },
   });
 
   return (
@@ -476,23 +501,21 @@ export function CounterPanel() {
       <Panel.Body>
         <div>
           <Panel.Meta>Counter</Panel.Meta>
-          <Panel.Value>{counter.count}</Panel.Value>
+          <Panel.Value />
         </div>
         <Panel.Actions>
-          <Button onClick={() => void counter.reset()}>Reset</Button>
-          <Button tone="primary" onClick={() => void counter.increment()}>
-            Add
-          </Button>
+          <Button label="Reset" action={() => void counter.reset()} />
+          <Button label="Add" tone="primary" action={() => void counter.increment()} />
         </Panel.Actions>
       </Panel.Body>
     </Panel.Root>
   );
 }
 `,
-    "src/components/screens/HomeScreen.tsx": `import { createHeader, nav } from "@poggers/app";
-import { CounterPanel } from "../domain/CounterPanel";
-import { Button } from "../primitives/Button";
-import { Transition } from "../motion/Transition";
+    "src/components/home-screen.tsx": `import { createHeader, nav } from "@poggers/app";
+import { Button } from "./button";
+import { CounterPanel } from "./counter-panel";
+import { Transition } from "./transition";
 
 export function HomeScreen() {
   const Header = createHeader();
@@ -505,7 +528,7 @@ export function HomeScreen() {
           <Header.Title>Home</Header.Title>
         </Header.Text>
         <Header.Actions>
-          <Button onClick={() => nav.settings()}>Settings</Button>
+          <Button label="Settings" action={() => nav.settings()} />
         </Header.Actions>
       </Header.Root>
       <CounterPanel />
@@ -513,14 +536,29 @@ export function HomeScreen() {
   );
 }
 `,
-    "src/components/screens/SettingsScreen.tsx": `import { createHeader, createPanel, nav, setPreset, usePreset } from "@poggers/app";
-import { Button } from "../primitives/Button";
-import { Transition } from "../motion/Transition";
+    "src/components/settings-screen.tsx": `import { createButton, createHeader, createPanel, nav, setPreset } from "@poggers/app";
+import { Button } from "./button";
+import { Transition } from "./transition";
 
 export function SettingsScreen() {
   const Header = createHeader();
   const Panel = createPanel({
     input: { tone: "neutral" },
+    derived() {
+      return {
+        value: "",
+      };
+    },
+  });
+  const ToggleDensity = createButton({
+    input: { tone: "neutral", disabled: false, label: "Toggle density" },
+    actions(ctx) {
+      return {
+        press() {
+          setPreset(ctx.preset === "dense" ? "system" : "dense");
+        },
+      };
+    },
   });
 
   return (
@@ -531,15 +569,15 @@ export function SettingsScreen() {
           <Header.Title>Settings</Header.Title>
         </Header.Text>
         <Header.Actions>
-          <Button onClick={() => nav.home()}>Home</Button>
+          <Button label="Home" action={() => nav.home()} />
         </Header.Actions>
       </Header.Root>
       <Panel.Root>
         <Panel.Body>
           <span>This app follows the strict Poggers structure.</span>
-          <Button onClick={() => setPreset(usePreset() === "dense" ? "system" : "dense")}>
-            Toggle density
-          </Button>
+          <ToggleDensity.Root>
+            <ToggleDensity.Label />
+          </ToggleDensity.Root>
         </Panel.Body>
       </Panel.Root>
     </Transition>

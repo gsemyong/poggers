@@ -181,7 +181,7 @@ const styles = defineStyles<StyleTestApp>({
 const hooks = createHooks({ app, styles, components });
 
 const note = hooks.useNote({ noteId: "n1" });
-note.title();
+void note.title;
 void note.rename("hello");
 hooks.nav.home();
 hooks.nav.note({ noteId: "n1" });

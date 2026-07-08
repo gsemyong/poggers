@@ -24,7 +24,6 @@ export {
   type Readable,
   type Signal,
 } from "./infra/ui";
-
 export type {
   CSSProperties,
   CustomElementAttributes,

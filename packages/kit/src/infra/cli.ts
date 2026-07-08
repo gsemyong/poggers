@@ -1,5 +1,7 @@
 #!/usr/bin/env bun
 import { buildApp, bundleApp, checkAppConventions, runApp, writeAppTypes } from "./runtime";
+import { existsSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 
 type ParsedArgs = {
   command: string;
@@ -46,8 +48,15 @@ async function main(argv = Bun.argv.slice(2)) {
     return;
   }
 
-  if (parsed.command === "typegen") {
+  if (parsed.command === "typecheck") {
     await writeAppTypes(parsed.appDir);
+    const tsc = Bun.spawn([resolveBin(parsed.appDir, "tsc"), "--noEmit"], {
+      cwd: parsed.appDir,
+      stdout: "inherit",
+      stderr: "inherit",
+    });
+    const code = await tsc.exited;
+    if (code !== 0) process.exitCode = code;
     return;
   }
 
@@ -67,7 +76,7 @@ async function main(argv = Bun.argv.slice(2)) {
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
-  const commands = new Set(["dev", "bundle", "build", "typegen", "check"]);
+  const commands = new Set(["dev", "bundle", "build", "typecheck", "check"]);
   const first = argv[0];
   const command = first && commands.has(first) ? first : "dev";
   const rest = command === first ? argv.slice(1) : argv;
@@ -108,12 +117,26 @@ function readString(value: string | true | undefined): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
+function resolveBin(startDir: string, name: string): string {
+  const binName = process.platform === "win32" ? `${name}.cmd` : name;
+  let dir = resolve(startDir);
+
+  while (true) {
+    const candidate = resolve(dir, "node_modules", ".bin", binName);
+    if (existsSync(candidate)) return candidate;
+
+    const parent = dirname(dir);
+    if (parent === dir) return name;
+    dir = parent;
+  }
+}
+
 function printUsage() {
   console.error(`Usage:
   poggers dev <app-dir> [--port 3000] [--title "My App"]
   poggers bundle <app-dir> [--outdir .app/build/web] [--minify false]
   poggers build <app-dir> --outfile dist/my-app [--title "My App"]
-  poggers typegen <app-dir>
+  poggers typecheck <app-dir>
   poggers check <app-dir>`);
 }
 

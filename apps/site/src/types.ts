@@ -44,6 +44,10 @@ export type App = {
 
   Components: {
     SiteShell: {
+      Derived: {
+        activeSlug: string;
+        navItems: Array<{ slug: string; title: string }>;
+      };
       Parts: {
         Root: "main";
         Sidebar: "aside";
@@ -55,6 +59,10 @@ export type App = {
     NavButton: {
       Input: {
         active: boolean;
+        label: string;
+      };
+      Actions: {
+        navigate(): void;
       };
       Parts: {
         Root: "button";
@@ -62,6 +70,11 @@ export type App = {
       };
     };
     PageHero: {
+      Derived: {
+        title: string;
+        summary: string;
+        sections: Section[];
+      };
       Parts: {
         Root: "section";
         Mark: "div";
@@ -72,6 +85,7 @@ export type App = {
       };
     };
     SectionCard: {
+      Input: Section;
       Parts: {
         Root: "article";
         Title: "h2";
