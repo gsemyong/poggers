@@ -147,7 +147,7 @@ export function serve<Spec extends AppSpec>(
 ): ServerHandle {
   const port = opts.port ?? 3000;
   const snapshotIntervalMs = opts.snapshotIntervalMs ?? SNAPSHOT_INTERVAL;
-  const storage = opts.storage ?? createFileStore(".app");
+  const storage = opts.storage ?? createFileStore(".poggers");
   const serverGeneration = crypto.randomUUID();
 
   const dirtyScopes = new Set<string>();
@@ -229,8 +229,9 @@ export function serve<Spec extends AppSpec>(
     for (const ev of events) {
       const e = ev as any;
       const version = e.version ?? snapshotVersion;
+      const hash = e.hash ?? snap?.hash;
       if (typeof e.seq === "number") {
-        workerReplayEvents.push({ ...e, version });
+        workerReplayEvents.push({ ...e, version, ...(hash ? { hash } : {}) });
       }
       if (e.seq <= prevSeq) continue;
       if (e.seq > prevSeq + 1) break;
@@ -246,6 +247,7 @@ export function serve<Spec extends AppSpec>(
           payload: e.payload,
         },
         version,
+        hash,
       );
       prevSeq = e.seq;
       const cur = instanceSeqs.get(id) ?? 0;
@@ -335,6 +337,7 @@ export function serve<Spec extends AppSpec>(
 
     const committed: CommittedEvent[] = [];
     let lastSeq = instanceSeqs.get(id) ?? 0;
+    const hash = (app.def as any).migrationHash;
     for (let i = 0; i < events.length; i++) {
       const ev = events[i]!;
       const seq = lastSeq + 1;
@@ -344,6 +347,7 @@ export function serve<Spec extends AppSpec>(
         seq,
         at: ev.at,
         version: app.def.version,
+        ...(hash ? { hash } : {}),
         actor: ev.actor,
         name: ev.name,
         payload: ev.payload,
@@ -362,8 +366,10 @@ export function serve<Spec extends AppSpec>(
           actor: ev.actor as ActorOf<Spec>,
           name: ev.name,
           payload: ev.payload,
+          hash: ev.hash,
         },
         ev.version,
+        ev.hash,
       );
     }
 
@@ -496,8 +502,12 @@ export function serve<Spec extends AppSpec>(
           (/\\.css$/.test(changedPath) || /(^|\\/)styles\\.tsx?$/.test(changedPath));
         const refreshStyle = () => {
           if (!stylePath) return;
-          const link = document.querySelector('link[rel="stylesheet"][href^="' + stylePath + '"]');
-          if (link) link.setAttribute("href", stylePath + "?v=" + version);
+          for (const link of document.querySelectorAll('link[rel="stylesheet"]')) {
+            const href = link.getAttribute("href") || "";
+            if (href === stylePath || href.startsWith(stylePath + "?")) {
+              link.setAttribute("href", stylePath + "?v=" + version);
+            }
+          }
         };
         const refreshCode = () => {
           importing = importing
@@ -516,6 +526,7 @@ export function serve<Spec extends AppSpec>(
             return;
           }
           if (isCodeChange(changedPath)) {
+            refreshStyle();
             refreshCode();
             return;
           }
@@ -901,7 +912,7 @@ self.addEventListener("fetch", (event) => {
         actor,
         store:
           workerOpts.store ??
-          createFSWorkerDurabilityStore(`.app/workers/${encodeURIComponent(workerId)}.json`),
+          createFSWorkerDurabilityStore(`.poggers/workers/${encodeURIComponent(workerId)}.json`),
         readViews(resource, key) {
           return readWorkerViews(resource, key) as any;
         },
@@ -946,7 +957,7 @@ self.addEventListener("fetch", (event) => {
         actor,
         store:
           programOpts.store ??
-          createFSWorkerDurabilityStore(`.app/programs/${encodeURIComponent(programId)}.json`),
+          createFSWorkerDurabilityStore(`.poggers/programs/${encodeURIComponent(programId)}.json`),
         readViews(resource, key) {
           return readWorkerViews(resource, key) as any;
         },
@@ -1385,7 +1396,7 @@ function shouldLiveReload(changedPath: string, watchDir: string): boolean {
   const rel = relative(watchDir, changedPath).replaceAll("\\", "/");
   if (!rel || rel.startsWith("..")) return false;
   if (rel.startsWith(".poggers-")) return false;
-  if (rel.startsWith(".app/")) return false;
+  if (rel.startsWith(".poggers/")) return false;
   if (rel.startsWith("dist/")) return false;
   if (rel.startsWith("node_modules/")) return false;
   if (rel.includes("/node_modules/")) return false;
@@ -1412,11 +1423,11 @@ function collectLiveReloadFiles(dir: string, watchDir: string): string[] {
     const path = resolve(dir, entry.name);
     const rel = relative(watchDir, path).replaceAll("\\", "/");
     if (
-      rel === ".app" ||
+      rel === ".poggers" ||
       rel === "dist" ||
       rel === "node_modules" ||
       rel.startsWith(".poggers-") ||
-      rel.startsWith(".app/") ||
+      rel.startsWith(".poggers/") ||
       rel.startsWith("dist/") ||
       rel.startsWith("node_modules/") ||
       rel.includes("/node_modules/")

@@ -37,6 +37,7 @@ export type TestAppEvent<
     seq: number;
     at: number;
     version: number;
+    hash?: string;
     actor: ActorOf<Spec>;
     name: keyof ResourceFor<Spec, Resource>["Events"] & string;
     payload: ResourceFor<Spec, Resource>["Events"][keyof ResourceFor<Spec, Resource>["Events"]];

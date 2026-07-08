@@ -7,6 +7,7 @@ export type AppSpec = {
     id: string;
   };
   Resources: Record<string, any>;
+  Deps?: any;
   Environments?: Record<
     string,
     {
@@ -70,7 +71,11 @@ export type EnvironmentName<Spec extends AppSpec> = Spec extends {
   Environments: infer Environments;
 }
   ? Extract<keyof Environments, string>
-  : never;
+  : Spec extends {
+        Deps: any;
+      }
+    ? "server"
+    : never;
 export type EnvironmentDeps<
   Spec extends AppSpec,
   Env extends EnvironmentName<Spec>,
@@ -84,7 +89,28 @@ export type EnvironmentDeps<
       ? Deps
       : Record<string, never>
     : never
-  : never;
+  : Env extends "server"
+    ? Spec extends {
+        Deps: infer Deps;
+      }
+      ? Deps
+      : Record<string, never>
+    : never;
+export type AppDependencies<Spec extends AppSpec> = Spec extends {
+  Deps: infer Deps;
+}
+  ? Deps
+  : Spec extends {
+        Environments: infer Environments;
+      }
+    ? "server" extends keyof Environments
+      ? Environments["server"] extends {
+          Deps: infer Deps;
+        }
+        ? Deps
+        : Record<string, never>
+      : Record<string, never>
+    : Record<string, never>;
 export type NavigationName<Spec extends AppSpec> = Spec extends {
   Navigation: infer Navigation;
 }
@@ -191,10 +217,23 @@ export type PwaDef = {
   };
 };
 export type AppDepsDef<Spec extends AppSpec> = {
-  [Env in EnvironmentName<Spec>]?: () =>
-    | EnvironmentDeps<Spec, Env>
-    | Promise<EnvironmentDeps<Spec, Env>>;
+  [Env in EnvironmentName<Spec>]?: DependencyMount<EnvironmentDeps<Spec, Env>>;
 };
+export type DependencyProvider<Value> = Value | (() => Value | Promise<Value>);
+export type DependencyProviderSet<Value> = {
+  production: DependencyProvider<Value>;
+  mock?: DependencyProvider<Value>;
+} & Record<string, DependencyProvider<Value> | undefined>;
+export type DependencyEntry<Value> = DependencyProviderSet<Value> | DependencyProvider<Value>;
+export type DependencyConfig<Deps> = {
+  mode?: string | (() => string | Promise<string>);
+  deps?: {
+    [Name in keyof Deps]: DependencyEntry<Deps[Name]>;
+  };
+} & {
+  [Name in keyof Deps]?: DependencyEntry<Deps[Name]>;
+};
+export type DependencyMount<Deps> = (() => Deps | Promise<Deps>) | Deps | DependencyConfig<Deps>;
 export type ProgramResource<Spec extends AppSpec, Resource extends ResourceName<Spec>> = ViewShape<
   Spec,
   Resource
@@ -459,11 +498,15 @@ export type AppDef<Spec extends AppSpec> = {
   version: number;
   app?: AppMetadata;
   pwa?: PwaDef;
+  migrationHash?: string;
+  migrations?: RuntimeMigrationEdge[];
   navigation?: NavigationDef<Spec>;
   identify?: (opts: { token: string }) => ActorOf<Spec> | null;
   deps?: AppDepsDef<Spec>;
   programs?: AppPrograms<Spec>;
   components?: ComponentControllers<Spec>;
+  styles?: unknown;
+  root?: (ctx: AppUIContext<Spec>) => unknown;
   ui?: (ctx: AppUIContext<Spec>) => unknown;
   resources: {
     [K in keyof Spec["Resources"]]: ResourceDef<
@@ -471,6 +514,17 @@ export type AppDef<Spec extends AppSpec> = {
       Spec["Resources"][K] extends ResourceSpec ? Spec["Resources"][K] : never
     >;
   };
+};
+export type RuntimeMigrationEdge = {
+  readonly from: string;
+  readonly to: string;
+  readonly migrate?: Record<
+    string,
+    {
+      readonly state?: (state: any) => any;
+      readonly event?: (name: string, payload: any) => { name: string; payload: any };
+    }
+  >;
 };
 type EventForCmd<R extends ResourceSpec, Cmd extends CommandSpec> =
   EventNameFor<Cmd> extends string
@@ -569,20 +623,25 @@ export type App<Spec extends AppSpec> = {
       actor: ActorOf<Spec>;
       name: string;
       payload: any;
+      hash?: string;
     },
     eventVersion?: number,
+    eventHash?: string,
   ) => void;
   upcastEvent: (
     resource: string,
     event: {
       name: string;
       payload: any;
+      hash?: string;
     },
     eventVersion?: number,
+    eventHash?: string,
   ) => {
     name: string;
     payload: any;
     version: number;
+    hash?: string;
   };
   snapshot: (
     state: any,
@@ -591,12 +650,14 @@ export type App<Spec extends AppSpec> = {
     version: number;
     seq: number;
     data: unknown;
+    hash?: string;
   };
   restore: (
     resource: string,
     snap: {
       version: number;
       data: unknown;
+      hash?: string;
     },
   ) => any;
   runCommand: (
@@ -618,6 +679,13 @@ export type App<Spec extends AppSpec> = {
     onError: (error: string, data?: any) => void,
   ) => void;
 };
+export declare function installAppMigrations<Spec extends AppSpec>(
+  app: App<Spec>,
+  options: {
+    hash?: string;
+    migrations?: readonly RuntimeMigrationEdge[];
+  },
+): App<Spec>;
 type ResourcesOf<A> =
   A extends App<infer S>
     ? S extends AppSpec & {

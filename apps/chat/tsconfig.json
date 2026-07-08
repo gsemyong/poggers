@@ -1,3 +1,13 @@
 {
-  "extends": "@poggers/kit/tsconfig"
+  "extends": "@poggers/kit/tsconfig",
+  "compilerOptions": {
+    "paths": {
+      "@poggers/app": ["./.poggers/types/app.d.ts"],
+      "app": ["./src/app.ts"],
+      "deps": ["./src/deps.ts"],
+      "types": ["./src/types.ts"],
+      "src/*": ["./src/*"],
+      "ui/*": ["./src/ui/*"]
+    }
+  }
 }

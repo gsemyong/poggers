@@ -20,12 +20,12 @@ bun --cwd packages/kit run test
 Generated app gate:
 
 ```bash
-rm -rf .app/generated-strict
-bun packages/create-poggers/src/index.js .app/generated-strict --no-install --force --kit-version file:$PWD/packages/kit
-bun install --cwd .app/generated-strict
-bun --cwd .app/generated-strict run typecheck
-bun --cwd .app/generated-strict run build
-PORT=4127 .app/generated-strict/dist/app
+rm -rf .poggers/generated-strict
+bun packages/create-poggers/src/index.js .poggers/generated-strict --no-install --force --kit-version file:$PWD/packages/kit
+bun install --cwd .poggers/generated-strict
+bun --cwd .poggers/generated-strict run typecheck
+bun --cwd .poggers/generated-strict run build
+PORT=4127 .poggers/generated-strict/dist/app
 ```
 
 While the generated binary is running, verify:
@@ -71,11 +71,13 @@ Worker tests cover semantic hooks, dependency injection, missed-event replay, du
 
 App surface tests cover embedded `defineApp` UI, typed navigation, PWA metadata, environment dependencies, and generated semantic hooks.
 
+Migration tests cover structural snapshot hashing, draft edge failure, reviewed edge typechecking, convention-loaded state/event migration, multi-hop paths, and missing-path errors.
+
 Dogfood app gates:
 
 ```bash
 bun --cwd apps/chat run typecheck
-POGGERS_FAKE_AI="Fake response" bun --cwd apps/chat run build
+POGGERS_DEPS=mock POGGERS_FAKE_AI="Fake response" bun --cwd apps/chat run build
 bun --cwd apps/site run typecheck
 bun --cwd apps/site run build
 ```

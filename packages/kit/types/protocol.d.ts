@@ -3,6 +3,7 @@ export type CommittedEvent = {
   seq: number;
   at: number;
   version?: number;
+  hash?: string;
   actor: unknown;
   name: string;
   payload: unknown;
@@ -17,6 +18,7 @@ export type Snapshot = {
   seq: number;
   data: unknown;
   generation?: string;
+  hash?: string;
 };
 export type JsonValue =
   | string

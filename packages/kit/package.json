@@ -54,6 +54,22 @@
       "types": "./types/runtime.d.ts",
       "default": "./src/runtime.ts"
     },
+    "./bun": {
+      "types": "./types/bun.d.ts",
+      "default": "./types/bun.d.ts"
+    },
+    "./env": {
+      "types": "./types/env.d.ts",
+      "default": "./src/env.ts"
+    },
+    "./globals": {
+      "types": "./types/globals.d.ts",
+      "default": "./types/globals.d.ts"
+    },
+    "./deps": {
+      "types": "./types/deps.d.ts",
+      "default": "./src/deps.ts"
+    },
     "./tsconfig": "./tsconfig.app.json"
   },
   "publishConfig": {
@@ -66,15 +82,12 @@
     "check": "bun run typecheck && bun run lint && bun run test"
   },
   "dependencies": {
+    "@types/bun": "^1.3.14",
     "alien-signals": "^3.2.1"
   },
   "devDependencies": {
-    "@types/bun": "^1.3.14",
     "fake-indexeddb": "^6.2.5",
     "fast-check": "^4.8.0",
-    "typescript": "7.0.1-rc"
-  },
-  "engines": {
-    "bun": ">=1.2.0"
+    "typescript": "^6.0.3"
   }
 }

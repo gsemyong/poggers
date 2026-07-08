@@ -1,6 +1,8 @@
 import { Output, gateway, streamText } from "ai";
 import { z } from "zod";
-import type { AIResponse, ChatProgramDeps } from "./src/types";
+import { env } from "@poggers/kit/env";
+import type { DependencyConfig } from "@poggers/kit/deps";
+import type { ChatProgramDeps } from "types";
 
 const aiPartSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("text"), content: z.string() }),
@@ -24,7 +26,7 @@ const aiPartSchema = z.discriminatedUnion("type", [
 
 const aiResponseSchema = z.object({ parts: z.array(aiPartSchema) });
 
-const SYSTEM_PROMPT = `You are a task clarification facilitator. Your job is to help the user articulate and refine their task description through a collaborative dialogue. You must NOT propose solutions, implementations, or specific technologies. Instead, your role is to:
+const systemPrompt = `You are a task clarification facilitator. Your job is to help the user articulate and refine their task description through a collaborative dialogue. You must NOT propose solutions, implementations, or specific technologies. Instead, your role is to:
 
 1. Listen carefully to what the user describes about their task
 2. Ask probing questions to uncover:
@@ -47,20 +49,16 @@ Respond using ONLY the structured JSON format specified. Use these part types in
 - summary: recap what you've understood so far.
 - separator: visually separate sections.`;
 
-const MODEL = "deepseek/deepseek-v4-flash";
+const model = "deepseek/deepseek-v4-flash";
+const defaultFakeResponse = "Fake worker response.";
 
-export function createServerDeps(): ChatProgramDeps {
-  const fakeResponse = process.env.POGGERS_FAKE_AI;
-  return fakeResponse ? createFakeChatDeps(fakeResponse) : createChatDeps();
-}
-
-export function createChatDeps(): ChatProgramDeps {
-  return {
-    ai: {
+export default {
+  ai: {
+    production: {
       async complete(messages, onChunk) {
         const result = streamText({
-          model: gateway(MODEL),
-          system: SYSTEM_PROMPT,
+          model: gateway(model),
+          system: systemPrompt,
           messages,
           output: Output.object({ schema: aiResponseSchema }),
         });
@@ -80,39 +78,23 @@ export function createChatDeps(): ChatProgramDeps {
         await onChunk(accumulated);
 
         const [text, output] = await Promise.all([result.text, result.output]);
-        return { text, parsed: (output as AIResponse | undefined) ?? null };
+        return { text, parsed: output ?? null };
       },
     },
-    clock: {
-      now() {
-        return Date.now();
-      },
-    },
-    ids: {
-      create(seed) {
-        return `assistant:${seed}`;
-      },
-    },
-  };
-}
-
-export function createFakeChatDeps(text: string = "Fake worker response."): ChatProgramDeps {
-  return {
-    ai: {
+    mock: {
       async complete(_messages, onChunk) {
+        const text = env("POGGERS_FAKE_AI") ?? defaultFakeResponse;
         await onChunk(text);
         return { text, parsed: { parts: [{ type: "text", content: text }] } };
       },
     },
-    clock: {
-      now() {
-        return Date.now();
-      },
+  },
+  clock: {
+    now: Date.now,
+  },
+  ids: {
+    create(seed: string) {
+      return `assistant:${seed}`;
     },
-    ids: {
-      create(seed) {
-        return `assistant:${seed}`;
-      },
-    },
-  };
-}
+  },
+} satisfies DependencyConfig<ChatProgramDeps>;

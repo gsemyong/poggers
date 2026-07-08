@@ -5,13 +5,13 @@ Poggers Kit is a small Bun framework for local, event-sourced personal applicati
 The default application surface is strict:
 
 ```text
-types.ts      generic app spec and shared domain types
-app.tsx       default export from defineApp<Spec>({...})
-components/   app-specific design system, screens, and widgets
-helpers/      dependency factories, adapters, parsers, ids, clocks
+src/types.ts       generic app spec and shared domain types
+src/app.ts         current app object satisfying AppDefinition
+src/deps.ts        dependency implementations and provider config
+src/ui/            app-specific screens and JSX widgets
 ```
 
-New apps should use the strict shape. Versioned API folders can still be used for migrations when an app grows, but the public app authoring surface is the generic `App` type plus `defineApp<App>(...)`.
+New apps should use the strict shape. Historical app shapes are captured as generated migration snapshots when persisted data changes; the public app authoring surface stays plain file exports checked with generated `@poggers/app` types.
 
 ## Workspace
 
@@ -28,7 +28,7 @@ apps/
 Apps import the same package paths external users import:
 
 ```ts
-import { defineApp } from "@poggers/kit";
+import type { AppDefinition } from "@poggers/app";
 import { render } from "@poggers/kit/ui";
 ```
 
@@ -36,7 +36,7 @@ import { render } from "@poggers/kit/ui";
 
 | Primitive  | Meaning                                                 |
 | ---------- | ------------------------------------------------------- |
-| `app`      | Product API defined with `defineApp()`                  |
+| `app`      | Product API exported as a typed app object              |
 | `resource` | Scoped owner of state, events, views, and commands      |
 | `view`     | Typed live projection of resource state                 |
 | `command`  | Typed mutation that emits events                        |
@@ -68,10 +68,8 @@ export type App = {
     };
   };
 
-  Environments: {
-    server: {
-      Deps: { logger: { write(message: string): Promise<void> } };
-    };
+  Deps: {
+    logger: { write(message: string): Promise<void> };
   };
 
   Navigation: {
@@ -105,14 +103,15 @@ export type App = {
 };
 ```
 
-`app.tsx` owns resource handlers, PWA metadata, navigation, programs, and root UI composition. Server-only dependencies live in root `deps.ts` so they do not enter the app `src` type graph:
+`app.ts` owns resource handlers, PWA metadata, navigation, semantic component behavior, styles, programs, and the root UI function reference. Dependency implementations live in `src/deps.ts`. Actual JSX screens and widgets live in `src/ui`.
 
-```tsx
-import { defineApp } from "@poggers/kit";
-import { NoteScreen } from "./components/note-screen";
-import type { App } from "./types";
+The default app TypeScript project excludes `src/deps.ts` from the editor-facing app program. `poggers typecheck` checks `src/deps.ts` in a separate program, so production adapters and test doubles stay typed without pulling heavy third-party SDK types into app/UI IntelliSense.
 
-export default defineApp<App>({
+```ts
+import type { AppDefinition } from "@poggers/app";
+import { NoteScreen } from "ui/note-screen";
+
+export default {
   version: 1,
 
   app: {
@@ -184,10 +183,28 @@ export default defineApp<App>({
     },
   },
 
-  ui() {
-    return <NoteScreen />;
+  root: NoteScreen,
+} satisfies AppDefinition;
+```
+
+`src/deps.ts` uses the package dependency-config type and the app's own dependency contract from `./types`. Values can be provided directly; dependencies that need runtime selection can expose a production provider and named alternatives such as `mock`. Inline one-off implementations in this file. Add helper modules only when there is real reuse.
+
+```ts
+import type { DependencyConfig } from "@poggers/kit/deps";
+import type { App } from "./types";
+
+export default {
+  logger: {
+    production: {
+      async write(message) {
+        console.log(message);
+      },
+    },
+    mock: {
+      async write() {},
+    },
   },
-});
+} satisfies DependencyConfig<App["Deps"]>;
 ```
 
 For local apps, `Actor` and `identify` are optional. The default actor is `{ id: token || "local" }`.
@@ -198,7 +215,7 @@ Application UI imports generated functions directly from `@poggers/app`.
 
 The native JSX runtime uses fine-grained signals internally. App code can pass signals directly to dynamic JSX children and attributes, or read them with calls like `note.title()`.
 
-Resources generate `useX` functions. Components generate `createX` functions. Style-only components need no controller. DOM event details stay in `defineApp.components` only when a component needs behavior; app UI renders generated component parts:
+Resources generate `useX` functions. Components generate `createX` functions. Style-only components need no controller. DOM event details stay in the app object's `components` table only when a component needs behavior; app UI renders generated component parts:
 
 ```tsx
 import { createNoteEditor, useNote, useScreen } from "@poggers/app";
@@ -239,11 +256,11 @@ export function NoteScreen() {
 }
 ```
 
-There are no style-only UI selectors and no tautological part controllers. If something is renderable, it belongs under `App["Components"]` and is created with `createX`; `defineApp.components` only supplies extra DOM props for behavior.
+There are no style-only UI selectors and no tautological part controllers. If something is renderable, it belongs under `App["Components"]` and is created with `createX`; app `components` only supplies extra DOM props for behavior.
 
 ## Programs
 
-Programs are persistent async scripts inside `defineApp`. They run in the chosen environment, receive typed semantic hooks, and receive dependencies from `deps`.
+Programs are persistent async scripts inside the app object. They run in the chosen environment, receive typed semantic hooks, and receive dependencies from `deps`.
 
 Programs are idempotent through durable handler-completion keys. They also record per-scope checkpoints. The server compacts an event tail only through the minimum of the snapshot sequence and configured program checkpoints, so a crashed or restarted program can replay retained events.
 
@@ -270,37 +287,40 @@ Command execution runs through a per-scope writer queue. Commands for the same r
 
 Built-in stores:
 
-| Store                | Use                                     |
-| -------------------- | --------------------------------------- |
-| `createFileStore`    | default local server store under `.app` |
-| `createBrowserStore` | IndexedDB client snapshot store         |
+| Store                | Use                                         |
+| -------------------- | ------------------------------------------- |
+| `createFileStore`    | default local server store under `.poggers` |
+| `createBrowserStore` | IndexedDB client snapshot store             |
 
 ## Migrations
 
-Versions stay in ordinary TypeScript files. A newer API points at the previous API and defines state/event migration only where it needs to.
+The current contract stays in `src/types.ts`. When persisted shape changes, the CLI snapshots that contract into `src/migrations/snapshots/<hash>.ts` and creates a reviewed edge under `src/migrations/`.
 
 ```ts
-export const api = defineApp<SpecV2, typeof v1>({
-  version: 2,
-  previous: v1,
+import type { Migration } from "@poggers/app";
+import type { App as From } from "./snapshots/a1b2c3d4e5f6.ts";
+import type { App as To } from "./snapshots/f6e5d4c3b2a1.ts";
+
+export default {
+  from: "a1b2c3d4e5f6",
+  to: "f6e5d4c3b2a1",
   migrate: {
-    state: {
-      note(data) {
-        return { ...data, archived: false };
+    note: {
+      state(old) {
+        return { ...old, archived: false };
       },
-    },
-    event: {
-      note(name, payload) {
+      event(name, payload) {
         if (name === "renamed") return { name: "titleChanged", payload };
         return { name, payload };
       },
     },
   },
-  resources: { ... },
-});
+} satisfies Migration<From, To>;
 ```
 
-Snapshots migrate during restore. Events upcast during replay and before program handler matching.
+Use `poggers migrations snapshot <app-dir>` to capture the initial current shape and `poggers migrations create <name> <app-dir>` after changing `types.ts`. Generated edges start as drafts, so `poggers typecheck` fails until the edge is reviewed.
+
+The legacy numeric `previous` chain remains a compatibility path for existing code. New apps should use snapshot hashes and migration edge files.
 
 ## PWA And Assets
 
@@ -311,10 +331,10 @@ When `pwa` is present, the server emits:
 - a generated fallback icon at `/_poggers/icon.svg`
 - app-shell HTML with manifest and service worker registration
 
-Strict apps define `styles.ts` with `defineStyles<App>(...)`. The kit compiles component-part presets into generated CSS, serves it as `/client.css`, and exposes direct typed imports through `@poggers/app`, such as `useNote`, `createNoteEditor`, `usePreset`, `setPreset`, `useScreen`, and `nav`.
+Strict apps define styles inside `src/app.ts` under `styles`. The kit compiles component-part presets into generated CSS, serves it as `/client.css`, and exposes direct typed imports through `@poggers/app`, such as `useNote`, `createNoteEditor`, `usePreset`, `setPreset`, `useScreen`, and `nav`.
 
 ## Type Performance And Docs
 
-Generated `@poggers/app` exports use named option/result aliases instead of public `Parameters<>` and `ReturnType<>` chains. This keeps hovers compact and avoids making the editor instantiate the full app hook surface for a single function.
+Generated `@poggers/app` exports use named option/result aliases instead of public `Parameters<>` and `ReturnType<>` chains. This keeps hovers compact and avoids making the editor instantiate the full app hook surface for a single function. App-local generated declarations live under `.poggers/types`; they are generated artifacts, ignored by Git, and refreshed by `poggers sync`, `poggers typecheck`, `poggers dev`, and `poggers build`.
 
 Write JSDoc in `types.ts` directly above the resource or component declaration. The generator copies those comments onto the generated `useX` and `createX` exports. See [type-performance-jsdoc.md](./type-performance-jsdoc.md).

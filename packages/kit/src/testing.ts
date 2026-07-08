@@ -41,6 +41,7 @@ export type TestAppEvent<
     seq: number;
     at: number;
     version: number;
+    hash?: string;
     actor: ActorOf<Spec>;
     name: keyof ResourceFor<Spec, Resource>["Events"] & string;
     payload: ResourceFor<Spec, Resource>["Events"][keyof ResourceFor<Spec, Resource>["Events"]];
@@ -180,6 +181,7 @@ async function runTestCommand<Spec extends AppSpec, Resource extends ResourceNam
   }
 
   let cursor = seqs.get(id) ?? 0;
+  const hash = (app.def as any).migrationHash;
   for (const event of collected) {
     cursor += 1;
     const stored = {
@@ -190,6 +192,7 @@ async function runTestCommand<Spec extends AppSpec, Resource extends ResourceNam
         seq: cursor,
         at: event.at,
         version: app.def.version,
+        ...(hash ? { hash } : {}),
         actor,
         name: event.name,
         payload: event.payload,
@@ -206,8 +209,10 @@ async function runTestCommand<Spec extends AppSpec, Resource extends ResourceNam
         actor,
         name: stored.event.name,
         payload: stored.event.payload,
+        hash: stored.event.hash,
       },
       stored.event.version,
+      stored.event.hash,
     );
     storedEvents.push(stored);
   }

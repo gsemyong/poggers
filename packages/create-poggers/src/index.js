@@ -95,6 +95,7 @@ function files({ appName, kitVersion }) {
         private: true,
         type: "module",
         scripts: {
+          postinstall: "poggers sync",
           dev: "poggers dev",
           build: "poggers build --outfile dist/app",
           start: "./dist/app",
@@ -106,7 +107,6 @@ function files({ appName, kitVersion }) {
           "@poggers/kit": kitVersion,
         },
         devDependencies: {
-          "@types/bun": "latest",
           typescript: "7.0.1-rc",
         },
       },
@@ -117,13 +117,23 @@ function files({ appName, kitVersion }) {
     "tsconfig.json": `${JSON.stringify(
       {
         extends: "@poggers/kit/tsconfig",
+        compilerOptions: {
+          paths: {
+            "@poggers/app": ["./.poggers/types/app.d.ts"],
+            app: ["./src/app.ts"],
+            deps: ["./src/deps.ts"],
+            types: ["./src/types.ts"],
+            "src/*": ["./src/*"],
+            "ui/*": ["./src/ui/*"],
+          },
+        },
       },
       null,
       2,
     )}
 `,
     ".gitignore": `node_modules
-.app
+.poggers
 dist
 .DS_Store
 `,
@@ -170,11 +180,7 @@ export type App = {
     };
   };
 
-  Environments: {
-    server: {
-      Deps: ServerDeps;
-    };
-  };
+  Deps: ServerDeps;
 
   Navigation: {
     home: {};
@@ -238,11 +244,10 @@ export type App = {
   };
 };
 `,
-    "src/app.tsx": `import { defineApp } from "@poggers/kit";
-import { Root } from "./components/root";
-import type { App } from "./types";
+    "src/app.ts": `import type { AppDefinition } from "@poggers/app";
+import { Root } from "ui/root";
 
-export default defineApp<App>({
+export default {
   version: 1,
 
   app: {
@@ -311,120 +316,115 @@ export default defineApp<App>({
     },
   },
 
-  ui() {
-    return <Root />;
+  styles: {
+    defaultPreset: "system",
+    presets: {
+      system: {
+        AppShell: {
+          Root: {
+            minHeight: "100dvh",
+            maxWidth: 760,
+            margin: "0 auto",
+            padding: "28px 20px",
+            fontFamily: "ui-sans-serif, system-ui, sans-serif",
+            background: "#f7f8fb",
+            color: "#16181d",
+          },
+        },
+        Header: {
+          Root: {
+            layout: { display: "flex", gap: 16 },
+            marginBottom: 20,
+          },
+          Text: {
+            flex: "1 1 auto",
+          },
+          Eyebrow: {
+            margin: "0 0 4px",
+            color: "#69707d",
+            fontSize: 13,
+          },
+          Title: {
+            margin: 0,
+            fontSize: 28,
+            lineHeight: 1.05,
+          },
+          Actions: {
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+          },
+        },
+        Button: {
+          Root: {
+            layout: { kind: "inlineCenter", gap: 8 },
+            surface: { background: "#ffffff", color: "#16181d", border: "1px solid #d8dde7" },
+            shape: { radius: 8 },
+            size: { minHeight: 40, padding: "0 14px" },
+            typography: { size: 14, weight: 650, lineHeight: 1 },
+            motion: { pressable: true },
+          },
+          Label: {
+            display: "inline-flex",
+            whiteSpace: "nowrap",
+          },
+        },
+        Panel: {
+          Root: {
+            surface: { background: "#ffffff", border: "1px solid #d8dde7", shadow: "0 8px 30px rgb(18 24 38 / 0.08)" },
+            shape: { radius: 8 },
+            padding: 18,
+          },
+          Body: {
+            display: "grid",
+            alignItems: "center",
+            gridTemplateColumns: "minmax(0, 1fr) auto",
+            gap: 16,
+          },
+          Meta: {
+            margin: "0 0 6px",
+            color: "#69707d",
+            fontSize: 13,
+          },
+          Value: {
+            margin: 0,
+            fontSize: 36,
+            lineHeight: 1,
+          },
+          Actions: {
+            display: "flex",
+            gap: 8,
+          },
+        },
+      },
+      dense: {
+        AppShell: {
+          Root: {
+            padding: "18px 16px",
+          },
+        },
+        Button: {
+          Root: {
+            size: { minHeight: 32, padding: "0 10px" },
+            typography: { size: 13, weight: 650, lineHeight: 1 },
+          },
+        },
+        Panel: {
+          Root: {
+            padding: 12,
+          },
+        },
+      },
+    },
   },
-});
-`,
-    "src/styles.ts": `import { defineStyles } from "@poggers/kit/style";
-import type { App } from "./types";
 
-export default defineStyles<App>({
-  defaultPreset: "system",
-  presets: {
-    system: {
-      AppShell: {
-        Root: {
-          minHeight: "100dvh",
-          maxWidth: 760,
-          margin: "0 auto",
-          padding: "28px 20px",
-          fontFamily: "ui-sans-serif, system-ui, sans-serif",
-          background: "#f7f8fb",
-          color: "#16181d",
-        },
-      },
-      Header: {
-        Root: {
-          layout: { display: "flex", gap: 16 },
-          marginBottom: 20,
-        },
-        Text: {
-          flex: "1 1 auto",
-        },
-        Eyebrow: {
-          margin: "0 0 4px",
-          color: "#69707d",
-          fontSize: 13,
-        },
-        Title: {
-          margin: 0,
-          fontSize: 28,
-          lineHeight: 1.05,
-        },
-        Actions: {
-          display: "flex",
-          alignItems: "center",
-          gap: 8,
-        },
-      },
-      Button: {
-        Root: {
-          layout: { kind: "inlineCenter", gap: 8 },
-          surface: { background: "#ffffff", color: "#16181d", border: "1px solid #d8dde7" },
-          shape: { radius: 8 },
-          size: { minHeight: 40, padding: "0 14px" },
-          typography: { size: 14, weight: 650, lineHeight: 1 },
-          motion: { pressable: true },
-        },
-        Label: {
-          display: "inline-flex",
-          whiteSpace: "nowrap",
-        },
-      },
-      Panel: {
-        Root: {
-          surface: { background: "#ffffff", border: "1px solid #d8dde7", shadow: "0 8px 30px rgb(18 24 38 / 0.08)" },
-          shape: { radius: 8 },
-          padding: 18,
-        },
-        Body: {
-          display: "grid",
-          alignItems: "center",
-          gridTemplateColumns: "minmax(0, 1fr) auto",
-          gap: 16,
-        },
-        Meta: {
-          margin: "0 0 6px",
-          color: "#69707d",
-          fontSize: 13,
-        },
-        Value: {
-          margin: 0,
-          fontSize: 36,
-          lineHeight: 1,
-        },
-        Actions: {
-          display: "flex",
-          gap: 8,
-        },
-      },
-    },
-    dense: {
-      AppShell: {
-        Root: {
-          padding: "18px 16px",
-        },
-      },
-      Button: {
-        Root: {
-          size: { minHeight: 32, padding: "0 10px" },
-          typography: { size: 13, weight: 650, lineHeight: 1 },
-        },
-      },
-      Panel: {
-        Root: {
-          padding: 12,
-        },
-      },
-    },
-  },
-});
+  root: Root,
+} satisfies AppDefinition;
 `,
-    "src/components/root.tsx": `import { useScreen } from "@poggers/app";
-import { AppShell } from "./app-shell";
-import { HomeScreen } from "./home-screen";
-import { SettingsScreen } from "./settings-screen";
+    "src/ui/root.tsx": `import { useScreen } from "@poggers/app";
+import { AppShell } from "ui/app-shell";
+import { HomeScreen } from "ui/home-screen";
+import { SettingsScreen } from "ui/settings-screen";
 
 export function Root() {
   return (
@@ -434,7 +434,7 @@ export function Root() {
   );
 }
 `,
-    "src/components/button.tsx": `import { createButton } from "@poggers/app";
+    "src/ui/button.tsx": `import { createButton } from "@poggers/app";
 
 type ButtonProps = {
   label: string;
@@ -460,7 +460,7 @@ export function Button({ label, action, tone = "neutral", disabled = false }: Bu
   );
 }
 `,
-    "src/components/app-shell.tsx": `import { createAppShell } from "@poggers/app";
+    "src/ui/app-shell.tsx": `import { createAppShell } from "@poggers/app";
 import type { Child } from "@poggers/kit/ui";
 
 export function AppShell({ children }: { children?: Child }) {
@@ -469,14 +469,14 @@ export function AppShell({ children }: { children?: Child }) {
   return <Shell.Root>{children}</Shell.Root>;
 }
 `,
-    "src/components/transition.tsx": `import type { Child } from "@poggers/kit/ui";
+    "src/ui/transition.tsx": `import type { Child } from "@poggers/kit/ui";
 
 export function Transition({ children }: { children?: Child }) {
   return <>{children}</>;
 }
 `,
-    "src/components/counter-panel.tsx": `import { createPanel, useCounter } from "@poggers/app";
-import { Button } from "./button";
+    "src/ui/counter-panel.tsx": `import { createPanel, useCounter } from "@poggers/app";
+import { Button } from "ui/button";
 
 export function CounterPanel() {
   const counter = useCounter({ id: "main" });
@@ -507,10 +507,10 @@ export function CounterPanel() {
   );
 }
 `,
-    "src/components/home-screen.tsx": `import { createHeader, nav } from "@poggers/app";
-import { Button } from "./button";
-import { CounterPanel } from "./counter-panel";
-import { Transition } from "./transition";
+    "src/ui/home-screen.tsx": `import { createHeader, nav } from "@poggers/app";
+import { Button } from "ui/button";
+import { CounterPanel } from "ui/counter-panel";
+import { Transition } from "ui/transition";
 
 export function HomeScreen() {
   const Header = createHeader();
@@ -531,9 +531,9 @@ export function HomeScreen() {
   );
 }
 `,
-    "src/components/settings-screen.tsx": `import { createButton, createHeader, createPanel, nav, setPreset } from "@poggers/app";
-import { Button } from "./button";
-import { Transition } from "./transition";
+    "src/ui/settings-screen.tsx": `import { createButton, createHeader, createPanel, nav, setPreset } from "@poggers/app";
+import { Button } from "ui/button";
+import { Transition } from "ui/transition";
 
 export function SettingsScreen() {
   const Header = createHeader();
@@ -579,15 +579,14 @@ export function SettingsScreen() {
   );
 }
 `,
-    "deps.ts": `import type { ServerDeps } from "./src/types";
+    "src/deps.ts": `import type { DependencyConfig } from "@poggers/kit/deps";
+import type { ServerDeps } from "types";
 
-export function createServerDeps(): ServerDeps {
-  return {
-    clock: {
-      now: () => Date.now(),
-    },
-  };
-}
+export default {
+  clock: {
+    now: Date.now,
+  },
+} satisfies DependencyConfig<ServerDeps>;
 `,
   };
 }

@@ -3,7 +3,7 @@
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
-      "outputs": ["dist/**", ".app/build/**"]
+      "outputs": ["dist/**", ".poggers/build/**"]
     },
     "check": {
       "dependsOn": ["typecheck", "lint", "test"],

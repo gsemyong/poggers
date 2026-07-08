@@ -3,18 +3,22 @@ import {
   buildApp,
   bundleApp,
   checkAppConventions,
+  createMigration,
   resolveApp,
   runApp,
   writeAppTypes,
+  writeMigrationSnapshot,
 } from "./runtime";
 import { existsSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { mkdir, readdir, writeFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
 
 type ParsedArgs = {
   command: string;
   appDir: string;
   flags: Map<string, string | true>;
+  migrationCommand?: string;
+  migrationName?: string;
 };
 
 async function main(argv = Bun.argv.slice(2)) {
@@ -56,9 +60,57 @@ async function main(argv = Bun.argv.slice(2)) {
     return;
   }
 
+  if (parsed.command === "sync") {
+    await writeAppTypes(parsed.appDir);
+    return;
+  }
+
   if (parsed.command === "typecheck") {
     const code = await typecheckApp(parsed.appDir);
     if (code !== 0) process.exitCode = code;
+    return;
+  }
+
+  if (parsed.command === "migrations") {
+    if (parsed.migrationCommand === "snapshot") {
+      const snapshot = await writeMigrationSnapshot(parsed.appDir);
+      console.log(
+        `${snapshot.created ? "Created" : "Found"} migration snapshot ${snapshot.hash} at ${snapshot.path}`,
+      );
+      return;
+    }
+
+    if (parsed.migrationCommand === "create") {
+      if (!parsed.migrationName) {
+        console.error("Missing migration name.");
+        printUsage();
+        process.exitCode = 1;
+        return;
+      }
+
+      const result = await createMigration(parsed.appDir, parsed.migrationName);
+      if (result.kind === "initial") {
+        console.log(`Created initial migration snapshot ${result.snapshot.hash}.`);
+        return;
+      }
+      if (result.kind === "unchanged") {
+        console.log(`No structural changes found. Current snapshot is ${result.snapshot.hash}.`);
+        return;
+      }
+      if (result.kind === "exists") {
+        console.log(`Migration already exists from ${result.fromHash} to ${result.toHash}.`);
+        console.log(result.path);
+        return;
+      }
+
+      console.log(`Created draft migration from ${result.fromHash} to ${result.toHash}.`);
+      console.log(result.path);
+      console.log("Review it, remove the draft marker, then run poggers typecheck.");
+      return;
+    }
+
+    printUsage();
+    process.exitCode = 1;
     return;
   }
 
@@ -78,10 +130,36 @@ async function main(argv = Bun.argv.slice(2)) {
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
-  const commands = new Set(["dev", "bundle", "build", "typecheck", "check"]);
+  const commands = new Set(["dev", "bundle", "build", "sync", "typecheck", "check", "migrations"]);
   const first = argv[0];
   const command = first && commands.has(first) ? first : "dev";
+  if (command === "migrations") {
+    const migrationCommand = argv[1];
+    const rest =
+      migrationCommand === "create"
+        ? argv.slice(3)
+        : migrationCommand === "snapshot"
+          ? argv.slice(2)
+          : argv.slice(1);
+    const parsed = parseAppDirAndFlags(rest);
+    return {
+      command,
+      migrationCommand,
+      migrationName: migrationCommand === "create" ? argv[2] : undefined,
+      appDir: parsed.appDir,
+      flags: parsed.flags,
+    };
+  }
+
   const rest = command === first ? argv.slice(1) : argv;
+  const parsed = parseAppDirAndFlags(rest);
+  return { command, appDir: parsed.appDir, flags: parsed.flags };
+}
+
+function parseAppDirAndFlags(rest: string[]): {
+  appDir: string;
+  flags: Map<string, string | true>;
+} {
   const flags = new Map<string, string | true>();
   let appDir = ".";
   let hasAppDir = false;
@@ -106,7 +184,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     }
   }
 
-  return { command, appDir, flags };
+  return { appDir, flags };
 }
 
 function readNumber(value: string | true | undefined): number | undefined {
@@ -120,19 +198,27 @@ function readString(value: string | true | undefined): string | undefined {
 }
 
 async function typecheckApp(appDir: string): Promise<number> {
-  await writeAppTypes(appDir);
+  try {
+    await writeAppTypes(appDir);
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    return 1;
+  }
 
   const appCode = await runTsc(appDir, ["--noEmit"]);
   if (appCode !== 0) return appCode;
 
-  return typecheckRootDeps(appDir);
+  const depsCode = await typecheckRootDeps(appDir);
+  if (depsCode !== 0) return depsCode;
+
+  return typecheckMigrations(appDir);
 }
 
 async function typecheckRootDeps(appDir: string): Promise<number> {
   const paths = resolveApp(appDir);
-  if (!paths.deps || isPathInside(paths.sourceDir, paths.deps)) return 0;
+  if (!paths.deps) return 0;
 
-  const configPath = resolve(paths.appDir, ".app/typecheck.deps.tsconfig.json");
+  const configPath = resolve(paths.appDir, ".poggers/typecheck.deps.tsconfig.json");
   await mkdir(dirname(configPath), { recursive: true });
   await writeFile(
     configPath,
@@ -147,7 +233,7 @@ async function typecheckRootDeps(appDir: string): Promise<number> {
           jsxImportSource: "@poggers/kit",
           allowJs: true,
           allowImportingTsExtensions: true,
-          types: ["bun"],
+          types: ["@poggers/kit/globals"],
           moduleResolution: "bundler",
           verbatimModuleSyntax: true,
           noEmit: true,
@@ -157,7 +243,12 @@ async function typecheckRootDeps(appDir: string): Promise<number> {
           noUncheckedIndexedAccess: true,
           noImplicitOverride: true,
           paths: {
-            "@poggers/app": [resolve(paths.sourceDir, "poggers-app.d.ts")],
+            "@poggers/app": [resolve(paths.appDir, ".poggers/types/app.d.ts")],
+            app: [resolve(paths.sourceDir, "app.ts")],
+            deps: [resolve(paths.sourceDir, "deps.ts")],
+            types: [resolve(paths.sourceDir, "types.ts")],
+            "src/*": [resolve(paths.sourceDir, "*")],
+            "ui/*": [resolve(paths.sourceDir, "ui/*")],
           },
         },
         files: [paths.deps],
@@ -171,6 +262,64 @@ async function typecheckRootDeps(appDir: string): Promise<number> {
   return runTsc(paths.appDir, ["--noEmit", "-p", configPath]);
 }
 
+async function typecheckMigrations(appDir: string): Promise<number> {
+  const paths = resolveApp(appDir);
+  const migrationFiles = await listMigrationEdgeFiles(resolve(paths.sourceDir, "migrations"));
+  if (migrationFiles.length === 0) return 0;
+
+  const configPath = resolve(paths.appDir, ".poggers/typecheck.migrations.tsconfig.json");
+  await mkdir(dirname(configPath), { recursive: true });
+  await writeFile(
+    configPath,
+    `${JSON.stringify(
+      {
+        compilerOptions: {
+          lib: ["ES2022", "DOM"],
+          target: "ESNext",
+          module: "Preserve",
+          moduleDetection: "force",
+          jsx: "react-jsx",
+          jsxImportSource: "@poggers/kit",
+          allowJs: true,
+          allowImportingTsExtensions: true,
+          types: ["@poggers/kit/globals"],
+          moduleResolution: "bundler",
+          verbatimModuleSyntax: true,
+          noEmit: true,
+          strict: true,
+          skipLibCheck: true,
+          noFallthroughCasesInSwitch: true,
+          noUncheckedIndexedAccess: true,
+          noImplicitOverride: true,
+          paths: {
+            "@poggers/app": [resolve(paths.appDir, ".poggers/types/app.d.ts")],
+            app: [resolve(paths.sourceDir, "app.ts")],
+            deps: [resolve(paths.sourceDir, "deps.ts")],
+            types: [resolve(paths.sourceDir, "types.ts")],
+            "src/*": [resolve(paths.sourceDir, "*")],
+            "ui/*": [resolve(paths.sourceDir, "ui/*")],
+          },
+        },
+        files: migrationFiles,
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+
+  return runTsc(paths.appDir, ["--noEmit", "-p", configPath]);
+}
+
+async function listMigrationEdgeFiles(migrationsDir: string): Promise<string[]> {
+  if (!existsSync(migrationsDir)) return [];
+  const entries = await readdir(migrationsDir, { withFileTypes: true });
+  return entries
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".ts"))
+    .map((entry) => resolve(migrationsDir, entry.name))
+    .sort();
+}
+
 function runTsc(cwd: string, args: string[]): Promise<number> {
   const tsc = Bun.spawn([resolveBin(cwd, "tsc"), ...args], {
     cwd,
@@ -178,11 +327,6 @@ function runTsc(cwd: string, args: string[]): Promise<number> {
     stderr: "inherit",
   });
   return tsc.exited;
-}
-
-function isPathInside(parent: string, child: string): boolean {
-  const path = relative(parent, child);
-  return path === "" || (!path.startsWith("..") && !isAbsolute(path));
 }
 
 function resolveBin(startDir: string, name: string): string {
@@ -202,9 +346,12 @@ function resolveBin(startDir: string, name: string): string {
 function printUsage() {
   console.error(`Usage:
   poggers dev <app-dir> [--port 3000] [--title "My App"]
-  poggers bundle <app-dir> [--outdir .app/build/web] [--minify false]
+  poggers bundle <app-dir> [--outdir .poggers/build/web] [--minify false]
   poggers build <app-dir> --outfile dist/my-app [--title "My App"]
+  poggers sync <app-dir>
   poggers typecheck <app-dir>
+  poggers migrations snapshot <app-dir>
+  poggers migrations create <name> <app-dir>
   poggers check <app-dir>`);
 }
 

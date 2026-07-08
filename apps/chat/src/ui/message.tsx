@@ -1,6 +1,6 @@
 import { createChatMessage, type ChatResource } from "@poggers/app";
-import { PartList } from "./part-list";
-import type { DisplayMessage } from "../types";
+import { PartList } from "ui/part-list";
+import type { DisplayMessage } from "types";
 
 export function Message({ message }: { message: DisplayMessage }) {
   const Message = createChatMessage({

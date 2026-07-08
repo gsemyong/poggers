@@ -172,12 +172,8 @@ describe("app surface", () => {
           Commands: { increment: { args: [by?: number]; event: "incremented"; error: never } };
         };
       };
-      Environments: {
-        server: {
-          Deps: {
-            now(): number;
-          };
-        };
+      Deps: {
+        now(): number;
       };
       Navigation: {
         home: {};
@@ -196,9 +192,9 @@ describe("app surface", () => {
         counter: "/counter/:id",
       },
       deps: {
-        server: () => ({
+        server: {
           now: () => Date.now(),
-        }),
+        },
       },
       resources: {
         counter: {

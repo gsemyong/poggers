@@ -164,7 +164,7 @@ Rules:
 
 ### Browser Gates
 
-- [x] Start `POGGERS_FAKE_AI=... bun run --filter @poggers/chat dev`.
+- [x] Start `POGGERS_DEPS=mock POGGERS_FAKE_AI=... bun run --filter @poggers/chat dev`.
 - [x] Open `http://localhost:3000` in browser automation.
 - [x] Verify no page errors or console errors.
 - [x] Verify style-only generated components render without controllers.

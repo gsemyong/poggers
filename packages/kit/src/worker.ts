@@ -147,6 +147,7 @@ export type WorkerRuntimeEvent<Spec extends AppSpec = AppSpec> = {
     seq: number;
     at: number;
     version: number;
+    hash?: string;
     actor: ActorOf<Spec>;
     name: string;
     payload: unknown;
@@ -288,8 +289,10 @@ export function testWorker<Spec extends AppSpec, Deps>(
           actor: stored.event.actor,
           name: stored.event.name,
           payload: stored.event.payload,
+          hash: stored.event.hash,
         },
         stored.event.version,
+        stored.event.hash,
       );
       seqs.set(id, Math.max(seqs.get(id) ?? 0, stored.event.seq));
     }
@@ -1068,6 +1071,7 @@ async function runTestCommand<Spec extends AppSpec, Resource extends ResourceNam
   }
 
   let cursor = seqs.get(id) ?? 0;
+  const hash = (app.def as any).migrationHash;
   for (const event of collected) {
     cursor += 1;
     const stored: WorkerRuntimeEvent<Spec> = {
@@ -1078,6 +1082,7 @@ async function runTestCommand<Spec extends AppSpec, Resource extends ResourceNam
         seq: cursor,
         at: event.at,
         version: app.def.version,
+        ...(hash ? { hash } : {}),
         actor,
         name: event.name,
         payload: event.payload,
@@ -1162,6 +1167,7 @@ function upcastWorkerRuntimeEvent<Spec extends AppSpec>(
       payload: stored.event.payload,
     },
     stored.event.version,
+    stored.event.hash,
   );
 
   return {
@@ -1169,6 +1175,7 @@ function upcastWorkerRuntimeEvent<Spec extends AppSpec>(
     event: {
       ...stored.event,
       version: upcasted.version,
+      ...(upcasted.hash ? { hash: upcasted.hash } : {}),
       name: upcasted.name,
       payload: upcasted.payload,
     },

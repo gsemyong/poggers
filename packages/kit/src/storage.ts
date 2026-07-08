@@ -119,8 +119,6 @@ export function createFileClientStore(snapshotPath: string): ClientStore {
 }
 
 export function createFileStore(baseDir: string): Store {
-  mkdirSync(baseDir, { recursive: true });
-
   return {
     loadSnapshot(key: string) {
       const safeKey = safeFilename(key);

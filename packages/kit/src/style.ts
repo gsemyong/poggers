@@ -1,11 +1,14 @@
-import type {
-  App,
-  AppNavigation,
-  AppScreen,
-  AppSpec,
-  ResourceFor,
-  ResourceName,
-  UISignal,
+import {
+  defineApp,
+  type App,
+  type AppDef,
+  type AppNavigation,
+  type AppScreen,
+  type AppSpec,
+  type ResourceFor,
+  type ResourceName,
+  type TypedAppDefinition,
+  type UISignal,
 } from "./app";
 import type { ConnectOpts } from "./client";
 import {
@@ -472,9 +475,16 @@ export type AppHooks<Spec extends AppSpec> = ApiHooks<Spec> &
     start(connect?: ConnectOpts | (() => Promise<import("./app").Client<Spec>>)): void;
   };
 
+export type AppInput<Spec extends AppSpec> = App<Spec> | AppDef<Spec> | TypedAppDefinition<Spec>;
+
+export type StyleInput<Spec extends AppSpec> =
+  | Styles<Spec>
+  | StylesDef<Spec>
+  | TypedStyleDefinition<Spec>;
+
 export type CreateHooksOpts<Spec extends AppSpec> = {
-  app: App<Spec>;
-  styles: Styles<Spec>;
+  app: AppInput<Spec>;
+  styles: StyleInput<Spec>;
   components?: ComponentRuntimeParts<Spec>;
 };
 
@@ -513,8 +523,10 @@ export function createHooks<Spec extends AppSpec>({
   styles,
   components,
 }: CreateHooksOpts<Spec>): AppHooks<Spec> {
-  const runtime = createNativeAppRuntime(app);
-  const defaultPreset = firstPreset(styles) as PresetName<Spec>;
+  const runtimeApp = normalizeAppInput(app);
+  const runtimeStyles = normalizeStylesInput(styles);
+  const runtime = createNativeAppRuntime(runtimeApp);
+  const defaultPreset = firstPreset(runtimeStyles) as PresetName<Spec>;
   const preset = runtimeSignal(defaultPreset);
   const theme = runtimeSignal(createInitialTheme<Spec>());
   const runtimeParts = normalizeRuntimeParts(components);
@@ -525,7 +537,7 @@ export function createHooks<Spec extends AppSpec>({
       return preset();
     },
     setPreset(nextPreset: PresetName<Spec>) {
-      if (!(String(nextPreset) in styles.def.presets)) {
+      if (!(String(nextPreset) in runtimeStyles.def.presets)) {
         throw new Error(`Unknown Poggers preset "${String(nextPreset)}".`);
       }
       preset(nextPreset);
@@ -541,10 +553,10 @@ export function createHooks<Spec extends AppSpec>({
     start: runtime.start,
   };
 
-  for (const componentName of collectComponentNames(app, styles, runtimeParts)) {
+  for (const componentName of collectComponentNames(runtimeApp, runtimeStyles, runtimeParts)) {
     hooks[`create${capitalize(componentName)}`] = (input: RuntimeHookInput = {}) =>
       createComponentInstance(componentName, {
-        app,
+        app: runtimeApp,
         preset,
         theme,
         parts: runtimeParts[componentName] ?? {},
@@ -553,6 +565,22 @@ export function createHooks<Spec extends AppSpec>({
   }
 
   return hooks as AppHooks<Spec>;
+}
+
+function normalizeAppInput<Spec extends AppSpec>(app: AppInput<Spec>): App<Spec> {
+  return isRuntimeApp(app) ? app : defineApp(app as AppDef<Spec>);
+}
+
+function isRuntimeApp<Spec extends AppSpec>(app: AppInput<Spec>): app is App<Spec> {
+  return Boolean((app as App<Spec>).def?.resources);
+}
+
+function normalizeStylesInput<Spec extends AppSpec>(styles: StyleInput<Spec>): Styles<Spec> {
+  return isRuntimeStyles(styles) ? styles : defineStyles(styles as StylesDef<Spec>);
+}
+
+function isRuntimeStyles<Spec extends AppSpec>(styles: StyleInput<Spec>): styles is Styles<Spec> {
+  return Boolean((styles as Styles<Spec>).def?.presets);
 }
 
 function createComponentInstance(

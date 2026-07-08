@@ -14,7 +14,7 @@ Implemented. `poggers dev` now serves a generated Bun HTML route with Bun's HMR 
 - Keep the app API server, event stream, snapshots, PWA routes, and `/ws` protocol in the existing server runtime.
 - Move browser assets onto Bun's HTML route pipeline in dev, because Bun's HMR is attached to `Bun.serve({ development, routes })`.
 - Treat full-page reload as a fallback, not the normal path.
-- Do not complicate user application structure. App authors should keep writing `types.ts`, `app.tsx`, `components/**`, `helpers/**`, and optional generated framework files stay inside `.app`.
+- Do not complicate user application structure. App authors should keep writing `src/types.ts`, `src/app.ts`, `src/deps.ts`, `src/ui/**`, and generated framework files stay inside `.poggers`.
 
 ## Current Problem
 
@@ -40,7 +40,7 @@ Implemented. `poggers dev` now serves a generated Bun HTML route with Bun's HMR 
 
 ## Implementation Checklist
 
-- [x] Add a dev browser asset mode that writes `.app/dev/index.html` instead of serving an opaque bundle.
+- [x] Add a dev browser asset mode that writes `.poggers/dev/index.html` instead of serving an opaque bundle.
 - [x] Change the dev entrypoint to be HMR-aware:
   - [x] Import generated CSS from a stable file path.
   - [x] Reuse the root runtime through `import.meta.hot.data`.

@@ -8,7 +8,7 @@ Make the simple Poggers use case excellent:
 - The app is opened from desktop or mobile through the served web UI.
 - Mobile access can be private through Tailscale Serve without requiring Poggers to solve mesh networking first.
 - Every app uses the same strict file structure.
-- The primary authoring surface is generic-first `defineApp<Spec>()`.
+- The primary authoring surface is plain file exports checked with generated `@poggers/app` types.
 - The app can be installed as a PWA.
 - UI authors keep full JSX control, client-side transitions, spring motion, and layout animations.
 - AI-generated code stays coherent because the framework enforces conventions.
@@ -19,12 +19,12 @@ This plan intentionally resets scope away from native bundles and multi-machine 
 
 Completed in this pass:
 
-- Generic-first `defineApp<Spec>()` now accepts embedded `app`, `pwa`, `navigation`, `deps`, `programs`, and `ui(ctx)` fields.
+- `src/app.ts` now exports a plain object with embedded `app`, `pwa`, `navigation`, `programs`, styles, and the root UI function reference.
 - Embedded UI receives semantic resource hooks, typed `screen`, and typed `nav` helpers derived from the generic spec.
 - The runtime can load new strict apps from `app.tsx` while preserving `api.ts`, `api/index.ts`, `defineUI`, and worker-file compatibility.
 - The server emits PWA app-shell HTML, manifest, service worker, generated fallback icon, bundled CSS, static assets, and browser-style SPA fallback.
-- Tailwind v4 is compiled by the kit build pipeline from `styles.css` or `components/theme.css`.
-- `create-poggers` generates the strict `types.ts`, `app.tsx`, `components/`, `helpers/`, and `styles.css` structure without empty folders.
+- Styles are compiled from the `styles` field in `src/app.ts`.
+- `create-poggers` generates the strict `src/types.ts`, `src/app.ts`, `src/deps.ts`, and `src/ui/` structure without empty folders.
 - `apps/chat` and `apps/site` now dogfood the strict structure.
 - Architecture and testing docs now describe the strict structure as the primary path.
 
@@ -52,27 +52,17 @@ Future gates not claimed by this pass:
 Every Poggers app must use this structure. There is no tiny-app exception.
 
 ```text
-types.ts
-app.tsx
-components/
-helpers/
+src/types.ts
+src/app.ts
+src/deps.ts
+src/ui/
 ```
 
-Recommended component subfolders:
+UI files should stay flat by default and use kebab-case file names. Split into nested folders only when a package genuinely grows past the simple shape.
+
+Optional library helpers can be grouped only when the grouping removes real noise:
 
 ```text
-components/
-  primitives/
-  layout/
-  motion/
-  screens/
-  domain/
-```
-
-Recommended helper subfolders:
-
-```text
-helpers/
   deps/
   env/
   format/
@@ -91,7 +81,7 @@ Owns app type information:
 - `App` generic spec type.
 - Resource state, presence, event, view, and command types.
 - Navigation/screen types.
-- Environment dependency types.
+- App dependency types.
 - Domain model types.
 - Shared data contracts used by UI, programs, helpers, and tests.
 
@@ -101,7 +91,7 @@ It must not contain runtime resource handlers, UI components, service startup, o
 
 Owns app composition:
 
-- `export default defineApp<App>({...})`.
+- `export default { ... } satisfies AppDefinition`.
 - App metadata.
 - PWA metadata.
 - Resources.
@@ -109,11 +99,11 @@ Owns app composition:
 - Navigation mapping.
 - Root UI composition.
 
-It may import components from `components/` and helpers from `helpers/`.
+It may import JSX screens and widgets from `ui/` and app-owned helpers or adapters from `lib/`.
 
-### `components/`
+### `ui/`
 
-Owns the local application design system.
+Owns the local application UI.
 
 The goal is not a generic library. It is the app's visual and interaction language:
 
@@ -123,9 +113,9 @@ The goal is not a generic library. It is the app's visual and interaction langua
 - Screens: top-level application states.
 - Domain: resource-specific widgets like chat threads, agent run cards, task rows.
 
-Components may use Tailwind classes, framework state primitives, and framework motion primitives. Components must not own durable data mutations except by calling semantic resource actions passed in as props or obtained from the UI context.
+UI modules may use framework state primitives and framework motion primitives. UI modules must not own durable data mutations except by calling semantic resource actions passed in as props or obtained from the UI context.
 
-### `helpers/`
+### `lib/`
 
 Owns implementation details:
 
@@ -138,18 +128,17 @@ Owns implementation details:
 - Pure parsers.
 - Environment adapters.
 
-Helpers must not import UI components. Helpers may import `types.ts`.
+Library helpers must not import UI components. Helpers may import `types.ts`.
 
 ## Public App Surface
 
 The desired primary surface is:
 
 ```tsx
-import { defineApp } from "@poggers/kit";
-import type { App } from "./types";
-import { Root } from "./components/root";
+import type { AppDefinition } from "@poggers/app";
+import { Root } from "ui/root";
 
-export default defineApp<App>({
+export default {
   version: 1,
 
   app: {
@@ -187,18 +176,18 @@ export default defineApp<App>({
   ui(ctx) {
     return <Root ctx={ctx} />;
   },
-});
+} satisfies AppDefinition;
 ```
 
-Server dependency construction lives in root `deps.ts`, outside `src`, and exports names such as `createServerDeps`.
+Server dependency construction lives in `src/deps.ts` as dependency provider config and inline implementations.
 
 Important constraints:
 
-- `defineApp<Spec>()` remains generic-first.
+- `types.ts` remains the generic source of truth; `app.tsx` uses generated `AppDefinition` with `satisfies`.
 - Do not introduce public `resource()`, `command()`, `event()`, or `type()` wrappers.
 - Keep the current resource definition shape unless a change is necessary for type inference or app organization.
-- `defineUI(api, ...)` remains as a compatibility adapter, but new apps should use `ui` inside `defineApp`.
-- `defineWorker` remains compatibility for existing worker-file apps. New apps should prefer `programs` inside `defineApp`.
+- `defineApp`, `defineStyles`, and `defineUI(api, ...)` remain compatibility adapters, but new apps should use plain exports.
+- `defineWorker` remains compatibility for existing worker-file apps. New apps should prefer `programs` inside `src/app.ts`.
 - Existing `api/v1.ts` version-folder apps remain supported for larger versioned APIs.
 
 ## Generic Spec Shape
@@ -218,11 +207,7 @@ export type App = {
     };
   };
 
-  Environments: {
-    server: {
-      Deps: ServerDeps;
-    };
-  };
+  Deps: ServerDeps;
 
   Navigation: {
     home: {};
@@ -234,7 +219,7 @@ export type App = {
 
 Navigation names, params, and `nav` helpers should derive from `Spec["Navigation"]`.
 
-Environment dependency types should continue to derive from `Spec["Environments"]`.
+Dependency types should derive from top-level `Spec["Deps"]` for the default server program.
 
 Resource hooks should continue to derive from `Spec["Resources"]`.
 
@@ -287,7 +272,7 @@ The framework should generate and serve:
 - Static asset cache.
 - Runtime cache for app shell and generated bundles.
 
-The framework should make PWA metadata first-class on `defineApp`:
+The framework should make PWA metadata first-class on the app object:
 
 ```ts
 pwa: {
@@ -343,7 +328,7 @@ Tailwind docs:
 
 Framework convention:
 
-- The app owns a single stylesheet, generated as `components/theme.css` or `styles.css`.
+- The app owns semantic styles in `src/app.ts`.
 - The stylesheet imports Tailwind and defines app tokens with `@theme`.
 - Components use Tailwind utilities.
 - Reusable visual decisions are represented by primitive component props.
@@ -422,17 +407,16 @@ Motion rules:
 `create-poggers` should generate:
 
 ```text
-deps.ts
 src/types.ts
-src/app.tsx
-src/styles.ts
-src/components/root.tsx
-src/components/app-shell.tsx
-src/components/button.tsx
-src/components/counter-panel.tsx
-src/components/home-screen.tsx
-src/components/settings-screen.tsx
-src/components/transition.tsx
+src/deps.ts
+src/app.ts
+src/ui/root.tsx
+src/ui/app-shell.tsx
+src/ui/button.tsx
+src/ui/counter-panel.tsx
+src/ui/home-screen.tsx
+src/ui/settings-screen.tsx
+src/ui/transition.tsx
 ```
 
 Generated app behavior:
@@ -450,13 +434,13 @@ Generated app behavior:
 
 The kit runtime should support:
 
-- Loading default export `defineApp<Spec>()` from `app.tsx`.
+- Loading a plain default app object from `src/app.ts`.
 - Serving UI from `def.ui`.
 - Serving generated PWA assets.
 - Serving generated manifest.
 - Serving generated service worker.
 - Starting `programs.server` in the same Bun process.
-- Loading environment deps from `def.deps.server` or app helper exports.
+- Loading app deps from a direct `src/deps.ts` default export, with `def.deps.server` and helper exports kept as compatibility paths.
 - Keeping existing `api.ts` + `app.tsx` + `worker.ts` compatibility.
 - Keeping existing migration chain support.
 
@@ -468,11 +452,11 @@ Update docs to explain:
 - Why every app has the same structure.
 - `types.ts` responsibilities.
 - `app.tsx` responsibilities.
-- `components/` conventions.
-- `helpers/` conventions.
-- Generic-first `defineApp<Spec>()`.
-- Embedded UI in `defineApp`.
-- Embedded programs in `defineApp`.
+- `ui/` conventions.
+- `lib/` conventions.
+- Plain `AppDefinition` export conventions.
+- Embedded UI in the app object.
+- Embedded programs in the app object.
 - Navigation API.
 - PWA setup and install behavior.
 - Tailwind conventions.
@@ -505,7 +489,7 @@ Docs should avoid presenting multiple equally blessed app shapes. Compatibility 
 - [ ] Add typed `nav` helpers that update browser history.
 - [ ] Handle back/forward navigation.
 - [ ] Handle unknown paths with a documented fallback.
-- [ ] Ensure UI can render from `defineApp` default export.
+- [ ] Ensure UI can render from a plain app object default export.
 - [ ] Keep existing standalone `app.tsx` UI loader working during migration.
 
 ### Phase 3: PWA Runtime
@@ -525,14 +509,14 @@ Docs should avoid presenting multiple equally blessed app shapes. Compatibility 
 - [ ] Add Tailwind v4 dependencies to the relevant package/app templates.
 - [ ] Decide whether Tailwind processing lives in kit bundler or generated app build config.
 - [ ] Add default `styles.css`.
-- [ ] Ensure class detection includes `app.tsx`, `components/**/*.tsx`, and any generated JSX files.
+- [ ] Ensure class detection includes `app.tsx`, `ui/**/*.tsx`, and any generated JSX files.
 - [ ] Make generated app compile Tailwind CSS in dev and build.
 - [ ] Document allowed CSS patterns.
 - [ ] Add lint/docs convention for avoiding unmanaged global CSS.
 
 ### Phase 5: Motion Primitives
 
-- [ ] Add minimal motion primitives under kit UI runtime or generated `components/motion`.
+- [ ] Add minimal motion primitives under kit UI runtime or generated `ui/motion`.
 - [ ] Start with `Presence`, `Transition`, and `useReducedMotion`.
 - [ ] Add spring primitive only after API shape is tested in an app.
 - [ ] Ensure primitives are independent from resource state.
@@ -551,11 +535,11 @@ Docs should avoid presenting multiple equally blessed app shapes. Compatibility 
 
 ### Phase 7: Dogfood Apps
 
-- [ ] Migrate `apps/chat` to `types.ts`, `app.tsx`, `components/`, `helpers/`.
-- [ ] Move chat UI pieces into `components/`.
-- [ ] Move chat deps and parsing helpers into `helpers/`.
-- [ ] Embed chat UI in `defineApp`.
-- [ ] Embed chat program in `defineApp` or keep compatibility only where needed.
+- [ ] Migrate `apps/chat` to `src/types.ts`, `src/app.ts`, `src/deps.ts`, and `src/ui/`.
+- [ ] Move chat UI pieces into `ui/`.
+- [ ] Move chat dependency implementations into `src/deps.ts`.
+- [ ] Embed chat UI in the app object.
+- [ ] Embed chat program in the app object or keep compatibility only where needed.
 - [ ] Add PWA metadata to chat.
 - [ ] Add Tailwind styling convention to chat.
 - [ ] Migrate `apps/site` to the same structure.
@@ -585,20 +569,20 @@ Docs should avoid presenting multiple equally blessed app shapes. Compatibility 
 
 ### Unit Gates
 
-- [ ] `defineApp` accepts embedded `ui`.
-- [ ] `defineApp` accepts embedded `pwa`.
-- [ ] `defineApp` accepts typed `navigation`.
+- [ ] The app object accepts embedded `ui`.
+- [ ] The app object accepts embedded `pwa`.
+- [ ] The app object accepts typed `navigation`.
 - [ ] Navigation params infer from `Spec["Navigation"]`.
 - [ ] `nav.chat({ sessionId })` is typed.
 - [ ] Missing route params fail type tests.
 - [ ] Resource hooks still derive from `Spec["Resources"]`.
-- [ ] Program deps still derive from `Spec["Environments"]`.
+- [ ] Program deps derive from top-level `Spec["Deps"]` for the default server program.
 - [ ] Existing migration tests pass.
 - [ ] Existing worker durability tests pass.
 
 ### Runtime Gates
 
-- [ ] App loads from only `app.tsx` plus `types.ts/components/helpers`.
+- [ ] App loads from only `src/app.ts` plus `src/types.ts`, `src/deps.ts`, and `src/ui`.
 - [ ] Server starts `programs.server`.
 - [ ] UI can call resource commands.
 - [ ] Resource state syncs to browser.
@@ -619,7 +603,7 @@ Docs should avoid presenting multiple equally blessed app shapes. Compatibility 
 ### Tailwind Gates
 
 - [ ] Generated app includes Tailwind CSS.
-- [ ] Tailwind utilities in `components/` appear in built CSS.
+- [ ] Semantic app styles appear in built CSS.
 - [ ] Theme tokens from `@theme` are available.
 - [ ] Production CSS is generated during binary/build pipeline.
 - [ ] No Vite dependency is reintroduced unless intentionally accepted.
@@ -670,8 +654,8 @@ Use browser automation against the running app.
 The plan is complete when:
 
 - A new app generated by `create-poggers` uses only the strict structure.
-- The generated app default export is `defineApp<Spec>()`.
-- Resources, programs, navigation, PWA metadata, and UI are all organized through `defineApp`.
+- The generated app default export is a plain object satisfying `AppDefinition`.
+- Resources, programs, navigation, PWA metadata, and UI are all organized through the app object.
 - The generated app uses Tailwind v4 by default.
 - The generated app is installable as a PWA on localhost or HTTPS.
 - The generated app can be served by a single Bun service binary.

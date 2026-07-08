@@ -127,6 +127,7 @@ export type WorkerRuntimeEvent<Spec extends AppSpec = AppSpec> = {
     seq: number;
     at: number;
     version: number;
+    hash?: string;
     actor: ActorOf<Spec>;
     name: string;
     payload: unknown;

@@ -5,6 +5,7 @@ export type LocalActor = { id: string };
 export type AppSpec = {
   Actor?: { id: string };
   Resources: Record<string, any>;
+  Deps?: any;
   Environments?: Record<string, { Deps?: any }>;
   Navigation?: Record<string, Record<string, any>>;
   Components?: Record<
@@ -59,7 +60,9 @@ export type EnvironmentName<Spec extends AppSpec> = Spec extends {
   Environments: infer Environments;
 }
   ? Extract<keyof Environments, string>
-  : never;
+  : Spec extends { Deps: any }
+    ? "server"
+    : never;
 
 export type EnvironmentDeps<
   Spec extends AppSpec,
@@ -70,7 +73,21 @@ export type EnvironmentDeps<
       ? Deps
       : Record<string, never>
     : never
-  : never;
+  : Env extends "server"
+    ? Spec extends { Deps: infer Deps }
+      ? Deps
+      : Record<string, never>
+    : never;
+
+export type AppDependencies<Spec extends AppSpec> = Spec extends { Deps: infer Deps }
+  ? Deps
+  : Spec extends { Environments: infer Environments }
+    ? "server" extends keyof Environments
+      ? Environments["server"] extends { Deps: infer Deps }
+        ? Deps
+        : Record<string, never>
+      : Record<string, never>
+    : Record<string, never>;
 
 export type NavigationName<Spec extends AppSpec> = Spec extends {
   Navigation: infer Navigation;
@@ -192,10 +209,28 @@ export type PwaDef = {
 };
 
 export type AppDepsDef<Spec extends AppSpec> = {
-  [Env in EnvironmentName<Spec>]?: () =>
-    | EnvironmentDeps<Spec, Env>
-    | Promise<EnvironmentDeps<Spec, Env>>;
+  [Env in EnvironmentName<Spec>]?: DependencyMount<EnvironmentDeps<Spec, Env>>;
 };
+
+export type DependencyProvider<Value> = Value | (() => Value | Promise<Value>);
+
+export type DependencyProviderSet<Value> = {
+  production: DependencyProvider<Value>;
+  mock?: DependencyProvider<Value>;
+} & Record<string, DependencyProvider<Value> | undefined>;
+
+export type DependencyEntry<Value> = DependencyProviderSet<Value> | DependencyProvider<Value>;
+
+export type DependencyConfig<Deps> = {
+  mode?: string | (() => string | Promise<string>);
+  deps?: {
+    [Name in keyof Deps]: DependencyEntry<Deps[Name]>;
+  };
+} & {
+  [Name in keyof Deps]?: DependencyEntry<Deps[Name]>;
+};
+
+export type DependencyMount<Deps> = (() => Deps | Promise<Deps>) | Deps | DependencyConfig<Deps>;
 
 export type ProgramResource<Spec extends AppSpec, Resource extends ResourceName<Spec>> = ViewShape<
   Spec,
@@ -487,11 +522,15 @@ export type AppDef<Spec extends AppSpec> = {
   version: number;
   app?: AppMetadata;
   pwa?: PwaDef;
+  migrationHash?: string;
+  migrations?: RuntimeMigrationEdge[];
   navigation?: NavigationDef<Spec>;
   identify?: (opts: { token: string }) => ActorOf<Spec> | null;
   deps?: AppDepsDef<Spec>;
   programs?: AppPrograms<Spec>;
   components?: ComponentControllers<Spec>;
+  styles?: unknown;
+  root?: (ctx: AppUIContext<Spec>) => unknown;
   ui?: (ctx: AppUIContext<Spec>) => unknown;
   resources: {
     [K in keyof Spec["Resources"]]: ResourceDef<
@@ -499,6 +538,18 @@ export type AppDef<Spec extends AppSpec> = {
       Spec["Resources"][K] extends ResourceSpec ? Spec["Resources"][K] : never
     >;
   };
+};
+
+export type RuntimeMigrationEdge = {
+  readonly from: string;
+  readonly to: string;
+  readonly migrate?: Record<
+    string,
+    {
+      readonly state?: (state: any) => any;
+      readonly event?: (name: string, payload: any) => { name: string; payload: any };
+    }
+  >;
 };
 
 type EventForCmd<R extends ResourceSpec, Cmd extends CommandSpec> =
@@ -601,19 +652,31 @@ export type App<Spec extends AppSpec> = {
       actor: ActorOf<Spec>;
       name: string;
       payload: any;
+      hash?: string;
     },
     eventVersion?: number,
+    eventHash?: string,
   ) => void;
   upcastEvent: (
     resource: string,
     event: {
       name: string;
       payload: any;
+      hash?: string;
     },
     eventVersion?: number,
-  ) => { name: string; payload: any; version: number };
-  snapshot: (state: any, seq: number) => { version: number; seq: number; data: unknown };
-  restore: (resource: string, snap: { version: number; data: unknown }) => any;
+    eventHash?: string,
+  ) => { name: string; payload: any; version: number; hash?: string };
+  snapshot: (
+    state: any,
+    seq: number,
+  ) => {
+    version: number;
+    seq: number;
+    data: unknown;
+    hash?: string;
+  };
+  restore: (resource: string, snap: { version: number; data: unknown; hash?: string }) => any;
   runCommand: (
     resource: string,
     state: any,
@@ -678,9 +741,18 @@ export function defineApp<Spec extends AppSpec, Prev extends App<any> = never>(
       if (!res) return undefined;
       return structuredClone(res.state);
     },
-    applyEvent: (r, s, e, ev) => applyEventImpl(runtimeDef, r, s, e, ev, previous),
-    upcastEvent: (r, e, ev) => upcastEventImpl(runtimeDef, r, e, ev, previous),
-    snapshot: (s, seq) => ({ version: resolvedDef.version, seq, data: structuredClone(s) }),
+    applyEvent: (r, s, e, ev, hash) => applyEventImpl(runtimeDef, r, s, e, ev, hash, previous),
+    upcastEvent: (r, e, ev, hash) => upcastEventImpl(runtimeDef, r, e, ev, hash, previous),
+    snapshot: (s, seq) => {
+      const snapshot = { version: resolvedDef.version, seq, data: structuredClone(s) } as {
+        version: number;
+        seq: number;
+        data: unknown;
+        hash?: string;
+      };
+      if (resolvedDef.migrationHash) snapshot.hash = resolvedDef.migrationHash;
+      return snapshot;
+    },
     restore: (r, snap) => restoreImpl(runtimeDef, r, snap, previous),
     runCommand: (r, s, a, k, n, args, onE, onSP, onErr) =>
       runCommandImpl(runtimeDef, r, s, a, k, n, args, onE, onSP, onErr),
@@ -694,13 +766,17 @@ function defaultIdentify<Spec extends AppSpec>({ token }: { token: string }): Ac
 function restoreImpl<S extends AppSpec>(
   def: ResolvedAppDef<S>,
   resource: string,
-  snap: { version: number; data: unknown },
+  snap: { version: number; data: unknown; hash?: string },
   previous?: App<any>,
 ): any {
   const res = def.resources[resource];
   if (!res) return undefined;
   const state = structuredClone(res.state);
   if (!snap) return state;
+  if (snap.hash && def.migrationHash) {
+    if (snap.hash === def.migrationHash) return structuredClone(snap.data);
+    return migrateStateByHash(def, resource, snap.hash, def.migrationHash, snap.data);
+  }
   if (snap.version === def.version) return structuredClone(snap.data);
   if (snap.version < def.version && previous) {
     const links: App<any>[] = [];
@@ -738,8 +814,10 @@ function applyEventImpl<S extends AppSpec>(
     actor: ActorOf<S>;
     name: string;
     payload: any;
+    hash?: string;
   },
   eventVersion?: number,
+  eventHash?: string,
   previous?: App<any>,
 ): void {
   const { name, payload } = upcastEventImpl(
@@ -747,6 +825,7 @@ function applyEventImpl<S extends AppSpec>(
     resource,
     { name: event.name, payload: event.payload },
     eventVersion,
+    eventHash ?? event.hash,
     previous,
   );
   const handler = def.resources[resource]?.events[name];
@@ -760,12 +839,30 @@ function upcastEventImpl<S extends AppSpec>(
   event: {
     name: string;
     payload: any;
+    hash?: string;
   },
   eventVersion?: number,
+  eventHash?: string,
   previous?: App<any>,
-): { name: string; payload: any; version: number } {
+): { name: string; payload: any; version: number; hash?: string } {
   let name = event.name;
   let payload = event.payload;
+  const sourceHash = eventHash ?? event.hash;
+  if (sourceHash && def.migrationHash) {
+    if (sourceHash !== def.migrationHash) {
+      const upcasted = migrateEventByHash(
+        def,
+        resource,
+        sourceHash,
+        def.migrationHash,
+        name,
+        payload,
+      );
+      name = upcasted.name;
+      payload = upcasted.payload;
+    }
+    return { name, payload, version: def.version, hash: def.migrationHash };
+  }
   if (eventVersion !== undefined && eventVersion < def.version && previous) {
     const links: App<any>[] = [];
     let cur: App<any> | undefined = previous;
@@ -789,6 +886,76 @@ function upcastEventImpl<S extends AppSpec>(
     }
   }
   return { name, payload, version: def.version };
+}
+
+export function installAppMigrations<Spec extends AppSpec>(
+  app: App<Spec>,
+  options: {
+    hash?: string;
+    migrations?: readonly RuntimeMigrationEdge[];
+  },
+): App<Spec> {
+  if (options.hash) {
+    (app.def as any).migrationHash = options.hash;
+  }
+  (app.def as any).migrations = [...(options.migrations ?? [])];
+  return app;
+}
+
+function migrateStateByHash<S extends AppSpec>(
+  def: ResolvedAppDef<S>,
+  resource: string,
+  from: string,
+  to: string,
+  data: unknown,
+): any {
+  const path = findMigrationPath(def, from, to);
+  let current = structuredClone(data);
+  for (const edge of path) {
+    current = edge.migrate?.[resource]?.state?.(current) ?? current;
+  }
+  return current;
+}
+
+function migrateEventByHash<S extends AppSpec>(
+  def: ResolvedAppDef<S>,
+  resource: string,
+  from: string,
+  to: string,
+  name: string,
+  payload: any,
+): { name: string; payload: any } {
+  const path = findMigrationPath(def, from, to);
+  let current = { name, payload };
+  for (const edge of path) {
+    current = edge.migrate?.[resource]?.event?.(current.name, current.payload) ?? current;
+  }
+  return current;
+}
+
+function findMigrationPath<S extends AppSpec>(
+  def: ResolvedAppDef<S>,
+  from: string,
+  to: string,
+): RuntimeMigrationEdge[] {
+  const migrations = ((def as any).migrations ?? []) as RuntimeMigrationEdge[];
+  const queue: Array<{ hash: string; path: RuntimeMigrationEdge[] }> = [{ hash: from, path: [] }];
+  const seen = new Set<string>([from]);
+
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    if (current.hash === to) return current.path;
+
+    for (const edge of migrations) {
+      if (edge.from !== current.hash || seen.has(edge.to)) continue;
+      const nextPath = [...current.path, edge];
+      if (edge.to === to) return nextPath;
+      seen.add(edge.to);
+      queue.push({ hash: edge.to, path: nextPath });
+    }
+  }
+
+  throw new Error(`No migration path from ${from} to ${to}.`);
 }
 
 function runCommandImpl<S extends AppSpec>(

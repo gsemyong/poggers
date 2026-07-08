@@ -1,6 +1,8 @@
 import type { ActorOf, App, AppSpec, EnvironmentDeps, EnvironmentName } from "./app";
 import { type ServeOpts, type ServerHandle, type WebLiveReloadOpts } from "./server";
 import type { AppProgram, WorkerDef, WorkerDurabilityStore } from "./worker";
+export { installAppMigrations } from "./app";
+export type { RuntimeMigrationEdge } from "./app";
 export type AppWorker<Spec extends AppSpec, Deps> = {
   worker: WorkerDef<Spec, Deps>;
   deps: Deps;
@@ -90,6 +92,34 @@ export type AppConventionIssue = {
   file: string;
   message: string;
 };
+export type MigrationSnapshotResult = {
+  hash: string;
+  path: string;
+  created: boolean;
+};
+export type MigrationCreateResult =
+  | {
+      kind: "initial";
+      snapshot: MigrationSnapshotResult;
+    }
+  | {
+      kind: "unchanged";
+      snapshot: MigrationSnapshotResult;
+    }
+  | {
+      kind: "created";
+      fromHash: string;
+      toHash: string;
+      snapshot: MigrationSnapshotResult;
+      path: string;
+    }
+  | {
+      kind: "exists";
+      fromHash: string;
+      toHash: string;
+      snapshot: MigrationSnapshotResult;
+      path: string;
+    };
 export declare function resolveApp(appDir: string): AppPaths;
 export declare function loadApp<Spec extends AppSpec = AppSpec>(
   appDir: string,
@@ -98,4 +128,12 @@ export declare function runApp(opts: RunAppOpts): Promise<ServerHandle>;
 export declare function bundleApp(opts: BundleAppOpts): Promise<void>;
 export declare function buildApp(opts: BuildAppOpts): Promise<void>;
 export declare function writeAppTypes(appDir: string): Promise<string | undefined>;
+export declare function writeMigrationSnapshot(appDir: string): Promise<MigrationSnapshotResult>;
+export declare function createMigration(
+  appDir: string,
+  name: string,
+): Promise<MigrationCreateResult>;
+export declare function resolveDependencyMount<Deps = Record<string, never>>(
+  mount: unknown,
+): Promise<Deps>;
 export declare function checkAppConventions(appDir: string): AppConventionIssue[];

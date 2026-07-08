@@ -174,8 +174,10 @@ function wire<Spec extends AppSpec>(
         actor: ev.actor as ActorOf<Spec>,
         name: ev.name,
         payload: ev.payload,
+        hash: ev.hash,
       },
       ev.version,
+      ev.hash,
     );
     updateCursor(id, ev.seq);
     dirty = true;

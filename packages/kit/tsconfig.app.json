@@ -8,7 +8,7 @@
     "jsxImportSource": "@poggers/kit",
     "allowJs": true,
     "allowImportingTsExtensions": true,
-    "types": ["bun"],
+    "types": ["@poggers/kit/globals"],
     "moduleResolution": "bundler",
     "verbatimModuleSyntax": true,
     "noEmit": true,
@@ -18,8 +18,18 @@
     "noUncheckedIndexedAccess": true,
     "noImplicitOverride": true,
     "paths": {
-      "@poggers/app": ["${configDir}/src/poggers-app.d.ts"]
+      "@poggers/app": ["${configDir}/.poggers/types/app.d.ts"],
+      "app": ["${configDir}/src/app.ts"],
+      "deps": ["${configDir}/src/deps.ts"],
+      "types": ["${configDir}/src/types.ts"],
+      "src/*": ["${configDir}/src/*"],
+      "ui/*": ["${configDir}/src/ui/*"]
     }
   },
-  "include": ["${configDir}/src/**/*.ts", "${configDir}/src/**/*.tsx", "${configDir}/src/**/*.d.ts"]
+  "include": [
+    "${configDir}/src/**/*.ts",
+    "${configDir}/src/**/*.tsx",
+    "${configDir}/src/**/*.d.ts"
+  ],
+  "exclude": ["${configDir}/src/deps.ts", "${configDir}/src/migrations/**/*.ts"]
 }

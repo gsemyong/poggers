@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "postinstall": "poggers sync",
     "dev": "poggers dev",
     "build": "poggers build --outfile dist/chat",
     "start": "./dist/chat",

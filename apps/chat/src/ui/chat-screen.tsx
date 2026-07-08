@@ -1,6 +1,6 @@
 import { createChatLayout, createComposer, setPreset, useChat } from "@poggers/app";
 import { For } from "@poggers/kit/ui";
-import { Message, StreamingMessage } from "./message";
+import { Message, StreamingMessage } from "ui/message";
 
 export function ChatScreen() {
   const chat = useChat({ sessionId: "default" });

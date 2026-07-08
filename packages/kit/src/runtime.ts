@@ -1,11 +1,25 @@
-import type { ActorOf, App, AppSpec, EnvironmentDeps, EnvironmentName } from "./app";
+import {
+  defineApp,
+  installAppMigrations,
+  type ActorOf,
+  type App,
+  type AppSpec,
+  type EnvironmentDeps,
+  type EnvironmentName,
+  type RuntimeMigrationEdge,
+} from "./app";
 import { serve, type ServeOpts, type ServerHandle, type WebLiveReloadOpts } from "./server";
+import { defineStyles } from "./style";
 import type { AppProgram, WorkerDef, WorkerDurabilityStore } from "./worker";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { $ } from "bun";
+
+export { installAppMigrations };
+export type { RuntimeMigrationEdge };
 
 export type AppWorker<Spec extends AppSpec, Deps> = {
   worker: WorkerDef<Spec, Deps>;
@@ -132,6 +146,36 @@ export type AppConventionIssue = {
   message: string;
 };
 
+export type MigrationSnapshotResult = {
+  hash: string;
+  path: string;
+  created: boolean;
+};
+
+export type MigrationCreateResult =
+  | {
+      kind: "initial";
+      snapshot: MigrationSnapshotResult;
+    }
+  | {
+      kind: "unchanged";
+      snapshot: MigrationSnapshotResult;
+    }
+  | {
+      kind: "created";
+      fromHash: string;
+      toHash: string;
+      snapshot: MigrationSnapshotResult;
+      path: string;
+    }
+  | {
+      kind: "exists";
+      fromHash: string;
+      toHash: string;
+      snapshot: MigrationSnapshotResult;
+      path: string;
+    };
+
 const poggersJsx = {
   runtime: "automatic",
   importSource: "@poggers/kit",
@@ -148,7 +192,9 @@ export function resolveApp(appDir: string): AppPaths {
     resolve(resolvedAppDir, "api/index.ts"),
   ]);
   const ui = firstExisting([
+    resolve(resolvedAppDir, "src/app.ts"),
     resolve(resolvedAppDir, "src/app.tsx"),
+    resolve(resolvedAppDir, "app.ts"),
     resolve(resolvedAppDir, "app.tsx"),
   ]);
   const sourceDir = ui ? dirname(ui) : resolve(resolvedAppDir, "src");
@@ -172,10 +218,12 @@ export function resolveApp(appDir: string): AppPaths {
     resolve(sourceDir, "worker.ts"),
     resolve(resolvedAppDir, "worker.ts"),
   ]);
-  const deps = firstExisting([resolve(resolvedAppDir, "deps.ts")]);
+  const deps = firstExisting([resolve(sourceDir, "deps.ts")]);
 
   if (!ui) {
-    throw new Error(`App is missing src/app.tsx or app.tsx in ${resolvedAppDir}.`);
+    throw new Error(
+      `App is missing src/app.ts, src/app.tsx, app.ts, or app.tsx in ${resolvedAppDir}.`,
+    );
   }
 
   const embedded = !api;
@@ -198,14 +246,16 @@ export async function loadApp<Spec extends AppSpec = AppSpec>(
   appDir: string,
 ): Promise<LoadedApp<Spec>> {
   const paths = resolveApp(appDir);
-  await writePoggersAppTypes(paths);
+  await writeGeneratedTypeArtifacts(paths);
   const apiModule = await importBuiltAppModule(paths);
   const depsModule = paths.deps ? await import(pathToFileURL(paths.deps).href) : {};
-  const api = (apiModule.api ?? apiModule.default) as App<Spec> | undefined;
+  const api = normalizeLoadedApp<Spec>(apiModule);
 
   if (!api?.def?.resources) {
     throw new Error(`App module must export a Poggers app from ${paths.api}.`);
   }
+
+  installAppMigrations(api, await loadMigrationRegistry(paths));
 
   const worker = paths.worker ? await loadWorker<Spec>(paths.worker, paths.appDir) : undefined;
   const program = await loadProgram(
@@ -217,6 +267,15 @@ export async function loadApp<Spec extends AppSpec = AppSpec>(
   );
 
   return { paths, api, worker, program };
+}
+
+function normalizeLoadedApp<Spec extends AppSpec>(
+  module: Record<string, any>,
+): App<Spec> | undefined {
+  const candidate = module.api ?? module.default;
+  if (!candidate) return undefined;
+  if (candidate.def?.resources) return candidate as App<Spec>;
+  return defineApp(candidate);
 }
 
 export async function runApp(opts: RunAppOpts): Promise<ServerHandle> {
@@ -254,13 +313,14 @@ export async function runApp(opts: RunAppOpts): Promise<ServerHandle> {
 
 export async function bundleApp(opts: BundleAppOpts): Promise<void> {
   const paths = resolveApp(opts.appDir);
+  await writeGeneratedTypeArtifacts(paths);
   const browser = await writeBrowserEntrypoint(paths);
   const result = await Bun.build({
     entrypoints: [browser.entrypoint],
     format: "esm",
     jsx: poggersJsx,
     minify: opts.minify ?? true,
-    outdir: opts.outdir ?? resolve(paths.appDir, ".app/build/web"),
+    outdir: opts.outdir ?? resolve(paths.appDir, ".poggers/build/web"),
     plugins: browser.plugins,
     target: "browser",
   });
@@ -272,6 +332,7 @@ export async function bundleApp(opts: BundleAppOpts): Promise<void> {
 
 export async function buildApp(opts: BuildAppOpts): Promise<void> {
   const paths = resolveApp(opts.appDir);
+  await writeGeneratedTypeArtifacts(paths);
   const browser = await writeBrowserEntrypoint(paths);
   const browserBuild = await Bun.build({
     entrypoints: [browser.entrypoint],
@@ -295,8 +356,9 @@ export async function buildApp(opts: BuildAppOpts): Promise<void> {
   const appEntrypoint = await writeBuiltAppModule(
     paths.api,
     resolve(buildDir, "app.generated.js"),
-    [createPoggersServerAppStubPlugin(paths)],
+    [createPoggersAppAliasesPlugin(paths), createPoggersServerAppStubPlugin(paths)],
   );
+  const migrationRegistry = await writeMigrationRegistry(paths, buildDir);
   const serverEntrypoint = resolve(buildDir, "server.generated.ts");
   await mkdir(buildDir, { recursive: true });
   await mkdir(dirname(resolve(opts.outfile)), { recursive: true });
@@ -309,6 +371,7 @@ export async function buildApp(opts: BuildAppOpts): Promise<void> {
       browser.entrypoint,
       browserBundle,
       browserStyle,
+      migrationRegistry,
       opts.title,
     ),
     "utf8",
@@ -319,30 +382,197 @@ export async function buildApp(opts: BuildAppOpts): Promise<void> {
 
 export async function writeAppTypes(appDir: string): Promise<string | undefined> {
   const paths = resolveApp(appDir);
-  return writePoggersAppTypes(paths);
+  return writeGeneratedTypeArtifacts(paths);
+}
+
+export async function writeMigrationSnapshot(appDir: string): Promise<MigrationSnapshotResult> {
+  const paths = resolveApp(appDir);
+  if (!paths.types) throw new Error(`App is missing src/types.ts in ${paths.appDir}.`);
+
+  const typesSource = await readFile(paths.types, "utf8");
+  const hash = structuralHash(typesSource);
+  const snapshotsDir = resolve(paths.sourceDir, "migrations/snapshots");
+  const snapshotPath = resolve(snapshotsDir, `${hash}.ts`);
+  const created = !existsSync(snapshotPath);
+
+  if (created) {
+    await mkdir(snapshotsDir, { recursive: true });
+    await writeFile(
+      snapshotPath,
+      `export const hash = ${JSON.stringify(hash)};\n\n${typesSource.trimEnd()}\n`,
+      "utf8",
+    );
+  }
+
+  return { hash, path: snapshotPath, created };
+}
+
+async function loadMigrationRegistry(paths: AppPaths): Promise<{
+  hash?: string;
+  migrations: RuntimeMigrationEdge[];
+}> {
+  const hash = await currentStructuralHash(paths);
+  const migrations: RuntimeMigrationEdge[] = [];
+
+  for (const file of await migrationEdgeFiles(paths.sourceDir)) {
+    const module = await import(`${pathToFileURL(file).href}?t=${Date.now()}`);
+    const edge = module.default ?? module.migration;
+    if (edge) migrations.push(edge as RuntimeMigrationEdge);
+  }
+
+  return { hash, migrations };
+}
+
+async function writeMigrationRegistry(paths: AppPaths, buildDir: string): Promise<string> {
+  const output = resolve(buildDir, "migrations.generated.ts");
+  const hash = await currentStructuralHash(paths);
+  const files = await migrationEdgeFiles(paths.sourceDir);
+  const imports = files
+    .map(
+      (file, index) =>
+        `import migration${index} from ${JSON.stringify(importSpecifier(output, file))};`,
+    )
+    .join("\n");
+  const migrations = files.map((_, index) => `migration${index}`).join(", ");
+
+  await mkdir(dirname(output), { recursive: true });
+  await writeFile(
+    output,
+    `${imports}${imports ? "\n\n" : ""}export const hash = ${hash === undefined ? "undefined" : JSON.stringify(hash)};
+export const migrations = [${migrations}];
+`,
+    "utf8",
+  );
+
+  return output;
+}
+
+async function currentStructuralHash(paths: AppPaths): Promise<string | undefined> {
+  if (!paths.types) return undefined;
+  return structuralHash(await readFile(paths.types, "utf8"));
+}
+
+async function migrationEdgeFiles(sourceDir: string): Promise<string[]> {
+  const migrationsDir = resolve(sourceDir, "migrations");
+  if (!existsSync(migrationsDir)) return [];
+
+  const entries = await readdir(migrationsDir, { withFileTypes: true });
+  return entries
+    .filter((entry) => entry.isFile() && /\.[cm]?tsx?$/.test(entry.name))
+    .map((entry) => resolve(migrationsDir, entry.name))
+    .sort();
+}
+
+export async function createMigration(
+  appDir: string,
+  name: string,
+): Promise<MigrationCreateResult> {
+  const paths = resolveApp(appDir);
+  const previous = await latestMigrationSnapshot(paths.sourceDir);
+  const snapshot = await writeMigrationSnapshot(appDir);
+
+  if (!previous) return { kind: "initial", snapshot };
+  if (previous.hash === snapshot.hash) return { kind: "unchanged", snapshot };
+
+  const migrationName = `${new Date().toISOString().slice(0, 10)}-${slugifyMigrationName(name)}-${previous.hash}-${snapshot.hash}.ts`;
+  const migrationPath = resolve(paths.sourceDir, "migrations", migrationName);
+
+  if (existsSync(migrationPath)) {
+    return {
+      kind: "exists",
+      fromHash: previous.hash,
+      toHash: snapshot.hash,
+      snapshot,
+      path: migrationPath,
+    };
+  }
+
+  await mkdir(dirname(migrationPath), { recursive: true });
+  await writeFile(
+    migrationPath,
+    `import type { Migration } from "@poggers/app";
+import type { App as From } from "./snapshots/${previous.hash}.ts";
+import type { App as To } from "./snapshots/${snapshot.hash}.ts";
+
+export default {
+  draft: true,
+  from: ${JSON.stringify(previous.hash)},
+  to: ${JSON.stringify(snapshot.hash)},
+  migrate: {},
+} satisfies Migration<From, To>;
+`,
+    "utf8",
+  );
+
+  return {
+    kind: "created",
+    fromHash: previous.hash,
+    toHash: snapshot.hash,
+    snapshot,
+    path: migrationPath,
+  };
+}
+
+function structuralHash(source: string): string {
+  const normalized = source
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/[^\n\r]*/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return createHash("sha256").update(normalized).digest("hex").slice(0, 12);
+}
+
+async function latestMigrationSnapshot(
+  sourceDir: string,
+): Promise<{ hash: string; path: string } | undefined> {
+  const snapshotsDir = resolve(sourceDir, "migrations/snapshots");
+  if (!existsSync(snapshotsDir)) return undefined;
+
+  const snapshots: Array<{ hash: string; path: string; mtimeMs: number }> = [];
+  for (const entry of await readdir(snapshotsDir)) {
+    const hash = /^([a-f0-9]{12})\.ts$/.exec(entry)?.[1];
+    if (!hash) continue;
+    const path = resolve(snapshotsDir, entry);
+    const info = await stat(path);
+    snapshots.push({ hash, path, mtimeMs: info.mtimeMs });
+  }
+
+  snapshots.sort((a, b) => b.mtimeMs - a.mtimeMs || b.hash.localeCompare(a.hash));
+  return snapshots[0];
+}
+
+function slugifyMigrationName(name: string): string {
+  return (
+    name
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "migration"
+  );
 }
 
 export function checkAppConventions(appDir: string): AppConventionIssue[] {
   const paths = resolveApp(appDir);
-  if (!paths.styleSource) return [];
-
   const issues: AppConventionIssue[] = [];
   const appSource = readFileSync(paths.ui, "utf8");
+  const strictStyles = Boolean(paths.styleSource || /\bstyles\s*:/.test(appSource));
+  if (!strictStyles) return [];
+
   collectForbiddenGeneratedSurface(paths.ui, appSource, issues);
   collectForbiddenAppStyling(paths.ui, appSource, issues);
   if (appSource.includes("@poggers/kit/style")) {
     issues.push({
       file: paths.ui,
-      message: "app.tsx must not import @poggers/kit/style; put presets in styles.ts.",
+      message: "app.ts must not import @poggers/kit/style; put styles in the app object.",
     });
   }
 
-  const componentsDir = resolve(paths.sourceDir, "components");
-  for (const file of sourceFiles(componentsDir)) {
+  const uiDir = resolve(paths.sourceDir, "ui");
+  for (const file of sourceFiles(uiDir)) {
     const source = readFileSync(file, "utf8");
-    collectComponentFileConventions(componentsDir, file, issues);
+    collectUiFileConventions(uiDir, file, issues);
     collectForbiddenGeneratedSurface(file, source, issues);
-    collectForbiddenComponentStyling(file, source, issues);
+    collectForbiddenUiStyling(file, source, issues);
   }
 
   if (paths.types) {
@@ -352,13 +582,10 @@ export function checkAppConventions(appDir: string): AppConventionIssue[] {
 
   if (paths.styleSource) {
     const stylesSource = readFileSync(paths.styleSource, "utf8");
-    if (
-      /from\s+["']\.\/helpers\//.test(stylesSource) ||
-      /from\s+["']\.\.\/helpers\//.test(stylesSource)
-    ) {
+    if (/from\s+["']\.\/lib\//.test(stylesSource) || /from\s+["']\.\.\/lib\//.test(stylesSource)) {
       issues.push({
         file: paths.styleSource,
-        message: "styles.ts must stay visual; do not import app helper/runtime modules.",
+        message: "styles.ts must stay visual; do not import app lib/runtime modules.",
       });
     }
   }
@@ -456,24 +683,34 @@ async function loadProgram<Spec extends AppSpec, Env extends EnvironmentName<Spe
 
   const envName = String(env);
   const capitalizedEnv = capitalize(envName);
-  const depsFactory =
+  const depsDefault = depsModule.default;
+  const depsMounts = isRecord(depsDefault) ? depsDefault : {};
+  const defaultDepsMount =
+    depsDefault !== undefined && !(envName in depsMounts) ? depsDefault : undefined;
+  const depsMount =
     api.def.deps?.[env] ??
+    depsMounts[envName] ??
+    defaultDepsMount ??
     apiModule[`create${capitalizedEnv}Deps`] ??
     apiModule.createProgramDeps ??
     depsModule[`create${capitalizedEnv}Deps`] ??
     depsModule.createProgramDeps;
-  const deps =
-    typeof depsFactory === "function"
-      ? await depsFactory()
-      : `${envName}Deps` in apiModule
-        ? await apiModule[`${envName}Deps`]
-        : `${envName}Deps` in depsModule
-          ? await depsModule[`${envName}Deps`]
-          : "programDeps" in apiModule
-            ? await apiModule.programDeps
-            : "programDeps" in depsModule
-              ? await depsModule.programDeps
-              : {};
+  const legacyDepsMount =
+    `${envName}Deps` in apiModule
+      ? apiModule[`${envName}Deps`]
+      : `${envName}Deps` in depsModule
+        ? depsModule[`${envName}Deps`]
+        : envName in depsMounts
+          ? depsMounts[envName]
+          : (defaultDepsMount ??
+            ("programDeps" in apiModule
+              ? apiModule.programDeps
+              : "programDeps" in depsModule
+                ? depsModule.programDeps
+                : {}));
+  const deps = await resolveDependencyMount<EnvironmentDeps<Spec, Env>>(
+    depsMount ?? legacyDepsMount,
+  );
 
   return {
     env,
@@ -483,6 +720,67 @@ async function loadProgram<Spec extends AppSpec, Env extends EnvironmentName<Spe
     actor: apiModule.programActor ?? depsModule.programActor,
     store: apiModule.programStore ?? depsModule.programStore,
   };
+}
+
+export async function resolveDependencyMount<Deps = Record<string, never>>(
+  mount: unknown,
+): Promise<Deps> {
+  const resolved = typeof mount === "function" ? await mount() : await mount;
+  if (!isDependencyConfig(resolved)) return (resolved ?? {}) as Deps;
+
+  const mode =
+    typeof resolved.mode === "function"
+      ? await resolved.mode()
+      : (resolved.mode ?? dependencyModeFromEnv() ?? "production");
+  const providers =
+    resolved.deps ??
+    Object.fromEntries(
+      Object.entries(resolved).filter(([name]) => name !== "mode" && name !== "deps"),
+    );
+  const deps: Record<string, unknown> = {};
+  for (const [name, entry] of Object.entries(providers)) {
+    if (isDependencyProviderSet(entry)) {
+      const provider = entry[mode] ?? entry.production;
+      if (provider === undefined)
+        throw new Error(`Dependency ${name} is missing a ${mode} provider.`);
+      deps[name] = await resolveDependencyProvider(provider);
+    } else {
+      deps[name] = await resolveDependencyProvider(entry);
+    }
+  }
+  return deps as Deps;
+}
+
+function dependencyModeFromEnv(): string | undefined {
+  const env = (
+    globalThis as typeof globalThis & {
+      process?: { env?: Record<string, string | undefined> };
+    }
+  ).process?.env;
+  return env?.POGGERS_DEPS ?? env?.POGGERS_DEPS_MODE ?? env?.POGGERS_DEPENDENCY_MODE;
+}
+
+function isDependencyConfig(value: unknown): value is {
+  mode?: string | (() => string | Promise<string>);
+  deps?: Record<string, unknown>;
+  [name: string]: unknown;
+} {
+  if (!isRecord(value)) return false;
+  if ("mode" in value) return true;
+  if ("deps" in value) return isRecord(value.deps);
+  return Object.entries(value).some(([, entry]) => isDependencyProviderSet(entry));
+}
+
+function isDependencyProviderSet(value: unknown): value is Record<string, unknown> {
+  return isRecord(value) && "production" in value;
+}
+
+async function resolveDependencyProvider(provider: unknown): Promise<unknown> {
+  return typeof provider === "function" ? await provider() : provider;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
 function selectProgramEnv<Spec extends AppSpec>(api: App<Spec>): EnvironmentName<Spec> {
@@ -503,36 +801,31 @@ async function writeBrowserEntrypoint(
 ): Promise<BrowserEntrypoint> {
   const buildDir = options.dev ? frameworkDevDir(paths) : frameworkBuildDir(paths);
   const entrypoint = resolve(buildDir, "browser.entry.tsx");
+  await mkdir(buildDir, { recursive: true });
+  await writePoggersAppTypes(paths);
   const compiledStyles = await compileBrowserStyles(paths, buildDir);
-  const plugins = paths.styleSource
-    ? [createPoggersKitSourcePlugin(), createPoggersAppPlugin(paths)]
-    : [createPoggersKitSourcePlugin()];
+  const plugins =
+    paths.embedded || paths.styleSource
+      ? [
+          createPoggersKitSourcePlugin(),
+          createPoggersAppAliasesPlugin(paths),
+          createPoggersAppPlugin(paths),
+        ]
+      : [createPoggersKitSourcePlugin(), createPoggersAppAliasesPlugin(paths)];
   const styleImport = compiledStyles
     ? `import ${JSON.stringify(importSpecifier(entrypoint, compiledStyles))};\n`
     : "";
-  await mkdir(buildDir, { recursive: true });
-  await writePoggersAppTypes(paths);
-  const source = paths.styleSource
+  const source = paths.embedded
     ? nativeBrowserEntrySource(styleImport, {
         rootImport: `import { Root } from "@poggers/app";`,
         rootExpression: "Root({})",
         dev: Boolean(options.dev),
       })
-    : paths.embedded
-      ? nativeBrowserEntrySource(styleImport, {
-          rootImport: `import { createAppUI, render } from "@poggers/kit/ui";
-import app from ${JSON.stringify(importSpecifier(entrypoint, paths.api))};
-
-const Root = createAppUI(app);`,
-          rootExpression: "Root({})",
-          renderImported: true,
-          dev: Boolean(options.dev),
-        })
-      : nativeBrowserEntrySource(styleImport, {
-          rootImport: `import Root from ${JSON.stringify(importSpecifier(entrypoint, paths.ui))};`,
-          rootExpression: "Root({})",
-          dev: Boolean(options.dev),
-        });
+    : nativeBrowserEntrySource(styleImport, {
+        rootImport: `import Root from ${JSON.stringify(importSpecifier(entrypoint, paths.ui))};`,
+        rootExpression: "Root({})",
+        dev: Boolean(options.dev),
+      });
   await writeFile(entrypoint, source, "utf8");
   return {
     entrypoint,
@@ -545,17 +838,26 @@ const Root = createAppUI(app);`,
 
 async function writeChangedDevArtifacts(paths: AppPaths, changedPath: string): Promise<void> {
   const changed = resolve(changedPath);
-  if (paths.styleSource && changed === resolve(paths.styleSource)) {
+  if (shouldRebuildBrowserStyles(paths, changed)) {
     await compileBrowserStyles(paths, frameworkDevDir(paths));
-    return;
   }
-  if (paths.styles && changed === resolve(paths.styles)) {
-    await compileBrowserStyles(paths, frameworkDevDir(paths));
-    return;
+  if (changed === resolve(paths.api) || (paths.types && changed === resolve(paths.types))) {
+    await writeGeneratedTypeArtifacts(paths);
   }
-  if (paths.types && changed === resolve(paths.types)) {
-    await writePoggersAppTypes(paths);
-  }
+}
+
+function shouldRebuildBrowserStyles(paths: AppPaths, changed: string): boolean {
+  if (paths.styleSource && changed === resolve(paths.styleSource)) return true;
+  if (paths.styles && changed === resolve(paths.styles)) return true;
+  if (!isSourceReloadFile(paths, changed)) return false;
+  return Boolean(paths.embedded || paths.styleSource || paths.styles);
+}
+
+function isSourceReloadFile(paths: AppPaths, changed: string): boolean {
+  const rel = relative(paths.sourceDir, changed).replaceAll("\\", "/");
+  if (!rel || rel.startsWith("..")) return false;
+  if (rel.startsWith(".poggers/") || rel.startsWith("migrations/")) return false;
+  return /\.(css|[cm]?[jt]sx?)$/.test(rel);
 }
 
 async function compileBrowserStyles(
@@ -564,9 +866,11 @@ async function compileBrowserStyles(
 ): Promise<string | undefined> {
   return paths.styleSource
     ? compilePoggersStyles(paths, buildDir)
-    : paths.styles
-      ? compileTailwindStyles(paths, buildDir)
-      : undefined;
+    : paths.embedded
+      ? compileEmbeddedPoggersStyles(paths, buildDir)
+      : paths.styles
+        ? compileTailwindStyles(paths, buildDir)
+        : undefined;
 }
 
 function nativeBrowserEntrySource(
@@ -657,14 +961,37 @@ async function compilePoggersStyles(paths: AppPaths, buildDir: string): Promise<
   const output = resolve(buildDir, "styles.generated.css");
   await mkdir(buildDir, { recursive: true });
   const stylesModule = await importBuiltSourceModule(paths.styleSource, buildDir, "style");
-  const styles = stylesModule.default ?? stylesModule.styles;
-  const css = renderPoggersCss(styles?.def ?? {});
+  const styles = normalizeLoadedStyles(stylesModule.default ?? stylesModule.styles);
+  const css = renderPoggersCss(styles.def);
   await writeFile(output, css, "utf8");
   return output;
 }
 
+async function compileEmbeddedPoggersStyles(
+  paths: AppPaths,
+  buildDir: string,
+): Promise<string | undefined> {
+  const apiModule = await importBuiltAppModule(paths);
+  const api = normalizeLoadedApp(apiModule);
+  const rawStyles = api?.def?.styles;
+  if (!rawStyles) return paths.styles ? compileTailwindStyles(paths, buildDir) : undefined;
+
+  const output = resolve(buildDir, "styles.generated.css");
+  await mkdir(buildDir, { recursive: true });
+  const styles = normalizeLoadedStyles(rawStyles);
+  const css = renderPoggersCss(styles.def);
+  await writeFile(output, css, "utf8");
+  return output;
+}
+
+function normalizeLoadedStyles(styles: any) {
+  if (styles?.def?.presets) return styles;
+  return defineStyles(styles ?? { presets: { default: {} } });
+}
+
 async function importBuiltAppModule(paths: AppPaths): Promise<Record<string, any>> {
   return importBuiltSourceModule(paths.api, frameworkDevDir(paths), "app", [
+    createPoggersAppAliasesPlugin(paths),
     createPoggersServerAppStubPlugin(paths),
   ]);
 }
@@ -738,6 +1065,34 @@ function createPoggersAppPlugin(paths: AppPaths): Bun.BunPlugin {
   };
 }
 
+function createPoggersAppAliasesPlugin(paths: AppPaths): Bun.BunPlugin {
+  return {
+    name: "poggers-app-aliases",
+    setup(build) {
+      build.onResolve({ filter: /^(?:app|deps|types|ui\/.*|src\/.*)$/ }, (args) => {
+        const target = resolveAppAlias(paths, args.path);
+        return target ? { path: target } : undefined;
+      });
+    },
+  };
+}
+
+function resolveAppAlias(paths: AppPaths, specifier: string): string | undefined {
+  if (specifier === "app") return paths.api;
+  if (specifier === "deps") return paths.deps;
+  if (specifier === "types") return paths.types;
+  if (specifier.startsWith("ui/")) {
+    return resolveSourceModule(resolve(paths.sourceDir, specifier));
+  }
+  if (specifier.startsWith("src/")) {
+    return resolveSourceModule(resolve(paths.sourceDir, specifier.slice("src/".length)));
+  }
+}
+
+function resolveSourceModule(path: string): string | undefined {
+  return firstExisting([path, `${path}.ts`, `${path}.tsx`, `${path}.mts`, `${path}.cts`]);
+}
+
 function createPoggersKitSourcePlugin(): Bun.BunPlugin {
   return {
     name: "poggers-kit-source",
@@ -780,9 +1135,11 @@ function createPoggersServerAppStubPlugin(paths: AppPaths): Bun.BunPlugin {
 function poggersAppModuleSource(paths: AppPaths): string {
   const surface = collectAppSurface(paths);
   const stylesImport = paths.styleSource
-    ? `import styles from ${JSON.stringify(paths.styleSource)};`
-    : `import { defineStyles } from "@poggers/kit/style";
-const styles = defineStyles({ presets: { default: {} } });`;
+    ? `import rawStyles from ${JSON.stringify(paths.styleSource)};`
+    : "";
+  const stylesDeclaration = paths.styleSource
+    ? "const styles = rawStyles;"
+    : "const styles = app.def.styles ?? { presets: { default: {} } };";
   const componentParts = JSON.stringify(componentPartsRecord(surface));
   const resourceExports = surface.resources
     .map(({ name: resource }) => {
@@ -801,12 +1158,15 @@ const styles = defineStyles({ presets: { default: {} } });`;
     })
     .join("\n\n");
 
-  return `import app from ${JSON.stringify(paths.api)};
+  return `import rawApp from ${JSON.stringify(paths.api)};
 ${stylesImport}
+import { defineApp } from "@poggers/kit";
 import { createHooks } from "@poggers/kit/style";
 import { createBrowserConnectOptions } from "@poggers/kit/ui";
 
 let hooks;
+const app = rawApp?.def?.resources ? rawApp : defineApp(rawApp);
+${stylesDeclaration}
 const components = ${componentParts};
 
 function getHooks() {
@@ -850,8 +1210,9 @@ export function start(connect) {
 
 export function Root(props = {}) {
   start(props.connect);
-  if (!app.def.ui) throw new Error("App definition does not include a ui(ctx) function.");
-  return app.def.ui(getHooks());
+  const root = app.def.root ?? app.def.ui;
+  if (!root) throw new Error("App definition does not include a root function.");
+  return root(getHooks());
 }
 
 export default Root;
@@ -969,6 +1330,7 @@ function collectAppSurface(paths: AppPaths): AppSurface {
   const source = readFileSync(paths.types, "utf8");
   const resourcesBlock = extractPropertyBlock(source, "Resources");
   const environmentsBlock = extractPropertyBlock(source, "Environments");
+  const depsType = extractPropertyValue(source, "Deps");
   const componentsBlock = extractPropertyBlock(source, "Components");
   const navigationBlock = extractPropertyBlock(source, "Navigation");
   const stylesBlock = extractPropertyBlock(source, "Styles");
@@ -1038,7 +1400,14 @@ function collectAppSurface(paths: AppPaths): AppSurface {
           name,
           depsType: `AppSpec["Environments"][${JSON.stringify(name)}] extends { Deps: infer Deps } ? Deps : EmptyObject`,
         }))
-      : [],
+      : depsType
+        ? [
+            {
+              name: "server",
+              depsType: `AppSpec extends { Deps: infer Deps } ? Deps : EmptyObject`,
+            },
+          ]
+        : [],
     components,
     navigation: navigationBlock
       ? readObjectMemberEntries(navigationBlock).map(({ name, value }) => ({
@@ -1438,7 +1807,9 @@ function resourceTypeDefinitions(resource: AppSurfaceResource): string {
     const commandType = `${typeName}ResourceCommands[${commandName}]`;
     const args = command.hasArgs ? `${commandType}["args"]` : "[]";
     const error = command.hasError ? `${commandType}["error"]` : "never";
-    return `  ${propertyKey(command.name)}(...args: ${args}): CommandReceipt<${error}>;`;
+    return `  ${propertyKey(command.name)}(
+    ...args: ${args}
+  ): CommandReceipt<${error}>;`;
   });
   return `${jsDoc(resource.doc, `Access the ${resource.name} resource.`)}
 type ${typeName}ResourceSpec = AppSpec["Resources"][${resourceName}];
@@ -1452,17 +1823,26 @@ export function use${capitalize(resource.name)}(key: ${typeName}ResourceKey): ${
 }
 
 function navigationTypes(surface: AppSurface): string {
-  const screens = surface.navigation.map(
-    (screen) =>
-      `  | { readonly name: ${JSON.stringify(screen.name)}; readonly params: ${screen.paramsType} }`,
-  );
+  const screens =
+    surface.navigation.length === 1
+      ? `{ readonly name: ${JSON.stringify(surface.navigation[0]!.name)}; readonly params: ${surface.navigation[0]!.paramsType} }`
+      : surface.navigation
+          .map(
+            (screen) =>
+              `  | { readonly name: ${JSON.stringify(screen.name)}; readonly params: ${screen.paramsType} }`,
+          )
+          .join("\n");
   const navFields = surface.navigation.map((screen) => {
     const params = screen.hasParams
       ? `params: ${screen.paramsType}`
       : `params?: ${screen.paramsType}`;
     return `  ${propertyKey(screen.name)}(${params}): void;`;
   });
-  return `export type AppScreen =\n${screens.join("\n")};
+  const screenType =
+    surface.navigation.length === 1
+      ? `export type AppScreen = ${screens};`
+      : `export type AppScreen =\n${screens};`;
+  return `${screenType}
 export type AppNavigation = {
 ${navFields.join("\n")}
 };`;
@@ -1503,14 +1883,17 @@ function componentTypeDefinitions(component: AppSurfaceComponent): string {
       ? `  derived: ${typeName}DerivedFactory;`
       : `  derived?: ${typeName}DerivedFactory;`,
   ];
+  const actionHandlerBlock = actionFields.length
+    ? `type ${typeName}ActionHandlers = {
+${actionFields.join("\n")}
+};`
+    : `type ${typeName}ActionHandlers = {};`;
   return `${jsDoc(component.doc, `Create a ${component.name} component instance.`)}
 type ${typeName}Input = ${inputType};
 type ${typeName}State = ${stateType};
 type ${typeName}Derived = ${derivedType};
 type ${typeName}Actions = ${actionsType};
-type ${typeName}ActionHandlers = {
-${actionFields.join("\n")}
-};
+${actionHandlerBlock}
 type ${typeName}Refs = {
 ${refFields.join("\n")}
 };
@@ -1547,31 +1930,52 @@ export function create${capitalize(component.name)}(${component.needsInput ? "in
 
 function appDefinitionTypes(surface: AppSurface): string {
   const resourceDefinitions = surface.resources.map(resourceDefinitionTypes).join("\n\n");
+  const environmentDefinitions = environmentDefinitionTypes(surface);
   const programDefinitions = programDefinitionTypes(surface);
   const componentDefinitions = Object.values(surface.components)
     .map(componentDefinitionTypes)
     .join("\n\n");
+  const definitionSections = [
+    resourceDefinitions,
+    environmentDefinitions,
+    migrationDefinitionTypes(),
+    programDefinitions,
+    componentDefinitions,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+  const appDefinitionFields = [
+    navigationDefinitionField(surface),
+    depsDefinitionField(surface),
+    programsDefinitionField(surface),
+    componentsDefinitionField(surface),
+  ].join("");
   return `type AppDefinitionSpecMarker<Spec> = {
   readonly __poggersAppSpec?: Spec;
 };
-type AppActor = AppSpec extends { Actor: infer Actor extends { id: string } } ? Actor : { id: string };
+type AppActor = AppSpec extends { Actor: infer Actor extends { id: string } }
+  ? Actor
+  : { id: string };
 type SessionData<Actor, Presence> = {
   readonly id: string;
   readonly actor: Actor;
   readonly presence: Presence;
 };
-type ResourcePresence<Resource> = Resource extends { Presence: infer Presence } ? Presence : EmptyObject;
+type ResourcePresence<Resource> = Resource extends { Presence: infer Presence }
+  ? Presence
+  : EmptyObject;
 type CommandArgs<Command> = Command extends { args: infer Args extends any[] }
   ? Args
   : Command extends any[]
     ? Command
     : [];
 type CommandError<Command> = Command extends { error: infer Error } ? Error : never;
-type CommandErrorFn<Command> = CommandError<Command> extends string
-  ? (code: CommandError<Command>) => void
-  : CommandError<Command> extends [infer Code extends string, infer Data]
-    ? (code: Code, data: Data) => void
-    : never;
+type CommandErrorFn<Command> =
+  CommandError<Command> extends string
+    ? (code: CommandError<Command>) => void
+    : CommandError<Command> extends [infer Code extends string, infer Data]
+      ? (code: Code, data: Data) => void
+      : never;
 type AppMetadata = {
   name?: string;
 };
@@ -1603,26 +2007,114 @@ ${surface.resources.map((resource) => `  use${capitalize(resource.name)}(key: ${
   readonly screen: Signal<AppScreen>;
   readonly nav: AppNavigation;
 };
+type AppRoot = (ctx: AppUIContext) => unknown;
 
-${resourceDefinitions}
-
-${programDefinitions}
-
-${componentDefinitions}
+${definitionSections}
 
 export type AppDefinition = AppDefinitionSpecMarker<AppSpec> & {
   version: number;
   app?: AppMetadata;
   pwa?: PwaDef;
-${navigationDefinitionField(surface)}
-${depsDefinitionField(surface)}
-${programsDefinitionField(surface)}
-${componentsDefinitionField(surface)}
+${appDefinitionFields}
+  styles?: StyleDefinition;
+  root?: AppRoot;
   ui?: (ctx: AppUIContext) => unknown;
   resources: {
 ${surface.resources.map((resource) => `    ${propertyKey(resource.name)}: ${pascalIdentifier(resource.name)}ResourceDefinition;`).join("\n")}
   };
 };`;
+}
+
+function migrationDefinitionTypes(): string {
+  return `type MigrationSpec = { Resources: Record<string, any> };
+type MigrationResourceName<Spec extends MigrationSpec> = Extract<keyof Spec["Resources"], string>;
+type MigrationResourceState<
+  Spec extends MigrationSpec,
+  Resource extends MigrationResourceName<Spec>,
+> = Spec["Resources"][Resource] extends { State: infer State } ? State : never;
+type MigrationResourceEvents<
+  Spec extends MigrationSpec,
+  Resource extends MigrationResourceName<Spec>,
+> = Spec["Resources"][Resource] extends { Events: infer Events extends Record<string, any> }
+  ? Events
+  : Record<string, never>;
+export type ResourceState<
+  Spec extends MigrationSpec,
+  Resource extends MigrationResourceName<Spec>,
+> = MigrationResourceState<Spec, Resource>;
+export type ResourceEventName<
+  Spec extends MigrationSpec,
+  Resource extends MigrationResourceName<Spec>,
+> = Extract<keyof MigrationResourceEvents<Spec, Resource>, string>;
+export type ResourceEventPayload<
+  Spec extends MigrationSpec,
+  Resource extends MigrationResourceName<Spec>,
+  Event extends ResourceEventName<Spec, Resource>,
+> = MigrationResourceEvents<Spec, Resource>[Event];
+export type MigratedEvent<
+  Spec extends MigrationSpec,
+  Resource extends MigrationResourceName<Spec>,
+> = {
+  [Event in ResourceEventName<Spec, Resource>]: {
+    name: Event;
+    payload: ResourceEventPayload<Spec, Resource, Event>;
+  };
+}[ResourceEventName<Spec, Resource>];
+export type Migration<From extends MigrationSpec, To extends MigrationSpec> = {
+  readonly draft?: false;
+  readonly from: string;
+  readonly to: string;
+  readonly migrate: {
+    [Resource in Extract<MigrationResourceName<From>, MigrationResourceName<To>>]?: {
+      state?: (state: ResourceState<From, Resource>) => ResourceState<To, Resource>;
+      event?: <Event extends ResourceEventName<From, Resource>>(
+        name: Event,
+        payload: ResourceEventPayload<From, Resource, Event>,
+      ) => MigratedEvent<To, Resource>;
+    };
+  };
+};`;
+}
+
+function environmentDefinitionTypes(surface: AppSurface): string {
+  const helpers = `type DependencyProvider<Value> = Value | (() => Value | Promise<Value>);
+export type DependencyProviderSet<Value> = {
+  production: DependencyProvider<Value>;
+  mock?: DependencyProvider<Value>;
+} & Record<string, DependencyProvider<Value> | undefined>;
+export type DependencyEntry<Value> = DependencyProviderSet<Value> | DependencyProvider<Value>;
+export type DependencyConfig<Deps> = {
+  mode?: string | (() => string | Promise<string>);
+  deps?: {
+    [Name in keyof Deps]: DependencyEntry<Deps[Name]>;
+  };
+} & {
+  [Name in keyof Deps]?: DependencyEntry<Deps[Name]>;
+};
+export type DependencyMount<Deps> = (() => Deps | Promise<Deps>) | Deps | DependencyConfig<Deps>;`;
+  if (surface.environments.length === 0)
+    return `${helpers}
+export type DependencyMounts = EmptyObject;`;
+  const aliases = surface.environments
+    .map((env) => `export type ${pascalIdentifier(env.name)}Deps = ${environmentDepsType(env)};`)
+    .join("\n");
+  const appDependencies =
+    surface.environments.length === 1
+      ? `export type AppDependencies = ${pascalIdentifier(surface.environments[0]!.name)}Deps;
+export type DependencyDefinition = DependencyConfig<AppDependencies>;`
+      : "";
+  return `${helpers}
+${aliases}
+${appDependencies}
+export type DependencyMounts = {
+${surface.environments
+  .map((env) => `  ${propertyKey(env.name)}?: DependencyMount<${pascalIdentifier(env.name)}Deps>;`)
+  .join("\n")}
+};`;
+}
+
+function environmentDepsType(env: AppSurfaceEnvironment): string {
+  return env.depsType;
 }
 
 function styleDefinitionTypes(surface: AppSurface): string {
@@ -1679,7 +2171,7 @@ function depsDefinitionField(surface: AppSurface): string {
   if (surface.environments.length === 0) return "";
   return `  deps?: {\n${surface.environments
     .map(
-      (env) => `    ${propertyKey(env.name)}?: () => ${env.depsType} | Promise<${env.depsType}>;`,
+      (env) => `    ${propertyKey(env.name)}?: DependencyMount<${pascalIdentifier(env.name)}Deps>;`,
     )
     .join("\n")}\n  };\n`;
 }
@@ -1689,7 +2181,7 @@ function programsDefinitionField(surface: AppSurface): string {
   return `  programs?: {\n${surface.environments
     .map(
       (env) =>
-        `    ${propertyKey(env.name)}?: (ctx: ${pascalIdentifier(env.name)}ProgramContext, deps: ${env.depsType}) => void | Promise<void>;`,
+        `    ${propertyKey(env.name)}?: (ctx: ${pascalIdentifier(env.name)}ProgramContext, deps: ${pascalIdentifier(env.name)}Deps) => void | Promise<void>;`,
     )
     .join("\n")}\n  };\n`;
 }
@@ -1709,20 +2201,33 @@ function resourceDefinitionTypes(resource: AppSurfaceResource): string {
   const typeName = pascalIdentifier(resource.name);
   const eventFields = resource.events.map(
     (event) =>
-      `  ${propertyKey(event)}(args: ${typeName}EventArgs<${JSON.stringify(event)}>): void;`,
+      `    ${propertyKey(event)}(args: ${typeName}EventArgs<${JSON.stringify(event)}>): void;`,
   );
   const viewFields = resource.views.map(
     (view) =>
-      `  ${propertyKey(view)}(args: ${typeName}ViewArgs): ${typeName}ResourceViews[${JSON.stringify(view)}];`,
+      `    ${propertyKey(view)}(args: ${typeName}ViewArgs): ${typeName}ResourceViews[${JSON.stringify(view)}];`,
   );
   const commandFields = resource.commands.map((command) => {
     const commandName = JSON.stringify(command.name);
-    return `  ${propertyKey(command.name)}(ctx: ${typeName}CommandContext<${commandName}>, ...args: CommandArgs<${typeName}ResourceCommands[${commandName}]>): void;`;
+    return `    ${propertyKey(command.name)}(
+      ctx: ${typeName}CommandContext<${commandName}>,
+      ...args: CommandArgs<${typeName}ResourceCommands[${commandName}]>
+    ): void;`;
   });
   const eventMap = resource.commands
     .filter((command) => command.eventName)
-    .map((command) => `  ${JSON.stringify(command.name)}: ${JSON.stringify(command.eventName)};`)
+    .map((command) => `  ${propertyKey(command.name)}: ${JSON.stringify(command.eventName)};`)
     .join("\n");
+  const commandEvents = eventMap
+    ? `type ${typeName}CommandEvents = {
+${eventMap}
+};`
+    : `type ${typeName}CommandEvents = {};`;
+  const eventsDefinition = eventFields.length
+    ? `events: {
+${eventFields.join("\n")}
+  };`
+    : "events: {};";
   return `type ${typeName}ResourceEvents = ${typeName}ResourceSpec["Events"];
 type ${typeName}ResourcePresence = ResourcePresence<${typeName}ResourceSpec>;
 type ${typeName}EventArgs<Event extends keyof ${typeName}ResourceEvents> = {
@@ -1738,16 +2243,12 @@ type ${typeName}ViewArgs = {
   readonly sessions: SessionData<AppActor, ${typeName}ResourcePresence>[];
   readonly key: ${typeName}ResourceKey;
 };
-type ${typeName}CommandEvents = {
-${eventMap}
-};
+${commandEvents}
 type ${typeName}CommandEvent<Command extends keyof ${typeName}ResourceCommands> =
   Command extends keyof ${typeName}CommandEvents
     ? ${typeName}CommandEvents[Command] extends keyof ${typeName}ResourceEvents
       ? {
-          [Event in ${typeName}CommandEvents[Command]]: (
-            payload: ${typeName}ResourceEvents[Event],
-          ) => void;
+          [Event in ${typeName}CommandEvents[Command]]: (payload: ${typeName}ResourceEvents[Event]) => void;
         }
       : EmptyObject
     : EmptyObject;
@@ -1764,9 +2265,7 @@ type ${typeName}CommandContext<Command extends keyof ${typeName}ResourceCommands
 type ${typeName}ResourceDefinition = {
   state: ${typeName}ResourceSpec["State"];
   presence?: ${typeName}ResourcePresence;
-  events: {
-${eventFields.join("\n")}
-  };
+  ${eventsDefinition}
   views?: {
 ${viewFields.join("\n")}
   };
@@ -1788,7 +2287,10 @@ function programDefinitionTypes(surface: AppSurface): string {
         ? eventItems
             .map(
               (item) =>
-                `  events(name: ${JSON.stringify(item.name)}, options: { id: string; signal?: AbortSignal }): AsyncIterable<${item.typeName}>;`,
+                `  events(
+    name: ${JSON.stringify(item.name)},
+    options: { id: string; signal?: AbortSignal },
+  ): AsyncIterable<${item.typeName}>;`,
             )
             .join("\n")
         : "  events(name: never, options: { id: string; signal?: AbortSignal }): AsyncIterable<never>;";
@@ -1816,7 +2318,9 @@ function programResourceType(resource: AppSurfaceResource): string {
     const commandType = `${typeName}ResourceCommands[${commandName}]`;
     const args = command.hasArgs ? `${commandType}["args"]` : "[]";
     const error = command.hasError ? `${commandType}["error"]` : "never";
-    return `  ${propertyKey(command.name)}(...args: ${args}): CommandReceipt<${error}>;`;
+    return `  ${propertyKey(command.name)}(
+    ...args: ${args}
+  ): CommandReceipt<${error}>;`;
   });
   return `type ${typeName}ProgramResource = {
 ${[...viewFields, ...commandFields, `  readonly view: ${typeName}ResourceViews;`].join("\n")}
@@ -1990,21 +2494,18 @@ function propertyKey(name: string): string {
   return /^[A-Za-z_$][\w$]*$/.test(name) ? name : JSON.stringify(name);
 }
 
+async function writeGeneratedTypeArtifacts(paths: AppPaths): Promise<string | undefined> {
+  return writePoggersAppTypes(paths);
+}
+
 async function writePoggersAppTypes(paths: AppPaths): Promise<string | undefined> {
   if (!paths.types) return undefined;
 
   const surface = collectAppSurface(paths);
-  const output = resolve(dirname(paths.types), "poggers-app.d.ts");
+  const output = resolve(paths.appDir, ".poggers/types/app.d.ts");
   const typesDir = dirname(output);
   const appSpecImport = importSpecifier(output, paths.types);
   await mkdir(typesDir, { recursive: true });
-  await rm(resolve(paths.appDir, ".app/types/@poggers/app/index.d.ts"), { force: true });
-  await rm(resolve(paths.appDir, ".app/types/poggers-app.d.ts"), { force: true });
-  await rm(resolve(paths.appDir, ".app/types/@poggers/app/index.tsx"), { force: true });
-  await rm(resolve(paths.appDir, ".app/types/@poggers/app/api.d.ts"), { force: true });
-  await rm(resolve(paths.appDir, ".app/types/@poggers/app/ui.d.ts"), { force: true });
-  await rm(resolve(paths.appDir, ".app/types/@poggers/app/api.ts"), { force: true });
-  await rm(resolve(paths.appDir, ".app/types/@poggers/app/ui.ts"), { force: true });
   const resourceExports = surface.resources.map(resourceTypeDefinitions).join("\n\n");
   const navigationExports = navigationTypes(surface);
   const componentExports = Object.values(surface.components)
@@ -2012,6 +2513,7 @@ async function writePoggersAppTypes(paths: AppPaths): Promise<string | undefined
     .join("\n\n");
   const appDefinition = appDefinitionTypes(surface);
   const styleDefinition = styleDefinitionTypes(surface);
+  const appSchemaHash = structuralHash(readFileSync(paths.types, "utf8"));
   const appPreset = surface.presetType ?? '"default"';
   const appThemeValues = surface.themeParams.length
     ? `{\n${surface.themeParams
@@ -2030,6 +2532,8 @@ async function writePoggersAppTypes(paths: AppPaths): Promise<string | undefined
     output,
     `import type { App as AppSpec } from ${JSON.stringify(appSpecImport)};
 
+export const appSchemaHash: ${JSON.stringify(appSchemaHash)};
+
 type EmptyObject = Record<never, never>;
 type Signal<T> = {
   (): T;
@@ -2037,8 +2541,7 @@ type Signal<T> = {
 };
 type Child = Node | string | number | boolean | null | undefined | Child[] | (() => Child);
 type CommandReceipt<E = never> = Promise<
-  | { ok: true; cursor?: number }
-  | { ok: false; error: E; data?: unknown }
+  { ok: true; cursor?: number } | { ok: false; error: E; data?: unknown }
 >;
 type SyncMeta = {
   cursor: number;
@@ -2349,57 +2852,48 @@ function collectForbiddenAppStyling(file: string, source: string, issues: AppCon
   if (/\bclassName\s*=|\bclass\s*=/.test(source)) {
     issues.push({
       file,
-      message: "app.tsx must not use class/className; style through semantic components.",
+      message: "app.ts must not use class/className; style through semantic components.",
     });
   }
   if (/\bstyle\s*=/.test(source)) {
     issues.push({
       file,
-      message: "app.tsx must not use inline style; put visual rules in styles.ts.",
+      message: "app.ts must not use inline style; put visual rules in app styles.",
     });
   }
 }
 
-function collectForbiddenComponentStyling(
-  file: string,
-  source: string,
-  issues: AppConventionIssue[],
-) {
+function collectForbiddenUiStyling(file: string, source: string, issues: AppConventionIssue[]) {
   if (/\bclassName\s*=|\bclass\s*=/.test(source)) {
     issues.push({
       file,
       message:
-        "components must not use class/className in strict style apps; render generated component parts.",
+        "ui files must not use class/className in strict style apps; render generated component parts.",
     });
   }
   if (/\bstyle\s*=/.test(source)) {
     issues.push({
       file,
       message:
-        "components must not use inline style in strict style apps; put visual rules in styles.ts.",
+        "ui files must not use inline style in strict style apps; put visual rules in app styles.",
     });
   }
 }
 
-function collectComponentFileConventions(
-  componentsDir: string,
-  file: string,
-  issues: AppConventionIssue[],
-) {
+function collectUiFileConventions(uiDir: string, file: string, issues: AppConventionIssue[]) {
   const name = basename(file).replace(/\.[cm]?tsx?$/, "");
   if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name)) {
     issues.push({
       file,
-      message: "component file names must be kebab-case.",
+      message: "ui file names must be kebab-case.",
     });
   }
 
-  const componentPath = relative(componentsDir, file);
-  if (componentPath.includes("/") || componentPath.includes("\\")) {
+  const uiPath = relative(uiDir, file);
+  if (uiPath.includes("/") || uiPath.includes("\\")) {
     issues.push({
       file,
-      message:
-        "component files must live directly in src/components; do not nest component folders.",
+      message: "ui files must live directly in src/ui; do not nest ui folders.",
     });
   }
 }
@@ -2426,11 +2920,15 @@ function serverEntrypointSource(
   browserEntry: string,
   browserBundle: string,
   browserStyle?: string,
+  migrationRegistry?: string,
   title?: string,
 ): string {
   const workerImport = paths.worker
     ? `import * as workerModule from ${JSON.stringify(importSpecifier(serverEntrypoint, paths.worker))};
-const workerExports = workerModule as Record<string, any>;
+`
+    : "";
+  const workerSetup = paths.worker
+    ? `const workerExports = workerModule as Record<string, any>;
 const worker = workerExports.default ?? workerExports.worker;
 const deps = typeof workerExports.createWorkerDeps === "function"
   ? await workerExports.createWorkerDeps()
@@ -2450,39 +2948,68 @@ const workerConfig = worker
     : "const workerConfig = undefined;\n";
   const depsImport = paths.deps
     ? `import * as depsModule from ${JSON.stringify(importSpecifier(serverEntrypoint, paths.deps))};
-const depsExports = depsModule as Record<string, any>;
 `
+    : "";
+  const depsSetup = paths.deps
+    ? "const depsExports = depsModule as Record<string, any>;\n"
     : "const depsExports = {} as Record<string, any>;\n";
+  const migrationImport = migrationRegistry
+    ? `import * as migrationRegistry from ${JSON.stringify(importSpecifier(serverEntrypoint, migrationRegistry))};
+`
+    : "const migrationRegistry = { hash: undefined, migrations: [] };\n";
 
   return `import * as apiModule from ${JSON.stringify(importSpecifier(serverEntrypoint, appEntrypoint))};
-import { serveApp } from "@poggers/kit/app";
+import { defineApp } from "@poggers/kit";
+import { installAppMigrations, resolveDependencyMount, serveApp } from "@poggers/kit/app";
 ${workerImport}
 ${depsImport}
+${migrationImport}
+${workerSetup}
+${depsSetup}
 const apiExports = apiModule as Record<string, any>;
-const api = apiExports.api ?? apiExports.default;
-if (!api) throw new Error("App API module must export api or default.");
+const depsDefault = depsExports.default;
+const depsMounts =
+  depsDefault && typeof depsDefault === "object" && !Array.isArray(depsDefault)
+    ? depsDefault
+    : {};
+const rawApi = apiExports.api ?? apiExports.default;
+if (!rawApi) throw new Error("App API module must export api or default.");
+const api = installAppMigrations(rawApi.def?.resources ? rawApi : defineApp(rawApi), {
+  hash: migrationRegistry.hash,
+  migrations: migrationRegistry.migrations,
+});
 const browserProgram = api.def?.programs?.browser;
 const serverProgram = api.def?.programs?.server;
 const programEnv = serverProgram ? "server" : browserProgram ? "browser" : undefined;
 const program = serverProgram ?? browserProgram;
-const createProgramDeps = programEnv
+const defaultDepsMount =
+  programEnv && depsDefault !== undefined && !(programEnv in depsMounts) ? depsDefault : undefined;
+const programDepsMount = programEnv
   ? api.def?.deps?.[programEnv] ??
+    depsMounts[programEnv] ??
+    defaultDepsMount ??
     apiExports[\`create\${programEnv[0].toUpperCase()}\${programEnv.slice(1)}Deps\`] ??
     apiExports.createProgramDeps ??
     depsExports[\`create\${programEnv[0].toUpperCase()}\${programEnv.slice(1)}Deps\`] ??
     depsExports.createProgramDeps
   : undefined;
-const programDeps = typeof createProgramDeps === "function"
-  ? await createProgramDeps()
-  : programEnv && \`\${programEnv}Deps\` in apiExports
-    ? await apiExports[\`\${programEnv}Deps\`]
-    : programEnv && \`\${programEnv}Deps\` in depsExports
-      ? await depsExports[\`\${programEnv}Deps\`]
-      : "programDeps" in apiExports
-        ? await apiExports.programDeps
-        : "programDeps" in depsExports
-          ? await depsExports.programDeps
-          : {};
+const legacyProgramDepsMount = programEnv
+  ? \`\${programEnv}Deps\` in apiExports
+    ? apiExports[\`\${programEnv}Deps\`]
+    : \`\${programEnv}Deps\` in depsExports
+      ? depsExports[\`\${programEnv}Deps\`]
+      : programEnv in depsMounts
+        ? depsMounts[programEnv]
+        : defaultDepsMount ??
+          ("programDeps" in apiExports
+            ? apiExports.programDeps
+            : "programDeps" in depsExports
+              ? depsExports.programDeps
+              : {})
+  : {};
+const programDeps = await resolveDependencyMount(
+  programDepsMount ?? legacyProgramDepsMount
+);
 const programConfig = program && programEnv
   ? {
       env: programEnv,
@@ -2532,11 +3059,11 @@ async function readBuildOutputs(outputs: Blob[]): Promise<{ script?: string; sty
 }
 
 function frameworkBuildDir(paths: AppPaths): string {
-  return resolve(paths.appDir, ".app/build");
+  return resolve(paths.appDir, ".poggers/build");
 }
 
 function frameworkDevDir(paths: AppPaths): string {
-  return resolve(paths.appDir, ".app/dev");
+  return resolve(paths.appDir, ".poggers/dev");
 }
 
 function importSpecifier(fromFile: string, targetPath: string): string {

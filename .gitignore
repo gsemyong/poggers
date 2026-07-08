@@ -3,7 +3,7 @@ node_modules
 dist
 .DS_Store
 .env
-.app
+.poggers
 .chat-snapshot.json
 .chat-events.jsonl
 .chat-snapshot.json.tmp

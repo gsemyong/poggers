@@ -7,7 +7,7 @@ Make the repository small, boring, and easy to reason about:
 - One server persistence implementation.
 - One browser persistence implementation.
 - No public adapter abstraction for runtime modes we do not support.
-- App-local generated declarations for editor stability, kept out of formatter churn.
+- App-local generated declarations for editor stability, ignored by Git.
 - No fake root TypeScript project pretending it can typecheck app-local generated modules.
 - A small set of tests named after product surfaces, not arbitrary layers.
 - Turbo, Oxlint, and Oxfmt wired in the least surprising way.
@@ -62,7 +62,7 @@ packages/
 Ignored generated output:
 
 ```txt
-apps/*/.app/build/
+apps/*/.poggers/build/
 apps/*/dist/
 ```
 
@@ -72,7 +72,7 @@ apps/*/dist/
 - Keep IndexedDB storage for browser client snapshots.
 - Remove LMDB from the product until we intentionally design a batched LMDB storage engine.
 - Remove the public `single-node` adapter concept; single-process pubsub and sequence allocation are server internals.
-- Remove package-level `app-types`; `@poggers/app` is app-specific and generated per app as `src/poggers-app.d.ts`.
+- Remove package-level `app-types`; `@poggers/app` is app-specific and generated per app as `.poggers/types/app.d.ts`.
 - Keep `jsxImportSource` only in the distributed app TypeScript config, because app JSX must compile through `@poggers/kit` rather than React.
 - Do not run root `tsc` over app source that imports `@poggers/app`; app typechecking must run through `poggers typecheck`.
 
@@ -84,7 +84,7 @@ apps/*/dist/
   - [x] `bun run build`
   - [x] generated app smoke: create, install, typecheck, build
 - [x] Save any performance numbers used for storage decisions in the final summary.
-- [x] Confirm no generated `.app`, `dist`, or `.turbo` output is tracked.
+- [x] Confirm no generated `.poggers`, `dist`, or `.turbo` output is tracked.
 
 Verification gate:
 
@@ -141,7 +141,7 @@ Intent: `@poggers/app` should be truthful: generated per app, never approximated
 - [x] Delete `packages/kit/app-types`.
 - [x] Remove `./app-types` package export.
 - [x] Remove fallback `@poggers/app` path entries that point into package static declarations.
-- [x] Make `poggers typecheck`, `poggers dev`, and `poggers build` generate `src/poggers-app.d.ts` before TypeScript needs it.
+- [x] Make `poggers typecheck`, `poggers dev`, and `poggers build` generate `.poggers/types/app.d.ts` before TypeScript needs it.
 - [x] Ensure generated declarations contain all app-specific resource, component, navigation, preset, and theme exports.
 - [x] Remove the root project path that hid missing generated app types.
 - [x] Update scaffold and docs to use the supported typecheck command.
@@ -262,11 +262,11 @@ Intent: new apps and existing apps use the same conventions.
 
 Verification gate:
 
-- [x] `rm -rf .app/generated-pristine`
-- [x] `bun packages/create-poggers/src/index.js .app/generated-pristine --no-install --force --kit-version file:$PWD/packages/kit`
-- [x] `bun install --cwd .app/generated-pristine`
-- [x] `bun run typecheck` from `.app/generated-pristine`
-- [x] `bun run build` from `.app/generated-pristine`
+- [x] `rm -rf .poggers/generated-pristine`
+- [x] `bun packages/create-poggers/src/index.js .poggers/generated-pristine --no-install --force --kit-version file:$PWD/packages/kit`
+- [x] `bun install --cwd .poggers/generated-pristine`
+- [x] `bun run typecheck` from `.poggers/generated-pristine`
+- [x] `bun run build` from `.poggers/generated-pristine`
 - [x] `bun run typecheck` from `apps/site`
 - [x] `bun run build` via workspace build for `apps/site`
 - [x] `bun run typecheck` from `apps/chat`

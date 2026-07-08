@@ -149,7 +149,7 @@ Checklist:
 - [ ] Move `create-poggers` metadata to `packages/create-poggers/package.json`.
 - [ ] Add root scripts that delegate to packages/apps.
 - [ ] Keep `bun.lock` at the repo root.
-- [ ] Keep generated artifacts ignored: `.app`, `dist`, app-specific build output.
+- [ ] Keep generated artifacts ignored: `.poggers`, `dist`, app-specific build output.
 
 Suggested root scripts:
 
@@ -172,7 +172,7 @@ Suggested root scripts:
 Checklist:
 
 - [ ] Record current `git status --short`.
-- [ ] Verify no generated `.app` or `dist` artifacts are tracked.
+- [ ] Verify no generated `.poggers` or `dist` artifacts are tracked.
 - [ ] Run current baseline checks before moving files.
 - [ ] Do not revert unrelated user edits.
 - [ ] Keep old app deletions intact unless they are part of generated output cleanup.
@@ -245,7 +245,7 @@ Suggested `apps/chat/package.json`:
 Verification:
 
 - [ ] `bun --cwd apps/chat run typecheck`
-- [ ] `POGGERS_FAKE_AI="Fake response" bun --cwd apps/chat run build`
+- [ ] `POGGERS_DEPS=mock POGGERS_FAKE_AI="Fake response" bun --cwd apps/chat run build`
 - [ ] Start `bun --cwd apps/chat run dev` and verify the app in browser.
 - [ ] Confirm no `src/apps/chat` remains.
 
@@ -551,7 +551,7 @@ Checklist:
 ### Gate 4: Chat App
 
 - [ ] `bun --cwd apps/chat run typecheck`
-- [ ] `POGGERS_FAKE_AI="Fake response" bun --cwd apps/chat run build`
+- [ ] `POGGERS_DEPS=mock POGGERS_FAKE_AI="Fake response" bun --cwd apps/chat run build`
 - [ ] Start `bun --cwd apps/chat run dev`.
 - [ ] Browser loads chat app.
 - [ ] Send a chat message.

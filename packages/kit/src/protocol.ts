@@ -3,6 +3,7 @@ export type CommittedEvent = {
   seq: number;
   at: number;
   version?: number;
+  hash?: string;
   actor: unknown;
   name: string;
   payload: unknown;
@@ -14,7 +15,13 @@ export type SessionData<A = unknown, P = unknown> = {
   presence: P;
 };
 
-export type Snapshot = { version: number; seq: number; data: unknown; generation?: string };
+export type Snapshot = {
+  version: number;
+  seq: number;
+  data: unknown;
+  generation?: string;
+  hash?: string;
+};
 
 export type JsonValue =
   | string
@@ -149,6 +156,7 @@ export function validateServerMessage(data: unknown): ServerMessage | null {
         m.event.version < 0)
     )
       return null;
+    if (m.event.hash !== undefined && typeof m.event.hash !== "string") return null;
     if (typeof m.event.name !== "string") return null;
     return m;
   }
@@ -191,6 +199,7 @@ function isValidSnapshot(s: unknown): boolean {
   if (typeof snap.version !== "number" || !Number.isFinite(snap.version) || snap.version < 0)
     return false;
   if (typeof snap.seq !== "number" || !Number.isFinite(snap.seq) || snap.seq < 0) return false;
+  if (snap.hash !== undefined && typeof snap.hash !== "string") return false;
   return true;
 }
 
@@ -205,6 +214,7 @@ function isValidEvent(e: unknown): boolean {
     (typeof ev.version !== "number" || !Number.isFinite(ev.version) || ev.version < 0)
   )
     return false;
+  if (ev.hash !== undefined && typeof ev.hash !== "string") return false;
   if (typeof ev.name !== "string") return false;
   return true;
 }

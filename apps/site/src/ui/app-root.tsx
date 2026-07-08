@@ -1,5 +1,5 @@
-import { PageScreen } from "./page-screen";
-import { SiteShell } from "./site-shell";
+import { PageScreen } from "ui/page-screen";
+import { SiteShell } from "ui/site-shell";
 
 export function Root() {
   return (

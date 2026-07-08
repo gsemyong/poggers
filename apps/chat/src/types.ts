@@ -108,11 +108,7 @@ export type App = {
     };
   };
 
-  Environments: {
-    server: {
-      Deps: ChatProgramDeps;
-    };
-  };
+  Deps: ChatProgramDeps;
 
   Components: {
     /** Full chat screen structure. Style-only parts are generated automatically. */

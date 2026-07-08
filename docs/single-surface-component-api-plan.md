@@ -442,7 +442,7 @@ Removed generated/public surfaces:
 - [x] Type text into the composer.
 - [x] Save an unrelated component edit and verify hot refresh preserves composer text.
 - [x] Send a message and verify the resource command path still works.
-- [x] Restart with `POGGERS_FAKE_AI` and verify the worker completion path without a third-party service.
+- [x] Restart with `POGGERS_DEPS=mock POGGERS_FAKE_AI=...` and verify the worker completion path without a third-party service.
 - [x] Toggle between presets and verify the whole app visual style changes without component code changes.
 - [x] Inspect DOM and verify parts have `data-pg-component` and `data-pg-part`.
 

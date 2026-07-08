@@ -1,10 +1,12 @@
 import type {
   App,
+  AppDef,
   AppNavigation,
   AppScreen,
   AppSpec,
   ResourceFor,
   ResourceName,
+  TypedAppDefinition,
   UISignal,
 } from "./app";
 import type { ConnectOpts } from "./client";
@@ -429,9 +431,14 @@ export type AppHooks<Spec extends AppSpec> = ApiHooks<Spec> &
   StyleControls<Spec> & {
     start(connect?: ConnectOpts | (() => Promise<import("./app").Client<Spec>>)): void;
   };
+export type AppInput<Spec extends AppSpec> = App<Spec> | AppDef<Spec> | TypedAppDefinition<Spec>;
+export type StyleInput<Spec extends AppSpec> =
+  | Styles<Spec>
+  | StylesDef<Spec>
+  | TypedStyleDefinition<Spec>;
 export type CreateHooksOpts<Spec extends AppSpec> = {
-  app: App<Spec>;
-  styles: Styles<Spec>;
+  app: AppInput<Spec>;
+  styles: StyleInput<Spec>;
   components?: ComponentRuntimeParts<Spec>;
 };
 export declare function defineStyles<Spec extends AppSpec>(

@@ -200,12 +200,13 @@ export function defineUI<Spec extends AppSpec, Props extends object = Record<str
 export function createAppUI<Spec extends AppSpec, Props extends object = Record<string, never>>(
   app: App<Spec>,
 ) {
-  if (!app.def.ui) {
-    throw new Error("App definition does not include a ui(ctx) function.");
+  const root = app.def.root ?? app.def.ui;
+  if (!root) {
+    throw new Error("App definition does not include a root function.");
   }
 
   const runtime = createNativeAppRuntime(app);
-  const appUI = app.def.ui as (ctx: AppUIContext<Spec>) => Child;
+  const appUI = root as (ctx: AppUIContext<Spec>) => Child;
 
   function DefinedAppUI(
     { connect, ..._props }: Props & DefineUIProps<Spec> = {} as Props & DefineUIProps<Spec>,
