@@ -79,6 +79,17 @@ const popoverOk = (
   </section>
 );
 
+const _dialogOk = (
+  <dialog
+    dialogOpen={enabled}
+    onCancel={(event) => event.preventDefault()}
+    onClose={(event) => event.currentTarget.returnValue}
+  />
+);
+
+// @ts-expect-error dialogOpen is a dialog lifecycle binding, not a global attribute.
+const _invalidDialogOpen = <div dialogOpen />;
+
 // @ts-expect-error popover target actions are narrowed to platform-valid values.
 const _invalidPopoverTargetAction = <button popoverTargetAction="dismiss" />;
 

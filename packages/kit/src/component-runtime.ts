@@ -199,8 +199,10 @@ type ComponentPartCommonProps<T extends Element> = ComponentPartDataAttributes &
     ref?: (element: T) => void;
     onBeforeToggle?: ComponentPartEvent<T, ComponentPartPopoverToggleEvent>;
     onBlur?: ComponentPartEvent<T, FocusEvent>;
+    onCancel?: ComponentPartEvent<T, Event>;
     onChange?: ComponentPartEvent<T, Event>;
     onClick?: ComponentPartEvent<T, MouseEvent>;
+    onClose?: ComponentPartEvent<T, Event>;
     onFocus?: ComponentPartEvent<T, FocusEvent>;
     onInput?: ComponentPartEvent<T, InputEvent>;
     onKeyDown?: ComponentPartEvent<T, KeyboardEvent>;
@@ -305,20 +307,24 @@ export type ComponentPartBindingForElement<ElementName extends string> =
                     action?: ComponentPartValue<string>;
                     method?: ComponentPartValue<"dialog" | "get" | "post">;
                   }
-                : ElementName extends "img"
-                  ? ComponentPartCommonProps<HTMLImageElement> & {
-                      alt?: ComponentPartValue<string>;
-                      height?: ComponentPartValue<string | number>;
-                      loading?: ComponentPartValue<"eager" | "lazy">;
-                      src?: ComponentPartValue<string>;
-                      width?: ComponentPartValue<string | number>;
+                : ElementName extends "dialog"
+                  ? ComponentPartCommonProps<HTMLDialogElement> & {
+                      dialogOpen?: ComponentPartValue<boolean>;
                     }
-                  : ElementName extends keyof HTMLElementTagNameMap
-                    ? ComponentPartCommonProps<HTMLElementTagNameMap[ElementName]>
-                    : ElementName extends keyof SVGElementTagNameMap
-                      ? ComponentPartCommonProps<SVGElementTagNameMap[ElementName]> &
-                          ComponentPartSvgProps
-                      : ComponentPartCommonProps<Element>;
+                  : ElementName extends "img"
+                    ? ComponentPartCommonProps<HTMLImageElement> & {
+                        alt?: ComponentPartValue<string>;
+                        height?: ComponentPartValue<string | number>;
+                        loading?: ComponentPartValue<"eager" | "lazy">;
+                        src?: ComponentPartValue<string>;
+                        width?: ComponentPartValue<string | number>;
+                      }
+                    : ElementName extends keyof HTMLElementTagNameMap
+                      ? ComponentPartCommonProps<HTMLElementTagNameMap[ElementName]>
+                      : ElementName extends keyof SVGElementTagNameMap
+                        ? ComponentPartCommonProps<SVGElementTagNameMap[ElementName]> &
+                            ComponentPartSvgProps
+                        : ComponentPartCommonProps<Element>;
 
 export type ComponentPartBinding<
   Spec extends AppSpec,

@@ -26,10 +26,14 @@ import { scopeId } from "./protocol";
 import { createBrowserStore } from "./storage";
 import {
   cancelVisualExit,
-  cancelVisualMotion,
+  cancelVisualExitWithin,
+  cancelVisualMotionWithin,
   hasVisualExit,
+  hasVisualExitWithin,
+  notifyVisualPresence,
   prefersReducedMotion,
   runVisualExit,
+  runVisualExitWithin,
 } from "./visual-runtime";
 
 type ResourceName<Spec extends AppSpec> = Extract<keyof Spec["Resources"], string>;
@@ -559,8 +563,11 @@ function retainForExit(nodes: Node[], onDone: () => void): () => void {
 }
 
 function waitForPresenceFinish(elements: HTMLElement[], onDone: () => void): () => void {
-  const visual = elements.filter(hasVisualExit);
-  const legacy = elements.filter((element) => !hasVisualExit(element));
+  const roots = elements.filter(
+    (element) => !elements.some((parent) => parent !== element && parent.contains(element)),
+  );
+  const visual = roots.filter(hasVisualExit);
+  const legacy = roots.filter((element) => !hasVisualExit(element));
   let stopped = false;
   let pending = Number(visual.length > 0) + Number(legacy.length > 0);
   const completeGroup = () => {
@@ -719,6 +726,11 @@ function applyProp(element: HTMLElement, name: string, value: unknown) {
     return;
   }
 
+  if (name === "dialogOpen") {
+    bindDialogOpen(element, value);
+    return;
+  }
+
   if (name.startsWith("on") && typeof value === "function") {
     const eventName = eventNameForProp(name);
     element.addEventListener(eventName, value as EventListener);
@@ -824,6 +836,7 @@ function bindHidden(element: HTMLElement, value: unknown) {
         if (!targetHidden) return;
         setHiddenAttribute(element, true);
         currentHidden = true;
+        notifyVisualPresence(element);
       });
       return;
     }
@@ -831,6 +844,7 @@ function bindHidden(element: HTMLElement, value: unknown) {
     setHiddenAttribute(element, false);
     currentHidden = false;
     markPresenceState([element], "entering");
+    notifyVisualPresence(element);
     requestPresenceFrame(() => {
       if (!targetHidden) markPresenceState([element], "entered");
     });
@@ -858,12 +872,16 @@ function bindPopoverOpen(element: HTMLElement, value: unknown) {
     try {
       (element as HTMLElement & { showPopover(): void }).showPopover();
     } catch {}
+    if (isOpen()) notifyVisualPresence(element);
   };
   const hide = () => {
     if (!isOpen()) return;
     try {
       (element as HTMLElement & { hidePopover(): void }).hidePopover();
     } catch {}
+    element.removeAttribute("aria-hidden");
+    element.removeAttribute("inert");
+    notifyVisualPresence(element);
     invoker?.focus({ preventScroll: true });
   };
 
@@ -872,8 +890,8 @@ function bindPopoverOpen(element: HTMLElement, value: unknown) {
     targetOpen = open;
     const currentRevision = ++revision;
     if (open) {
-      cancelVisualMotion(element);
-      cancelVisualExit(element);
+      cancelVisualMotionWithin(element);
+      cancelVisualExitWithin(element);
       element.removeAttribute("aria-hidden");
       element.removeAttribute("inert");
       if (element.isConnected) show();
@@ -889,17 +907,88 @@ function bindPopoverOpen(element: HTMLElement, value: unknown) {
       initialized = true;
       return;
     }
-    if (prefersReducedMotion() || !hasVisualExit(element)) {
+    if (prefersReducedMotion() || !hasVisualExitWithin(element)) {
       hide();
       return;
     }
-    void runVisualExit(element).then(() => {
+    element.setAttribute("aria-hidden", "true");
+    element.setAttribute("inert", "");
+    void runVisualExitWithin(element).then(() => {
       if (targetOpen || currentRevision !== revision) return;
       hide();
     });
   }, value);
 
-  registerCleanup(() => cancelVisualExit(element));
+  registerCleanup(() => cancelVisualExitWithin(element));
+}
+
+function bindDialogOpen(element: HTMLElement, value: unknown) {
+  if (!(element instanceof HTMLDialogElement)) {
+    throw new TypeError("dialogOpen can only be bound to a <dialog> element.");
+  }
+
+  let initialized = false;
+  let targetOpen = false;
+  let invoker: HTMLElement | null = null;
+  let revision = 0;
+
+  const show = () => {
+    if (element.open) return;
+    invoker = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    try {
+      element.showModal();
+    } catch {
+      return;
+    }
+    notifyVisualPresence(element);
+  };
+  const close = () => {
+    if (!element.open) return;
+    element.close();
+    element.removeAttribute("aria-hidden");
+    element.removeAttribute("inert");
+    notifyVisualPresence(element);
+    invoker?.focus({ preventScroll: true });
+  };
+
+  bindValue((next) => {
+    const open = Boolean(next);
+    targetOpen = open;
+    const currentRevision = ++revision;
+
+    if (open) {
+      cancelVisualMotionWithin(element);
+      cancelVisualExitWithin(element);
+      element.removeAttribute("aria-hidden");
+      element.removeAttribute("inert");
+      if (element.isConnected) show();
+      else {
+        queueMicrotask(() => {
+          if (targetOpen) show();
+        });
+      }
+      initialized = true;
+      return;
+    }
+
+    if (!initialized || !element.open) {
+      initialized = true;
+      return;
+    }
+    if (prefersReducedMotion() || !hasVisualExitWithin(element)) {
+      close();
+      return;
+    }
+
+    element.setAttribute("aria-hidden", "true");
+    element.setAttribute("inert", "");
+    void runVisualExitWithin(element).then(() => {
+      if (targetOpen || currentRevision !== revision) return;
+      close();
+    });
+  }, value);
+
+  registerCleanup(() => cancelVisualExitWithin(element));
 }
 
 function shouldRetainElementForExit(element: HTMLElement): boolean {

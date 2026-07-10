@@ -85,7 +85,6 @@ export const precisionPreset = {
           apply: { padding: { inline: tokens.space.xs, block: tokens.space.sm } },
         },
       ],
-      motion: { change: { surface: tokens.motion.fast } },
     } as const;
 
     return {
@@ -170,37 +169,64 @@ export const precisionPreset = {
           text: { size: 11, weight: 600 },
         },
         Panel: {
+          frame: {
+            inline: {
+              min: { viewport: { axis: "inline", percent: 1 } },
+              max: { viewport: { axis: "inline", percent: 1 } },
+            },
+            block: {
+              min: { viewport: { axis: "block", percent: 1 } },
+              max: { viewport: { axis: "block", percent: 1 } },
+            },
+          },
+          margin: 0,
+          padding: 0,
+          surface: { fill: "transparent" },
+          stroke: { width: 0, line: "solid", color: "transparent" },
+          scroll: { inline: "visible", block: "visible" },
+          position: {
+            kind: "fixed",
+            anchor: "none",
+            place: "auto",
+            inset: 0,
+            layer: tokens.z.popover,
+          },
+          decor: {
+            backdrop: { surface: { fill: "transparent" } },
+          },
+        },
+        Backdrop: {
+          position: { kind: "fixed", inset: 0, layer: 0 },
+          surface: { fill: tokens.color.backdrop },
+          motion: {
+            enter: { from: { effect: { opacity: 0 } }, using: tokens.motion.fast },
+            exit: { to: { effect: { opacity: 0 } }, using: tokens.motion.fast },
+          },
+        },
+        Surface: {
           layout: { kind: "stack", gap: tokens.space.sm },
           frame: {
             inline: tokens.size.panel,
-            block: { max: { viewport: { axis: "block", percent: 0.54 } } },
+            block: { max: { viewport: { axis: "block", percent: 0.52 } } },
             contain: "layout",
           },
           padding: tokens.space.sm,
+          position: { kind: "fixed", anchor: "none", place: "center", layer: 1 },
           surface: { fill: tokens.color.panel, text: tokens.color.text },
           stroke: { width: 1, line: "solid", color: tokens.color.line },
           shape: { radius: tokens.radius.panel, clip: "content" },
           effect: { shadow: tokens.shadow.panel },
-          position: {
-            kind: "fixed",
-            anchor: { part: "Trigger" },
-            place: "block-end",
-            layer: tokens.z.popover,
-          },
           transform: { block: values.dragOffset },
-          decor: {
-            backdrop: { surface: { fill: tokens.color.backdrop } },
-          },
           motion: {
             enter: {
-              from: { effect: { opacity: 0 }, transform: { block: -8, scale: 0.985 } },
+              from: { effect: { opacity: 0 } },
               using: tokens.motion.settle,
             },
             exit: {
-              to: { effect: { opacity: 0 }, transform: { block: 18, scale: 0.99 } },
+              to: { effect: { opacity: 0 } },
               using: tokens.motion.fast,
             },
-            layout: { geometry: "frame", content: "preserve", using: tokens.motion.settle },
+            layout: { geometry: "frame", using: tokens.motion.settle },
             gesture: {
               axis: "block",
               value: values.dragOffset,
@@ -215,6 +241,7 @@ export const precisionPreset = {
             {
               container: "compact",
               apply: {
+                margin: 0,
                 frame: {
                   inline: "auto",
                   block: { max: { viewport: { axis: "block", percent: 0.82 } } },
@@ -224,6 +251,7 @@ export const precisionPreset = {
                   anchor: "none",
                   place: "auto",
                   inset: { inline: 10, blockEnd: 10 },
+                  layer: 1,
                 },
                 shape: { radius: 18 },
               },
@@ -254,6 +282,10 @@ export const precisionPreset = {
           surface: { fill: tokens.color.panelRaised },
           stroke: { width: 1, line: "solid", color: tokens.color.line },
           shape: { radius: tokens.radius.control },
+          motion: {
+            enter: { from: { transform: { block: -6 } }, using: tokens.motion.settle },
+            exit: { to: { transform: { block: -4 } }, using: tokens.motion.fast },
+          },
         },
         SearchIcon: { surface: { text: tokens.color.muted } },
         SearchInput: {
@@ -349,13 +381,17 @@ export const precisionPreset = {
           layout: { kind: "row", align: "center", distribute: "between" },
           padding: { inline: tokens.space.sm, blockStart: tokens.space.sm },
           stroke: { blockStart: { width: 1, line: "solid", color: tokens.color.line } },
+          motion: {
+            enter: { from: { transform: { block: 6 } }, using: tokens.motion.settle },
+            exit: { to: { transform: { block: 4 } }, using: tokens.motion.fast },
+          },
         },
         ResultCount: {
           frame: { contain: "layout" },
           text: { size: 12 },
           surface: { text: tokens.color.muted },
           motion: {
-            layout: { geometry: "text", content: "preserve", using: tokens.motion.fast },
+            layout: { geometry: "text", using: tokens.motion.fast },
           },
         },
         Close: {
@@ -487,7 +523,7 @@ export const tactilePreset = {
           apply: { padding: { inline: tokens.space.xs, block: tokens.space.sm } },
         },
       ],
-      motion: { change: { surface: tokens.motion.snap, transform: tokens.motion.press } },
+      motion: { change: { transform: tokens.motion.press } },
     } as const;
 
     return {
@@ -574,7 +610,7 @@ export const tactilePreset = {
               },
             },
           ],
-          motion: { change: { transform: tokens.motion.press, effect: tokens.motion.snap } },
+          motion: { change: { transform: tokens.motion.press, opacity: tokens.motion.snap } },
         },
         TriggerIcon: { surface: { text: tokens.color.accent }, text: { size: 18, weight: 700 } },
         TriggerLabel: {
@@ -583,6 +619,39 @@ export const tactilePreset = {
         },
         TriggerKey: { use: key },
         Panel: {
+          frame: {
+            inline: {
+              min: { viewport: { axis: "inline", percent: 1 } },
+              max: { viewport: { axis: "inline", percent: 1 } },
+            },
+            block: {
+              min: { viewport: { axis: "block", percent: 1 } },
+              max: { viewport: { axis: "block", percent: 1 } },
+            },
+          },
+          margin: 0,
+          padding: 0,
+          surface: { fill: "transparent" },
+          stroke: { width: 0, line: "solid", color: "transparent" },
+          scroll: { inline: "visible", block: "visible" },
+          position: {
+            kind: "fixed",
+            anchor: "none",
+            place: "auto",
+            inset: 0,
+            layer: tokens.z.popover,
+          },
+          decor: { backdrop: { surface: { fill: "transparent" } } },
+        },
+        Backdrop: {
+          position: { kind: "fixed", inset: 0, layer: 0 },
+          surface: { fill: tokens.color.backdrop },
+          motion: {
+            enter: { from: { effect: { opacity: 0 } }, using: tokens.motion.snap },
+            exit: { to: { effect: { opacity: 0 } }, using: tokens.motion.snap },
+          },
+        },
+        Surface: {
           layout: { kind: "stack", gap: tokens.space.sm },
           frame: {
             inline: tokens.size.panel,
@@ -590,28 +659,22 @@ export const tactilePreset = {
             contain: "layout",
           },
           padding: tokens.space.sm,
+          position: { kind: "fixed", anchor: "none", place: "center", layer: 1 },
           surface: { fill: tokens.gradient.panel, text: tokens.color.text },
           stroke: { width: 1, line: "solid", color: tokens.color.line },
           shape: { radius: tokens.radius.panel, clip: "content" },
           effect: { shadow: tokens.shadow.panel },
-          position: {
-            kind: "fixed",
-            anchor: { part: "Trigger" },
-            place: "block-end",
-            layer: tokens.z.popover,
-          },
           transform: { block: values.dragOffset },
-          decor: { backdrop: { surface: { fill: tokens.color.backdrop } } },
           motion: {
             enter: {
-              from: { effect: { opacity: 0 }, transform: { block: 16, scale: 0.96 } },
+              from: { effect: { opacity: 0 } },
               using: tokens.motion.settle,
             },
             exit: {
-              to: { effect: { opacity: 0 }, transform: { block: 34, scale: 0.97 } },
+              to: { effect: { opacity: 0 } },
               using: tokens.motion.snap,
             },
-            layout: { geometry: "frame", content: "preserve", using: tokens.motion.settle },
+            layout: { geometry: "frame", using: tokens.motion.settle },
             gesture: {
               axis: "block",
               value: values.dragOffset,
@@ -626,6 +689,7 @@ export const tactilePreset = {
             {
               container: "compact",
               apply: {
+                margin: 0,
                 frame: {
                   inline: "auto",
                   block: { max: { viewport: { axis: "block", percent: 0.84 } } },
@@ -635,6 +699,7 @@ export const tactilePreset = {
                   anchor: "none",
                   place: "auto",
                   inset: { inline: 8, blockEnd: 8 },
+                  layer: 1,
                 },
                 shape: { radius: 22 },
               },
@@ -666,6 +731,13 @@ export const tactilePreset = {
           stroke: { width: 1, line: "solid", color: tokens.color.line },
           shape: { radius: tokens.radius.control },
           effect: { shadow: tokens.shadow.pressed },
+          motion: {
+            enter: {
+              from: { transform: { block: 10, scale: 0.985 } },
+              using: tokens.motion.settle,
+            },
+            exit: { to: { transform: { block: 8 } }, using: tokens.motion.snap },
+          },
         },
         SearchIcon: { surface: { text: tokens.color.accent }, text: { size: 16 } },
         SearchInput: {
@@ -730,7 +802,6 @@ export const tactilePreset = {
             { native: "hover", apply: { surface: { fill: tokens.color.panelRaised } } },
             { native: "selected", apply: { surface: { text: tokens.color.accentInk } } },
           ],
-          motion: { change: { surface: tokens.motion.snap } },
         },
         Selection: {
           position: { kind: "absolute", inset: 0, layer: 0 },
@@ -756,13 +827,17 @@ export const tactilePreset = {
           layout: { kind: "row", align: "center", distribute: "between" },
           padding: { inline: tokens.space.sm, blockStart: tokens.space.md },
           stroke: { blockStart: { width: 1, line: "solid", color: tokens.color.line } },
+          motion: {
+            enter: { from: { transform: { block: 8 } }, using: tokens.motion.settle },
+            exit: { to: { transform: { block: 6 } }, using: tokens.motion.snap },
+          },
         },
         ResultCount: {
           frame: { contain: "layout" },
           surface: { text: tokens.color.muted },
           text: { font: tokens.font.mono, size: 11 },
           motion: {
-            layout: { geometry: "text", content: "preserve", using: tokens.motion.snap },
+            layout: { geometry: "text", using: tokens.motion.snap },
           },
         },
         Close: {
@@ -779,7 +854,7 @@ export const tactilePreset = {
               apply: { transform: { block: 2 }, effect: { shadow: tokens.shadow.pressed } },
             },
           ],
-          motion: { change: { transform: tokens.motion.press, effect: tokens.motion.snap } },
+          motion: { change: { transform: tokens.motion.press, opacity: tokens.motion.snap } },
         },
       }),
     };
@@ -849,7 +924,6 @@ export const editorialPreset = {
           apply: { padding: { inline: tokens.space.xs, block: tokens.space.sm } },
         },
       ],
-      motion: { change: { surface: tokens.motion.quick, stroke: tokens.motion.quick } },
     } as const;
 
     return {
@@ -945,7 +1019,7 @@ export const editorialPreset = {
             { native: "hover", apply: { surface: { fill: tokens.color.accentSoft } } },
             { native: "active", apply: { transform: { inline: 3, block: 3 } } },
           ],
-          motion: { change: { surface: tokens.motion.quick, transform: tokens.motion.quick } },
+          motion: { change: { transform: tokens.motion.quick } },
         },
         TriggerIcon: { surface: { text: tokens.color.accent }, text: { size: 20, weight: 800 } },
         TriggerLabel: { text: { size: 15, weight: 720 } },
@@ -956,34 +1030,61 @@ export const editorialPreset = {
           text: { size: 11, weight: 750 },
         },
         Panel: {
+          frame: {
+            inline: {
+              min: { viewport: { axis: "inline", percent: 1 } },
+              max: { viewport: { axis: "inline", percent: 1 } },
+            },
+            block: {
+              min: { viewport: { axis: "block", percent: 1 } },
+              max: { viewport: { axis: "block", percent: 1 } },
+            },
+          },
+          margin: 0,
+          padding: 0,
+          surface: { fill: "transparent" },
+          stroke: { width: 0, line: "solid", color: "transparent" },
+          scroll: { inline: "visible", block: "visible" },
+          position: {
+            kind: "fixed",
+            anchor: "none",
+            place: "auto",
+            inset: 0,
+            layer: tokens.z.popover,
+          },
+          decor: { backdrop: { surface: { fill: "transparent" } } },
+        },
+        Backdrop: {
+          position: { kind: "fixed", inset: 0, layer: 0 },
+          surface: { fill: tokens.color.backdrop },
+          motion: {
+            enter: { from: { effect: { opacity: 0 } }, using: tokens.motion.quick },
+            exit: { to: { effect: { opacity: 0 } }, using: tokens.motion.quick },
+          },
+        },
+        Surface: {
           layout: { kind: "stack", gap: 0 },
           frame: {
             inline: tokens.size.panel,
-            block: { max: { viewport: { axis: "block", percent: 0.54 } } },
+            block: { max: { viewport: { axis: "block", percent: 0.52 } } },
             contain: "layout",
           },
+          position: { kind: "fixed", anchor: "none", place: "center", layer: 1 },
           surface: { fill: tokens.color.paper, text: tokens.color.text },
           stroke: { width: 2, line: "solid", color: tokens.color.line },
           shape: { radius: tokens.radius.panel, clip: "content" },
           effect: { shadow: tokens.shadow.panel },
-          position: {
-            kind: "fixed",
-            anchor: { part: "Trigger" },
-            place: "block-end",
-            layer: tokens.z.popover,
-          },
           transform: { block: values.dragOffset },
-          decor: { backdrop: { surface: { fill: tokens.color.backdrop } } },
           motion: {
             enter: {
-              from: { effect: { opacity: 0 }, transform: { inline: 26 } },
+              from: { effect: { opacity: 0 } },
               using: tokens.motion.layout,
             },
             exit: {
-              to: { effect: { opacity: 0 }, transform: { inline: -18 } },
+              to: { effect: { opacity: 0 } },
               using: tokens.motion.quick,
             },
-            layout: { geometry: "frame", content: "preserve", using: tokens.motion.layout },
+            layout: { geometry: "frame", using: tokens.motion.layout },
             gesture: {
               axis: "block",
               value: values.dragOffset,
@@ -998,6 +1099,7 @@ export const editorialPreset = {
             {
               container: "compact",
               apply: {
+                margin: 0,
                 frame: {
                   inline: "auto",
                   block: { max: { viewport: { axis: "block", percent: 0.9 } } },
@@ -1007,6 +1109,7 @@ export const editorialPreset = {
                   anchor: "none",
                   place: "auto",
                   inset: { inline: 0, blockEnd: 0 },
+                  layer: 1,
                 },
                 effect: { shadow: "none" },
               },
@@ -1039,6 +1142,10 @@ export const editorialPreset = {
           frame: { block: 62 },
           padding: { inline: tokens.space.lg },
           stroke: { blockEnd: { width: 2, line: "solid", color: tokens.color.line } },
+          motion: {
+            enter: { from: { transform: { inline: 14 } }, using: tokens.motion.layout },
+            exit: { to: { transform: { inline: -10 } }, using: tokens.motion.quick },
+          },
         },
         SearchIcon: { surface: { text: tokens.color.accent }, text: { size: 18, weight: 800 } },
         SearchInput: {
@@ -1119,7 +1226,6 @@ export const editorialPreset = {
             { native: "hover", apply: { surface: { fill: tokens.color.canvas } } },
             { native: "selected", apply: { surface: { text: tokens.color.text } } },
           ],
-          motion: { change: { surface: tokens.motion.quick } },
         },
         Selection: {
           position: { kind: "absolute", inset: 0, layer: 0 },
@@ -1152,13 +1258,17 @@ export const editorialPreset = {
           layout: { kind: "row", align: "center", distribute: "between" },
           padding: { inline: tokens.space.lg, block: tokens.space.md },
           stroke: { blockStart: { width: 2, line: "solid", color: tokens.color.line } },
+          motion: {
+            enter: { from: { transform: { inline: -12 } }, using: tokens.motion.layout },
+            exit: { to: { transform: { inline: 10 } }, using: tokens.motion.quick },
+          },
         },
         ResultCount: {
           frame: { contain: "layout" },
           surface: { text: tokens.color.muted },
           text: { size: 11, weight: 700, transform: "uppercase" },
           motion: {
-            layout: { geometry: "text", content: "preserve", using: tokens.motion.quick },
+            layout: { geometry: "text", using: tokens.motion.quick },
           },
         },
         Close: {

@@ -111,11 +111,7 @@ export const docsPreset = {
           { native: "active", apply: { transform: { scale: 0.985 } } },
         ],
         motion: {
-          change: {
-            surface: tokens.motion.quick,
-            stroke: tokens.motion.quick,
-            transform: tokens.motion.quick,
-          },
+          change: { transform: tokens.motion.quick },
         },
       },
     }),

@@ -25,6 +25,38 @@ async function closeMenu(page: Page) {
   await expect(page.getByRole("dialog", { name: "Command menu" })).toBeHidden();
 }
 
+test("dialog presence retains one mounted surface through animated close and reopen", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1024, height: 768 });
+  await page.goto("/");
+  const dialog = await openMenu(page);
+  const shell = page.locator("#visual-lab-command-menu");
+  await dialog.locator(":scope > :last-child").evaluate((element) => {
+    element.setAttribute("data-presence-identity", "retained");
+  });
+
+  const exitState = await page
+    .getByRole("button", { name: "Done", exact: true })
+    .evaluate((button) => {
+      button.click();
+      const dialog = document.querySelector("#visual-lab-command-menu") as HTMLDialogElement;
+      return { open: dialog.open, animations: dialog.getAnimations({ subtree: true }).length };
+    });
+  expect(exitState.open).toBe(true);
+  expect(exitState.animations).toBeGreaterThanOrEqual(2);
+  await expect(shell.locator('[data-presence-identity="retained"]')).toHaveCount(1);
+  await expect(shell).not.toHaveAttribute("open", "");
+
+  await page.getByRole("button", { name: "Search commands", exact: true }).click();
+  await expect(shell).toHaveAttribute("open", "");
+  await expect(shell.locator('[data-presence-identity="retained"]')).toHaveCount(1);
+  await expect(shell.locator(":scope > *")).toHaveCount(2);
+
+  await shell.locator(":scope > :first-child").click({ position: { x: 12, y: 12 } });
+  await expect(shell).not.toHaveAttribute("open", "");
+});
+
 test("one semantic component supports three distinct preset fingerprints", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/");
@@ -55,22 +87,25 @@ test("one semantic component supports three distinct preset fingerprints", async
     const dialog = await openMenu(page);
     await page.waitForTimeout(650);
     const placement = await dialog.evaluate((element) => {
-      const style = getComputedStyle(element);
-      const rectangle = element.getBoundingClientRect();
+      const surface = element.lastElementChild;
+      if (!surface) throw new Error("Missing command menu surface.");
+      const rectangle = surface.getBoundingClientRect();
       return {
         bottomGap: innerHeight - rectangle.bottom,
-        fallback: style.positionTryFallbacks,
-        order: style.positionTryOrder,
+        centerInline: Math.abs(rectangle.left + rectangle.width / 2 - innerWidth / 2),
+        centerBlock: Math.abs(rectangle.top + rectangle.height / 2 - innerHeight / 2),
         topGap: rectangle.top,
       };
     });
-    expect(placement.fallback).toBe("flip-block");
-    expect(placement.order).toBe("most-block-size");
+    expect(placement.centerInline).toBeLessThanOrEqual(1);
+    expect(placement.centerBlock).toBeLessThanOrEqual(1);
     expect(placement.topGap).toBeGreaterThanOrEqual(8);
     expect(placement.bottomGap).toBeGreaterThanOrEqual(8);
     fingerprints.push(
       await dialog.evaluate((element) => {
-        const style = getComputedStyle(element);
+        const surface = element.lastElementChild;
+        if (!surface) throw new Error("Missing command menu surface.");
+        const style = getComputedStyle(surface);
         const selected = getComputedStyle(element.querySelector('[aria-selected="true"]')!);
         return JSON.stringify({
           background: style.backgroundImage || style.backgroundColor,
@@ -107,13 +142,18 @@ test("typed theme selection stays reactive and preserves component state", async
   const input = page.getByRole("combobox", { name: "Search commands" });
   await input.fill("review");
   expect(
-    await dialog.evaluate((element) => innerHeight - element.getBoundingClientRect().bottom),
+    await dialog.evaluate((element) => {
+      const surface = element.lastElementChild;
+      return surface ? innerHeight - surface.getBoundingClientRect().bottom : -1;
+    }),
   ).toBeGreaterThanOrEqual(8);
   const lightCanvas = await page
     .locator("main")
     .evaluate((element) => getComputedStyle(element).color);
 
-  await page.getByRole("button", { name: "Dark", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Dark", exact: true })
+    .evaluate((button) => button.click());
   const themeButton = page.getByRole("button", { name: "Light", exact: true });
   await expect(themeButton).toHaveAttribute("aria-pressed", "true");
   await expect(dialog).toBeVisible();
@@ -122,12 +162,24 @@ test("typed theme selection stays reactive and preserves component state", async
     .poll(() => page.locator("main").evaluate((element) => getComputedStyle(element).color))
     .not.toBe(lightCanvas);
 
-  await selectPreset(page, "Tactile");
+  await page
+    .getByRole("button", { name: "Tactile", exact: true })
+    .evaluate((button) => button.click());
+  await expect(page.getByRole("button", { name: "Tactile", exact: true })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
   await expect(themeButton).toHaveAttribute("aria-pressed", "true");
   await expect(input).toHaveValue("review");
-  await selectPreset(page, "Precision");
+  await page
+    .getByRole("button", { name: "Precision", exact: true })
+    .evaluate((button) => button.click());
+  await expect(page.getByRole("button", { name: "Precision", exact: true })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
   await expect(themeButton).toHaveAttribute("aria-pressed", "true");
-  await themeButton.click();
+  await themeButton.evaluate((button) => button.click());
   await expect(page.getByRole("button", { name: "Dark", exact: true })).toHaveAttribute(
     "aria-pressed",
     "false",
@@ -184,7 +236,7 @@ test("compact sheet drags, springs back, and flick-dismisses", async ({ page }) 
   await page.goto("/");
   const dialog = await openMenu(page);
   await page.waitForTimeout(650);
-  const handle = dialog.locator(":scope > div").first();
+  const handle = dialog.locator(':scope > div > div[aria-hidden="true"]');
   const box = await handle.boundingBox();
   if (!box) throw new Error("Missing drag handle geometry.");
   const x = box.x + box.width / 2;
@@ -198,7 +250,7 @@ test("compact sheet drags, springs back, and flick-dismisses", async ({ page }) 
   await page.mouse.up();
   await expect(dialog).toBeVisible();
   await expect
-    .poll(() => dialog.evaluate((element) => element.getAttribute("style") ?? ""))
+    .poll(() => dialog.evaluate((element) => element.lastElementChild?.getAttribute("style") ?? ""))
     .not.toContain("transform");
 
   const nextBox = await handle.boundingBox();
@@ -229,14 +281,16 @@ test("preset hot refresh preserves state and does not replay entrance motion", a
     await writeFile(presetPath, changed);
     const dialog = page.getByRole("dialog", { name: "Command menu" });
     await expect
-      .poll(() => dialog.evaluate((element) => getComputedStyle(element).borderRadius))
+      .poll(() =>
+        dialog.evaluate((element) => getComputedStyle(element.lastElementChild!).borderRadius),
+      )
       .toBe("18px");
     await expect(dialog).toBeVisible();
     await expect(input).toHaveValue("review");
     await expect(dialog).toHaveCount(1);
     await page.waitForTimeout(200);
     await expect(dialog).not.toHaveCSS("opacity", "0");
-    expect(await dialog.getAttribute("style")).not.toContain("will-change");
+    expect((await dialog.getAttribute("style")) ?? "").not.toContain("will-change");
   } finally {
     await writeFile(presetPath, source);
   }
@@ -245,7 +299,7 @@ test("preset hot refresh preserves state and does not replay entrance motion", a
     .poll(() =>
       page
         .getByRole("dialog", { name: "Command menu" })
-        .evaluate((element) => getComputedStyle(element).borderRadius),
+        .evaluate((element) => getComputedStyle(element.lastElementChild!).borderRadius),
     )
     .toBe("17px");
   await expect(page.getByRole("combobox", { name: "Search commands" })).toHaveValue("review");
@@ -398,11 +452,105 @@ test("rapid interruptions converge without residue, duplication, or browser erro
   await expect(page.locator("[data-motion-lifecycle], [inert]")).toHaveCount(0);
   expect(
     await dialog.evaluate((element) => ({
-      transform: element.style.transform,
-      willChange: element.style.willChange,
+      transform: (element.lastElementChild as HTMLElement).style.transform,
+      willChange: (element.lastElementChild as HTMLElement).style.willChange,
     })),
   ).toEqual({ transform: "", willChange: "" });
   expect(errors).toEqual([]);
+});
+
+test("layout, spring, and exit playback remain compositor-only", async ({ page }) => {
+  await page.addInitScript(() => {
+    const calls: Array<{ keys: string[]; easing: string }> = [];
+    const original = Element.prototype.animate;
+    Element.prototype.animate = function (keyframes, options) {
+      const frames = Array.isArray(keyframes) ? keyframes : [keyframes];
+      calls.push({
+        keys: [
+          ...new Set(
+            frames.flatMap((frame) =>
+              Object.keys(frame).filter(
+                (key) => !["composite", "computedOffset", "easing", "offset"].includes(key),
+              ),
+            ),
+          ),
+        ].sort(),
+        easing:
+          typeof options === "object" && options && "easing" in options
+            ? String(options.easing)
+            : "",
+      });
+      return original.call(this, keyframes, options);
+    };
+    (globalThis as typeof globalThis & { __motionCalls: typeof calls }).__motionCalls = calls;
+  });
+
+  await page.setViewportSize({ width: 1024, height: 768 });
+  await page.goto("/");
+  const dialog = await openMenu(page);
+  await page.waitForTimeout(650);
+  await page.evaluate(() => {
+    (globalThis as typeof globalThis & { __motionCalls: unknown[] }).__motionCalls.length = 0;
+  });
+  await dialog.evaluate((element) => {
+    const surface = element.lastElementChild;
+    if (!(surface instanceof HTMLElement)) throw new Error("Missing command menu surface.");
+    const records: string[] = [];
+    const observer = new MutationObserver(() => records.push(surface.getAttribute("style") ?? ""));
+    observer.observe(surface, { attributes: true, attributeFilter: ["style"] });
+    Object.assign(globalThis, {
+      __motionMutations: records,
+      __stopMotionMutations: () => observer.disconnect(),
+    });
+  });
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.waitForTimeout(700);
+  const evidence = await page.evaluate(() => {
+    const globals = globalThis as typeof globalThis & {
+      __motionCalls: Array<{ keys: string[]; easing: string }>;
+      __motionMutations: string[];
+      __stopMotionMutations(): void;
+    };
+    globals.__stopMotionMutations();
+    return {
+      calls: globals.__motionCalls,
+      mutations: globals.__motionMutations,
+      projections: document.querySelectorAll("[data-poggers-projection]").length,
+    };
+  });
+
+  expect(evidence.calls.length).toBeGreaterThan(0);
+  for (const call of evidence.calls) {
+    expect(call.keys.every((key) => key === "opacity" || key === "transform")).toBe(true);
+    expect(call.easing === "linear" || call.easing.startsWith("cubic-bezier(")).toBe(true);
+  }
+  expect(evidence.mutations.length).toBeLessThanOrEqual(8);
+  expect(
+    evidence.mutations.some((style) => /(?:^|;)\s*(?:height|left|top|width)\s*:/.test(style)),
+  ).toBe(false);
+  expect(evidence.projections).toBe(0);
+  expect(
+    await dialog.evaluate((element) => element.lastElementChild?.getAttribute("style") ?? ""),
+  ).not.toMatch(/height|left|top|transform|width/);
+
+  await page.evaluate(() => {
+    (globalThis as typeof globalThis & { __motionCalls: unknown[] }).__motionCalls.length = 0;
+  });
+  await page.getByRole("button", { name: "Done", exact: true }).click();
+  await expect(dialog).toBeHidden();
+  const exitCalls = await page.evaluate(
+    () =>
+      (
+        globalThis as typeof globalThis & {
+          __motionCalls: Array<{ keys: string[]; easing: string }>;
+        }
+      ).__motionCalls,
+  );
+  expect(exitCalls.length).toBeGreaterThan(0);
+  expect(
+    exitCalls.every((call) => call.keys.every((key) => key === "opacity" || key === "transform")),
+  ).toBe(true);
 });
 
 test("close, preset replacement, and immediate reopen cancel the prior exit owner", async ({
@@ -419,10 +567,10 @@ test("close, preset replacement, and immediate reopen cancel the prior exit owne
 
   expect(
     await dialog.evaluate((element) => ({
-      computed: getComputedStyle(element).transform,
-      inline: element.style.transform,
-      opacity: element.style.opacity,
-      willChange: element.style.willChange,
+      computed: getComputedStyle(element.lastElementChild!).transform,
+      inline: (element.lastElementChild as HTMLElement).style.transform,
+      opacity: (element.lastElementChild as HTMLElement).style.opacity,
+      willChange: (element.lastElementChild as HTMLElement).style.willChange,
     })),
   ).toEqual({ computed: "none", inline: "", opacity: "", willChange: "" });
 });

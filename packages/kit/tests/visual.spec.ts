@@ -67,7 +67,7 @@ function fixture(): Record<string, any> {
             apply: { surface: { text: tokens.color.text } },
           },
         ],
-        motion: { change: { surface: tokens.motion.settle } },
+        motion: { change: { opacity: tokens.motion.settle } },
       };
       return {
         Card: ({ values }: { values: any }) => ({
@@ -90,6 +90,7 @@ function fixture(): Record<string, any> {
               kind: "absolute",
               anchor: { part: "Anchor" },
               place: "block-end",
+              inset: { inline: 8, blockEnd: 4 },
             },
             scroll: { block: "auto", overscroll: "contain", scrollbar: "thin" },
             interaction: {
@@ -138,7 +139,7 @@ describe("visual preset materialization", () => {
     expect(selectVisualMotionBackend("none")).toBe("instant");
     expect(selectVisualMotionBackend({ duration: 140, easing: "decelerate" })).toBe("waapi");
     expect(selectVisualMotionBackend({ spring: { duration: 420, bounce: 0.1 } })).toBe(
-      "anime-spring",
+      "sampled-waapi",
     );
   });
 
@@ -281,6 +282,12 @@ export default { styles: { presets: { precision: precisionPreset } } } satisfies
     expect(css).toContain("position-try-order: most-block-size");
     expect(css).toContain('[aria-pressed="true"]');
     expect(source).toContain("stylex.create");
+    expect(source).toContain('"marginBlock": "12px"');
+    expect(source).toContain('"insetInline": "8px"');
+    expect(source).toContain('"insetBlockEnd": "4px"');
+    expect(source).toContain('"transitionProperty": "opacity"');
+    expect(source).not.toContain('"transitionProperty": "background-color');
+    expect(source).not.toContain("linear(");
   });
 
   it("rejects unknown components and parts", () => {
@@ -348,6 +355,28 @@ export default { styles: { presets: { precision: precisionPreset } } } satisfies
     expect(() =>
       generateVisualStylexModule([materializeVisualPreset("precision", unsafe, surface)]),
     ).toThrow("cannot combine layout motion with an authored transform matrix");
+
+    const paintAnimation = fixture();
+    paintAnimation.components = ({ tokens }: { tokens: any }) => ({
+      Card: () => ({
+        Root: { motion: { change: { surface: tokens.motion.settle } } },
+      }),
+    });
+    expect(() =>
+      generateVisualStylexModule([materializeVisualPreset("precision", paintAnimation, surface)]),
+    ).toThrow('change contains unknown field "surface"');
+
+    const trackAnimation = fixture();
+    trackAnimation.components = ({ tokens }: { tokens: any }) => ({
+      Card: () => ({
+        Root: {
+          motion: { layout: { geometry: "tracks", using: tokens.motion.settle } },
+        },
+      }),
+    });
+    expect(() =>
+      generateVisualStylexModule([materializeVisualPreset("precision", trackAnimation, surface)]),
+    ).toThrow('layout.geometry has unsupported value "tracks"');
   });
 
   it("rejects runtime functions, non-finite numbers, class instances, and cycles", () => {

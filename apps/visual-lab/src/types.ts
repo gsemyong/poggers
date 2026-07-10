@@ -61,7 +61,9 @@ export type App = {
         TriggerIcon: "span";
         TriggerLabel: "span";
         TriggerKey: "span";
-        Panel: "div";
+        Panel: "dialog";
+        Backdrop: "div";
+        Surface: "div";
         Handle: "div";
         Search: "label";
         SearchIcon: "span";

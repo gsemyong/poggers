@@ -2885,8 +2885,10 @@ type PartCommonProps<T extends Element> = PartDataAttributes &
     ref?: (element: T) => void;
     onBeforeToggle?: PartEvent<T, PartPopoverToggleEvent>;
     onBlur?: PartEvent<T, FocusEvent>;
+    onCancel?: PartEvent<T, Event>;
     onChange?: PartEvent<T, Event>;
     onClick?: PartEvent<T, MouseEvent>;
+    onClose?: PartEvent<T, Event>;
     onFocus?: PartEvent<T, FocusEvent>;
     onInput?: PartEvent<T, InputEvent>;
     onKeyDown?: PartEvent<T, KeyboardEvent>;
@@ -2907,6 +2909,9 @@ type PartCommonProps<T extends Element> = PartDataAttributes &
     onToggle?: PartEvent<T, PartPopoverToggleEvent>;
   };
 type PartHtmlProps = PartCommonProps<HTMLElement>;
+type PartDialogProps = PartCommonProps<HTMLDialogElement> & {
+  dialogOpen?: PartValue<boolean>;
+};
 type PartButtonProps = PartCommonProps<HTMLButtonElement> & PartPopoverTargetProps & {
   disabled?: PartValue<boolean>;
   name?: PartValue<string>;
@@ -2966,6 +2971,8 @@ type PartSvgProps = PartCommonProps<SVGElement> & {
 
 function partPropsType(elementName: string): string {
   switch (elementName) {
+    case "dialog":
+      return "PartDialogProps";
     case "button":
       return "PartButtonProps";
     case "input":

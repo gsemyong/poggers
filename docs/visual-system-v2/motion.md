@@ -1,84 +1,144 @@
 # Visual Transactions And Motion
 
-## Ownership
+## Performance Contract
 
-Each component instance mounts one visual coordinator. The coordinator sees
-only that component's declared parts. An element has at most one runtime motion
-owner; starting a new owner first captures the current presentation, cancels the
-old animation, and then retargets.
+Poggers motion has a closed rendering contract:
 
-The JSX runtime has no document-wide layout scanner and performs no implicit
-projection. A part participates in geometry work only when its preset declares
-`layout` or `shared` motion.
+- Direct animation may target only `opacity` and the transform lanes
+  (`translate`, `scale`, `rotate`, and the runtime projection matrix).
+- Paint properties such as color, shadow, filter, border, radius, and
+  `clip-path` cannot be declared as motion.
+- Layout properties such as width, height, inset, grid tracks, margin, and font
+  metrics cannot be declared as motion.
+- Layout changes are committed once, then represented with compositor-only
+  projection layers. They are never interpolated by writing geometry each
+  frame.
+- Reduced motion resolves directly to the destination.
+
+This follows the browser rendering pipeline rather than pretending that every
+CSS property has the same cost. Static StyleX output may use the full closed
+visual vocabulary; the narrower rule applies only to interpolation.
+
+## Public Intent
+
+```ts
+motion: {
+  change: { opacity: tokens.motion.quick, transform: tokens.motion.quick },
+  enter: {
+    from: { effect: { opacity: 0 }, transform: { block: 12, scale: 0.98 } },
+    using: tokens.motion.settle,
+  },
+  exit: {
+    to: { effect: { opacity: 0 }, transform: { block: 16, scale: 0.98 } },
+    using: tokens.motion.quick,
+  },
+  layout: { geometry: "frame", using: tokens.motion.settle },
+}
+```
+
+`position` projects translation only. `frame` projects position and size with
+old/new visual layers. `text` uses the same projection and enables cached
+PreText measurement. There are no `content`, `size`, or `tracks` modes because
+they previously exposed multiple algorithms for the same result, including an
+unsafe width/height path.
 
 ## Transaction
 
-For a state, value, theme, or preset update the coordinator:
+Each component instance owns one visual coordinator. A transaction:
 
-1. resolves the mounted parts with declared motion;
-2. reads current presentation geometry for affected parts;
-3. cancels previous owners and removes their temporary writes;
-4. reads destination geometry in a separate phase;
-5. selects the declared backend and starts or resolves the transaction;
-6. restores temporary `transform`, `transform-origin`, and `will-change` on
-   completion, cancellation, replacement, or disposal.
+1. reads all affected presentation rectangles;
+2. cancels an interrupted owner from its current visual presentation;
+3. reads destination rectangles after temporary presentation has been removed;
+4. commits a stable snapshot for the next transaction;
+5. writes projection setup once;
+6. plays only transform and opacity keyframes;
+7. removes projection nodes and temporary presentation on finish, cancellation,
+   preset replacement, hot refresh, or disposal.
 
-Preset replacement cancels old gestures, exits, geometry caches, and animation
-owners. It suppresses entrance motion for the replacement render.
+Reads are batched before writes. State and DOM mutation work is scheduled before
+paint. ResizeObserver transactions flush inside the observer delivery so a
+responsive destination cannot paint for one frame before projection begins.
 
-## Backends
+## Spring Playback
 
-| Intent                                             | Backend                |
-| -------------------------------------------------- | ---------------------- |
-| Static, pseudo, theme, container, preference       | extracted StyleX CSS   |
-| Finite duration change/enter/exit                  | WAAPI through Anime.js |
-| Spring change/enter/exit/layout/gesture            | Anime.js spring        |
-| Position, size, frame, tracks, shared geometry     | component-scoped FLIP  |
-| Text-height prediction during declared text layout | cached PreText         |
-| Reduced motion                                     | immediate final state  |
+Anime.js supplies the spring model. Poggers samples that curve up front at a
+maximum 120 Hz resolution and sends native transform/opacity keyframes to
+WAAPI. The browser interpolates those keyframes; no JavaScript animation loop
+runs on every frame.
 
-The public token uses either `{ duration, easing, delay? }` or
-`{ spring: { duration, bounce? }, delay? }`. The engine-specific easing or
-spring object never enters an application type.
+Native state transitions use compositor-compatible cubic Bezier timing. Poggers
+does not emit custom `linear()` easing for those transitions because Safari does
+not consistently hardware-accelerate it. This is a deliberate performance
+trade: lifecycle and layout motion retain the full sampled spring, while hover,
+focus, pressed, and selected transitions use a perceptual spring approximation.
 
-## Lifecycle
+`will-change` is not left on animated elements. WAAPI owns transient promotion.
+The only explicit `will-change: transform` is during a live drag and it is
+restored on release or cancellation.
 
-Entry starts only for a newly observed part. Exit integrates with `Show`,
-reactive `hidden`, and native popover teardown. An exiting element becomes
-`aria-hidden` and inert before animation, and those temporary attributes are
-restored if the exit is cancelled.
+## Layout Projection
 
-Hot refresh restores component state and suppresses mount entrance. Rapid
-open/close and preset replacement therefore converge without duplicate nodes or
-replayed entry motion.
+Position-only changes use FLIP translation on the live element. Size-changing
+frame and text transactions retain a sanitized old visual snapshot and place
+the live element at its final layout immediately. Old and new layers follow the
+same transform projection while crossfading, then the old layer is removed.
 
-## Layout And Text
+This avoids per-frame layout and prevents live text from being permanently
+counter-scaled. One browser layout for the destination and one paint for each
+projection layer are still real costs. The framework can eliminate layout from
+playback, not from the act of changing document structure.
 
-`position` animates translation only. For `size`, `frame`, `tracks`, and `text`,
-`content: "scale"` uses full-matrix scale projection. The default
-`content: "preserve"` animates measured width and height so child text is never
-counter-scaled or stretched. Text geometry optionally predicts target height
-with PreText when the computed font can be prepared. Failure or unsupported
-font data falls back to browser geometry.
+PreText is used for its actual strength: cached text preparation and pure
+arithmetic line layout. Cache identity includes text, named font, letter
+spacing, white-space, and word-break. Unsupported or unloaded font data falls
+back to browser geometry. PreText is not treated as a replacement for the CSS
+layout engine.
 
-Entry, exit, layout, and gesture motion all target one complete transform
-matrix. This prevents per-transform engine caches from leaking a cancelled
-preset's translation, rotation, or scale into the next visual transaction.
+## Shared Morphs
 
-Layout is not universally compositor-only. Measuring and changing intrinsic
-layout can require browser layout and paint; Poggers scopes that work to the
-declared component instead of claiming to bypass the platform.
+`motion.shared` gives visual instances a typed identity owned by the app
+contract and a spring owned by the preset. When one instance replaces another,
+the runtime retains the old visual, commits the new layout, projects both old
+and new frames with transforms, and crossfades their rendered appearance. This
+is the shared-element morph used for selections, cards that become detail
+surfaces, and controls that expand into sheets.
 
-## Gesture
+The old visual is a sanitized, inert snapshot and the new visual is the live
+DOM. Geometry and appearance may differ; playback still writes only transform
+and opacity. Arbitrary SVG path interpolation is deliberately not implied by
+this primitive because it is paint work and cannot satisfy the cross-browser
+compositor contract.
 
-A gesture declaration names an axis, continuous length value, optional handle,
-bounds, rubber-band factor, dismiss thresholds, and settle token. Pointer
-capture drives direct transform tracking. Release distance and measured velocity
-select dismiss or spring settle, and logical coordinates respect writing mode.
+Inside a browser top layer, the current backend projects the live destination
+without mounting a second snapshot. Chromium paint and capture gates are not
+reliable when transformed projection clones are mounted inside a modal layer.
+That fallback preserves clean geometry motion, but full old/new appearance
+morphing in a dialog remains an open gate until retained live sources pass the
+same browser checks.
 
-## Explicit Boundaries
+## Presence
 
-There is no public timeline, arbitrary-property animation, scroll-linked
-sequence, or direct engine escape. Data virtualization remains application
-behavior. These capabilities should become reviewed typed primitives only when
-a real app demonstrates a coherent requirement.
+`Show`, reactive `hidden`, and native dialogs/popovers share one exit controller.
+Exiting content becomes inert and accessibility-hidden before playback.
+Ordinary DOM branches are removed from flow and represented by a fixed visual
+snapshot, so old and new branches cannot push each other around. An open native
+top layer remains active until its declared exit completes.
+
+Opening or unhiding dispatches an internal presence notification so elements
+whose CSS visibility changed without a DOM mutation still receive entrance and
+geometry work. Reopening cancels the previous exit, restores the source, removes
+its snapshot, and retargets from the current presentation. Modal dialogs remain
+mounted and stay in the top layer until every registered descendant exit has
+finished; only then does the runtime call `close()`.
+
+## Verification Gates
+
+- The preset type and compiler reject every non-compositor motion domain.
+- Generated transition lists contain only opacity and transform properties.
+- Spring lifecycle keyframes use native WAAPI with `linear` interpolation over
+  pre-sampled values.
+- Browser tests record every keyframe and fail on geometry or paint properties.
+- Browser tests record inline mutations and fail on per-frame width, height,
+  inset, left, or top writes.
+- Rapid resize, close, reopen, reduced motion, drag, preset replacement, and hot
+  refresh must leave no projection node, inline transform, or `will-change`.

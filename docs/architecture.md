@@ -235,7 +235,7 @@ export const systemPreset = {
         interaction: {
           focusRing: { color: tokens.color.focus, width: 2, offset: 2 },
         },
-        motion: { change: { effect: tokens.motion.quick } },
+        motion: { change: { opacity: tokens.motion.quick } },
       },
     }),
   }),
@@ -307,6 +307,6 @@ preset ownership without replaying entrance motion, and swaps the stylesheet
 only after the new one loads.
 
 The primary verification surface is `apps/visual-lab`: one accessible command
-menu, three independent presets, typed themes, desktop popover, compact drag
+menu, three independent presets, typed themes, desktop modal dialog, compact drag
 sheet, keyboard behavior, reduced motion, forced colors, RTL, reflow, HMR, and
 production-binary journeys.

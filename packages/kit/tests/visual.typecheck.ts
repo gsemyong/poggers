@@ -156,7 +156,7 @@ const precision = {
           ],
           motion: {
             change: {
-              effect: tokens.motion.fast,
+              opacity: tokens.motion.fast,
               transform: tokens.motion.settle,
             },
             enter: {
@@ -169,7 +169,6 @@ const precision = {
             },
             layout: {
               geometry: "frame",
-              content: "preserve",
               using: tokens.motion.settle,
             },
             shared: {

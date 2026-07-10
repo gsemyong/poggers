@@ -552,7 +552,7 @@ export type PositionVisual<Tokens = Empty, Values = Empty> = {
   readonly kind: "relative" | "absolute" | "fixed" | "sticky";
   readonly inset?: LogicalSpace<Tokens, Values>;
   readonly layer?: number | TokenRefOfGroup<Tokens, "z">;
-  readonly place?: "auto" | "block-start" | "block-end" | "inline-start" | "inline-end";
+  readonly place?: "auto" | "center" | "block-start" | "block-end" | "inline-start" | "inline-end";
 };
 
 export type ScrollVisual = {
@@ -730,9 +730,7 @@ export type MotionVisual<
   Shared extends string = never,
   Part extends string = never,
 > = {
-  readonly change?: Partial<
-    Record<"surface" | "text" | "stroke" | "shape" | "effect" | "transform", MotionRef<Tokens>>
-  >;
+  readonly change?: Partial<Record<"opacity" | "transform", MotionRef<Tokens>>>;
   readonly enter?: {
     readonly from: MotionFrame;
     readonly using: MotionRef<Tokens>;
@@ -742,8 +740,7 @@ export type MotionVisual<
     readonly using: MotionRef<Tokens>;
   };
   readonly layout?: {
-    readonly geometry: "position" | "size" | "frame" | "tracks" | "text";
-    readonly content?: "preserve" | "scale";
+    readonly geometry: "position" | "frame" | "text";
     readonly using: MotionRef<Tokens>;
   };
   readonly shared?: {

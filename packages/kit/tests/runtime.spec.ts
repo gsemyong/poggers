@@ -241,7 +241,7 @@ export const systemPreset = {
           { variant: { tone: "strong" }, apply: { surface: { fill: tokens.color.accent } } },
           { container: "compact", apply: { frame: { inline: "fill" } } },
         ],
-        motion: { change: { effect: tokens.motion.quick }, layout: { geometry: "position", using: tokens.motion.settle } },
+        motion: { change: { opacity: tokens.motion.quick }, layout: { geometry: "position", using: tokens.motion.settle } },
         ${options.invalidVisualField ? "mystery: true," : ""}
       },
       Label: { text: { size: 14, weight: 650, line: 1 } },

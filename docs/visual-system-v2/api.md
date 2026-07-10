@@ -141,7 +141,7 @@ when: [
 ```
 
 Container names and thresholds belong to the preset. The same application can
-therefore become an anchored desktop popover in one preset and a compact bottom
+therefore become a centered desktop dialog in one preset and a compact bottom
 sheet in another without changing semantic UI code.
 
 Viewport/environment conditions are reserved for root application concerns.
@@ -155,7 +155,7 @@ Motion is target-state intent attached to the preset part:
 ```ts
 motion: {
   change: {
-    effect: tokens.motion.fast,
+    opacity: tokens.motion.fast,
     transform: tokens.motion.settle,
   },
   enter: {
@@ -164,7 +164,6 @@ motion: {
   },
   layout: {
     geometry: "frame",
-    content: "preserve",
     using: tokens.motion.settle,
   },
   gesture: {
@@ -177,9 +176,10 @@ motion: {
 }
 ```
 
-No engine or lifecycle is exposed. A component transaction selects extracted
-CSS, WAAPI through Anime.js, Anime.js springs, component-scoped FLIP, or
-PreText-assisted text geometry based on the declared intent.
+No engine or lifecycle is exposed. Direct changes are restricted to opacity and
+transform. A component transaction selects extracted StyleX CSS, sampled native
+WAAPI springs, component-scoped projection, or cached PreText geometry based on
+the declared intent.
 
 ## Static Evaluation And IR
 
@@ -211,7 +211,7 @@ The primitive set can express the following without framework recipes:
   container rearrangement, backdrop/effects, and gesture/timeline motion.
 - Canvas overlay: absolute/anchor positioning, logical insets, pointer/touch
   policy, transforms, blend/effects, and continuous coordinates.
-- Command menu: native popover state, listbox states, anchored fallback,
+- Command menu: native modal dialog state, listbox states, centered placement,
   compact fixed sheet, drag value, enter/exit, and result reflow.
 
 Application-specific semantics, data models, gestures, and accessible bindings

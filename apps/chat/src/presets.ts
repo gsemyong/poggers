@@ -179,7 +179,7 @@ function chatComponents(tokens: PaperTokens, direction: Direction): ChatComponen
           { native: "hover", apply: { effect: { opacity: 0.78 } } },
           { native: "active", apply: { transform: { scale: 0.97 } } },
         ],
-        motion: { change: { effect: tokens.motion.fast, transform: tokens.motion.fast } },
+        motion: { change: { opacity: tokens.motion.fast, transform: tokens.motion.fast } },
       },
       Messages: {
         layout: { kind: "stack", gap: terminal ? tokens.space.md : tokens.space.lg },
@@ -311,7 +311,7 @@ function chatComponents(tokens: PaperTokens, direction: Direction): ChatComponen
             apply: { effect: { opacity: 0.45 }, interaction: { cursor: "default" } },
           },
         ],
-        motion: { change: { effect: tokens.motion.fast, transform: tokens.motion.fast } },
+        motion: { change: { opacity: tokens.motion.fast, transform: tokens.motion.fast } },
       },
     }),
     AIPart: () => ({

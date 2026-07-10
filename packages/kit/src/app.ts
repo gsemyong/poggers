@@ -454,7 +454,9 @@ type ComponentControllerCommonProps<T extends Element> = ComponentControllerData
     tabindex?: number;
     title?: string;
     onBeforeToggle?: ComponentControllerEvent<T, ComponentControllerPopoverToggleEvent>;
+    onCancel?: ComponentControllerEvent<T, Event>;
     onClick?: ComponentControllerEvent<T, MouseEvent>;
+    onClose?: ComponentControllerEvent<T, Event>;
     onInput?: ComponentControllerEvent<T, InputEvent>;
     onSubmit?: ComponentControllerEvent<T, SubmitEvent>;
     onToggle?: ComponentControllerEvent<T, ComponentControllerPopoverToggleEvent>;
@@ -506,24 +508,28 @@ type ComponentPartBindingForElement<ElementName extends string> = ElementName ex
             multiple?: boolean;
             value?: string | number | readonly string[];
           }
-        : ElementName extends "img"
-          ? ComponentControllerCommonProps<HTMLImageElement> & {
-              alt?: string;
-              height?: string | number;
-              loading?: "eager" | "lazy";
-              src?: string;
-              width?: string | number;
+        : ElementName extends "dialog"
+          ? ComponentControllerCommonProps<HTMLDialogElement> & {
+              dialogOpen?: boolean;
             }
-          : ElementName extends "a"
-            ? ComponentControllerCommonProps<HTMLAnchorElement> & {
-                href?: string;
-                target?: string;
+          : ElementName extends "img"
+            ? ComponentControllerCommonProps<HTMLImageElement> & {
+                alt?: string;
+                height?: string | number;
+                loading?: "eager" | "lazy";
+                src?: string;
+                width?: string | number;
               }
-            : ElementName extends keyof HTMLElementTagNameMap
-              ? ComponentControllerCommonProps<HTMLElementTagNameMap[ElementName]>
-              : ElementName extends keyof SVGElementTagNameMap
-                ? ComponentControllerCommonProps<SVGElementTagNameMap[ElementName]>
-                : Record<string, unknown>;
+            : ElementName extends "a"
+              ? ComponentControllerCommonProps<HTMLAnchorElement> & {
+                  href?: string;
+                  target?: string;
+                }
+              : ElementName extends keyof HTMLElementTagNameMap
+                ? ComponentControllerCommonProps<HTMLElementTagNameMap[ElementName]>
+                : ElementName extends keyof SVGElementTagNameMap
+                  ? ComponentControllerCommonProps<SVGElementTagNameMap[ElementName]>
+                  : Record<string, unknown>;
 
 export type ComponentPartBinding<
   Spec extends AppSpec,

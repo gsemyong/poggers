@@ -1,5 +1,4 @@
 import type { MaterializedVisualPreset } from "./visual-compiler";
-import { spring as animeSpring, waapi } from "animejs";
 
 type RawCode = { readonly $code: string };
 type CodeValue = string | number | boolean | null | RawCode | CodeValue[] | CodeObject;
@@ -408,15 +407,8 @@ function validateMotionShape(value: unknown, preset: MaterializedVisualPreset, p
   }
   if (motion.layout != null) {
     const layout = requiredRecord(motion.layout, `${path}.layout`);
-    assertKnownKeys(layout, ["geometry", "content", "using"], `${path}.layout`);
-    enumAt(
-      layout.geometry,
-      ["position", "size", "frame", "tracks", "text"],
-      `${path}.layout.geometry`,
-    );
-    if (layout.content != null) {
-      enumAt(layout.content, ["preserve", "scale"], `${path}.layout.content`);
-    }
+    assertKnownKeys(layout, ["geometry", "using"], `${path}.layout`);
+    enumAt(layout.geometry, ["position", "frame", "text"], `${path}.layout.geometry`);
     motionToken(preset, layout.using, `${path}.layout.using`);
   }
   if (motion.shared != null) {
@@ -470,11 +462,7 @@ function motionToken(preset: MaterializedVisualPreset, value: unknown, path: str
 }
 
 const transitionProperties: Readonly<Record<string, readonly string[]>> = {
-  surface: ["background-color", "background-image", "color"],
-  text: ["color", "font-size", "font-weight", "line-height", "letter-spacing"],
-  stroke: ["border-color", "border-width"],
-  shape: ["border-radius", "clip-path"],
-  effect: ["opacity"],
+  opacity: ["opacity"],
   transform: ["translate", "scale", "rotate", "transform"],
 };
 
@@ -520,13 +508,19 @@ function motionCssTiming(value: unknown): { duration: string; delay: string; eas
   const spring = recordAt(driver.spring);
   if (Object.keys(spring).length) {
     const duration = numberOr(spring.duration, 400);
+    const bounce = Math.max(-0.5, Math.min(0.5, numberOr(spring.bounce, 0)));
     return {
       duration: `${duration}ms`,
       delay,
-      easing: waapi.convertEase(
-        animeSpring({ duration, bounce: numberOr(spring.bounce, 0) }).ease,
-        24,
-      ),
+      // Safari does not offload custom linear() easings. Keep native-state
+      // transitions compositor eligible; lifecycle springs use sampled WAAPI
+      // keyframes in the runtime instead.
+      easing:
+        bounce > 0
+          ? `cubic-bezier(.2, ${1 + bounce * 0.9}, .3, 1)`
+          : bounce < 0
+            ? `cubic-bezier(.3, 0, ${0.7 - bounce * 0.2}, 1)`
+            : "cubic-bezier(.2, .8, .2, 1)",
     };
   }
   const easings: Readonly<Record<string, string>> = {
@@ -555,14 +549,11 @@ function validateMotionSafety(
   const layout = recordAt(motion.layout);
   if (!Object.keys(layout).length) return;
   const geometry = layout.geometry;
-  if (geometry === "size" || geometry === "frame" || geometry === "tracks" || geometry === "text") {
+  if (geometry === "frame" || geometry === "text") {
     const contain = recordAt(resolved.frame).contain;
     if (contain !== "layout" && contain !== "strict") {
       throw new Error(`${path}.motion.layout with ${geometry} geometry requires frame.contain.`);
     }
-  }
-  if (geometry === "text" && layout.content === "scale") {
-    throw new Error(`${path}.motion.layout text geometry cannot scale glyph content.`);
   }
   const transform = recordAt(resolved.transform);
   if (transform.skewInline != null || transform.skewBlock != null) {
@@ -1225,13 +1216,12 @@ function lowerPosition(
   const position = requiredRecord(value, context.path);
   assertKnownKeys(position, ["kind", "inset", "layer", "anchor", "place"], context.path);
   style.position = stringAt(position.kind, `${context.path}.kind`);
-  if (position.inset != null)
-    lowerLogicalSpace(position.inset, style, "margin", childPath(context, "inset"));
   if (position.inset != null) {
-    for (const key of Object.keys(style).filter((key) => key.startsWith("margin"))) {
+    const insetStyle: Record<string, CodeValue> = {};
+    lowerLogicalSpace(position.inset, insetStyle, "margin", childPath(context, "inset"));
+    for (const key of Object.keys(insetStyle)) {
       const insetKey = key.replace(/^margin/, "inset");
-      style[insetKey] = style[key]!;
-      delete style[key];
+      style[insetKey] = insetStyle[key]!;
     }
   }
   if (position.layer != null) style.zIndex = cssNumber(position.layer, childPath(context, "layer"));
@@ -1247,8 +1237,14 @@ function lowerPosition(
   }
   if (position.place != null) {
     const place = stringAt(position.place, `${context.path}.place`);
-    style.positionArea = place === "auto" ? "none" : place;
-    if (anchor.part != null && place !== "auto") {
+    if (place === "center") {
+      style.inset = 0;
+      style.margin = "auto";
+      style.positionArea = "none";
+    } else {
+      style.positionArea = place === "auto" ? "none" : place;
+    }
+    if (anchor.part != null && place !== "auto" && place !== "center") {
       const axis = place.startsWith("block") ? "block" : "inline";
       style.positionTryFallbacks = `flip-${axis}`;
       style.positionTryOrder = `most-${axis}-size`;

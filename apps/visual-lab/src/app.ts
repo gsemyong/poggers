@@ -195,21 +195,23 @@ export default {
           TriggerKey: { children: "⌘K", "aria-hidden": true },
           Panel: {
             id: panelId,
-            popover: "auto",
-            popoverOpen: state.open,
-            role: "dialog",
+            dialogOpen: state.open,
             "aria-label": "Command menu",
-            "aria-modal": true,
-            onBeforeToggle(event) {
-              if (event.newState === "closed" && state.open && event.cancelable) {
-                event.preventDefault();
-                actions.close();
-              }
+            onCancel(event) {
+              event.preventDefault();
+              actions.close();
             },
-            onToggle(event) {
-              actions.syncOpen(event.newState === "open");
+            onClick(event) {
+              if (event.target === event.currentTarget) actions.close();
+            },
+            onClose() {
+              actions.syncOpen(false);
             },
             onVisualDismiss: actions.close,
+          },
+          Backdrop: {
+            "aria-hidden": true,
+            onClick: actions.close,
           },
           Handle: { "aria-hidden": true },
           SearchIcon: { children: "⌕", "aria-hidden": true },
