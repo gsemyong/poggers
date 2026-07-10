@@ -1,0 +1,16 @@
+{
+  "name": "@poggers/visual-lab",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "poggers dev",
+    "build": "poggers build --outfile dist/visual-lab",
+    "start": "./dist/visual-lab",
+    "lint": "poggers check",
+    "test": "playwright test",
+    "typecheck": "poggers typecheck"
+  },
+  "dependencies": {
+    "@poggers/kit": "workspace:*"
+  }
+}

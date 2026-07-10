@@ -1,136 +1,98 @@
-# Poggers Kit Architecture
+# Poggers Architecture
 
-Poggers Kit is a small Bun framework for local, event-sourced personal applications.
+Poggers is a Bun framework for typed, event-sourced applications. It has one
+application contract, one generated app module, and one closed visual system.
 
-The default application surface is strict:
-
-```text
-src/types.ts       generic app spec and shared domain types
-src/app.ts         current app object satisfying AppDefinition
-src/deps.ts        dependency implementations and provider config
-src/ui/            app-specific screens and JSX widgets
-```
-
-New apps should use the strict shape. Historical app shapes are captured as generated migration snapshots when persisted data changes; the public app authoring surface stays plain file exports checked with generated `@poggers/app` types.
-
-## Workspace
+## Application Shape
 
 ```text
-packages/
-  kit/              framework runtime, CLI, JSX UI runtime, program runtime, store adapters
-  create-poggers/   initializer for bunx/create-style usage
-
-apps/
-  chat/             dogfood chat app
-  site/             dogfood docs site
+src/
+  app.ts       resources, programs, component behavior, preset registry, root
+  types.ts     generic app contract and domain types
+  deps.ts      production and named dependency providers, when needed
+  presets.ts   visual tokens, themes, responsive rules, and motion
+  ui/          flat kebab-case JSX composition
+  migrations/  reviewed persistent-schema edges, when needed
 ```
 
-Apps import the same package paths external users import:
+Everything authored by an application lives under `src`. Generated declarations
+and compiler modules live under `.poggers`, are ignored by Git, and are safe to
+delete.
 
-```ts
-import type { AppDefinition } from "@poggers/app";
-import { render } from "@poggers/kit/ui";
-```
+The package TypeScript config provides `app`, `deps`, `types`, `src/*`, and
+`ui/*` aliases and checks every source file. Applications do not copy compiler
+options or commit generated declarations.
 
-## Core Concepts
+## Ownership
 
-| Primitive  | Meaning                                                 |
-| ---------- | ------------------------------------------------------- |
-| `app`      | Product API exported as a typed app object              |
-| `resource` | Scoped owner of state, events, views, and commands      |
-| `view`     | Typed live projection of resource state                 |
-| `command`  | Typed mutation that emits events                        |
-| `event`    | Immutable mutation scoped to one resource instance      |
-| `scope`    | Stable id from `resource + key`                         |
-| `snapshot` | `{ version, seq, data }` full-state checkpoint          |
-| `tail`     | Events newer than the compacted snapshot/program cursor |
-| `cursor`   | Per-scope sync position                                 |
+| Surface                                                                  | Owner        |
+| ------------------------------------------------------------------------ | ------------ |
+| Resources, events, views, commands, programs                             | `app.ts`     |
+| Component state, derived values, actions, native bindings, accessibility | `app.ts`     |
+| DOM composition and dynamic collection rendering                         | `ui/`        |
+| Production and mock dependency implementations                           | `deps.ts`    |
+| Tokens, themes, visual states, responsive composition, motion            | `presets.ts` |
+| CSS extraction, animation scheduling, text geometry                      | Poggers Kit  |
 
-## App Definition
+Applications cannot author raw CSS, classes, inline style, StyleX, Anime.js, or
+PreText. StyleX is the static backend; Anime.js and PreText are runtime details.
 
-`types.ts` owns the generic app spec:
+## App Contract
+
+`types.ts` is the generic source of correctness:
 
 ```ts
 export type App = {
   Resources: {
     note: {
-      Key: { noteId: string };
+      Key: { id: string };
       State: { title: string };
       Events: { renamed: { title: string } };
       Views: { title: string };
       Commands: {
-        rename: {
-          args: [title: string];
-          event: "renamed";
-          error: never;
-        };
+        rename: { args: [title: string]; event: "renamed"; error: "empty" };
       };
     };
   };
-
-  Deps: {
-    logger: { write(message: string): Promise<void> };
-  };
-
-  Navigation: {
-    home: {};
-    note: { noteId: string };
-  };
-
+  Deps: { logger: { write(message: string): Promise<void> } };
   Components: {
     NoteEditor: {
-      State: {
-        title: string;
-      };
-      Derived: {
-        canSave: boolean;
-      };
-      Actions: {
-        change(title: string): void;
-        save(): void;
-      };
-      Parts: {
-        Root: "form";
-        Input: "input";
-        Save: "button";
-      };
+      Input: { title: string; save(title: string): void };
+      State: { title: string };
+      Derived: { canSave: boolean };
+      Actions: { change(title: string): void; save(): void };
+      StyleValues: { saveProgress: "progress" };
+      Parts: { Root: "form"; Input: "input"; Save: "button" };
     };
   };
-
   Styles: {
-    Presets: "system" | "dense";
+    Presets: {
+      system: {
+        Tokens: {
+          color: "canvas" | "text" | "accent" | "focus";
+          space: "control";
+          motion: "quick" | "settle";
+        };
+        Themes: "default" | "dark";
+        Containers: "compact";
+      };
+    };
   };
 };
 ```
 
-`app.ts` owns resource handlers, PWA metadata, navigation, semantic component behavior, styles, programs, and the root UI function reference. Dependency implementations live in `src/deps.ts`. Actual JSX screens and widgets live in `src/ui`.
+Finite state and variants become typed visual conditions. `StyleValues` declares
+continuous values by interpolation kind; component controllers return ordinary
+numbers for them.
 
-The default app TypeScript project excludes `src/deps.ts` from the editor-facing app program. `poggers typecheck` checks `src/deps.ts` in a separate program, so production adapters and test doubles stay typed without pulling heavy third-party SDK types into app/UI IntelliSense.
+## App Definition
+
+`app.ts` exports one object with `satisfies AppDefinition<App>`. There is no
+`defineApp` call in application code.
 
 ```ts
-import type { AppDefinition } from "@poggers/app";
-import { NoteScreen } from "ui/note-screen";
-
 export default {
   version: 1,
-
-  app: {
-    name: "Notes",
-  },
-
-  pwa: {
-    name: "Notes",
-    shortName: "Notes",
-    themeColor: "#0f172a",
-    backgroundColor: "#ffffff",
-    display: "standalone",
-  },
-
-  navigation: {
-    home: "/",
-    note: "/notes/:noteId",
-  },
-
   resources: {
     note: {
       state: { title: "" },
@@ -139,111 +101,79 @@ export default {
           state.title = payload.title;
         },
       },
-      views: {
-        title({ state }) {
-          return state.title;
-        },
-      },
+      views: { title: ({ state }) => state.title },
       commands: {
         rename(ctx, title) {
-          ctx.event.renamed({ title });
+          if (!title.trim()) return ctx.error("empty");
+          return ctx.event.renamed({ title });
         },
       },
     },
   },
-
-  programs: {
-    async server({ events }, deps) {
-      for await (const { event } of events("note.renamed", { id: "note.log-renames" })) {
-        await deps.logger.write(event.payload.title);
-      }
-    },
-  },
-
   components: {
-    NoteEditor({ state, derived, actions }) {
-      return {
-        Root: {
-          onSubmit(event) {
-            event.preventDefault();
-            actions.save();
-          },
-        },
-        Input: {
-          value: state.title,
-          onInput(event) {
-            actions.change(event.currentTarget.value);
-          },
-        },
-        Save: {
-          type: "submit",
-          disabled: !derived.canSave,
-        },
-      };
-    },
-  },
-
-  root: NoteScreen,
-} satisfies AppDefinition;
-```
-
-`src/deps.ts` uses the package dependency-config type and the app's own dependency contract from `./types`. Values can be provided directly; dependencies that need runtime selection can expose a production provider and named alternatives such as `mock`. Inline one-off implementations in this file. Add helper modules only when there is real reuse.
-
-```ts
-import type { DependencyConfig } from "@poggers/kit/deps";
-import type { App } from "./types";
-
-export default {
-  logger: {
-    production: {
-      async write(message) {
-        console.log(message);
-      },
-    },
-    mock: {
-      async write() {},
-    },
-  },
-} satisfies DependencyConfig<App["Deps"]>;
-```
-
-For local apps, `Actor` and `identify` are optional. The default actor is `{ id: token || "local" }`.
-
-## UI
-
-Application UI imports generated functions directly from `@poggers/app`.
-
-The native JSX runtime uses fine-grained signals internally. App code can pass signals directly to dynamic JSX children and attributes, or read them with calls like `note.title()`.
-
-Resources generate `useX` functions. Components generate `createX` functions. Style-only components need no controller. DOM event details stay in the app object's `components` table only when a component needs behavior; app UI renders generated component parts:
-
-```tsx
-import { createNoteEditor, useNote, useScreen } from "@poggers/app";
-
-export function NoteScreen() {
-  const screen = useScreen();
-  const noteId = screen.name === "note" ? screen.params.noteId : "main";
-  const note = useNote({ noteId });
-  const Editor = createNoteEditor({
-    state: { title: note.title() },
-    derived({ state }) {
-      return {
+    NoteEditor: {
+      state: ({ input }) => ({ title: input.title }),
+      derived: ({ state }) => ({
         get canSave() {
           return state.title.trim().length > 0;
         },
-      };
-    },
-    actions({ state }) {
-      return {
+      }),
+      actions: ({ input, state }) => ({
         change(title) {
           state.title = title;
         },
         save() {
           const title = state.title.trim();
-          if (!title) return;
-          void note.rename(title);
+          if (title) input.save(title);
         },
-      };
+      }),
+      bind({ state, derived, actions }) {
+        return {
+          values: { saveProgress: derived.canSave ? 1 : 0 },
+          Root: {
+            onSubmit(event) {
+              event.preventDefault();
+              actions.save();
+            },
+          },
+          Input: {
+            value: state.title,
+            onInput(event) {
+              actions.change(event.currentTarget.value);
+            },
+          },
+          Save: { type: "submit", disabled: !derived.canSave },
+        };
+      },
+    },
+  },
+  styles: { defaultPreset: "system", presets: { system: systemPreset } },
+  root: Root,
+} satisfies AppDefinition<App>;
+```
+
+Component contexts expose current `preset` and `theme` values plus `setPreset`
+and `setTheme`. These are reactive even when destructured in derived or action
+definitions. Token values never enter app behavior.
+
+## UI Composition
+
+`@poggers/app` is a virtual module generated from `types.ts`. Resources create
+`useX` functions and components create `createX` functions. A component factory
+accepts only declared input and variants; UI code cannot replace its state,
+derived values, or actions.
+
+```tsx
+export function NoteScreen() {
+  const note = useNote({ id: "main" });
+  const Editor = createNoteEditor({
+    input: {
+      get title() {
+        return note.title;
+      },
+      save(title) {
+        void note.rename(title);
+      },
     },
   });
 
@@ -256,85 +186,127 @@ export function NoteScreen() {
 }
 ```
 
-There are no style-only UI selectors and no tautological part controllers. If something is renderable, it belongs under `App["Components"]` and is created with `createX`; app `components` only supplies extra DOM props for behavior.
+UI files choose structure and children. Generated part types omit visual class
+and style props. Event and accessibility bindings shared by the component live
+in `app.ts`; per-item identity for dynamic collections remains structural UI
+data.
 
-## Programs
+## Visual Presets
 
-Programs are persistent async scripts inside the app object. They run in the chosen environment, receive typed semantic hooks, and receive dependencies from `deps`.
-
-Programs are idempotent through durable handler-completion keys. They also record per-scope checkpoints. The server compacts an event tail only through the minimum of the snapshot sequence and configured program checkpoints, so a crashed or restarted program can replay retained events.
-
-## Store
-
-The server store is snapshot plus event tail:
+Presets are plain objects checked with `satisfies Preset<App, Name>`:
 
 ```ts
-interface Store {
-  loadSnapshot(key: string): Snapshot | null;
-  saveSnapshot(key: string, snapshot: Snapshot): void;
-  appendEvents(key: string, events: unknown[], commandId?: string): void;
-  getEvents(key: string): unknown[];
-  compactEvents(key: string, throughSeq: number): void;
-  saveCommandId(scopeId: string, commandId: string): void;
-  getCommandIds(scopeId: string): Set<string>;
-  clearCommandIds(scopeId: string): void;
-}
-```
-
-`compactEvents(key, throughSeq)` removes only events with `seq <= throughSeq`. The snapshot remains the state checkpoint, and the tail remains the recovery/replay material for newer events or programs that have not caught up.
-
-Command execution runs through a per-scope writer queue. Commands for the same resource key are serialized before they read state and append events. Different scopes have independent queues, so unrelated resources do not share one app-wide writer.
-
-Built-in stores:
-
-| Store                | Use                                         |
-| -------------------- | ------------------------------------------- |
-| `createFileStore`    | default local server store under `.poggers` |
-| `createBrowserStore` | IndexedDB client snapshot store             |
-
-## Migrations
-
-The current contract stays in `src/types.ts`. When persisted shape changes, the CLI snapshots that contract into `src/migrations/snapshots/<hash>.ts` and creates a reviewed edge under `src/migrations/`.
-
-```ts
-import type { Migration } from "@poggers/app";
-import type { App as From } from "./snapshots/a1b2c3d4e5f6.ts";
-import type { App as To } from "./snapshots/f6e5d4c3b2a1.ts";
-
-export default {
-  from: "a1b2c3d4e5f6",
-  to: "f6e5d4c3b2a1",
-  migrate: {
-    note: {
-      state(old) {
-        return { ...old, archived: false };
-      },
-      event(name, payload) {
-        if (name === "renamed") return { name: "titleChanged", payload };
-        return { name, payload };
+export const systemPreset = {
+  tokens: {
+    color: {
+      canvas: { l: 0.98, c: 0.004, h: 255 },
+      text: { l: 0.2, c: 0.01, h: 255 },
+      accent: { l: 0.56, c: 0.18, h: 255 },
+      focus: { l: 0.64, c: 0.17, h: 250 },
+    },
+    space: { control: 12 },
+    motion: {
+      quick: { duration: 130, easing: "decelerate" },
+      settle: { spring: { duration: 380, bounce: 0.06 } },
+    },
+  },
+  themes: {
+    default: {},
+    dark: {
+      color: {
+        canvas: { l: 0.14, c: 0.008, h: 255 },
+        text: { l: 0.95, c: 0.004, h: 255 },
       },
     },
   },
-} satisfies Migration<From, To>;
+  containers: { compact: { inlineBelow: 520 } },
+  components: ({ tokens }) => ({
+    NoteEditor: ({ values }) => ({
+      Root: {
+        layout: { kind: "stack", gap: tokens.space.control },
+        surface: { fill: tokens.color.canvas, text: tokens.color.text },
+        when: [{ container: "compact", apply: { frame: { inline: "fill" } } }],
+        motion: {
+          layout: { geometry: "position", using: tokens.motion.settle },
+        },
+      },
+      Save: {
+        effect: { opacity: values.saveProgress },
+        interaction: {
+          focusRing: { color: tokens.color.focus, width: 2, offset: 2 },
+        },
+        motion: { change: { effect: tokens.motion.quick } },
+      },
+    }),
+  }),
+} satisfies Preset<App, "system">;
 ```
 
-Use `poggers migrations snapshot <app-dir>` to capture the initial current shape and `poggers migrations create <name> <app-dir>` after changing `types.ts`. Generated edges start as drafts, so `poggers typecheck` fails until the edge is reviewed.
+The two callbacks are compile-time scopes for symbolic token and value
+references. They are not runtime wrappers. The compiler evaluates them once,
+validates serializable output, and emits a StyleX module plus a compact runtime
+manifest.
 
-The legacy numeric `previous` chain remains a compatibility path for existing code. New apps should use snapshot hashes and migration edge files.
+## Visual Transactions
 
-## PWA And Assets
+Each mounted component has one coordinator. It observes only parts with declared
+motion, batches geometry reads before writes, and gives each animated element
+one runtime owner. Preset replacement cancels old ownership and suppresses mount
+motion.
 
-When `pwa` is present, the server emits:
+- Static rules, pseudo states, themes, and container queries compile through
+  StyleX.
+- Finite timing uses WAAPI through Anime.js.
+- Interruptible springs and gestures use Anime.js springs.
+- Declared layout and shared geometry use component-scoped FLIP.
+- `geometry: "text"` can use cached PreText prediction for named fonts.
+- Reduced motion resolves immediately and leaves no inline ownership residue.
 
-- `/manifest.webmanifest`
-- `/service-worker.js`
-- a generated fallback icon at `/_poggers/icon.svg`
-- app-shell HTML with manifest and service worker registration
+The generic JSX runtime does not scan the document or project layout. Layout
+motion exists only when a preset declares it.
 
-Strict apps define styles inside `src/app.ts` under `styles`. The kit compiles component-part presets into generated CSS, serves it as `/client.css`, and exposes direct typed imports through `@poggers/app`, such as `useNote`, `createNoteEditor`, `usePreset`, `setPreset`, `useScreen`, and `nav`.
+## Dependencies
 
-## Type Performance And Docs
+`deps.ts` directly implements the app contract. Values are values; providers are
+used only when runtime selection is needed.
 
-Generated `@poggers/app` exports use named option/result aliases instead of public `Parameters<>` and `ReturnType<>` chains. This keeps hovers compact and avoids making the editor instantiate the full app hook surface for a single function. App-local generated declarations live under `.poggers/types`; they are generated artifacts, ignored by Git, and refreshed by `poggers sync`, `poggers typecheck`, `poggers dev`, and `poggers build`.
+```ts
+export default {
+  logger: {
+    production: {
+      async write(message) {
+        console.log(message);
+      },
+    },
+    mock: { async write() {} },
+  },
+} satisfies DependencyConfig<App["Deps"]>;
+```
 
-Write JSDoc in `types.ts` directly above the resource or component declaration. The generator copies those comments onto the generated `useX` and `createX` exports. See [type-performance-jsdoc.md](./type-performance-jsdoc.md).
+`POGGERS_DEPS=mock` selects named providers. The production binary reads the
+single default dependency config or an explicit app environment mount; legacy
+`createXDeps` naming fallbacks are not generated.
+
+## Persistence And Migrations
+
+The server store is a snapshot plus an event tail. The built-in local server
+uses the filesystem; browser client snapshots use IndexedDB. Commands for one
+scope are serialized, while unrelated scopes remain independent.
+
+`poggers migrations snapshot` records the persistent resource schema under
+`src/migrations/snapshots`. `poggers migrations create <name>` creates a typed,
+review-required hash edge. Runtime migration finds a complete hash path before
+loading persisted state and fails explicitly when no path exists.
+
+## Build And HMR
+
+`poggers sync`, `typecheck`, `dev`, and `build` regenerate disposable artifacts
+as needed. The StyleX compiler extracts static CSS in development and production.
+HMR preserves render-owned state, refreshes generated visual output, replaces
+preset ownership without replaying entrance motion, and swaps the stylesheet
+only after the new one loads.
+
+The primary verification surface is `apps/visual-lab`: one accessible command
+menu, three independent presets, typed themes, desktop popover, compact drag
+sheet, keyboard behavior, reduced motion, forced colors, RTL, reflow, HMR, and
+production-binary journeys.

@@ -1,4 +1,5 @@
 import type { JsonValue, SessionData } from "./protocol";
+import type { PresetName, PresetThemeName } from "./preset";
 
 export type LocalActor = { id: string };
 
@@ -12,17 +13,17 @@ export type AppSpec = {
     string,
     {
       Input?: Record<string, any>;
+      Variants?: Record<string, any>;
       State?: Record<string, any>;
       Derived?: Record<string, any>;
       Actions?: Record<string, (...args: any[]) => any>;
+      StyleValues?: Record<string, string>;
+      Shared?: string;
       Parts: Record<string, string>;
     }
   >;
   Styles?: {
-    Presets?: string;
-    Theme?: {
-      Params?: Record<string, any>;
-    };
+    Presets?: string | Record<string, any>;
   };
 };
 
@@ -357,6 +358,37 @@ export type ComponentActions<Spec extends AppSpec, Component extends ComponentNa
     ? Actions
     : Record<never, never>;
 
+export type ComponentStyleValueKind =
+  | "number"
+  | "progress"
+  | "opacity"
+  | "ratio"
+  | "zIndex"
+  | "length"
+  | "space"
+  | "size"
+  | "radius";
+
+type ComponentStyleValueFor<Kind extends string> = Kind extends
+  | "number"
+  | "progress"
+  | "opacity"
+  | "ratio"
+  | "zIndex"
+  ? number
+  : Kind extends "length" | "space" | "size" | "radius"
+    ? number
+    : never;
+
+export type ComponentStyleValues<Spec extends AppSpec, Component extends ComponentName<Spec>> =
+  ComponentFor<Spec, Component> extends {
+    StyleValues: infer Values extends Record<string, string>;
+  }
+    ? {
+        [Value in keyof Values]: ComponentStyleValueFor<Values[Value] & string>;
+      }
+    : Record<never, never>;
+
 export type ComponentParts<Spec extends AppSpec, Component extends ComponentName<Spec>> =
   ComponentFor<Spec, Component> extends {
     Parts: infer Parts extends Record<string, string>;
@@ -391,36 +423,76 @@ type ComponentControllerChild =
   | ComponentControllerChild[]
   | (() => ComponentControllerChild);
 
-type ComponentControllerCommonProps<T extends Element> = {
-  id?: string;
-  class?: string;
-  className?: string;
-  children?: ComponentControllerChild;
-  hidden?: boolean;
-  role?: string;
-  title?: string;
-  onClick?: ComponentControllerEvent<T, MouseEvent>;
-  onInput?: ComponentControllerEvent<T, InputEvent>;
-  onSubmit?: ComponentControllerEvent<T, SubmitEvent>;
-  onKeyDown?: ComponentControllerEvent<T, KeyboardEvent>;
-  onKeyUp?: ComponentControllerEvent<T, KeyboardEvent>;
-  onFocus?: ComponentControllerEvent<T, FocusEvent>;
-  onBlur?: ComponentControllerEvent<T, FocusEvent>;
+type ComponentControllerValue<T> = T | null | undefined;
+type ComponentControllerPopoverValue = "auto" | "hint" | "manual" | boolean;
+type ComponentControllerPopoverTargetAction = "hide" | "show" | "toggle";
+type ComponentControllerPopoverToggleEvent = Event & {
+  readonly newState: "closed" | "open";
+  readonly oldState: "closed" | "open";
 };
+type ComponentControllerDataAttributes = {
+  [Key in `data-${string}`]?: ComponentControllerValue<string | number | boolean>;
+};
+type ComponentControllerAriaAttributes = {
+  [Key in `aria-${string}`]?: ComponentControllerValue<string | number | boolean>;
+};
+type ComponentControllerPopoverTargetProps = {
+  popovertarget?: ComponentControllerValue<string>;
+  popovertargetaction?: ComponentControllerValue<ComponentControllerPopoverTargetAction>;
+  popoverTarget?: ComponentControllerValue<string>;
+  popoverTargetAction?: ComponentControllerValue<ComponentControllerPopoverTargetAction>;
+};
+
+type ComponentControllerCommonProps<T extends Element> = ComponentControllerDataAttributes &
+  ComponentControllerAriaAttributes & {
+    id?: string;
+    children?: ComponentControllerChild;
+    hidden?: boolean;
+    popover?: ComponentControllerPopoverValue;
+    role?: string;
+    tabIndex?: number;
+    tabindex?: number;
+    title?: string;
+    onBeforeToggle?: ComponentControllerEvent<T, ComponentControllerPopoverToggleEvent>;
+    onClick?: ComponentControllerEvent<T, MouseEvent>;
+    onInput?: ComponentControllerEvent<T, InputEvent>;
+    onSubmit?: ComponentControllerEvent<T, SubmitEvent>;
+    onToggle?: ComponentControllerEvent<T, ComponentControllerPopoverToggleEvent>;
+    onKeyDown?: ComponentControllerEvent<T, KeyboardEvent>;
+    onKeyUp?: ComponentControllerEvent<T, KeyboardEvent>;
+    onFocus?: ComponentControllerEvent<T, FocusEvent>;
+    onBlur?: ComponentControllerEvent<T, FocusEvent>;
+    onGotPointerCapture?: ComponentControllerEvent<T, PointerEvent>;
+    onLostPointerCapture?: ComponentControllerEvent<T, PointerEvent>;
+    onPointerDown?: ComponentControllerEvent<T, PointerEvent>;
+    onPointerEnter?: ComponentControllerEvent<T, PointerEvent>;
+    onPointerMove?: ComponentControllerEvent<T, PointerEvent>;
+    onPointerOut?: ComponentControllerEvent<T, PointerEvent>;
+    onPointerOver?: ComponentControllerEvent<T, PointerEvent>;
+    onPointerUp?: ComponentControllerEvent<T, PointerEvent>;
+    onPointerCancel?: ComponentControllerEvent<T, PointerEvent>;
+    onPointerLeave?: ComponentControllerEvent<T, PointerEvent>;
+  };
 
 type ComponentPartBindingForElement<ElementName extends string> = ElementName extends "button"
   ? ComponentControllerCommonProps<HTMLButtonElement> & {
       disabled?: boolean;
+      name?: string;
+      value?: string | number;
       type?: "button" | "submit" | "reset";
-    }
+    } & ComponentControllerPopoverTargetProps
   : ElementName extends "input"
     ? ComponentControllerCommonProps<HTMLInputElement> & {
         checked?: boolean;
         disabled?: boolean;
+        max?: number;
+        min?: number;
+        name?: string;
         placeholder?: string;
+        step?: number;
         type?: string;
         value?: string | number | readonly string[];
-      }
+      } & ComponentControllerPopoverTargetProps
     : ElementName extends "textarea"
       ? ComponentControllerCommonProps<HTMLTextAreaElement> & {
           disabled?: boolean;
@@ -434,56 +506,159 @@ type ComponentPartBindingForElement<ElementName extends string> = ElementName ex
             multiple?: boolean;
             value?: string | number | readonly string[];
           }
-        : ElementName extends "a"
-          ? ComponentControllerCommonProps<HTMLAnchorElement> & {
-              href?: string;
-              target?: string;
+        : ElementName extends "img"
+          ? ComponentControllerCommonProps<HTMLImageElement> & {
+              alt?: string;
+              height?: string | number;
+              loading?: "eager" | "lazy";
+              src?: string;
+              width?: string | number;
             }
-          : ElementName extends keyof HTMLElementTagNameMap
-            ? ComponentControllerCommonProps<HTMLElementTagNameMap[ElementName]>
-            : ElementName extends keyof SVGElementTagNameMap
-              ? ComponentControllerCommonProps<SVGElementTagNameMap[ElementName]>
-              : Record<string, unknown>;
+          : ElementName extends "a"
+            ? ComponentControllerCommonProps<HTMLAnchorElement> & {
+                href?: string;
+                target?: string;
+              }
+            : ElementName extends keyof HTMLElementTagNameMap
+              ? ComponentControllerCommonProps<HTMLElementTagNameMap[ElementName]>
+              : ElementName extends keyof SVGElementTagNameMap
+                ? ComponentControllerCommonProps<SVGElementTagNameMap[ElementName]>
+                : Record<string, unknown>;
 
 export type ComponentPartBinding<
   Spec extends AppSpec,
   Component extends ComponentName<Spec>,
   Part extends ComponentPartName<Spec, Component>,
-> = ComponentPartBindingForElement<ComponentPartElement<Spec, Component, Part>> & {
-  readonly "data-pg-component": Component;
-  readonly "data-pg-part": Part;
-};
+> = ComponentPartBindingForElement<ComponentPartElement<Spec, Component, Part>>;
 
 export type ComponentControllerContext<
   Spec extends AppSpec,
   Component extends ComponentName<Spec>,
 > = {
+  readonly preset: PresetName<Spec>;
+  readonly setPreset: (preset: PresetName<Spec>) => void;
+  readonly theme: PresetThemeName<Spec>;
+  readonly setTheme: (theme: PresetThemeName<Spec>) => void;
   readonly input: ComponentInput<Spec, Component>;
+  readonly variants: ComponentVariants<Spec, Component>;
   readonly state: ComponentState<Spec, Component>;
   readonly derived: ComponentDerived<Spec, Component>;
-  readonly actions: {
-    [Action in keyof ComponentActions<Spec, Component>]: (
-      ...args: ComponentActionArgs<ComponentActions<Spec, Component>[Action]>
-    ) => void;
-  };
-  readonly refs: {
-    readonly [Part in ComponentPartName<Spec, Component>]?: Element | null;
-  };
+  readonly actions: ComponentActionHandlers<Spec, Component>;
+  readonly refs: ComponentRefs<Spec, Component>;
+};
+
+export type ComponentVariants<Spec extends AppSpec, Component extends ComponentName<Spec>> =
+  ComponentFor<Spec, Component> extends {
+    Variants: infer Variants extends Record<string, any>;
+  }
+    ? Variants
+    : Record<never, never>;
+
+export type ComponentRefs<Spec extends AppSpec, Component extends ComponentName<Spec>> = {
+  readonly [Part in ComponentPartName<Spec, Component>]?: Element | null;
+};
+
+export type ComponentActionHandlers<Spec extends AppSpec, Component extends ComponentName<Spec>> = {
+  [Action in keyof ComponentActions<Spec, Component>]: (
+    ...args: ComponentActionArgs<ComponentActions<Spec, Component>[Action]>
+  ) => void;
 };
 
 export type ComponentControllerResult<
   Spec extends AppSpec,
   Component extends ComponentName<Spec>,
-> = Partial<{
+> = {
+  values?: Partial<ComponentStyleValues<Spec, Component>>;
+} & Partial<{
   [Part in ComponentPartName<Spec, Component>]: Partial<
     ComponentPartBinding<Spec, Component, Part>
   >;
 }>;
 
+export type ComponentStateContext<Spec extends AppSpec, Component extends ComponentName<Spec>> = {
+  readonly input: ComponentInput<Spec, Component>;
+  readonly variants: ComponentVariants<Spec, Component>;
+};
+
+export type ComponentDerivedContext<
+  Spec extends AppSpec,
+  Component extends ComponentName<Spec>,
+> = ComponentStateContext<Spec, Component> & {
+  readonly preset: PresetName<Spec>;
+  readonly setPreset: (preset: PresetName<Spec>) => void;
+  readonly theme: PresetThemeName<Spec>;
+  readonly setTheme: (theme: PresetThemeName<Spec>) => void;
+  readonly state: ComponentState<Spec, Component>;
+  readonly refs: ComponentRefs<Spec, Component>;
+};
+
+export type ComponentActionContext<
+  Spec extends AppSpec,
+  Component extends ComponentName<Spec>,
+> = ComponentDerivedContext<Spec, Component> & {
+  readonly preset: PresetName<Spec>;
+  readonly setPreset: (preset: PresetName<Spec>) => void;
+  readonly derived: ComponentDerived<Spec, Component>;
+};
+
+type ComponentStateDefinition<Spec extends AppSpec, Component extends ComponentName<Spec>> = [
+  keyof ComponentState<Spec, Component>,
+] extends [never]
+  ? {
+      state?:
+        | ComponentState<Spec, Component>
+        | ((ctx: ComponentStateContext<Spec, Component>) => ComponentState<Spec, Component>);
+    }
+  : {
+      state:
+        | ComponentState<Spec, Component>
+        | ((ctx: ComponentStateContext<Spec, Component>) => ComponentState<Spec, Component>);
+    };
+
+type ComponentDerivedDefinition<Spec extends AppSpec, Component extends ComponentName<Spec>> = [
+  keyof ComponentDerived<Spec, Component>,
+] extends [never]
+  ? {
+      derived?: (
+        ctx: ComponentDerivedContext<Spec, Component>,
+      ) => ComponentDerived<Spec, Component>;
+    }
+  : {
+      derived: (ctx: ComponentDerivedContext<Spec, Component>) => ComponentDerived<Spec, Component>;
+    };
+
+type ComponentActionsDefinition<Spec extends AppSpec, Component extends ComponentName<Spec>> = [
+  keyof ComponentActions<Spec, Component>,
+] extends [never]
+  ? {
+      actions?: (
+        ctx: ComponentActionContext<Spec, Component>,
+      ) => ComponentActionHandlers<Spec, Component>;
+    }
+  : {
+      actions: (
+        ctx: ComponentActionContext<Spec, Component>,
+      ) => ComponentActionHandlers<Spec, Component>;
+    };
+
+export type ComponentDefinition<
+  Spec extends AppSpec,
+  Component extends ComponentName<Spec>,
+> = ComponentStateDefinition<Spec, Component> &
+  ComponentDerivedDefinition<Spec, Component> &
+  ComponentActionsDefinition<Spec, Component> & {
+    bind?: (
+      ctx: ComponentControllerContext<Spec, Component>,
+    ) => ComponentControllerResult<Spec, Component>;
+    setup?: (ctx: ComponentControllerContext<Spec, Component>) => void | (() => void);
+  };
+
 export type ComponentControllers<Spec extends AppSpec> = Partial<{
-  [Component in ComponentName<Spec>]: (
-    ctx: ComponentControllerContext<Spec, Component>,
-  ) => ComponentControllerResult<Spec, Component>;
+  [Component in ComponentName<Spec>]:
+    | ((
+        ctx: ComponentControllerContext<Spec, Component>,
+      ) => ComponentControllerResult<Spec, Component>)
+    | ComponentDefinition<Spec, Component>;
 }>;
 
 export type ResourceDef<Spec extends AppSpec, R extends ResourceSpec> = {
@@ -775,6 +950,7 @@ function restoreImpl<S extends AppSpec>(
   if (!snap) return state;
   if (snap.hash && def.migrationHash) {
     if (snap.hash === def.migrationHash) return structuredClone(snap.data);
+    if (snap.version === def.version) return structuredClone(snap.data);
     return migrateStateByHash(def, resource, snap.hash, def.migrationHash, snap.data);
   }
   if (snap.version === def.version) return structuredClone(snap.data);
@@ -850,6 +1026,9 @@ function upcastEventImpl<S extends AppSpec>(
   const sourceHash = eventHash ?? event.hash;
   if (sourceHash && def.migrationHash) {
     if (sourceHash !== def.migrationHash) {
+      if (eventVersion === def.version) {
+        return { name, payload, version: def.version, hash: def.migrationHash };
+      }
       const upcasted = migrateEventByHash(
         def,
         resource,

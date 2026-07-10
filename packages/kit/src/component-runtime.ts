@@ -12,12 +12,21 @@ import {
 } from "./app";
 import type { ConnectOpts } from "./client";
 import {
+  createVisualCoordinator,
+  isCompiledVisualPreset,
+  visualPartAttributes,
+  type CompiledVisuals,
+} from "./visual-runtime";
+import {
   computed,
   createNativeAppRuntime,
+  effect,
+  isHotRefresh,
   jsx,
+  onMount,
   reactiveValue,
-  runtimeSignal,
   signal,
+  untrack,
   type Child,
   type NativeResource,
   type Props,
@@ -64,6 +73,13 @@ export type ComponentState<Spec extends AppSpec, Component extends ComponentName
     ? State
     : Record<never, never>;
 
+export type ComponentVariants<Spec extends AppSpec, Component extends ComponentName<Spec>> =
+  ComponentFor<Spec, Component> extends {
+    Variants: infer Variants extends Record<string, any>;
+  }
+    ? Variants
+    : Record<never, never>;
+
 export type ComponentDerived<Spec extends AppSpec, Component extends ComponentName<Spec>> =
   ComponentFor<Spec, Component> extends {
     Derived: infer Derived extends Record<string, any>;
@@ -76,6 +92,26 @@ export type ComponentActions<Spec extends AppSpec, Component extends ComponentNa
     Actions: infer Actions extends Record<string, any>;
   }
     ? Actions
+    : Record<never, never>;
+
+type ComponentStyleValueFor<Kind extends string> = Kind extends
+  | "number"
+  | "progress"
+  | "opacity"
+  | "ratio"
+  | "zIndex"
+  ? number
+  : Kind extends "length" | "space" | "size" | "radius"
+    ? number
+    : never;
+
+export type ComponentStyleValues<Spec extends AppSpec, Component extends ComponentName<Spec>> =
+  ComponentFor<Spec, Component> extends {
+    StyleValues: infer Values extends Record<string, string>;
+  }
+    ? {
+        [Value in keyof Values]: ComponentStyleValueFor<Values[Value] & string>;
+      }
     : Record<never, never>;
 
 export type ComponentParts<Spec extends AppSpec, Component extends ComponentName<Spec>> =
@@ -112,18 +148,6 @@ export type ComponentRefs<Spec extends AppSpec, Component extends ComponentName<
   readonly [Part in ComponentPartName<Spec, Component>]?: Element | null;
 };
 
-export type ComponentInstanceContext<
-  Spec extends AppSpec,
-  Component extends ComponentName<Spec>,
-> = {
-  readonly preset: PresetName<Spec>;
-  readonly theme: ThemeValues<Spec>;
-  readonly input: ComponentInput<Spec, Component>;
-  readonly state: ComponentStateObject<Spec, Component>;
-  readonly derived: ComponentDerived<Spec, Component>;
-  readonly refs: ComponentRefs<Spec, Component>;
-};
-
 export type ComponentInstanceActionHandlers<
   Spec extends AppSpec,
   Component extends ComponentName<Spec>,
@@ -133,27 +157,11 @@ export type ComponentInstanceActionHandlers<
   ) => void;
 };
 
-export type ComponentInstanceActionFactory<
-  Spec extends AppSpec,
-  Component extends ComponentName<Spec>,
-> = (
-  ctx: ComponentInstanceContext<Spec, Component>,
-) => ComponentInstanceActionHandlers<Spec, Component>;
-
-export type ComponentInstanceDerivedFactory<
-  Spec extends AppSpec,
-  Component extends ComponentName<Spec>,
-> = (
-  ctx: Omit<ComponentInstanceContext<Spec, Component>, "derived">,
-) => ComponentDerived<Spec, Component>;
-
 type ComponentPartValue<T> = T | null | undefined;
 
 type ComponentPartEvent<T extends EventTarget, E extends Event> = {
   bivarianceHack(event: E & { readonly currentTarget: T }): void;
 }["bivarianceHack"];
-
-type ComponentPartStyle = string | Record<string, string | number | null | undefined>;
 
 type ComponentPartDataAttributes = {
   [Key in `data-${string}`]?: ComponentPartValue<string | number | boolean>;
@@ -163,19 +171,33 @@ type ComponentPartAriaAttributes = {
   [Key in `aria-${string}`]?: ComponentPartValue<string | number | boolean>;
 };
 
+type ComponentPartPopoverValue = "auto" | "hint" | "manual" | boolean;
+type ComponentPartPopoverTargetAction = "hide" | "show" | "toggle";
+type ComponentPartPopoverToggleEvent = Event & {
+  readonly newState: "closed" | "open";
+  readonly oldState: "closed" | "open";
+};
+type ComponentPartPopoverTargetProps = {
+  popovertarget?: ComponentPartValue<string>;
+  popovertargetaction?: ComponentPartValue<ComponentPartPopoverTargetAction>;
+  popoverTarget?: ComponentPartValue<string>;
+  popoverTargetAction?: ComponentPartValue<ComponentPartPopoverTargetAction>;
+};
+
 type ComponentPartCommonProps<T extends Element> = ComponentPartDataAttributes &
   ComponentPartAriaAttributes & {
-    id?: ComponentPartValue<string>;
     class?: ComponentPartValue<string | false>;
     className?: ComponentPartValue<string | false>;
+    id?: ComponentPartValue<string>;
     hidden?: ComponentPartValue<boolean | "hidden" | "until-found">;
+    popover?: ComponentPartValue<ComponentPartPopoverValue>;
     role?: ComponentPartValue<string>;
-    style?: ComponentPartValue<ComponentPartStyle>;
     tabIndex?: ComponentPartValue<number>;
     tabindex?: ComponentPartValue<number>;
     title?: ComponentPartValue<string>;
     children?: Child;
     ref?: (element: T) => void;
+    onBeforeToggle?: ComponentPartEvent<T, ComponentPartPopoverToggleEvent>;
     onBlur?: ComponentPartEvent<T, FocusEvent>;
     onChange?: ComponentPartEvent<T, Event>;
     onClick?: ComponentPartEvent<T, MouseEvent>;
@@ -185,9 +207,18 @@ type ComponentPartCommonProps<T extends Element> = ComponentPartDataAttributes &
     onKeyUp?: ComponentPartEvent<T, KeyboardEvent>;
     onMouseDown?: ComponentPartEvent<T, MouseEvent>;
     onMouseUp?: ComponentPartEvent<T, MouseEvent>;
+    onGotPointerCapture?: ComponentPartEvent<T, PointerEvent>;
+    onLostPointerCapture?: ComponentPartEvent<T, PointerEvent>;
+    onPointerCancel?: ComponentPartEvent<T, PointerEvent>;
     onPointerDown?: ComponentPartEvent<T, PointerEvent>;
+    onPointerEnter?: ComponentPartEvent<T, PointerEvent>;
+    onPointerLeave?: ComponentPartEvent<T, PointerEvent>;
+    onPointerMove?: ComponentPartEvent<T, PointerEvent>;
+    onPointerOut?: ComponentPartEvent<T, PointerEvent>;
+    onPointerOver?: ComponentPartEvent<T, PointerEvent>;
     onPointerUp?: ComponentPartEvent<T, PointerEvent>;
     onSubmit?: ComponentPartEvent<T, SubmitEvent>;
+    onToggle?: ComponentPartEvent<T, ComponentPartPopoverToggleEvent>;
   };
 
 type ComponentPartSvgProps = {
@@ -207,29 +238,32 @@ type ComponentPartSvgProps = {
 
 export type ComponentPartBindingForElement<ElementName extends string> =
   ElementName extends "button"
-    ? ComponentPartCommonProps<HTMLButtonElement> & {
-        disabled?: ComponentPartValue<boolean>;
-        type?: ComponentPartValue<"button" | "submit" | "reset">;
-        value?: ComponentPartValue<string | number>;
-      }
-    : ElementName extends "input"
-      ? ComponentPartCommonProps<HTMLInputElement> & {
-          accept?: ComponentPartValue<string>;
-          checked?: ComponentPartValue<boolean>;
+    ? ComponentPartCommonProps<HTMLButtonElement> &
+        ComponentPartPopoverTargetProps & {
           disabled?: ComponentPartValue<boolean>;
-          max?: ComponentPartValue<string | number>;
-          min?: ComponentPartValue<string | number>;
-          multiple?: ComponentPartValue<boolean>;
           name?: ComponentPartValue<string>;
-          pattern?: ComponentPartValue<string>;
-          placeholder?: ComponentPartValue<string>;
-          readOnly?: ComponentPartValue<boolean>;
-          readonly?: ComponentPartValue<boolean>;
-          required?: ComponentPartValue<boolean>;
-          step?: ComponentPartValue<string | number>;
-          type?: ComponentPartValue<string>;
-          value?: ComponentPartValue<string | number | readonly string[]>;
+          type?: ComponentPartValue<"button" | "submit" | "reset">;
+          value?: ComponentPartValue<string | number>;
         }
+    : ElementName extends "input"
+      ? ComponentPartCommonProps<HTMLInputElement> &
+          ComponentPartPopoverTargetProps & {
+            accept?: ComponentPartValue<string>;
+            checked?: ComponentPartValue<boolean>;
+            disabled?: ComponentPartValue<boolean>;
+            max?: ComponentPartValue<string | number>;
+            min?: ComponentPartValue<string | number>;
+            multiple?: ComponentPartValue<boolean>;
+            name?: ComponentPartValue<string>;
+            pattern?: ComponentPartValue<string>;
+            placeholder?: ComponentPartValue<string>;
+            readOnly?: ComponentPartValue<boolean>;
+            readonly?: ComponentPartValue<boolean>;
+            required?: ComponentPartValue<boolean>;
+            step?: ComponentPartValue<string | number>;
+            type?: ComponentPartValue<string>;
+            value?: ComponentPartValue<string | number | readonly string[]>;
+          }
       : ElementName extends "textarea"
         ? ComponentPartCommonProps<HTMLTextAreaElement> & {
             cols?: ComponentPartValue<number>;
@@ -284,15 +318,14 @@ export type ComponentPartBindingForElement<ElementName extends string> =
                     : ElementName extends keyof SVGElementTagNameMap
                       ? ComponentPartCommonProps<SVGElementTagNameMap[ElementName]> &
                           ComponentPartSvgProps
-                      : Record<string, unknown>;
+                      : ComponentPartCommonProps<Element>;
 
 export type ComponentPartBinding<
   Spec extends AppSpec,
   Component extends ComponentName<Spec>,
   Part extends ComponentPartName<Spec, Component>,
 > = ComponentPartBindingForElement<ComponentPartElement<Spec, Component, Part>> & {
-  readonly "data-pg-component": Component;
-  readonly "data-pg-part": Part;
+  readonly class: string;
 };
 
 export type ComponentPartComponent<
@@ -300,7 +333,7 @@ export type ComponentPartComponent<
   Component extends ComponentName<Spec>,
   Part extends ComponentPartName<Spec, Component>,
 > = (
-  props?: Partial<ComponentPartBinding<Spec, Component, Part>> & {
+  props?: Partial<Omit<ComponentPartBinding<Spec, Component, Part>, "class" | "style">> & {
     children?: Child;
   },
 ) => Child;
@@ -311,24 +344,14 @@ export type ComponentInstanceInput<
 > = (HasNoKeys<ComponentInput<Spec, Component>> extends true
   ? { input?: ComponentInput<Spec, Component> }
   : { input: ComponentInput<Spec, Component> }) &
-  (HasNoKeys<ComponentState<Spec, Component>> extends true
-    ? { state?: ComponentState<Spec, Component> }
-    : { state: ComponentState<Spec, Component> }) &
-  (HasNoKeys<ComponentActions<Spec, Component>> extends true
-    ? { actions?: ComponentInstanceActionFactory<Spec, Component> }
-    : { actions: ComponentInstanceActionFactory<Spec, Component> }) &
-  (HasNoKeys<ComponentDerived<Spec, Component>> extends true
-    ? { derived?: ComponentInstanceDerivedFactory<Spec, Component> }
-    : { derived: ComponentInstanceDerivedFactory<Spec, Component> });
+  (HasNoKeys<ComponentVariants<Spec, Component>> extends true
+    ? { variants?: ComponentVariants<Spec, Component> }
+    : { variants: ComponentVariants<Spec, Component> });
 
 type ComponentInstanceNeedsInput<Spec extends AppSpec, Component extends ComponentName<Spec>> =
   HasNoKeys<ComponentInput<Spec, Component>> extends true
-    ? HasNoKeys<ComponentState<Spec, Component>> extends true
-      ? HasNoKeys<ComponentActions<Spec, Component>> extends true
-        ? HasNoKeys<ComponentDerived<Spec, Component>> extends true
-          ? false
-          : true
-        : true
+    ? HasNoKeys<ComponentVariants<Spec, Component>> extends true
+      ? false
       : true
     : true;
 
@@ -349,9 +372,11 @@ export type ComponentInstanceResult<Spec extends AppSpec, Component extends Comp
   >;
 } & {
   readonly input: ComponentInput<Spec, Component>;
+  readonly variants: ComponentVariants<Spec, Component>;
   readonly state: ComponentStateObject<Spec, Component>;
   readonly derived: ComponentDerived<Spec, Component>;
   readonly actions: ComponentInstanceActionHandlers<Spec, Component>;
+  readonly values: ComponentStyleValues<Spec, Component>;
   readonly refs: ComponentRefs<Spec, Component>;
 };
 
@@ -387,86 +412,43 @@ export type PresetName<Spec extends AppSpec> =
     Presets: infer Presets extends string;
   }
     ? Presets
-    : "default";
+    : StylesOf<Spec> extends {
+          Presets: infer Presets extends Record<string, any>;
+        }
+      ? Extract<keyof Presets, string>
+      : "default";
 
-type ThemeParamsOf<Spec extends AppSpec> =
+type PresetSpecsOf<Spec extends AppSpec> =
   StylesOf<Spec> extends {
-    Theme: {
-      Params: infer Params extends Record<string, any>;
-    };
+    Presets: infer Presets extends Record<string, any>;
   }
-    ? Params
+    ? Presets
     : Record<string, never>;
 
-export type ThemeParamName<Spec extends AppSpec> = Extract<keyof ThemeParamsOf<Spec>, string>;
+type ThemeNamesOf<Spec extends AppSpec> = {
+  [Preset in keyof PresetSpecsOf<Spec>]: PresetSpecsOf<Spec>[Preset] extends {
+    Themes: infer Themes extends string;
+  }
+    ? Themes
+    : never;
+}[keyof PresetSpecsOf<Spec>];
 
-type WidenPrimitive<Value> = Value extends number
-  ? number
-  : Value extends string
-    ? string
-    : Value extends boolean
-      ? boolean
-      : Value;
-
-export type ThemeParamValue<
-  Spec extends AppSpec,
-  Param extends ThemeParamName<Spec>,
-> = ThemeParamsOf<Spec>[Param] extends {
-  default: infer Default extends number | string | boolean;
-}
-  ? WidenPrimitive<Default>
-  : ThemeParamsOf<Spec>[Param] extends number | string | boolean
-    ? WidenPrimitive<ThemeParamsOf<Spec>[Param]>
-    : number;
-
-export type ThemeValues<Spec extends AppSpec> = {
-  readonly [Param in ThemeParamName<Spec>]: ThemeParamValue<Spec, Param>;
-};
-
-export type StyleContext<Spec extends AppSpec, Component extends ComponentName<Spec>> = {
-  readonly preset: PresetName<Spec>;
-  readonly input: ComponentInput<Spec, Component>;
-  readonly state: ComponentState<Spec, Component>;
-  readonly derived: ComponentDerived<Spec, Component>;
-  readonly theme: ThemeValues<Spec>;
-};
-
-export type SemanticStyleOutput = Record<string, unknown>;
-
-export type StyleSlotDef<Spec extends AppSpec, Component extends ComponentName<Spec>> =
-  | SemanticStyleOutput
-  | ((ctx: StyleContext<Spec, Component>) => SemanticStyleOutput);
-
-export type StylePresetDef<Spec extends AppSpec> = {
-  [Component in ComponentName<Spec>]?: {
-    [Part in ComponentPartName<Spec, Component>]?: StyleSlotDef<Spec, Component>;
-  };
-};
+export type ThemeName<Spec extends AppSpec> = [ThemeNamesOf<Spec>] extends [never]
+  ? "default"
+  : ThemeNamesOf<Spec> | "default";
 
 export type StylesDef<Spec extends AppSpec> = {
-  defaultPreset?: PresetName<Spec>;
-  presets: {
-    [Preset in PresetName<Spec>]?: StylePresetDef<Spec>;
-  };
-};
-
-export type Styles<Spec extends AppSpec> = {
-  readonly def: StylesDef<Spec>;
-};
-
-export type TypedStyleDefinition<Spec extends AppSpec> = {
-  readonly __poggersStyleSpec?: Spec;
+  readonly defaultPreset?: PresetName<Spec>;
+  readonly presets: Partial<Record<PresetName<Spec>, unknown>>;
 };
 
 export type StyleControls<Spec extends AppSpec> = {
   readonly preset: Signal<PresetName<Spec>>;
+  readonly themeName: Signal<ThemeName<Spec>>;
   usePreset(): PresetName<Spec>;
   setPreset(preset: PresetName<Spec>): void;
-  useTheme(): ThemeValues<Spec>;
-  setThemeParam<Param extends ThemeParamName<Spec>>(
-    param: Param,
-    value: ThemeParamValue<Spec, Param>,
-  ): void;
+  useThemeName(): ThemeName<Spec>;
+  setTheme(theme: ThemeName<Spec>): void;
 };
 
 export type AppHooks<Spec extends AppSpec> = ApiHooks<Spec> &
@@ -477,29 +459,39 @@ export type AppHooks<Spec extends AppSpec> = ApiHooks<Spec> &
 
 export type AppInput<Spec extends AppSpec> = App<Spec> | AppDef<Spec> | TypedAppDefinition<Spec>;
 
-export type StyleInput<Spec extends AppSpec> =
-  | Styles<Spec>
-  | StylesDef<Spec>
-  | TypedStyleDefinition<Spec>;
-
 export type CreateHooksOpts<Spec extends AppSpec> = {
   app: AppInput<Spec>;
-  styles: StyleInput<Spec>;
+  styles: StylesDef<Spec>;
   components?: ComponentRuntimeParts<Spec>;
+  compiledVisuals?: CompiledVisuals;
 };
 
 type RuntimeComponentParts = Record<string, Record<string, string>>;
 
 type RuntimeHookInput = {
   input?: Record<string, unknown>;
-  state?: Record<string, unknown>;
-  actions?: (ctx: RuntimeComponentInstanceContext) => Record<string, (...args: any[]) => void>;
+  variants?: Record<string, unknown>;
+};
+
+type RuntimeComponentDefinition = {
+  state?:
+    | Record<string, unknown>
+    | ((ctx: {
+        input: Record<string, unknown>;
+        variants: Record<string, unknown>;
+      }) => Record<string, unknown>);
   derived?: (ctx: Omit<RuntimeComponentInstanceContext, "derived">) => Record<string, unknown>;
+  actions?: (ctx: RuntimeComponentInstanceContext) => Record<string, (...args: any[]) => void>;
+  bind?: (ctx: RuntimeComponentControllerContext) => Record<string, unknown>;
+  setup?: (ctx: RuntimeComponentControllerContext) => void | (() => void);
 };
 
 type RuntimeComponentInstanceContext = {
   readonly preset: string;
-  readonly theme: Record<string, unknown>;
+  readonly setPreset: (preset: string) => void;
+  readonly theme: string;
+  readonly setTheme: (theme: string) => void;
+  readonly variants: Record<string, unknown>;
   readonly input: Record<string, unknown>;
   readonly state: Record<string, unknown>;
   readonly derived: Record<string, unknown>;
@@ -510,56 +502,59 @@ type RuntimeComponentControllerContext = RuntimeComponentInstanceContext & {
   readonly actions: Record<string, (...args: any[]) => void>;
 };
 
-export function defineStyles<Spec extends AppSpec>(def: TypedStyleDefinition<Spec>): Styles<Spec>;
-export function defineStyles<Spec extends AppSpec>(def: StylesDef<Spec>): Styles<Spec>;
-export function defineStyles<Spec extends AppSpec>(
-  def: StylesDef<Spec> | TypedStyleDefinition<Spec>,
-): Styles<Spec> {
-  return { def: def as StylesDef<Spec> };
-}
-
 export function createHooks<Spec extends AppSpec>({
   app,
   styles,
   components,
+  compiledVisuals,
 }: CreateHooksOpts<Spec>): AppHooks<Spec> {
   const runtimeApp = normalizeAppInput(app);
-  const runtimeStyles = normalizeStylesInput(styles);
   const runtime = createNativeAppRuntime(runtimeApp);
-  const defaultPreset = firstPreset(runtimeStyles) as PresetName<Spec>;
-  const preset = runtimeSignal(defaultPreset);
-  const theme = runtimeSignal(createInitialTheme<Spec>());
+  const defaultPreset = firstPreset(styles) as PresetName<Spec>;
+  const preset = signal(defaultPreset);
+  const themeName = signal("default" as ThemeName<Spec>);
+  updateRootPreset(preset());
   const runtimeParts = normalizeRuntimeParts(components);
+  const selectPreset = (nextPreset: PresetName<Spec>) => {
+    if (!(String(nextPreset) in styles.presets)) {
+      throw new Error(`Unknown Poggers preset "${String(nextPreset)}".`);
+    }
+    preset(nextPreset);
+    updateRootPreset(nextPreset);
+  };
+  const selectTheme = (nextTheme: ThemeName<Spec>) => {
+    themeName(nextTheme);
+    updateRootTheme(nextTheme);
+  };
   const hooks: Record<string, unknown> = {
     ...(runtime.api as Record<string, unknown>),
     preset,
+    themeName,
     usePreset() {
       return preset();
     },
-    setPreset(nextPreset: PresetName<Spec>) {
-      if (!(String(nextPreset) in runtimeStyles.def.presets)) {
-        throw new Error(`Unknown Poggers preset "${String(nextPreset)}".`);
-      }
-      preset(nextPreset);
-      updateRootPreset(nextPreset);
+    setPreset: selectPreset,
+    useThemeName() {
+      return themeName();
     },
-    useTheme() {
-      return theme();
-    },
-    setThemeParam(param: string, value: unknown) {
-      theme({ ...theme(), [param]: value });
-      updateRootThemeParam(param, value);
-    },
+    setTheme: selectTheme,
     start: runtime.start,
   };
 
-  for (const componentName of collectComponentNames(runtimeApp, runtimeStyles, runtimeParts)) {
+  for (const componentName of collectComponentNames(runtimeApp, runtimeParts)) {
     hooks[`create${capitalize(componentName)}`] = (input: RuntimeHookInput = {}) =>
       createComponentInstance(componentName, {
         app: runtimeApp,
         preset,
-        theme,
+        setPreset(nextPreset) {
+          selectPreset(nextPreset as PresetName<Spec>);
+        },
+        themeName,
+        setTheme(nextTheme) {
+          selectTheme(nextTheme as ThemeName<Spec>);
+        },
         parts: runtimeParts[componentName] ?? {},
+        compiledVisuals,
         input,
       });
   }
@@ -575,31 +570,41 @@ function isRuntimeApp<Spec extends AppSpec>(app: AppInput<Spec>): app is App<Spe
   return Boolean((app as App<Spec>).def?.resources);
 }
 
-function normalizeStylesInput<Spec extends AppSpec>(styles: StyleInput<Spec>): Styles<Spec> {
-  return isRuntimeStyles(styles) ? styles : defineStyles(styles as StylesDef<Spec>);
-}
-
-function isRuntimeStyles<Spec extends AppSpec>(styles: StyleInput<Spec>): styles is Styles<Spec> {
-  return Boolean((styles as Styles<Spec>).def?.presets);
-}
-
 function createComponentInstance(
   componentName: string,
   options: {
     app: App<any>;
     preset: () => string;
-    theme: () => Record<string, unknown>;
+    setPreset: (preset: string) => void;
+    themeName: () => string;
+    setTheme: (theme: string) => void;
     parts: Record<string, string>;
+    compiledVisuals?: CompiledVisuals;
     input: RuntimeHookInput;
   },
 ) {
+  const suppressInitialEnter = isHotRefresh();
   const input = options.input.input ?? {};
+  const variants = options.input.variants ?? {};
+  const componentEntry = options.app.def.components?.[componentName];
+  const definition =
+    componentEntry && typeof componentEntry === "object"
+      ? (componentEntry as RuntimeComponentDefinition)
+      : undefined;
   const signals = Object.create(null) as Record<string, Signal<unknown>>;
   const refs = Object.create(null) as Record<string, Element | null>;
+  const partElements = Object.create(null) as Record<string, Set<Element>>;
   const state = createStateObject(signals);
+  const definitionState =
+    typeof definition?.state === "function"
+      ? definition.state({ input, variants })
+      : definition?.state;
+  const initialState = cloneComponentState({
+    ...definitionState,
+  });
 
-  for (const [name, value] of Object.entries(options.input.state ?? {})) {
-    signals[name] = signal(value);
+  for (const [name, value] of Object.entries(initialState)) {
+    signals[name] = signal(value, `component:${componentName}:state:${name}`);
   }
 
   const derivedSignals = Object.create(null) as Record<string, () => unknown>;
@@ -609,24 +614,30 @@ function createComponentInstance(
     get preset() {
       return options.preset();
     },
+    setPreset: options.setPreset,
     get theme() {
-      return options.theme();
+      return options.themeName();
     },
+    setTheme: options.setTheme,
+    variants,
     input,
     state,
     refs,
   };
-  const derivedSource = options.input.derived?.(baseContext as never) ?? {};
-  const derivedDescriptors = Object.getOwnPropertyDescriptors(derivedSource);
+  const derivedFactory = definition?.derived;
+  const readDerivedSource = derivedFactory
+    ? computed(() => asRecord(derivedFactory(baseContext as never)))
+    : () => ({});
+  const derivedDescriptors = Object.getOwnPropertyDescriptors(untrack(readDerivedSource));
 
-  for (const [name, descriptor] of Object.entries(derivedDescriptors)) {
-    const getter =
-      typeof descriptor.get === "function"
-        ? () => descriptor.get!.call(derived)
-        : typeof descriptor.value === "function"
-          ? () => descriptor.value.call(derived)
-          : () => descriptor.value;
-    const value = computed(getter);
+  for (const name of Object.keys(derivedDescriptors)) {
+    const value = computed(() => {
+      const descriptor = Object.getOwnPropertyDescriptor(readDerivedSource(), name);
+      if (!descriptor) return undefined;
+      if (typeof descriptor.get === "function") return descriptor.get.call(derived);
+      if (typeof descriptor.value === "function") return descriptor.value.call(derived);
+      return descriptor.value;
+    });
     derivedSignals[name] = value;
     const initialValue = value();
     if (initialValue != null && typeof initialValue === "object") {
@@ -640,31 +651,42 @@ function createComponentInstance(
     });
   }
 
-  const instanceContext: RuntimeComponentInstanceContext = {
-    ...baseContext,
+  const instanceContext = extendContext<RuntimeComponentInstanceContext>(baseContext, {
     derived,
-  };
+  });
   const actions = Object.create(null) as Record<string, (...args: any[]) => void>;
-  const actionSource = options.input.actions?.(instanceContext) ?? {};
-  for (const [name, handler] of Object.entries(actionSource)) {
-    actions[name] = (...args: any[]) => handler(...args);
+  const actionsFactory = definition?.actions;
+  const actionSource = untrack(() => actionsFactory?.(instanceContext) ?? {});
+  for (const name of Object.keys(actionSource)) {
+    actions[name] = (...args: any[]) => {
+      const handler = actionsFactory?.(instanceContext)?.[name] ?? actionSource[name];
+      return handler?.(...args);
+    };
   }
 
-  const controllerContext: RuntimeComponentControllerContext = {
-    ...instanceContext,
+  const controllerContext = extendContext<RuntimeComponentControllerContext>(instanceContext, {
     actions,
-  };
-  const controller = options.app.def.components?.[componentName];
-  const readControllerPart = (partName: string) => {
+  });
+  const controller = typeof componentEntry === "function" ? componentEntry : definition?.bind;
+  const readControllerResult = () => {
     if (typeof controller !== "function") return {};
-    return asRecord(controller(controllerContext))[partName];
+    return asRecord(
+      (controller as (ctx: RuntimeComponentControllerContext) => unknown)(controllerContext),
+    );
   };
+  const readControllerPart = (partName: string) => {
+    return readControllerResult()[partName];
+  };
+  const readControllerValues = () => asRecord(readControllerResult().values);
+  const values = createControllerValuesObject(readControllerValues);
   const target = Object.create(null) as Record<string, unknown>;
 
   target.input = input;
+  target.variants = variants;
   target.state = state;
   target.derived = derived;
   target.actions = actions;
+  target.values = values;
   target.refs = refs;
 
   for (const name of Object.keys(derivedDescriptors)) {
@@ -683,15 +705,88 @@ function createComponentInstance(
   for (const [partName, elementName] of Object.entries(options.parts)) {
     target[partName] = createComponentPartComponent(componentName, partName, elementName, {
       refs,
-      input,
+      partElements,
+      variants,
       state,
-      derived,
-      preset: options.preset,
       controller: () => readControllerPart(partName),
+      values: readControllerValues,
+      compiledVisuals: options.compiledVisuals,
+      preset: options.preset,
+      themeName: options.themeName,
     });
   }
 
+  mountComponentSetup(definition?.setup, controllerContext);
+
+  mountCompiledVisualComponent({
+    componentName,
+    compiledVisuals: options.compiledVisuals,
+    preset: options.preset,
+    themeName: options.themeName,
+    variants,
+    state,
+    values,
+    refs,
+    partElements,
+    suppressInitialEnter,
+  });
+
   return target;
+}
+
+function mountCompiledVisualComponent(options: {
+  componentName: string;
+  compiledVisuals?: CompiledVisuals;
+  preset: () => string;
+  themeName: () => string;
+  variants: Record<string, unknown>;
+  state: Record<string, unknown>;
+  values: Record<string, unknown>;
+  refs: Record<string, Element | null>;
+  partElements: Record<string, Set<Element>>;
+  suppressInitialEnter: boolean;
+}) {
+  if (!options.compiledVisuals) return;
+  onMount(() => {
+    const coordinator = createVisualCoordinator({
+      compiled: options.compiledVisuals ?? {},
+      component: options.componentName,
+      refs: options.refs,
+      elements: options.partElements,
+      suppressInitialEnter: options.suppressInitialEnter,
+    });
+    const disposeEffect = effect(() => {
+      const preset = options.preset();
+      if (!isCompiledVisualPreset(options.compiledVisuals, preset)) return;
+      coordinator.update({
+        preset,
+        theme: options.themeName(),
+        variants: { ...options.variants },
+        state: { ...options.state },
+        values: { ...options.values },
+      });
+    });
+    return () => {
+      disposeEffect();
+      coordinator.dispose();
+    };
+  });
+}
+
+function cloneComponentState(state: Record<string, unknown>): Record<string, unknown> {
+  try {
+    return structuredClone(state);
+  } catch {
+    return { ...state };
+  }
+}
+
+function mountComponentSetup(
+  setup: RuntimeComponentDefinition["setup"],
+  context: RuntimeComponentControllerContext,
+) {
+  if (!setup) return;
+  onMount(() => setup(context));
 }
 
 function createStateObject(signals: Record<string, Signal<unknown>>): Record<string, unknown> {
@@ -720,29 +815,105 @@ function createStateObject(signals: Record<string, Signal<unknown>>): Record<str
   });
 }
 
+function extendContext<T extends Record<string, unknown>>(
+  base: Record<string, unknown>,
+  values: Record<string, unknown>,
+): T {
+  const context = Object.create(null) as Record<string, unknown>;
+  Object.defineProperties(context, Object.getOwnPropertyDescriptors(base));
+  for (const [name, value] of Object.entries(values)) {
+    Object.defineProperty(context, name, {
+      enumerable: true,
+      configurable: true,
+      value,
+    });
+  }
+  return context as T;
+}
+
+function createControllerValuesObject(
+  readValues: () => Record<string, unknown>,
+): Record<string, unknown> {
+  return new Proxy(Object.create(null), {
+    get(_target, prop: string) {
+      if (typeof prop !== "string") return undefined;
+      return readValues()[prop];
+    },
+    ownKeys() {
+      return Reflect.ownKeys(readValues());
+    },
+    getOwnPropertyDescriptor(_target, prop: string) {
+      if (prop in readValues()) return { enumerable: true, configurable: true };
+      return undefined;
+    },
+  });
+}
+
 function createComponentPartComponent(
   componentName: string,
   partName: string,
   elementName: string,
   options: {
     refs: Record<string, Element | null>;
-    input: Record<string, unknown>;
+    partElements: Record<string, Set<Element>>;
+    variants: Record<string, unknown>;
     state: Record<string, unknown>;
-    derived: Record<string, unknown>;
-    preset: () => string;
     controller: () => unknown;
+    values: () => Record<string, unknown>;
+    compiledVisuals?: CompiledVisuals;
+    preset: () => string;
+    themeName: () => string;
+  },
+) {
+  return createCompiledVisualPartComponent(componentName, partName, elementName, options);
+}
+
+function createCompiledVisualPartComponent(
+  componentName: string,
+  partName: string,
+  elementName: string,
+  options: {
+    refs: Record<string, Element | null>;
+    partElements: Record<string, Set<Element>>;
+    variants: Record<string, unknown>;
+    state: Record<string, unknown>;
+    controller: () => unknown;
+    values: () => Record<string, unknown>;
+    preset: () => string;
+    themeName: () => string;
+    compiledVisuals?: CompiledVisuals;
   },
 ) {
   return (props: Props = {}) => {
-    const base = createBasePartProps(
-      componentName,
-      partName,
-      options.preset,
-      options.input,
-      options.state,
-      options.derived,
-      options.refs,
+    const readAttributes = computed(() =>
+      visualPartAttributes(
+        options.compiledVisuals ?? {},
+        options.preset(),
+        componentName,
+        partName,
+        {
+          theme: options.themeName(),
+          variants: options.variants,
+          state: options.state,
+          values: options.values(),
+        },
+      ),
     );
+    const base: Record<string, unknown> = {
+      class() {
+        return readAttributes().class;
+      },
+      style() {
+        return readAttributes().style;
+      },
+      "data-style-src"() {
+        return readAttributes()["data-style-src"];
+      },
+      ref(element: Element) {
+        options.refs[partName] = element;
+        (options.partElements[partName] ??= new Set()).add(element);
+      },
+    };
     const controllerProps = createReactiveControllerProps(options.controller);
     return jsx(elementName, mergeProps(base, controllerProps, props));
   };
@@ -750,7 +921,7 @@ function createComponentPartComponent(
 
 function createReactiveControllerProps(readController: () => unknown): Record<string, unknown> {
   const read = () => asRecord(readController());
-  const initial = asRecord(read());
+  const initial = asRecord(untrack(read));
   const props: Record<string, unknown> = {};
 
   for (const [name, value] of Object.entries(initial)) {
@@ -764,52 +935,23 @@ function createReactiveControllerProps(readController: () => unknown): Record<st
   return props;
 }
 
-function createBasePartProps(
-  componentName: string,
-  partName: string,
-  preset: () => string,
-  input: Record<string, unknown>,
-  state: Record<string, unknown>,
-  derived: Record<string, unknown>,
-  refs: Record<string, Element | null>,
-): Props {
-  const className = `pg-${kebab(componentName)}__${kebab(partName)}`;
-  const props: Record<string, unknown> = {
-    "data-pg-component": componentName,
-    "data-pg-part": partName,
-    "data-pg-preset": preset,
-    class: className,
-    ref(element: Element) {
-      refs[partName] = element;
-    },
-  };
-
-  for (const [name, value] of Object.entries(input)) {
-    props[`data-pg-input-${kebab(name)}`] = value;
-  }
-  for (const name of Object.keys(state)) {
-    props[`data-pg-state-${kebab(name)}`] = () => state[name];
-  }
-  for (const name of Object.keys(derived)) {
-    props[`data-pg-derived-${kebab(name)}`] = () => derived[name];
-  }
-
-  return props;
-}
-
 function mergeProps(...sources: Array<Record<string, unknown> | Props>): Props {
   const merged: Record<string, unknown> = {};
 
   for (const source of sources) {
     for (const [name, value] of Object.entries(source)) {
       const existing = merged[name];
-      if ((name === "class" || name === "className") && existing) {
-        merged[name] = mergeClassValue(existing, value);
+      if (name === "class" || name === "className") {
+        const existingClass = merged.class ?? merged.className;
+        delete merged.className;
+        merged.class = existingClass ? mergeClassValue(existingClass, value) : value;
       } else if (name === "ref" && typeof existing === "function" && typeof value === "function") {
         merged[name] = (element: Element) => {
           (existing as (element: Element) => void)(element);
           value(element);
         };
+      } else if (name === "style" && existing) {
+        merged[name] = mergeStyleValue(existing, value);
       } else if (
         name.startsWith("on") &&
         typeof existing === "function" &&
@@ -828,6 +970,27 @@ function mergeProps(...sources: Array<Record<string, unknown> | Props>): Props {
   return merged as Props;
 }
 
+function mergeStyleValue(existing: unknown, next: unknown): () => unknown {
+  return () => {
+    const existingObject = styleObject(existing);
+    const nextObject = styleObject(next);
+    if (existingObject && nextObject) return { ...existingObject, ...nextObject };
+    return nextObject ?? existingObject ?? resolveMaybeSignal(next);
+  };
+}
+
+function styleObject(value: unknown): Record<string, unknown> | undefined {
+  const resolved = resolveMaybeSignal(value);
+  if (resolved && typeof resolved === "object" && !Array.isArray(resolved)) {
+    return resolved as Record<string, unknown>;
+  }
+  return undefined;
+}
+
+function resolveMaybeSignal(value: unknown): unknown {
+  return typeof value === "function" ? (value as () => unknown)() : value;
+}
+
 function normalizeRuntimeParts<Spec extends AppSpec>(
   components?: ComponentRuntimeParts<Spec>,
 ): RuntimeComponentParts {
@@ -843,36 +1006,34 @@ function normalizeRuntimeParts<Spec extends AppSpec>(
 
 function collectComponentNames<Spec extends AppSpec>(
   app: App<Spec>,
-  styles: Styles<Spec>,
   parts: RuntimeComponentParts,
 ): string[] {
   const names = new Set<string>();
   for (const name of Object.keys(parts)) names.add(name);
   for (const name of Object.keys(app.def.components ?? {})) names.add(name);
-  for (const preset of Object.values(styles.def.presets) as StylePresetDef<Spec>[]) {
-    for (const name of Object.keys(preset ?? {})) names.add(name);
-  }
   return [...names];
 }
 
-function firstPreset<Spec extends AppSpec>(styles: Styles<Spec>): string {
-  const explicit = styles.def.defaultPreset;
+function firstPreset<Spec extends AppSpec>(styles: StylesDef<Spec>): string {
+  const explicit = styles.defaultPreset;
   if (explicit) return String(explicit);
-  return Object.keys(styles.def.presets)[0] ?? "default";
-}
-
-function createInitialTheme<Spec extends AppSpec>(): ThemeValues<Spec> {
-  return {} as ThemeValues<Spec>;
+  return Object.keys(styles.presets)[0] ?? "default";
 }
 
 function updateRootPreset(preset: string) {
   if (typeof document === "undefined") return;
-  document.documentElement.dataset.poggersPreset = String(preset);
+  const root = document.documentElement;
+  if (!root) return;
+  root.dataset.preset = String(preset);
 }
 
-function updateRootThemeParam(param: string, value: unknown) {
+function updateRootTheme(theme: string) {
   if (typeof document === "undefined") return;
-  document.documentElement.style.setProperty(`--pg-${kebab(param)}`, String(value));
+  if (!theme || theme === "default") {
+    delete document.documentElement.dataset.theme;
+    return;
+  }
+  document.documentElement.dataset.theme = String(theme);
 }
 
 function capitalize(value: string): string {
@@ -885,14 +1046,6 @@ function mergeClassValue(left: unknown, right: unknown): () => string {
     const rightValue = typeof right === "function" ? (right as () => unknown)() : right;
     return [leftValue, rightValue].filter(Boolean).join(" ");
   };
-}
-
-function kebab(value: string): string {
-  return value
-    .replace(/([a-z0-9])([A-Z])/g, "$1-$2")
-    .replace(/[^a-zA-Z0-9_-]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .toLowerCase();
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

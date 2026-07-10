@@ -256,6 +256,51 @@ describe("app", () => {
       const restored = app.restore("counter", {} as any);
       expect(restored).toEqual({ count: 0 });
     });
+
+    it("accepts same-version snapshots and events with legacy hashes", () => {
+      const hashed = defineApp<any>({
+        version: 1,
+        migrationHash: "current-resource-hash",
+        resources: {
+          counter: {
+            state: { count: 0 },
+            events: {
+              incremented({ state, payload }) {
+                state.count += payload.amount;
+              },
+            },
+            views: {},
+            commands: {},
+          },
+        },
+      });
+
+      expect(
+        hashed.restore("counter", {
+          version: 1,
+          hash: "legacy-full-source-hash",
+          data: { count: 41 },
+        }),
+      ).toEqual({ count: 41 });
+
+      const state = hashed.createState("counter");
+      hashed.applyEvent(
+        "counter",
+        state,
+        {
+          id: "event-1",
+          seq: 1,
+          at: 1,
+          actor: { id: "actor-1" },
+          name: "incremented",
+          payload: { amount: 1 },
+          hash: "legacy-full-source-hash",
+        },
+        1,
+        "legacy-full-source-hash",
+      );
+      expect(state).toEqual({ count: 1 });
+    });
   });
 
   describe("runCommand", () => {

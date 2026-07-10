@@ -69,6 +69,7 @@ export type WebServeOpts = {
   entrypoint: string | URL;
   html?: any;
   styles?: string;
+  styleFiles?: string[];
   plugins?: Bun.BunPlugin[];
   assetDir?: string;
   title?: string;
@@ -176,6 +177,14 @@ export function serve<Spec extends AppSpec>(
   let liveReloadWatcher: FSWatcher | undefined;
   let liveReloadTimer: ReturnType<typeof setTimeout> | undefined;
   let liveReloadPoll: ReturnType<typeof setInterval> | undefined;
+  let liveReloadBuild: Promise<void> | undefined;
+  let liveReloadPendingPath: string | undefined;
+  let browserAssetsCache:
+    | { version: number; assets: { script: string; style?: string } }
+    | undefined;
+  let browserAssetsBuild:
+    | { version: number; promise: Promise<{ script: string; style?: string } | Response> }
+    | undefined;
 
   function getEventBuffer(key: string): unknown[] {
     let buf = eventBuffers.get(key);
@@ -419,9 +428,32 @@ export function serve<Spec extends AppSpec>(
   }
 
   async function buildBrowserAssets(): Promise<{ script: string; style?: string } | Response> {
+    const version = liveReloadVersion;
+    if (browserAssetsCache?.version === version) return browserAssetsCache.assets;
+    if (browserAssetsBuild) {
+      const activeBuild = browserAssetsBuild;
+      const result = await activeBuild.promise;
+      if (activeBuild.version === version)
+        return result instanceof Response ? result.clone() : result;
+      return buildBrowserAssets();
+    }
+    // Publish the in-flight generation before Bun begins compiling so concurrent
+    // script and stylesheet requests always share one StyleX build.
+    const promise = Promise.resolve().then(() => compileBrowserAssets());
+    browserAssetsBuild = { version, promise };
+    try {
+      const result = await promise;
+      if (!(result instanceof Response)) browserAssetsCache = { version, assets: result };
+      return result;
+    } finally {
+      if (browserAssetsBuild?.promise === promise) browserAssetsBuild = undefined;
+    }
+  }
+
+  async function compileBrowserAssets(): Promise<{ script: string; style?: string } | Response> {
     if (!web) return new Response("not found", { status: 404 });
     if (web.bundle) {
-      return { script: web.bundle, style: web.styleBundle };
+      return { script: web.bundle, style: await appendStyleFiles(web.styleBundle, web.styleFiles) };
     }
 
     const entrypoint =
@@ -457,7 +489,23 @@ export function serve<Spec extends AppSpec>(
       return new Response("browser bundle produced no output", { status: 500 });
     }
 
+    style = await appendStyleFiles(style, web.styleFiles);
     return { script, style };
+  }
+
+  async function appendStyleFiles(
+    style: string | undefined,
+    styleFiles: string[] | undefined,
+  ): Promise<string | undefined> {
+    let next = style;
+    for (const path of styleFiles ?? []) {
+      const file = Bun.file(path);
+      if (!(await file.exists())) continue;
+      const css = await file.text();
+      if (!css.trim()) continue;
+      next = next ? `${next}\n${css}` : css;
+    }
+    return next;
   }
 
   async function buildBrowserBundle(): Promise<Response> {
@@ -492,7 +540,7 @@ export function serve<Spec extends AppSpec>(
         let version = 0;
         let importing = Promise.resolve();
         const scriptPath = ${JSON.stringify(webScriptPath)};
-        const stylePath = ${JSON.stringify(web.styles || web.styleBundle ? webStylePath : "")};
+        const stylePath = ${JSON.stringify(web.styles || web.styleBundle || web.styleFiles?.length ? webStylePath : "")};
         const isCodeChange = (changedPath) =>
           typeof changedPath === "string" &&
           /\\.[cm]?[jt]sx?$/.test(changedPath) &&
@@ -501,16 +549,32 @@ export function serve<Spec extends AppSpec>(
           typeof changedPath === "string" &&
           (/\\.css$/.test(changedPath) || /(^|\\/)styles\\.tsx?$/.test(changedPath));
         const refreshStyle = () => {
-          if (!stylePath) return;
+          if (!stylePath) return Promise.resolve();
+          const replacements = [];
           for (const link of document.querySelectorAll('link[rel="stylesheet"]')) {
             const href = link.getAttribute("href") || "";
             if (href === stylePath || href.startsWith(stylePath + "?")) {
-              link.setAttribute("href", stylePath + "?v=" + version);
+              replacements.push(new Promise((resolve) => {
+                const next = link.cloneNode();
+                next.setAttribute("href", stylePath + "?v=" + version);
+                next.addEventListener("load", () => {
+                  link.remove();
+                  resolve();
+                }, { once: true });
+                next.addEventListener("error", () => {
+                  next.remove();
+                  console.error("poggers stylesheet refresh failed");
+                  resolve();
+                }, { once: true });
+                link.after(next);
+              }));
             }
           }
+          return Promise.all(replacements);
         };
         const refreshCode = () => {
           importing = importing
+            .then(() => refreshStyle())
             .then(() => import(scriptPath + "?v=" + version))
             .catch((error) => {
               console.error("poggers hot refresh failed", error);
@@ -522,11 +586,10 @@ export function serve<Spec extends AppSpec>(
           if (message.type !== "reload" && !message.reload) return;
           const changedPath = message.changedPath;
           if (isStyleChange(changedPath)) {
-            refreshStyle();
+            void refreshStyle();
             return;
           }
           if (isCodeChange(changedPath)) {
-            refreshStyle();
             refreshCode();
             return;
           }
@@ -562,7 +625,7 @@ export function serve<Spec extends AppSpec>(
     if (!web) return new Response("not found", { status: 404 });
     const title = web.title ?? app.def.app?.name ?? app.def.pwa?.name ?? "App";
     const pwa = app.def.pwa;
-    const hasStyle = Boolean(web.styles || web.styleBundle);
+    const hasStyle = Boolean(web.styles || web.styleBundle || web.styleFiles?.length);
     const html =
       web.indexHtml ??
       `<!doctype html>
@@ -620,6 +683,13 @@ export function serve<Spec extends AppSpec>(
           ? resolve(liveReload.watchDir, String(filename))
           : liveReload.watchDir;
         if (!shouldLiveReload(changedPath, liveReload.watchDir)) return;
+        try {
+          const mtime = statSync(changedPath).mtimeMs;
+          if (liveReloadFiles.get(changedPath) === mtime) return;
+          liveReloadFiles.set(changedPath, mtime);
+        } catch {
+          if (!liveReloadFiles.delete(changedPath)) return;
+        }
         scheduleLiveReload(changedPath);
       });
     } catch (error) {
@@ -652,20 +722,41 @@ export function serve<Spec extends AppSpec>(
   }
 
   function scheduleLiveReload(changedPath: string) {
+    liveReloadPendingPath = changedPath;
+    if (liveReloadBuild) return;
     if (liveReloadTimer) clearTimeout(liveReloadTimer);
     liveReloadTimer = setTimeout(() => {
       liveReloadTimer = undefined;
-      void notifyLiveReload(changedPath);
+      const pendingPath = liveReloadPendingPath;
+      liveReloadPendingPath = undefined;
+      if (pendingPath) void notifyLiveReload(pendingPath);
     }, 80);
   }
 
   async function notifyLiveReload(changedPath: string) {
+    if (liveReloadBuild) {
+      liveReloadPendingPath = changedPath;
+      return;
+    }
+    liveReloadBuild = rebuildAndPublish(changedPath);
     try {
+      await liveReloadBuild;
+    } finally {
+      liveReloadBuild = undefined;
+      const pendingPath = liveReloadPendingPath;
+      liveReloadPendingPath = undefined;
+      if (pendingPath) scheduleLiveReload(pendingPath);
+    }
+  }
+
+  async function rebuildAndPublish(changedPath: string) {
+    try {
+      if (browserAssetsBuild) await browserAssetsBuild.promise;
       await web?.liveReload?.onChange?.(changedPath);
     } catch (error) {
       console.error("poggers live reload rebuild failed", error);
+      return;
     }
-
     liveReloadVersion += 1;
     liveReloadChangedPath = relative(web?.liveReload?.watchDir ?? "", changedPath);
     const message = JSON.stringify({
@@ -712,7 +803,7 @@ export function serve<Spec extends AppSpec>(
     if (!app.def.pwa) return new Response("not found", { status: 404 });
     const cacheName = `poggers-${app.def.version}`;
     const urls = ["/", webScriptPath, "/manifest.webmanifest"];
-    if (web?.styles || web?.styleBundle) urls.push(webStylePath);
+    if (web?.styles || web?.styleBundle || web?.styleFiles?.length) urls.push(webStylePath);
     const source = `const CACHE_NAME = ${JSON.stringify(cacheName)};
 const APP_SHELL = ${JSON.stringify(urls)};
 
@@ -1399,6 +1490,9 @@ function shouldLiveReload(changedPath: string, watchDir: string): boolean {
   if (rel.startsWith(".poggers/")) return false;
   if (rel.startsWith("dist/")) return false;
   if (rel.startsWith("node_modules/")) return false;
+  if (rel.startsWith("coverage/")) return false;
+  if (rel.startsWith("playwright-report/")) return false;
+  if (rel.startsWith("test-results/")) return false;
   if (rel.includes("/node_modules/")) return false;
   if (rel.endsWith(".jsonl")) return false;
   if (rel.endsWith(".snapshot.json")) return false;
@@ -1426,10 +1520,16 @@ function collectLiveReloadFiles(dir: string, watchDir: string): string[] {
       rel === ".poggers" ||
       rel === "dist" ||
       rel === "node_modules" ||
+      rel === "coverage" ||
+      rel === "playwright-report" ||
+      rel === "test-results" ||
       rel.startsWith(".poggers-") ||
       rel.startsWith(".poggers/") ||
       rel.startsWith("dist/") ||
       rel.startsWith("node_modules/") ||
+      rel.startsWith("coverage/") ||
+      rel.startsWith("playwright-report/") ||
+      rel.startsWith("test-results/") ||
       rel.includes("/node_modules/")
     ) {
       continue;
@@ -1518,8 +1618,8 @@ function publicAssetPath(path: string): string {
 
 function renderDefaultIcon(): Response {
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <rect width="512" height="512" rx="108" fill="#111827"/>
-  <path d="M136 327V185h126c72 0 114 38 114 96s-42 96-114 96h-56v-50h56c38 0 60-16 60-46s-22-46-60-46h-72v92h-54Z" fill="#f8fafc"/>
+  <rect width="512" height="512" rx="108" fill="oklch(21.01% 0.0318 264.66)"/>
+  <path d="M136 327V185h126c72 0 114 38 114 96s-42 96-114 96h-56v-50h56c38 0 60-16 60-46s-22-46-60-46h-72v92h-54Z" fill="oklch(98.42% 0.0034 247.86)"/>
 </svg>`;
   return new Response(svg, {
     headers: {

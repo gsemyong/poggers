@@ -5,6 +5,12 @@ type PrimitiveAttribute = string | number | boolean | null | undefined;
 type Booleanish = boolean | "true" | "false";
 type CrossOrigin = "anonymous" | "use-credentials" | "";
 type Ref<T extends Element> = (element: T) => void;
+type PopoverValue = "auto" | "hint" | "manual" | boolean;
+type PopoverTargetAction = "hide" | "show" | "toggle";
+type PopoverToggleEvent = Event & {
+  readonly newState: "closed" | "open";
+  readonly oldState: "closed" | "open";
+};
 
 type DOMEvent<T extends EventTarget, E extends Event> = E & {
   readonly currentTarget: T;
@@ -22,6 +28,7 @@ type EventHandlerProps<T extends Element> = {
   onAnimationStart?: EventHandler<T, AnimationEvent>;
   onAuxClick?: EventHandler<T, MouseEvent>;
   onBeforeInput?: EventHandler<T, InputEvent>;
+  onBeforeToggle?: EventHandler<T, PopoverToggleEvent>;
   onBlur?: EventHandler<T, FocusEvent>;
   onCancel?: EventHandler<T, Event>;
   onCanPlay?: EventHandler<T, Event>;
@@ -98,7 +105,7 @@ type EventHandlerProps<T extends Element> = {
   onSubmit?: EventHandler<T, SubmitEvent>;
   onSuspend?: EventHandler<T, Event>;
   onTimeUpdate?: EventHandler<T, Event>;
-  onToggle?: EventHandler<T, Event>;
+  onToggle?: EventHandler<T, PopoverToggleEvent>;
   onTouchCancel?: EventHandler<T, TouchEvent>;
   onTouchEnd?: EventHandler<T, TouchEvent>;
   onTouchMove?: EventHandler<T, TouchEvent>;
@@ -200,7 +207,8 @@ type GlobalAttributes<T extends Element> = EventHandlerProps<T> &
     itemtype?: AttributeValue<string>;
     lang?: AttributeValue<string>;
     part?: AttributeValue<string>;
-    popover?: AttributeValue<"auto" | "hint" | "manual" | boolean>;
+    popover?: AttributeValue<PopoverValue>;
+    popoverOpen?: AttributeValue<boolean>;
     ref?: Ref<T>;
     role?: AttributeValue<string>;
     slot?: AttributeValue<string>;
@@ -262,6 +270,10 @@ type HTMLSpecificAttributes<Tag extends keyof HTMLElementTagNameMap> = Tag exten
         formnovalidate?: AttributeValue<boolean>;
         formtarget?: AttributeValue<Target>;
         name?: AttributeValue<string>;
+        popovertarget?: AttributeValue<string>;
+        popovertargetaction?: AttributeValue<PopoverTargetAction>;
+        popoverTarget?: AttributeValue<string>;
+        popoverTargetAction?: AttributeValue<PopoverTargetAction>;
         type?: AttributeValue<ButtonType>;
         value?: AttributeValue<string | number>;
       }
@@ -320,6 +332,10 @@ type HTMLSpecificAttributes<Tag extends keyof HTMLElementTagNameMap> = Tag exten
                 name?: AttributeValue<string>;
                 pattern?: AttributeValue<string>;
                 placeholder?: AttributeValue<string>;
+                popovertarget?: AttributeValue<string>;
+                popovertargetaction?: AttributeValue<PopoverTargetAction>;
+                popoverTarget?: AttributeValue<string>;
+                popoverTargetAction?: AttributeValue<PopoverTargetAction>;
                 readonly?: AttributeValue<boolean>;
                 required?: AttributeValue<boolean>;
                 size?: AttributeValue<number>;

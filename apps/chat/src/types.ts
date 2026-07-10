@@ -16,10 +16,7 @@ export type DisplayMessage = {
   timestamp: number;
 };
 
-export type AIMessage = {
-  role: "user" | "assistant";
-  content: string;
-};
+export type AIMessage = { role: "user" | "assistant"; content: string };
 
 export type ChatProgramDeps = {
   ai: {
@@ -28,12 +25,8 @@ export type ChatProgramDeps = {
       onChunk: (text: string) => Promise<void> | void,
     ): Promise<{ text: string; parsed: AIResponse | null }>;
   };
-  clock: {
-    now(): number;
-  };
-  ids: {
-    create(seed: string): string;
-  };
+  clock: { now(): number };
+  ids: { create(seed: string): string };
 };
 
 export type ChatState = {
@@ -63,11 +56,7 @@ export type ChatViews = {
 };
 
 export type ChatCommands = {
-  sendMessage: {
-    args: [text: string];
-    event: "messageSent";
-    error: "empty";
-  };
+  sendMessage: { args: [text: string]; event: "messageSent"; error: "empty" };
   completeGeneration: {
     args: [
       data: {
@@ -80,24 +69,13 @@ export type ChatCommands = {
     event: "generationCompleted";
     error: "duplicate";
   };
-  failGeneration: {
-    args: [message: string];
-    event: "generationError";
-    error: never;
-  };
-  startStreaming: {
-    args: [];
-    error: never;
-  };
-  streamChunk: {
-    args: [text: string];
-    error: never;
-  };
+  failGeneration: { args: [message: string]; event: "generationError"; error: never };
+  startStreaming: { args: []; error: never };
+  streamChunk: { args: [text: string]; error: never };
 };
 
 export type App = {
   Resources: {
-    /** Local-first chat state, commands, streaming presence, and assistant messages. */
     chat: {
       Key: { sessionId: string };
       State: ChatState;
@@ -107,12 +85,15 @@ export type App = {
       Commands: ChatCommands;
     };
   };
-
   Deps: ChatProgramDeps;
-
   Components: {
-    /** Full chat screen structure. Style-only parts are generated automatically. */
     ChatLayout: {
+      Input: {
+        status: ChatState["status"];
+        error: string | null;
+        stale: boolean;
+        understanding: string | null;
+      };
       Derived: {
         brandText: string;
         presetSwitchLabel: string;
@@ -121,9 +102,7 @@ export type App = {
         understandingText: string;
         hasUnderstanding: boolean;
       };
-      Actions: {
-        togglePreset(): void;
-      };
+      Actions: { togglePreset(): void };
       Parts: {
         Root: "div";
         Topbar: "header";
@@ -140,61 +119,110 @@ export type App = {
         Composer: "div";
       };
     };
-    /** Message container for user, assistant, and streaming messages. */
     ChatMessage: {
       Input: {
         role: "user" | "assistant";
         streaming: boolean;
-      };
-      Derived: {
-        roleLabel: string;
-        contentText: string;
+        content: string;
         hidden: boolean;
       };
-      Parts: {
-        Root: "div";
-        Role: "div";
-        Content: "div";
-      };
+      Variants: { role: "user" | "assistant"; streaming: "yes" | "no" };
+      Derived: { roleLabel: string; contentText: string; hidden: boolean };
+      Parts: { Root: "div"; Role: "div"; Content: "div" };
     };
-    /** Structured assistant response part renderer. */
     AIPart: {
-      Input: {
-        kind: "heading" | "text" | "questions" | "summary" | "separator";
-      };
-      Parts: {
-        Root: "div";
-        Item: "div";
-      };
+      Input: { kind: "heading" | "text" | "questions" | "summary" | "separator" };
+      Parts: { Root: "div"; Item: "div" };
     };
-    /** Composer form with local text state, submit action, and derived button state. */
     Composer: {
-      State: {
-        value: string;
+      Input: {
+        status: ChatState["status"];
+        sendMessage(text: string): void;
       };
-      Derived: {
-        canSubmit: boolean;
-        busy: boolean;
-      };
+      State: { value: string };
+      Derived: { canSubmit: boolean; busy: boolean };
       Actions: {
         clear(): void;
         change(value: string): void;
         submit(): void;
         submitFromKeyboard(event: KeyboardEvent): void;
       };
-      Parts: {
-        Root: "form";
-        Input: "textarea";
-        Send: "button";
-      };
+      Parts: { Root: "form"; Input: "textarea"; Send: "button" };
     };
   };
-
   Styles: {
-    Presets: "paper" | "terminal";
-    Theme: {
-      Params: {
-        density: { min: 0; max: 1; default: 0.5 };
+    Presets: {
+      paper: {
+        Tokens: {
+          color:
+            | "canvas"
+            | "panel"
+            | "panelAlt"
+            | "text"
+            | "muted"
+            | "accent"
+            | "success"
+            | "border"
+            | "field"
+            | "buttonText"
+            | "focus";
+          space: "xs" | "sm" | "md" | "lg" | "xl";
+          radius: "sm" | "md" | "round";
+          size: "messageMax" | "composerMin" | "topbarButton";
+          font: "body" | "mono";
+          shadow: "soft" | "inset" | "none";
+          motion: "fast" | "settle";
+        };
+        Themes: "default";
+        Containers: "compact";
+      };
+      mono: {
+        Tokens: {
+          color:
+            | "canvas"
+            | "panel"
+            | "panelAlt"
+            | "text"
+            | "muted"
+            | "accent"
+            | "success"
+            | "border"
+            | "field"
+            | "buttonText"
+            | "focus";
+          space: "xs" | "sm" | "md" | "lg" | "xl";
+          radius: "sm" | "md" | "round";
+          size: "messageMax" | "composerMin" | "topbarButton";
+          font: "body" | "mono";
+          shadow: "soft" | "inset" | "none";
+          motion: "fast" | "settle";
+        };
+        Themes: "default";
+        Containers: "compact";
+      };
+      terminal: {
+        Tokens: {
+          color:
+            | "canvas"
+            | "panel"
+            | "panelAlt"
+            | "text"
+            | "muted"
+            | "accent"
+            | "success"
+            | "border"
+            | "field"
+            | "buttonText"
+            | "focus";
+          space: "xs" | "sm" | "md" | "lg" | "xl";
+          radius: "sm" | "md" | "round";
+          size: "messageMax" | "composerMin" | "topbarButton";
+          font: "body" | "mono";
+          shadow: "soft" | "inset" | "none";
+          motion: "fast" | "settle";
+        };
+        Themes: "default";
+        Containers: "compact";
       };
     };
   };

@@ -1,13 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import {
-  bundleApp,
-  checkAppConventions,
-  resolveDependencyMount,
-  runApp,
-  writeAppTypes,
-} from "../src/runtime";
+import { checkAppConventions, resolveDependencyMount, writeAppTypes } from "../src/runtime";
 
 const createdDirs: string[] = [];
 
@@ -18,23 +12,17 @@ afterEach(async () => {
 });
 
 describe("Poggers app virtual modules", () => {
-  it("resolves direct dependency configs with values and production/mock providers", async () => {
+  it("resolves values and named production/mock dependency providers", async () => {
     const deps = await resolveDependencyMount<{
       ai: { complete(): string };
       clock: { now(): number };
     }>({
       mode: "mock",
       ai: {
-        production() {
-          return { complete: () => "production" };
-        },
-        mock: {
-          complete: () => "mock",
-        },
+        production: { complete: () => "production" },
+        mock: { complete: () => "mock" },
       },
-      clock: {
-        now: () => 123,
-      },
+      clock: { now: () => 123 },
     });
 
     expect(deps.ai.complete()).toBe("mock");
@@ -46,19 +34,12 @@ describe("Poggers app virtual modules", () => {
     process.env.POGGERS_DEPS = "mock";
 
     try {
-      const deps = await resolveDependencyMount<{
-        ai: { complete(): string };
-      }>({
+      const deps = await resolveDependencyMount<{ ai: { complete(): string } }>({
         ai: {
-          production: {
-            complete: () => "production",
-          },
-          mock: {
-            complete: () => "mock",
-          },
+          production: { complete: () => "production" },
+          mock: { complete: () => "mock" },
         },
       });
-
       expect(deps.ai.complete()).toBe("mock");
     } finally {
       if (previous === undefined) delete process.env.POGGERS_DEPS;
@@ -66,398 +47,260 @@ describe("Poggers app virtual modules", () => {
     }
   });
 
-  it("writes dependency aliases for top-level app deps", async () => {
-    const appDir = await mkdtemp(resolve(".poggers-runtime-types-"));
-    createdDirs.push(appDir);
-    await mkdir(join(appDir, "src"), { recursive: true });
+  it("generates shallow dependency and component aliases", async () => {
+    const appDir = await writeVisualFixture("types");
+    const output = await writeAppTypes(appDir);
+    const source = await readFile(output!, "utf8");
 
-    await writeFile(
-      join(appDir, "src/types.ts"),
-      `export type App = {
-  Resources: {
-    note: {
-      Key: { id: string };
-      State: { title: string };
-      Events: {};
-      Views: {};
-      Commands: {};
-    };
-  };
-  Deps: {
-    logger: {
-      write(message: string): void;
-    };
-  };
-};
-`,
-    );
-    await writeFile(join(appDir, "src/app.ts"), "export default { version: 1, resources: {} };\n");
-
-    await writeAppTypes(appDir);
-    const appModule = await readFile(join(appDir, ".poggers/types/app.d.ts"), "utf8");
-
-    expect(appModule).toContain(
+    expect(source).toContain(
       "export type ServerDeps = AppSpec extends { Deps: infer Deps } ? Deps : EmptyObject;",
     );
-    expect(appModule).toContain("export type AppDependencies = ServerDeps;");
-    expect(appModule).toContain(
+    expect(source).toContain(
       "export type DependencyDefinition = DependencyConfig<AppDependencies>;",
     );
+    expect(source).toContain("export function createButton(input: ButtonOptions): ButtonInstance;");
+    expect(source).toContain("input: ButtonInput;");
+    expect(source).toContain("variants: ButtonVariants;");
+    expect(source).not.toContain("state?: ButtonState;");
+    expect(source).not.toContain("actions?: ButtonActionFactory;");
+    expect(source).not.toContain("derived?: ButtonDerivedFactory;");
+    expect(source).not.toContain("useTheme():");
+    expect(source).not.toContain("setThemeParam");
+    expect(source).not.toContain("className?: PartValue");
+    expect(source).not.toContain("style?: PartValue");
   });
 
-  it("starts a cold app whose component imports @poggers/app", async () => {
-    const appDir = await mkdtemp(resolve(".poggers-runtime-dev-"));
-    createdDirs.push(appDir);
-    await mkdir(join(appDir, "src/ui"), { recursive: true });
+  it("validates and statically bundles the closed v2 visual preset", async () => {
+    const appDir = await writeVisualFixture("bundle");
+    expect(checkAppConventions(appDir)).toEqual([]);
 
-    await writeFile(
-      join(appDir, "package.json"),
-      JSON.stringify(
-        {
-          name: "@poggers/runtime-dev-test",
-          private: true,
-          type: "module",
-          dependencies: {
-            "@poggers/kit": "workspace:*",
-          },
-        },
-        null,
-        2,
-      ),
-    );
-    await writeFile(
-      join(appDir, "tsconfig.json"),
-      JSON.stringify(
-        {
-          extends: "@poggers/kit/tsconfig",
-        },
-        null,
-        2,
-      ),
-    );
-    await writeFile(
-      join(appDir, "src/types.ts"),
-      `export type App = {
-  Resources: {
-    /** Counter resource used by the generated useCounter hook. */
-    counter: {
-      Key: { id: string };
-      State: { count: number };
-      Events: { incremented: { by: number } };
-      Views: { count: number };
-      Commands: {
-        increment: { args: []; event: "incremented"; error: never };
-      };
-    };
-  };
-  Components: {
-    /** Primary counter button component. */
-    Button: {
-      Parts: {
-        Root: "button";
-      };
-    };
-  };
-  Styles: {
-    Presets: "system";
-  };
-};
-`,
-    );
+    const outdir = join(appDir, "dist");
+    const build = await runCli(appDir, ["bundle", ".", "--outdir", outdir, "--minify", "false"]);
+    expect(build.code, build.stderr).toBe(0);
+    const files = await readdir(outdir);
+    const cssFile = files.find((file) => file.endsWith(".css"));
+    const jsFile = files.find((file) => file.endsWith(".js"));
+    expect(cssFile).toBeDefined();
+    expect(jsFile).toBeDefined();
+
+    const css = await readFile(join(outdir, cssFile!), "utf8");
+    const js = await readFile(join(outdir, jsFile!), "utf8");
+    expect(css).toContain("background-color:");
+    expect(css).toContain("border-radius:");
+    expect(css).toContain("@container");
+    expect(js).not.toContain("stylex.create");
+    expect(js).not.toContain("stylex-inject");
+    expect(js).not.toContain("data-stylex");
+  });
+
+  it("reports compiler diagnostics through the app validation boundary", async () => {
+    const appDir = await writeVisualFixture("invalid", { invalidVisualField: true });
+    const check = await runCli(appDir, ["check", "."]);
+    expect(check.code).toBe(1);
+    expect(check.stderr).toContain('unknown field "mystery"');
+  });
+
+  it("rejects raw classes, inline style, and direct backend imports", async () => {
+    const appDir = await writeVisualFixture("escapes");
     await writeFile(
       join(appDir, "src/ui/root.tsx"),
-      `import { createButton, useCounter } from "@poggers/app";
+      `import * as stylex from "@stylexjs/stylex";
 
 export function Root() {
-  const counter = useCounter({ id: "main" });
-  const Button = createButton();
-  return <Button.Root onClick={() => void counter.increment()}>{counter.count}</Button.Root>;
+  const className = stylex.props({}).className;
+  return <div className={className} style={{ color: "red" }} />;
 }
 `,
     );
-    await writeFile(
-      join(appDir, "src/app.ts"),
-      `import type { AppDefinition } from "@poggers/app";
-import { Root } from "./ui/root";
 
-export default {
-  version: 1,
-  resources: {
-    counter: {
-      state: { count: 0 },
-      events: {
-        incremented({ state, payload }) {
-          state.count += payload.by;
-        },
-      },
-      views: {
-        count({ state }) {
-          return state.count;
-        },
-      },
-      commands: {
-        increment(ctx) {
-          return ctx.event.incremented({ by: 1 });
-        },
-      },
-    },
-  },
-  styles: {
-    presets: {
-      system: {
-        Button: {
-          Root: {
-            padding: "8px 12px",
-          },
-        },
-      },
-    },
-  },
-  root: Root,
-} satisfies AppDefinition;
-`,
-    );
-
-    const handle = await runApp({ appDir, port: 0 });
-    try {
-      expect(handle.url.port).not.toBe("0");
-      const index = await fetch(handle.url);
-      expect(index.ok).toBe(true);
-      const html = await index.text();
-      expect(html).toContain("/client.js");
-      expect(html).toContain("/__poggers/live");
-      expect(html).toContain('href.startsWith(stylePath + "?")');
-      expect(html).toContain(`refreshStyle();
-            refreshCode();`);
-      const entry = await readFile(join(appDir, ".poggers/dev/browser.entry.tsx"), "utf8");
-      expect(entry).toContain("import.meta.hot.accept()");
-      expect(entry).toContain("import.meta.hot.data");
-      expect(entry).toContain("__poggersHotData");
-      expect(entry).toContain('window.addEventListener("poggers:render"');
-      const appModule = await readFile(join(appDir, ".poggers/types/app.d.ts"), "utf8");
-      expect(appModule).toContain('import type { App as AppSpec } from "../../src/types.ts"');
-      expect(appModule).not.toContain('import app from "./app.ts"');
-      expect(appModule).not.toContain('import styles from "./styles.ts"');
-      expect(appModule).not.toContain("import.meta.hot");
-      expect(appModule).toContain("/** Counter resource used by the generated useCounter hook. */");
-      expect(appModule).toContain("/** Primary counter button component. */");
-      expect(appModule).toContain("export type CounterResourceKey");
-      expect(appModule).toContain("export function useCounter(key: CounterResourceKey)");
-      expect(appModule).toContain("export type ButtonInstance");
-      expect(appModule).toContain("export function createButton(input?: ButtonOptions)");
-      expect(appModule).not.toContain("Parameters<AppHooks");
-      expect(appModule).not.toContain("ReturnType<AppHooks");
-      const nested = await fetch(new URL("/nested/screen", handle.url), {
-        headers: { Accept: "text/html" },
-      });
-      expect(await nested.text()).toContain('<div id="root"></div>');
-      const ws = await fetch(new URL("/ws", handle.url));
-      expect(ws.status).toBe(500);
-      expect(await ws.text()).toBe("upgrade failed");
-    } finally {
-      handle.stop();
-    }
+    expect(checkAppConventions(appDir).map((issue) => issue.message)).toEqual([
+      "ui files must not use class/className; render generated component parts.",
+      "ui files must not use inline style; define visual rules in presets.",
+      "ui files must not import @stylexjs/stylex in strict style apps; put visual rules in app styles.",
+    ]);
   });
 
-  it("bundles an app that imports direct generated functions from @poggers/app", async () => {
-    const appDir = await mkdtemp(resolve(".poggers-runtime-"));
-    createdDirs.push(appDir);
-    await mkdir(join(appDir, "src/ui"), { recursive: true });
+  it("enforces flat kebab-case UI modules", async () => {
+    const appDir = await writeVisualFixture("names");
+    await mkdir(join(appDir, "src/ui/nested"), { recursive: true });
+    await writeFile(join(appDir, "src/ui/nested/BadName.tsx"), "export const value = 1;\n");
 
-    await writeFile(
-      join(appDir, "src/types.ts"),
-      `export type App = {
-  Resources: {
-    counter: {
-      Key: { id: string };
-      State: { count: number };
-      Events: { incremented: { by: number } };
-      Views: { count: number };
-      Commands: {
-        increment: { args: [by?: number]; event: "incremented"; error: never };
-      };
-    };
-  };
+    expect(checkAppConventions(appDir).map((issue) => issue.message)).toContain(
+      "ui file names must be kebab-case.",
+    );
+    expect(checkAppConventions(appDir).map((issue) => issue.message)).toContain(
+      "ui files must live directly in src/ui; do not nest ui folders.",
+    );
+  });
+});
+
+async function runCli(
+  cwd: string,
+  args: string[],
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  const cli = resolve(import.meta.dir, "../src/cli.ts");
+  const process = Bun.spawn(["bun", cli, ...args], {
+    cwd,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [code, stdout, stderr] = await Promise.all([
+    process.exited,
+    new Response(process.stdout).text(),
+    new Response(process.stderr).text(),
+  ]);
+  return { code, stdout, stderr };
+}
+
+async function writeVisualFixture(
+  name: string,
+  options: { invalidVisualField?: boolean } = {},
+): Promise<string> {
+  const appDir = await mkdtemp(resolve(`.poggers-runtime-${name}-`));
+  createdDirs.push(appDir);
+  await mkdir(join(appDir, "src/ui"), { recursive: true });
+
+  await writeFile(
+    join(appDir, "package.json"),
+    JSON.stringify({
+      name: `@poggers/runtime-${name}`,
+      private: true,
+      type: "module",
+      dependencies: { "@poggers/kit": "workspace:*" },
+    }),
+  );
+  await writeFile(join(appDir, "tsconfig.json"), '{"extends":"@poggers/kit/tsconfig"}\n');
+  await writeFile(
+    join(appDir, "src/types.ts"),
+    `export type App = {
+  Resources: {};
+  Deps: { logger: { write(message: string): void } };
   Components: {
     Button: {
-      Input: { tone: "neutral" | "primary"; disabled: boolean };
+      Input: { label: string; activate(): void };
+      Variants: { tone: "quiet" | "strong" };
+      State: { active: boolean };
+      Derived: { label: string };
+      Actions: { activate(): void };
+      StyleValues: { press: "progress" };
       Parts: { Root: "button"; Label: "span" };
     };
   };
   Styles: {
-    Presets: "system" | "dense";
-    Theme: {
-      Params: {
-        density: { min: 0; max: 1; default: 0.5 };
+    Presets: {
+      system: {
+        Tokens: {
+          color: "canvas" | "text" | "accent" | "focus";
+          space: "control";
+          radius: "control";
+          motion: "quick" | "settle";
+        };
+        Themes: "default";
+        Containers: "compact";
       };
     };
   };
 };
 `,
-    );
-
-    await writeFile(
-      join(appDir, "src/ui/root.tsx"),
-      `import { createButton, useCounter } from "@poggers/app";
-
-export function Root() {
-  const counter = useCounter({ id: "main" });
-  const Button = createButton({
-    input: { tone: "primary", disabled: false },
-  });
-
-  return (
-    <Button.Root onClick={() => void counter.increment()}>
-      <Button.Label>{counter.count}</Button.Label>
-    </Button.Root>
   );
-}
-`,
-    );
+  await writeFile(
+    join(appDir, "src/presets.ts"),
+    `import type { Preset } from "@poggers/kit/style";
+import type { App } from "types";
 
-    await writeFile(
-      join(appDir, "src/app.ts"),
-      `import type { AppDefinition } from "@poggers/app";
-import { Root } from "./ui/root";
+export const systemPreset = {
+  tokens: {
+    color: {
+      canvas: { l: 0.98, c: 0.004, h: 255 },
+      text: { l: 0.2, c: 0.01, h: 255 },
+      accent: { l: 0.56, c: 0.18, h: 255 },
+      focus: { l: 0.64, c: 0.17, h: 250 },
+    },
+    space: { control: 12 },
+    radius: { control: 10 },
+    motion: {
+      quick: { duration: 130, easing: "decelerate" },
+      settle: { spring: { duration: 380, bounce: 0.06 } },
+    },
+  },
+  themes: { default: {} },
+  containers: { compact: { inlineBelow: 420 } },
+  components: ({ tokens }) => ({
+    Button: ({ values }) => ({
+      Root: {
+        layout: { kind: "row", align: "center", distribute: "center" },
+        padding: { inline: tokens.space.control },
+        surface: { fill: tokens.color.canvas, text: tokens.color.text },
+        shape: { radius: tokens.radius.control },
+        interaction: {
+          cursor: "pointer",
+          focusRing: { color: tokens.color.focus, width: 3, offset: 2 },
+        },
+        effect: { opacity: values.press },
+        when: [
+          { variant: { tone: "strong" }, apply: { surface: { fill: tokens.color.accent } } },
+          { container: "compact", apply: { frame: { inline: "fill" } } },
+        ],
+        motion: { change: { effect: tokens.motion.quick }, layout: { geometry: "position", using: tokens.motion.settle } },
+        ${options.invalidVisualField ? "mystery: true," : ""}
+      },
+      Label: { text: { size: 14, weight: 650, line: 1 } },
+    }),
+  }),
+} satisfies Preset<App, "system">;
+`,
+  );
+  await writeFile(
+    join(appDir, "src/app.ts"),
+    `import type { AppDefinition } from "@poggers/app";
+import { systemPreset } from "src/presets";
+import type { App } from "types";
+import { Root } from "ui/root";
 
 export default {
   version: 1,
-  resources: {
-    counter: {
-      state: { count: 0 },
-      events: {
-        incremented({ state, payload }) {
-          state.count += payload.by;
-        },
-      },
-      views: {
-        count({ state }) {
-          return state.count;
-        },
-      },
-      commands: {
-        increment(ctx, by = 1) {
-          return ctx.event.incremented({ by });
-        },
-      },
-    },
-  },
+  resources: {},
   components: {
-    Button({ input }) {
-      return {
-        Root: {
-          type: "button",
-          disabled: input.disabled,
-        },
-      };
-    },
-  },
-  styles: {
-    defaultPreset: "system",
-    presets: {
-      system: {
-        Button: {
-          Root: {
-            layout: { kind: "inlineCenter", gap: 6 },
-            surface: { background: "#111827", color: "white", border: "1px solid #111827" },
-            shape: { radius: 8 },
-            size: { minHeight: 40, padding: "0 14px" },
-            motion: { pressable: true },
-          },
-          Label: {
-            typography: { size: 14, weight: 650, lineHeight: 1.1 },
-          },
-        },
+    Button: {
+      state: { active: false },
+      derived({ input }) {
+        return { get label() { return input.label; } };
       },
-      dense: {
-        Button: {
-          Root: {
-            size: { minHeight: 32, padding: "0 10px" },
+      actions({ input, state }) {
+        return {
+          activate() {
+            state.active = !state.active;
+            input.activate();
           },
-        },
+        };
+      },
+      bind({ state, derived, actions }) {
+        return {
+          values: { press: state.active ? 0.82 : 1 },
+          Root: { type: "button", onClick: actions.activate, "aria-pressed": state.active },
+          Label: { children: derived.label },
+        };
       },
     },
   },
+  styles: { defaultPreset: "system", presets: { system: systemPreset } },
   root: Root,
-} satisfies AppDefinition;
+} satisfies AppDefinition<App>;
 `,
-    );
+  );
+  await writeFile(
+    join(appDir, "src/ui/root.tsx"),
+    `import { createButton } from "@poggers/app";
 
-    const typeFile = await writeAppTypes(appDir);
-    expect(typeFile).toEndWith(".poggers/types/app.d.ts");
-    expect(await readFile(typeFile!, "utf8")).toContain("export function useCounter");
-    expect(await readFile(typeFile!, "utf8")).toContain("export function createButton");
-
-    const outdir = join(appDir, "dist");
-    await bundleApp({ appDir, outdir, minify: false });
-
-    const css = await readFile(join(outdir, "browser.entry.css"), "utf8");
-    expect(css).toContain("body {");
-    expect(css).toContain("margin: 0;");
-    expect(css).toContain(".pg-button__root");
-    expect(css).toContain('data-pg-component="Button"');
+export function Root() {
+  const Button = createButton({
+    input: { label: "Toggle", activate() {} },
+    variants: { tone: "strong" },
   });
-
-  it("flags raw component styling in strict style apps", async () => {
-    const appDir = await mkdtemp(resolve(".poggers-runtime-lint-"));
-    createdDirs.push(appDir);
-    await mkdir(join(appDir, "src/ui"), { recursive: true });
-
-    await writeFile(
-      join(appDir, "src/types.ts"),
-      "export type App = { Resources: {}; Components: {}; Styles: {} };\n",
-    );
-    await writeFile(
-      join(appDir, "src/app.ts"),
-      `import type { AppDefinition } from "@poggers/app";
-export default { version: 1, resources: {}, styles: { presets: { system: {} } } } satisfies AppDefinition;
-`,
-    );
-    await writeFile(
-      join(appDir, "src/ui/bad.tsx"),
-      `export function Bad() {
-  return <div className="raw" />;
+  return () => <Button.Root><Button.Label /></Button.Root>;
 }
 `,
-    );
+  );
 
-    expect(checkAppConventions(appDir)).toEqual([
-      {
-        file: join(appDir, "src/ui/bad.tsx"),
-        message:
-          "ui files must not use class/className in strict style apps; render generated component parts.",
-      },
-    ]);
-  });
-
-  it("flags nested or non-kebab component module names", async () => {
-    const appDir = await mkdtemp(resolve(".poggers-runtime-lint-"));
-    createdDirs.push(appDir);
-    await mkdir(join(appDir, "src/ui/screens"), { recursive: true });
-
-    await writeFile(
-      join(appDir, "src/types.ts"),
-      "export type App = { Resources: {}; Components: {}; Styles: {} };\n",
-    );
-    await writeFile(
-      join(appDir, "src/app.ts"),
-      `import type { AppDefinition } from "@poggers/app";
-export default { version: 1, resources: {}, styles: { presets: { system: {} } } } satisfies AppDefinition;
-`,
-    );
-    await writeFile(
-      join(appDir, "src/ui/screens/HomeScreen.tsx"),
-      "export function HomeScreen() { return null; }\n",
-    );
-
-    const issues = checkAppConventions(appDir);
-    expect(issues).toContainEqual({
-      file: join(appDir, "src/ui/screens/HomeScreen.tsx"),
-      message: "ui file names must be kebab-case.",
-    });
-    expect(issues).toContainEqual({
-      file: join(appDir, "src/ui/screens/HomeScreen.tsx"),
-      message: "ui files must live directly in src/ui; do not nest ui folders.",
-    });
-  });
-});
+  return appDir;
+}

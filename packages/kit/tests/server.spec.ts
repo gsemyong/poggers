@@ -1,4 +1,6 @@
 import { afterEach, describe, it, expect } from "bun:test";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { computeSync, serve, type ServerHandle } from "../src/server";
 import { defineApp } from "../src/app";
 import { scopeId } from "../src/protocol";
@@ -12,10 +14,14 @@ const resource = "counter";
 const key: JsonValue = { counterId: "test" };
 const bid = scopeId(resource, key);
 let handle: ServerHandle | null = null;
+const temporaryDirs: string[] = [];
 
-afterEach(() => {
+afterEach(async () => {
   handle?.stop();
   handle = null;
+  for (const dir of temporaryDirs.splice(0)) {
+    await rm(dir, { force: true, recursive: true });
+  }
 });
 
 describe("computeSync", () => {
@@ -301,6 +307,108 @@ describe("computeSync", () => {
 });
 
 describe("web app shell", () => {
+  it("does not publish a live reload when its rebuild fails", async () => {
+    const watchDir = await mkdtemp(resolve(".poggers-live-reload-"));
+    temporaryDirs.push(watchDir);
+    const watchedFile = join(watchDir, "app.ts");
+    await writeFile(watchedFile, "export const version = 1;\n");
+
+    let notifyAttempt: (() => void) | undefined;
+    const attempted = new Promise<void>((resolveAttempt) => {
+      notifyAttempt = resolveAttempt;
+    });
+
+    handle = serve(app, {
+      port: 0,
+      storage: createMemoryStore(),
+      web: {
+        entrypoint: import.meta.url,
+        bundle: "console.log('client');",
+        styleBundle: "body { color: green; }",
+        liveReload: {
+          watchDir,
+          onChange() {
+            notifyAttempt?.();
+            throw new Error("expected rebuild failure");
+          },
+        },
+      },
+    });
+
+    await writeFile(watchedFile, "export const version = 2;\n");
+    await Promise.race([
+      attempted,
+      Bun.sleep(2_000).then(() => {
+        throw new Error("live reload did not observe the file change");
+      }),
+    ]);
+    await Bun.sleep(20);
+
+    const status = (await fetch(new URL("/__poggers/live-poll?version=0", handle.url)).then(
+      (response) => response.json(),
+    )) as { changedPath: string; reload: boolean; version: number };
+    expect(status).toEqual({
+      changedPath: "",
+      reload: false,
+      version: 0,
+    });
+  });
+
+  it("serializes rebuilds when another save arrives during hot refresh", async () => {
+    const watchDir = await mkdtemp(resolve(".poggers-live-reload-"));
+    temporaryDirs.push(watchDir);
+    const watchedFile = join(watchDir, "app.ts");
+    await writeFile(watchedFile, "export const version = 1;\n");
+
+    let active = 0;
+    let calls = 0;
+    let maxActive = 0;
+    let releaseFirst: (() => void) | undefined;
+    let markFirstStarted: (() => void) | undefined;
+    const firstStarted = new Promise<void>((resolveStarted) => {
+      markFirstStarted = resolveStarted;
+    });
+    const firstBlocked = new Promise<void>((resolveBlocked) => {
+      releaseFirst = resolveBlocked;
+    });
+
+    handle = serve(app, {
+      port: 0,
+      storage: createMemoryStore(),
+      web: {
+        entrypoint: import.meta.url,
+        bundle: "console.log('client');",
+        styleBundle: "body { color: green; }",
+        liveReload: {
+          watchDir,
+          async onChange() {
+            calls += 1;
+            active += 1;
+            maxActive = Math.max(maxActive, active);
+            if (calls === 1) {
+              markFirstStarted?.();
+              await firstBlocked;
+            }
+            await Bun.sleep(10);
+            active -= 1;
+          },
+        },
+      },
+    });
+
+    await writeFile(watchedFile, "export const version = 2;\n");
+    await firstStarted;
+    await writeFile(watchedFile, "export const version = 3;\n");
+    await Bun.sleep(150);
+    releaseFirst?.();
+
+    const deadline = Date.now() + 2_000;
+    while ((calls < 2 || active > 0) && Date.now() < deadline) await Bun.sleep(20);
+
+    expect(calls).toBeGreaterThanOrEqual(2);
+    expect(maxActive).toBe(1);
+  });
+
   it("serves PWA metadata, bundled CSS, generated icon, and SPA fallback", async () => {
     const webApp = defineApp<{
       Resources: {
@@ -318,8 +426,8 @@ describe("web app shell", () => {
       pwa: {
         name: "PWA Test",
         shortName: "PWA",
-        themeColor: "#111827",
-        backgroundColor: "#ffffff",
+        themeColor: "oklch(21.01% 0.0318 264.66)",
+        backgroundColor: "oklch(100% 0 89.88)",
         display: "standalone",
       },
       resources: {
@@ -342,7 +450,7 @@ describe("web app shell", () => {
       web: {
         entrypoint: import.meta.url,
         bundle: "console.log('client');",
-        styleBundle: "body { color: rgb(1 2 3); }",
+        styleBundle: "body { color: oklch(21.01% 0.0318 264.66); }",
       },
     });
 
@@ -371,7 +479,7 @@ describe("web app shell", () => {
 
     const cssResponse = await fetch(new URL("/client.css", handle.url));
     expect(cssResponse.headers.get("Content-Type")).toContain("text/css");
-    expect(await cssResponse.text()).toContain("rgb(1 2 3)");
+    expect(await cssResponse.text()).toContain("oklch(21.01% 0.0318 264.66)");
 
     const iconResponse = await fetch(new URL("/_poggers/icon.svg", handle.url));
     expect(iconResponse.headers.get("Content-Type")).toContain("image/svg+xml");

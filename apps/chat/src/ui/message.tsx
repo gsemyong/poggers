@@ -4,20 +4,13 @@ import type { DisplayMessage } from "types";
 
 export function Message({ message }: { message: DisplayMessage }) {
   const Message = createChatMessage({
-    input: { role: message.role, streaming: false },
-    derived({ input }) {
-      return {
-        get roleLabel() {
-          return input.role === "user" ? "You" : "NA";
-        },
-        get contentText() {
-          return message.content;
-        },
-        get hidden() {
-          return false;
-        },
-      };
+    input: {
+      role: message.role,
+      streaming: false,
+      content: message.content,
+      hidden: false,
     },
+    variants: { role: message.role, streaming: "no" },
   });
 
   return (
@@ -34,20 +27,17 @@ export function Message({ message }: { message: DisplayMessage }) {
 
 export function StreamingMessage({ chat }: { chat: ChatResource }) {
   const Message = createChatMessage({
-    input: { role: "assistant", streaming: true },
-    derived() {
-      return {
-        get roleLabel() {
-          return "NA";
-        },
-        get contentText() {
-          return chat.streamingText ?? "";
-        },
-        get hidden() {
-          return !chat.streamingText;
-        },
-      };
+    input: {
+      role: "assistant",
+      streaming: true,
+      get content() {
+        return chat.streamingText ?? "";
+      },
+      get hidden() {
+        return !chat.streamingText;
+      },
     },
+    variants: { role: "assistant", streaming: "yes" },
   });
 
   return (

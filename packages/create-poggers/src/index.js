@@ -10,13 +10,10 @@ const kitVersion = args.kitVersion ?? "latest";
 
 if (existsSync(targetDir) && !args.force) {
   const entries = await readdir(targetDir);
-  if (entries.length > 0) {
-    fail(`Directory ${targetDir} is not empty. Pass --force to write into it.`);
-  }
+  if (entries.length) fail(`Directory ${targetDir} is not empty. Pass --force to write into it.`);
 }
 
 await mkdir(targetDir, { recursive: true });
-
 for (const [path, content] of Object.entries(files({ appName, kitVersion }))) {
   const filePath = resolve(targetDir, path);
   await mkdir(dirname(filePath), { recursive: true });
@@ -30,53 +27,35 @@ if (args.install) {
     stdout: "inherit",
     stderr: "inherit",
   });
-
-  if (!install.success) {
-    fail("bun install failed.");
-  }
+  if (!install.success) fail("bun install failed.");
 }
 
 const relativeDir = args.projectName ?? ".";
-console.log(`Created ${appName} in ${targetDir}`);
-console.log("");
+console.log(`Created ${appName} in ${targetDir}\n`);
 if (relativeDir !== ".") console.log(`  cd ${relativeDir}`);
 if (!args.install) console.log("  bun install");
-console.log("  bun dev");
-console.log("");
-console.log("Build a single executable with:");
-console.log("  bun run build");
+console.log("  bun dev\n");
+console.log("Build a single executable with:\n  bun run build");
 
 function parseArgs(argv) {
   const flags = new Map();
   const positional = [];
-
-  for (let i = 0; i < argv.length; i++) {
-    const value = argv[i];
+  for (let index = 0; index < argv.length; index++) {
+    const value = argv[index];
     if (!value.startsWith("--")) {
       positional.push(value);
       continue;
     }
-
     const name = value.slice(2);
-    if (name === "no-install") {
-      flags.set("install", false);
+    if (name === "no-install" || name === "install" || name === "force") {
+      flags.set(name === "no-install" ? "install" : name, name !== "no-install");
       continue;
     }
-    if (name === "install") {
-      flags.set("install", true);
-      continue;
-    }
-    if (name === "force") {
-      flags.set("force", true);
-      continue;
-    }
-
-    const next = argv[i + 1];
+    const next = argv[index + 1];
     if (!next || next.startsWith("--")) fail(`Missing value for --${name}.`);
     flags.set(name, next);
-    i += 1;
+    index++;
   }
-
   return {
     projectName: positional[0],
     name: flags.get("name"),
@@ -103,71 +82,29 @@ function files({ appName, kitVersion }) {
           check: "bun run typecheck && bun run lint",
           typecheck: "poggers typecheck",
         },
-        dependencies: {
-          "@poggers/kit": kitVersion,
-        },
-        devDependencies: {
-          typescript: "7.0.1-rc",
-        },
+        dependencies: { "@poggers/kit": kitVersion },
+        devDependencies: { typescript: "^7.0.2" },
       },
       null,
       2,
-    )}
-`,
-    "tsconfig.json": `${JSON.stringify(
-      {
-        extends: "@poggers/kit/tsconfig",
-        compilerOptions: {
-          paths: {
-            "@poggers/app": ["./.poggers/types/app.d.ts"],
-            app: ["./src/app.ts"],
-            deps: ["./src/deps.ts"],
-            types: ["./src/types.ts"],
-            "src/*": ["./src/*"],
-            "ui/*": ["./src/ui/*"],
-          },
-        },
-      },
-      null,
-      2,
-    )}
-`,
-    ".gitignore": `node_modules
-.poggers
-dist
-.DS_Store
-`,
-    "src/types.ts": `export type CounterState = {
-  count: number;
-};
+    )}\n`,
+    "tsconfig.json": `${JSON.stringify({ extends: "@poggers/kit/tsconfig" }, null, 2)}\n`,
+    ".gitignore": `node_modules\n.poggers\ndist\n.DS_Store\n`,
+    "src/types.ts": `export type CounterState = { count: number };
 
 export type CounterEvents = {
   incremented: { by: number };
   reset: {};
 };
 
-export type CounterViews = {
-  count: number;
-};
+export type CounterViews = { count: number };
 
 export type CounterCommands = {
-  increment: {
-    args: [by?: number];
-    event: "incremented";
-    error: never;
-  };
-  reset: {
-    args: [];
-    event: "reset";
-    error: never;
-  };
+  increment: { args: [by?: number]; event: "incremented"; error: never };
+  reset: { args: []; event: "reset"; error: never };
 };
 
-export type ServerDeps = {
-  clock: {
-    now(): number;
-  };
-};
+export type ServerDeps = { clock: { now(): number } };
 
 export type App = {
   Resources: {
@@ -179,414 +116,252 @@ export type App = {
       Commands: CounterCommands;
     };
   };
-
   Deps: ServerDeps;
-
-  Navigation: {
-    home: {};
-    settings: {};
-  };
-
   Components: {
     AppShell: {
-      Parts: {
-        Root: "main";
-      };
+      Parts: { Root: "main"; Content: "div" };
     };
     Header: {
-      Parts: {
-        Root: "header";
-        Text: "div";
-        Eyebrow: "p";
-        Title: "h1";
-        Actions: "div";
-      };
+      Parts: { Root: "header"; Eyebrow: "p"; Title: "h1"; Summary: "p" };
     };
     Button: {
-      Input: {
-        tone: "neutral" | "primary";
-        disabled: boolean;
-        label: string;
-      };
-      Actions: {
-        press(): void;
-      };
-      Parts: {
-        Root: "button";
-        Label: "span";
-      };
+      Input: { label: string; disabled: boolean; activate(): void };
+      Variants: { tone: "neutral" | "primary" };
+      Actions: { activate(): void };
+      Parts: { Root: "button"; Label: "span" };
     };
-    Panel: {
-      Input: {
-        tone: "neutral" | "raised";
-      };
-      Derived: {
-        value: string;
-      };
-      Parts: {
-        Root: "section";
-        Body: "div";
-        Meta: "p";
-        Value: "h2";
-        Actions: "div";
-      };
+    CounterPanel: {
+      Input: { value: string };
+      Derived: { value: string };
+      Parts: { Root: "section"; Copy: "div"; Meta: "p"; Value: "h2"; Actions: "div" };
     };
   };
-
   Styles: {
-    Presets: "system" | "dense";
-    Theme: {
-      Params: {
-        density: { min: 0; max: 1; default: 0.5 };
-        roundness: { min: 0; max: 1; default: 0.6 };
+    Presets: {
+      system: {
+        Tokens: {
+          color: "canvas" | "panel" | "panelMuted" | "text" | "muted" | "border" | "accent" | "onAccent" | "focus";
+          space: "sm" | "md" | "lg" | "xl";
+          size: "content";
+          radius: "sm" | "md";
+          shadow: "panel";
+          font: "body";
+          motion: "quick" | "settle";
+        };
+        Themes: "default";
+        Containers: "compact";
       };
     };
   };
 };
 `,
     "src/app.ts": `import type { AppDefinition } from "@poggers/app";
+import { systemPreset } from "src/presets";
+import type { App } from "types";
 import { Root } from "ui/root";
 
 export default {
   version: 1,
-
-  app: {
-    name: ${JSON.stringify(displayName)},
-  },
-
+  app: { name: ${JSON.stringify(displayName)} },
   pwa: {
     name: ${JSON.stringify(displayName)},
     shortName: ${JSON.stringify(displayName)},
-    themeColor: "#111827",
-    backgroundColor: "#f8fafc",
+    themeColor: "oklch(24% 0.02 255)",
+    backgroundColor: "oklch(98% 0.004 255)",
     display: "standalone",
   },
-
-  navigation: {
-    home: "/",
-    settings: "/settings",
-  },
-
   resources: {
     counter: {
       state: { count: 0 },
       events: {
-        incremented({ state, payload }) {
-          state.count += payload.by;
-        },
-        reset({ state }) {
-          state.count = 0;
-        },
+        incremented({ state, payload }) { state.count += payload.by; },
+        reset({ state }) { state.count = 0; },
       },
-      views: {
-        count({ state }) {
-          return state.count;
-        },
-      },
+      views: { count({ state }) { return state.count; } },
       commands: {
-        increment(ctx, by = 1) {
-          return ctx.event.incremented({ by });
-        },
-        reset(ctx) {
-          return ctx.event.reset({});
-        },
+        increment(ctx, by = 1) { return ctx.event.incremented({ by }); },
+        reset(ctx) { return ctx.event.reset({}); },
       },
     },
   },
-
   components: {
-    Button({ input, actions }) {
-      return {
-        Root: {
-          type: "button",
-          disabled: input.disabled,
-          onClick: actions.press,
-        },
-        Label: {
-          children: input.label,
-        },
-      };
-    },
-    Panel({ derived }) {
-      return {
-        Value: {
-          children: derived.value,
-        },
-      };
-    },
-  },
-
-  styles: {
-    defaultPreset: "system",
-    presets: {
-      system: {
-        AppShell: {
-          Root: {
-            minHeight: "100dvh",
-            maxWidth: 760,
-            margin: "0 auto",
-            padding: "28px 20px",
-            fontFamily: "ui-sans-serif, system-ui, sans-serif",
-            background: "#f7f8fb",
-            color: "#16181d",
-          },
-        },
-        Header: {
-          Root: {
-            layout: { display: "flex", gap: 16 },
-            marginBottom: 20,
-          },
-          Text: {
-            flex: "1 1 auto",
-          },
-          Eyebrow: {
-            margin: "0 0 4px",
-            color: "#69707d",
-            fontSize: 13,
-          },
-          Title: {
-            margin: 0,
-            fontSize: 28,
-            lineHeight: 1.05,
-          },
-          Actions: {
-            display: "flex",
-            alignItems: "center",
-            gap: 8,
-          },
-        },
-        Button: {
-          Root: {
-            layout: { kind: "inlineCenter", gap: 8 },
-            surface: { background: "#ffffff", color: "#16181d", border: "1px solid #d8dde7" },
-            shape: { radius: 8 },
-            size: { minHeight: 40, padding: "0 14px" },
-            typography: { size: 14, weight: 650, lineHeight: 1 },
-            motion: { pressable: true },
-          },
-          Label: {
-            display: "inline-flex",
-            whiteSpace: "nowrap",
-          },
-        },
-        Panel: {
-          Root: {
-            surface: { background: "#ffffff", border: "1px solid #d8dde7", shadow: "0 8px 30px rgb(18 24 38 / 0.08)" },
-            shape: { radius: 8 },
-            padding: 18,
-          },
-          Body: {
-            display: "grid",
-            alignItems: "center",
-            gridTemplateColumns: "minmax(0, 1fr) auto",
-            gap: 16,
-          },
-          Meta: {
-            margin: "0 0 6px",
-            color: "#69707d",
-            fontSize: 13,
-          },
-          Value: {
-            margin: 0,
-            fontSize: 36,
-            lineHeight: 1,
-          },
-          Actions: {
-            display: "flex",
-            gap: 8,
-          },
-        },
+    Button: {
+      actions({ input }) {
+        return { activate: input.activate };
       },
-      dense: {
-        AppShell: {
-          Root: {
-            padding: "18px 16px",
-          },
-        },
-        Button: {
-          Root: {
-            size: { minHeight: 32, padding: "0 10px" },
-            typography: { size: 13, weight: 650, lineHeight: 1 },
-          },
-        },
-        Panel: {
-          Root: {
-            padding: 12,
-          },
-        },
+      bind({ input, actions }) {
+        return {
+          Root: { type: "button", disabled: input.disabled, onClick: actions.activate },
+          Label: { children: input.label },
+        };
+      },
+    },
+    CounterPanel: {
+      derived({ input }) {
+        return { get value() { return input.value; } };
+      },
+      bind({ derived }) {
+        return { Value: { children: derived.value } };
       },
     },
   },
-
+  styles: { defaultPreset: "system", presets: { system: systemPreset } },
   root: Root,
-} satisfies AppDefinition;
+} satisfies AppDefinition<App>;
 `,
-    "src/ui/root.tsx": `import { useScreen } from "@poggers/app";
-import { AppShell } from "ui/app-shell";
-import { HomeScreen } from "ui/home-screen";
-import { SettingsScreen } from "ui/settings-screen";
+    "src/presets.ts": `import type { Preset } from "@poggers/kit/style";
+import type { App } from "types";
+
+export const systemPreset = {
+  tokens: {
+    color: {
+      canvas: { l: 0.98, c: 0.004, h: 255 },
+      panel: { l: 1, c: 0, h: 0 },
+      panelMuted: { l: 0.965, c: 0.006, h: 255 },
+      text: { l: 0.22, c: 0.015, h: 255 },
+      muted: { l: 0.52, c: 0.012, h: 255 },
+      border: { l: 0.89, c: 0.008, h: 255 },
+      accent: { l: 0.24, c: 0.02, h: 255 },
+      onAccent: { l: 0.99, c: 0.002, h: 255 },
+      focus: { l: 0.62, c: 0.14, h: 250 },
+    },
+    space: { sm: 10, md: 16, lg: 24, xl: 36 },
+    size: { content: 720 },
+    radius: { sm: 8, md: 12 },
+    shadow: {
+      panel: { y: 24, blur: 80, spread: -36, color: { l: 0.2, c: 0.02, h: 255, alpha: 0.28 } },
+    },
+    font: {
+      body: { families: ["Inter", "system-ui", "sans-serif"] },
+    },
+    motion: {
+      quick: { duration: 140, easing: "decelerate" },
+      settle: { spring: { duration: 420, bounce: 0.04 } },
+    },
+  },
+  themes: { default: {} },
+  containers: { compact: { inlineBelow: 460 } },
+  components: ({ tokens }) => ({
+    AppShell: () => ({
+      Root: {
+        layout: { kind: "grid", align: "center", distribute: "center" },
+        frame: { inline: "fill", block: { min: { viewport: { axis: "block", percent: 1 } } } },
+        padding: { block: tokens.space.xl, inline: tokens.space.lg },
+        surface: { fill: tokens.color.canvas, text: tokens.color.text },
+        text: { font: tokens.font.body },
+      },
+      Content: {
+        layout: { kind: "stack", gap: tokens.space.lg },
+        frame: { inline: { max: tokens.size.content } },
+        motion: {
+          enter: {
+            from: { effect: { opacity: 0 }, transform: { block: 8 } },
+            using: tokens.motion.settle,
+          },
+        },
+      },
+    }),
+    Header: () => ({
+      Root: { layout: { kind: "stack", gap: tokens.space.sm } },
+      Eyebrow: {
+        margin: 0,
+        surface: { text: tokens.color.muted },
+        text: { size: 12, weight: 700, line: 1, transform: "uppercase" },
+      },
+      Title: { margin: 0, text: { size: 32, weight: 720, line: 1.05 } },
+      Summary: {
+        frame: { inline: { max: 520 } },
+        margin: 0,
+        surface: { text: tokens.color.muted },
+        text: { size: 15, line: 1.5, wrap: "pretty" },
+      },
+    }),
+    Button: () => ({
+      Root: {
+        layout: { kind: "row", align: "center", distribute: "center" },
+        frame: { block: 42 },
+        padding: { inline: tokens.space.md },
+        surface: { fill: tokens.color.panelMuted, text: tokens.color.text },
+        stroke: { width: 1, line: "solid", color: tokens.color.border },
+        shape: { radius: tokens.radius.sm },
+        text: { size: 14, weight: 650, line: 1 },
+        interaction: {
+          cursor: "pointer",
+          focusRing: { color: tokens.color.focus, width: 3, offset: 2 },
+        },
+        when: [
+          { variant: { tone: "primary" }, apply: { surface: { fill: tokens.color.accent, text: tokens.color.onAccent }, stroke: { color: tokens.color.accent } } },
+          { native: "hover", apply: { effect: { opacity: 0.84 } } },
+          { native: "active", apply: { transform: { scale: 0.98 } } },
+          { native: "disabled", apply: { effect: { opacity: 0.5 }, interaction: { cursor: "default" } } },
+        ],
+        motion: { change: { effect: tokens.motion.quick, transform: tokens.motion.quick } },
+      },
+      Label: { text: { wrap: "nowrap" } },
+    }),
+    CounterPanel: () => ({
+      Root: {
+        layout: { kind: "grid", columns: [{ minmax: [0, { fraction: 1 }] }, "content"], align: "center" },
+        padding: tokens.space.lg,
+        surface: { fill: tokens.color.panel },
+        stroke: { width: 1, line: "solid", color: tokens.color.border },
+        shape: { radius: tokens.radius.md },
+        effect: { shadow: tokens.shadow.panel },
+        when: [{ container: "compact", apply: { layout: { kind: "stack", gap: tokens.space.lg, align: "stretch" } } }],
+      },
+      Copy: { layout: { kind: "stack", gap: tokens.space.sm } },
+      Meta: { margin: 0, surface: { text: tokens.color.muted }, text: { size: 13, weight: 620, line: 1.2 } },
+      Value: { margin: 0, text: { size: 44, weight: 720, line: 1 } },
+      Actions: { layout: { kind: "row", align: "center", gap: tokens.space.sm } },
+    }),
+  }),
+} satisfies Preset<App, "system">;
+`,
+    "src/ui/root.tsx": `import { createAppShell, createButton, createCounterPanel, createHeader, useCounter } from "@poggers/app";
 
 export function Root() {
-  return (
-    <AppShell>
-      {() => (useScreen().name === "settings" ? <SettingsScreen /> : <HomeScreen />)}
-    </AppShell>
-  );
-}
-`,
-    "src/ui/button.tsx": `import { createButton } from "@poggers/app";
-
-type ButtonProps = {
-  label: string;
-  action: () => void;
-  tone?: "primary" | "neutral";
-  disabled?: boolean;
-};
-
-export function Button({ label, action, tone = "neutral", disabled = false }: ButtonProps) {
-  const Button = createButton({
-    input: { tone, disabled, label },
-    actions() {
-      return {
-        press: action,
-      };
-    },
-  });
-
-  return (
-    <Button.Root>
-      <Button.Label />
-    </Button.Root>
-  );
-}
-`,
-    "src/ui/app-shell.tsx": `import { createAppShell } from "@poggers/app";
-import type { Child } from "@poggers/kit/ui";
-
-export function AppShell({ children }: { children?: Child }) {
-  const Shell = createAppShell();
-
-  return <Shell.Root>{children}</Shell.Root>;
-}
-`,
-    "src/ui/transition.tsx": `import type { Child } from "@poggers/kit/ui";
-
-export function Transition({ children }: { children?: Child }) {
-  return <>{children}</>;
-}
-`,
-    "src/ui/counter-panel.tsx": `import { createPanel, useCounter } from "@poggers/app";
-import { Button } from "ui/button";
-
-export function CounterPanel() {
   const counter = useCounter({ id: "main" });
-  const Panel = createPanel({
-    input: { tone: "raised" },
-    derived() {
-      return {
-        get value() {
-          return String(counter.count);
-        },
-      };
-    },
+  const Shell = createAppShell();
+  const Header = createHeader();
+  const Panel = createCounterPanel({
+    input: { get value() { return String(counter.count); } },
+  });
+  const Reset = createButton({
+    input: { label: "Reset", disabled: false, activate() { void counter.reset(); } },
+    variants: { tone: "neutral" },
+  });
+  const Increment = createButton({
+    input: { label: "Add one", disabled: false, activate() { void counter.increment(); } },
+    variants: { tone: "primary" },
   });
 
-  return (
-    <Panel.Root>
-      <Panel.Body>
-        <div>
-          <Panel.Meta>Counter</Panel.Meta>
-          <Panel.Value />
-        </div>
-        <Panel.Actions>
-          <Button label="Reset" action={() => void counter.reset()} />
-          <Button label="Add" tone="primary" action={() => void counter.increment()} />
-        </Panel.Actions>
-      </Panel.Body>
-    </Panel.Root>
-  );
-}
-`,
-    "src/ui/home-screen.tsx": `import { createHeader, nav } from "@poggers/app";
-import { Button } from "ui/button";
-import { CounterPanel } from "ui/counter-panel";
-import { Transition } from "ui/transition";
-
-export function HomeScreen() {
-  const Header = createHeader();
-
-  return (
-    <Transition>
-      <Header.Root>
-        <Header.Text>
+  return () => (
+    <Shell.Root>
+      <Shell.Content>
+        <Header.Root>
           <Header.Eyebrow>Poggers app</Header.Eyebrow>
-          <Header.Title>Home</Header.Title>
-        </Header.Text>
-        <Header.Actions>
-          <Button label="Settings" action={() => nav.settings()} />
-        </Header.Actions>
-      </Header.Root>
-      <CounterPanel />
-    </Transition>
-  );
-}
-`,
-    "src/ui/settings-screen.tsx": `import { createButton, createHeader, createPanel, nav, setPreset } from "@poggers/app";
-import { Button } from "ui/button";
-import { Transition } from "ui/transition";
-
-export function SettingsScreen() {
-  const Header = createHeader();
-  const Panel = createPanel({
-    input: { tone: "neutral" },
-    derived() {
-      return {
-        value: "",
-      };
-    },
-  });
-  const ToggleDensity = createButton({
-    input: { tone: "neutral", disabled: false, label: "Toggle density" },
-    actions(ctx) {
-      return {
-        press() {
-          setPreset(ctx.preset === "dense" ? "system" : "dense");
-        },
-      };
-    },
-  });
-
-  return (
-    <Transition>
-      <Header.Root>
-        <Header.Text>
-          <Header.Eyebrow>Application</Header.Eyebrow>
-          <Header.Title>Settings</Header.Title>
-        </Header.Text>
-        <Header.Actions>
-          <Button label="Home" action={() => nav.home()} />
-        </Header.Actions>
-      </Header.Root>
-      <Panel.Root>
-        <Panel.Body>
-          <span>This app follows the strict Poggers structure.</span>
-          <ToggleDensity.Root>
-            <ToggleDensity.Label />
-          </ToggleDensity.Root>
-        </Panel.Body>
-      </Panel.Root>
-    </Transition>
+          <Header.Title>${displayName}</Header.Title>
+          <Header.Summary>Typed application behavior and a compiled visual preset, with no backend styling API in application code.</Header.Summary>
+        </Header.Root>
+        <Panel.Root>
+          <Panel.Copy>
+            <Panel.Meta>Counter</Panel.Meta>
+            <Panel.Value />
+          </Panel.Copy>
+          <Panel.Actions>
+            <Reset.Root><Reset.Label /></Reset.Root>
+            <Increment.Root><Increment.Label /></Increment.Root>
+          </Panel.Actions>
+        </Panel.Root>
+      </Shell.Content>
+    </Shell.Root>
   );
 }
 `,
     "src/deps.ts": `import type { DependencyConfig } from "@poggers/kit/deps";
 import type { ServerDeps } from "types";
 
-export default {
-  clock: {
-    now: Date.now,
-  },
-} satisfies DependencyConfig<ServerDeps>;
+export default { clock: { now: Date.now } } satisfies DependencyConfig<ServerDeps>;
 `,
   };
 }

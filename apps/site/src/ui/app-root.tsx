@@ -2,7 +2,7 @@ import { PageScreen } from "ui/page-screen";
 import { SiteShell } from "ui/site-shell";
 
 export function Root() {
-  return (
+  return () => (
     <SiteShell>
       <PageScreen />
     </SiteShell>

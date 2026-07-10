@@ -1,79 +1,33 @@
-import { createChatLayout, createComposer, setPreset, useChat } from "@poggers/app";
+import { createChatLayout, createComposer, useChat } from "@poggers/app";
 import { For } from "@poggers/kit/ui";
 import { Message, StreamingMessage } from "ui/message";
 
 export function ChatScreen() {
   const chat = useChat({ sessionId: "default" });
   const Layout = createChatLayout({
-    derived(ctx) {
-      return {
-        get brandText() {
-          return ctx.preset === "paper" ? "Paper desk" : "Terminal station";
-        },
-        get presetSwitchLabel() {
-          return ctx.preset === "paper" ? "Terminal" : "Paper";
-        },
-        get statusText() {
-          const status = chat.status;
-          const label =
-            status === "idle" ? "(idle)" : status === "generating" ? "(generating)" : "x";
-          const error = chat.error;
-          return error ? `${label} ${error}` : label;
-        },
-        get statusMeta() {
-          return chat.sync.stale ? "reconnecting" : "connected";
-        },
-        get understandingText() {
-          return chat.understanding ?? "";
-        },
-        get hasUnderstanding() {
-          return Boolean(chat.understanding);
-        },
-      };
-    },
-    actions(ctx) {
-      return {
-        togglePreset() {
-          setPreset(ctx.preset === "paper" ? "terminal" : "paper");
-        },
-      };
+    input: {
+      get status() {
+        return chat.status;
+      },
+      get error() {
+        return chat.error;
+      },
+      get stale() {
+        return chat.sync.stale;
+      },
+      get understanding() {
+        return chat.understanding;
+      },
     },
   });
   const Composer = createComposer({
-    state: { value: "" },
-    derived({ state }) {
-      return {
-        get busy() {
-          return chat.status === "generating";
-        },
-        get canSubmit() {
-          return chat.status === "idle" && state.value.trim().length > 0;
-        },
-      };
-    },
-    actions({ state }) {
-      const submit = () => {
-        if (chat.status !== "idle") return;
-        const nextText = state.value.trim();
-        if (!nextText) return;
-        void chat.sendMessage(nextText);
-        state.value = "";
-      };
-
-      return {
-        clear() {
-          state.value = "";
-        },
-        change(value) {
-          state.value = value;
-        },
-        submit,
-        submitFromKeyboard(event) {
-          if (event.key !== "Enter" || event.shiftKey) return;
-          event.preventDefault();
-          submit();
-        },
-      };
+    input: {
+      get status() {
+        return chat.status;
+      },
+      sendMessage(text) {
+        void chat.sendMessage(text);
+      },
     },
   });
 
@@ -81,7 +35,7 @@ export function ChatScreen() {
     <Layout.Root>
       <Layout.Topbar>
         <Layout.Brand>
-          <Layout.BrandMark>NA</Layout.BrandMark>
+          <Layout.BrandMark>AI</Layout.BrandMark>
           <Layout.BrandText />
         </Layout.Brand>
         <Layout.PresetSwitch />
@@ -92,7 +46,8 @@ export function ChatScreen() {
           each={chat.messages}
           fallback={
             <Layout.Empty>
-              Describe your lol, piece kek. NA will ask clarifying questions to help you refine it.
+              Describe what you want to clarify. The assistant will ask focused questions and refine
+              it with you.
             </Layout.Empty>
           }
         >

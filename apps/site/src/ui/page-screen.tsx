@@ -3,30 +3,17 @@ import { For } from "@poggers/kit/ui";
 
 export function PageScreen() {
   const Hero = createPageHero({
-    derived() {
-      return {
-        get title() {
-          const screen = useScreen();
-          const slug = screen.name === "page" ? screen.params.slug : "home";
-          return usePage({ slug }).page.title;
-        },
-        get summary() {
-          const screen = useScreen();
-          const slug = screen.name === "page" ? screen.params.slug : "home";
-          return usePage({ slug }).page.summary;
-        },
-        get sections() {
-          const screen = useScreen();
-          const slug = screen.name === "page" ? screen.params.slug : "home";
-          return usePage({ slug }).page.sections;
-        },
-      };
+    input: {
+      get page() {
+        const screen = useScreen();
+        return usePage({ slug: screen.name === "page" ? screen.params.slug : "home" }).page;
+      },
     },
   });
 
-  return (
+  return () => (
     <Hero.Root>
-      <Hero.Mark aria-hidden="true">PK</Hero.Mark>
+      <Hero.Mark aria-hidden>PK</Hero.Mark>
       <Hero.Eyebrow>Built with Poggers Kit</Hero.Eyebrow>
       <Hero.Title />
       <Hero.Summary />

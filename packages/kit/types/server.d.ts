@@ -36,6 +36,7 @@ export type WebServeOpts = {
   entrypoint: string | URL;
   html?: any;
   styles?: string;
+  styleFiles?: string[];
   plugins?: Bun.BunPlugin[];
   assetDir?: string;
   title?: string;

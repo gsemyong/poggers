@@ -28,6 +28,12 @@ describe("Poggers migrations", () => {
     expect(second.hash).toBe(first.hash);
     expect(second.created).toBe(false);
 
+    await writeFile(join(appDir, "src/types.ts"), counterTypesV1UiChurn, "utf8");
+
+    const uiChurn = await writeMigrationSnapshot(appDir);
+    expect(uiChurn.hash).toBe(first.hash);
+    expect(uiChurn.created).toBe(false);
+
     await writeFile(join(appDir, "src/types.ts"), counterTypesV2, "utf8");
     await writeFile(join(appDir, "src/app.ts"), counterAppV2, "utf8");
 
@@ -312,6 +318,40 @@ export type App =
       Events: { inc: { by: number } };
       Views: { count: number };
       Commands: Record<string, never>;
+    };
+  };
+};
+`;
+
+const counterTypesV1UiChurn = `export type ButtonInput = {
+  label: string;
+};
+
+export type App = {
+  Resources: {
+    counter: {
+      Key: { id: string };
+      State: { count: number };
+      Events: { inc: { by: number } };
+      Views: { displayCount: string };
+      Commands: {
+        increment: { args: [by?: number]; event: "inc"; error: never };
+      };
+    };
+  };
+  Components: {
+    Button: {
+      Input: ButtonInput;
+      Parts: { Root: "button"; Label: "span" };
+    };
+  };
+  Styles: {
+    Presets: {
+      system: {
+        Tokens: {
+          color: { canvas: "color"; text: "color" };
+        };
+      };
     };
   };
 };

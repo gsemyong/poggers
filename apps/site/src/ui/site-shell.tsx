@@ -4,18 +4,16 @@ import type { Child } from "@poggers/kit/ui";
 
 export function SiteShell({ children }: { children?: Child }) {
   const Shell = createSiteShell({
-    derived() {
-      return {
-        get activeSlug() {
-          const screen = useScreen();
-          return screen.name === "page" ? screen.params.slug : "home";
-        },
-        get navItems() {
-          const screen = useScreen();
-          const slug = screen.name === "page" ? screen.params.slug : "home";
-          return usePage({ slug }).nav;
-        },
-      };
+    input: {
+      get activeSlug() {
+        const screen = useScreen();
+        return screen.name === "page" ? screen.params.slug : "home";
+      },
+      get navItems() {
+        const screen = useScreen();
+        const slug = screen.name === "page" ? screen.params.slug : "home";
+        return usePage({ slug }).nav;
+      },
     },
   });
 
@@ -27,18 +25,18 @@ export function SiteShell({ children }: { children?: Child }) {
           <For each={Shell.navItems}>
             {(item) => {
               const NavButton = createNavButton({
-                input: { active: item.slug === Shell.activeSlug, label: item.title },
-                actions() {
-                  return {
-                    navigate() {
-                      if (item.slug === "home") {
-                        nav.home();
-                        return;
-                      }
-                      nav.page({ slug: item.slug });
-                    },
-                  };
+                input: {
+                  active: item.slug === Shell.activeSlug,
+                  label: item.title,
+                  navigate() {
+                    if (item.slug === "home") {
+                      nav.home();
+                      return;
+                    }
+                    nav.page({ slug: item.slug });
+                  },
                 },
+                variants: { active: item.slug === Shell.activeSlug ? "yes" : "no" },
               });
               return (
                 <NavButton.Root>

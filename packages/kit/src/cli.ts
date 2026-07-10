@@ -6,6 +6,7 @@ import {
   createMigration,
   resolveApp,
   runApp,
+  validateAppStyles,
   writeAppTypes,
   writeMigrationSnapshot,
 } from "./runtime";
@@ -115,13 +116,21 @@ async function main(argv = Bun.argv.slice(2)) {
   }
 
   if (parsed.command === "check") {
+    let failed = false;
     const issues = checkAppConventions(parsed.appDir);
     if (issues.length > 0) {
       for (const issue of issues) {
         console.error(`${issue.file}: ${issue.message}`);
       }
-      process.exitCode = 1;
+      failed = true;
     }
+    try {
+      await validateAppStyles(parsed.appDir);
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : String(error));
+      failed = true;
+    }
+    if (failed) process.exitCode = 1;
     return;
   }
 
@@ -208,58 +217,7 @@ async function typecheckApp(appDir: string): Promise<number> {
   const appCode = await runTsc(appDir, ["--noEmit"]);
   if (appCode !== 0) return appCode;
 
-  const depsCode = await typecheckRootDeps(appDir);
-  if (depsCode !== 0) return depsCode;
-
   return typecheckMigrations(appDir);
-}
-
-async function typecheckRootDeps(appDir: string): Promise<number> {
-  const paths = resolveApp(appDir);
-  if (!paths.deps) return 0;
-
-  const configPath = resolve(paths.appDir, ".poggers/typecheck.deps.tsconfig.json");
-  await mkdir(dirname(configPath), { recursive: true });
-  await writeFile(
-    configPath,
-    `${JSON.stringify(
-      {
-        compilerOptions: {
-          lib: ["ES2022", "DOM"],
-          target: "ESNext",
-          module: "Preserve",
-          moduleDetection: "force",
-          jsx: "react-jsx",
-          jsxImportSource: "@poggers/kit",
-          allowJs: true,
-          allowImportingTsExtensions: true,
-          types: ["@poggers/kit/globals"],
-          moduleResolution: "bundler",
-          verbatimModuleSyntax: true,
-          noEmit: true,
-          strict: true,
-          skipLibCheck: true,
-          noFallthroughCasesInSwitch: true,
-          noUncheckedIndexedAccess: true,
-          noImplicitOverride: true,
-          paths: {
-            "@poggers/app": [resolve(paths.appDir, ".poggers/types/app.d.ts")],
-            app: [resolve(paths.sourceDir, "app.ts")],
-            deps: [resolve(paths.sourceDir, "deps.ts")],
-            types: [resolve(paths.sourceDir, "types.ts")],
-            "src/*": [resolve(paths.sourceDir, "*")],
-            "ui/*": [resolve(paths.sourceDir, "ui/*")],
-          },
-        },
-        files: [paths.deps],
-      },
-      null,
-      2,
-    )}\n`,
-    "utf8",
-  );
-
-  return runTsc(paths.appDir, ["--noEmit", "-p", configPath]);
 }
 
 async function typecheckMigrations(appDir: string): Promise<number> {

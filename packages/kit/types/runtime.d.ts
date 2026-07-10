@@ -25,6 +25,7 @@ export type ServeAppOpts<Spec extends AppSpec, Deps = never> = Omit<
   api: App<Spec>;
   ui: string | URL;
   styles?: string;
+  styleFiles?: string[];
   plugins?: Bun.BunPlugin[];
   html?: any;
   development?: Bun.Serve.Development;
@@ -40,6 +41,7 @@ export declare function serveApp<Spec extends AppSpec, Deps = never>({
   api,
   ui,
   styles,
+  styleFiles,
   plugins,
   html,
   development,
@@ -59,8 +61,6 @@ export type AppPaths = {
   ui: string;
   types?: string;
   embedded: boolean;
-  styles?: string;
-  styleSource?: string;
   worker?: string;
   deps?: string;
 };

@@ -4,64 +4,84 @@ export const pages: Page[] = [
   {
     slug: "home",
     title: "Poggers Kit",
-    summary: "A small event-sourced full-stack kit for building applications with Bun.",
+    summary:
+      "A small event-sourced full-stack kit for building typed local-first applications with Bun.",
     sections: [
       {
-        heading: "Three files",
-        body: "Define the app spec once, build the UI with semantic hooks, and keep background logic in environment programs only when you need it.",
+        heading: "One application contract",
+        body: "Resources, dependencies, components, navigation, and visual presets derive from the same generic app type.",
       },
       {
-        heading: "Single process",
-        body: "The runtime owns the server, browser bundle, sync layer, program lifecycle, snapshots, and binary build.",
+        heading: "One runtime",
+        body: "The kit owns the server, browser bundle, sync layer, programs, snapshots, migrations, and executable build.",
       },
       {
-        heading: "Local-first store",
-        body: "Durable state is latest snapshot plus the event tail after that snapshot.",
+        heading: "One visual language",
+        body: "Presets author typed tokens and low-level visual intent while StyleX, Anime.js, and PreText stay internal.",
       },
     ],
   },
   {
     slug: "getting-started",
     title: "Getting Started",
-    summary: "Create an app without installing a global CLI.",
+    summary: "Create, develop, typecheck, and ship an app without installing a global CLI.",
     sections: [
-      {
-        heading: "Create",
-        body: "Run bun create poggers@latest my-app.",
-      },
+      { heading: "Create", body: "Run bun create poggers@latest my-app." },
       {
         heading: "Develop",
-        body: "Run bun dev inside the app. The local poggers binary comes from @poggers/kit.",
+        body: "Run bun dev. Generated declarations and visual output stay disposable under .poggers.",
       },
       {
         heading: "Ship",
-        body: "Run bun run build to produce a single executable.",
+        body: "Run bun run build to produce a single executable with statically extracted visual CSS.",
       },
     ],
   },
   {
     slug: "api",
-    title: "API Surface",
-    summary: "Apps are defined by one generic app spec, semantic hooks, and optional programs.",
+    title: "Application API",
+    summary:
+      "Applications own semantics, state, actions, accessibility, dependencies, and their stable component part tree.",
     sections: [
       {
-        heading: "defineApp",
-        body: "The generic type parameter describes resources, keys, events, views, commands, navigation, and dependencies.",
+        heading: "Resources",
+        body: "Typed state, events, views, and commands form the local-first data model.",
       },
       {
-        heading: "Semantic hooks",
-        body: "UI code receives hooks derived from resource names, such as useChat or usePage.",
+        heading: "Components",
+        body: "Finite state and actions stay in the app while generated parts keep JSX semantic and predictable.",
       },
       {
         heading: "Programs",
-        body: "Environment programs are persistent async scripts with typed deps and durable event streams.",
+        body: "Persistent async programs consume durable events with environment-specific dependencies.",
+      },
+    ],
+  },
+  {
+    slug: "visual-system",
+    title: "Visual System",
+    summary:
+      "A closed TypeScript-first language compiles structured visual intent into atomic StyleX output and scoped motion transactions.",
+    sections: [
+      {
+        heading: "Typed presets",
+        body: "Each preset owns its token vocabulary, themes, container rules, component visuals, and motion character.",
+      },
+      {
+        heading: "Modern defaults",
+        body: "Logical directions, OKLCH color, container queries, native state, and reduced motion are built in.",
+      },
+      {
+        heading: "Scoped motion",
+        body: "CSS, WAAPI, Anime springs, layout transactions, and text geometry are selected behind one declarative contract.",
       },
     ],
   },
   {
     slug: "store",
     title: "Store And Migrations",
-    summary: "Snapshots and event tails form the canonical durable state.",
+    summary:
+      "Snapshots and event tails form the canonical durable state, with explicit type-safe migration paths between schema hashes.",
     sections: [
       {
         heading: "Snapshots",
@@ -69,11 +89,11 @@ export const pages: Page[] = [
       },
       {
         heading: "Event tail",
-        body: "Only events after the snapshot sequence need to remain for rebuild.",
+        body: "Only events after the snapshot sequence remain necessary for replay.",
       },
       {
         heading: "Migrations",
-        body: "Old snapshots are migrated and old events are upcast before replay.",
+        body: "Old snapshots migrate and old events upcast before normal application processing resumes.",
       },
     ],
   },

@@ -9,11 +9,16 @@ import {
   type RuntimeMigrationEdge,
 } from "./app";
 import { serve, type ServeOpts, type ServerHandle, type WebLiveReloadOpts } from "./server";
-import { defineStyles } from "./style";
+import {
+  analyzeVisualContract,
+  analyzeVisualPresetSources,
+  materializeVisualPreset,
+} from "./visual-compiler";
+import { generateVisualStylexModule } from "./visual-stylex";
 import type { AppProgram, WorkerDef, WorkerDurabilityStore } from "./worker";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { $ } from "bun";
@@ -45,6 +50,7 @@ export type ServeAppOpts<Spec extends AppSpec, Deps = never> = Omit<
   api: App<Spec>;
   ui: string | URL;
   styles?: string;
+  styleFiles?: string[];
   plugins?: Bun.BunPlugin[];
   html?: any;
   development?: Bun.Serve.Development;
@@ -61,6 +67,7 @@ export function serveApp<Spec extends AppSpec, Deps = never>({
   api,
   ui,
   styles,
+  styleFiles,
   plugins,
   html,
   development,
@@ -81,6 +88,7 @@ export function serveApp<Spec extends AppSpec, Deps = never>({
       entrypoint: ui,
       html,
       styles,
+      styleFiles,
       plugins,
       assetDir,
       title,
@@ -99,8 +107,6 @@ export type AppPaths = {
   ui: string;
   types?: string;
   embedded: boolean;
-  styles?: string;
-  styleSource?: string;
   worker?: string;
   deps?: string;
 };
@@ -108,6 +114,7 @@ export type AppPaths = {
 type BrowserEntrypoint = {
   entrypoint: string;
   styles?: string;
+  styleFiles?: string[];
   plugins: Bun.BunPlugin[];
   html?: any;
   development?: Bun.Serve.Development;
@@ -202,18 +209,6 @@ export function resolveApp(appDir: string): AppPaths {
     resolve(sourceDir, "types.ts"),
     resolve(resolvedAppDir, "types.ts"),
   ]);
-  const styles = firstExisting([
-    resolve(sourceDir, "styles.css"),
-    resolve(sourceDir, "components/theme.css"),
-    resolve(resolvedAppDir, "styles.css"),
-    resolve(resolvedAppDir, "components/theme.css"),
-  ]);
-  const styleSource = firstExisting([
-    resolve(sourceDir, "styles.ts"),
-    resolve(sourceDir, "styles.tsx"),
-    resolve(resolvedAppDir, "styles.ts"),
-    resolve(resolvedAppDir, "styles.tsx"),
-  ]);
   const worker = firstExisting([
     resolve(sourceDir, "worker.ts"),
     resolve(resolvedAppDir, "worker.ts"),
@@ -235,8 +230,6 @@ export function resolveApp(appDir: string): AppPaths {
     ui,
     types,
     embedded,
-    styles,
-    styleSource,
     worker,
     deps,
   };
@@ -281,7 +274,9 @@ function normalizeLoadedApp<Spec extends AppSpec>(
 export async function runApp(opts: RunAppOpts): Promise<ServerHandle> {
   const loaded = await loadApp(opts.appDir);
   const title = opts.title ?? loaded.api.def.app?.name ?? loaded.api.def.pwa?.name;
+  const browserBuildDir = frameworkDevDir(loaded.paths, `server-${opts.port ?? 3000}`);
   const browser = await writeBrowserEntrypoint(loaded.paths, {
+    buildDir: browserBuildDir,
     dev: opts.liveReload !== false,
     title,
   });
@@ -291,6 +286,7 @@ export async function runApp(opts: RunAppOpts): Promise<ServerHandle> {
     ui: browser.entrypoint,
     html: browser.html,
     styles: browser.styles,
+    styleFiles: browser.styleFiles,
     plugins: browser.plugins,
     development: browser.development,
     title: opts.title,
@@ -303,7 +299,7 @@ export async function runApp(opts: RunAppOpts): Promise<ServerHandle> {
         : {
             watchDir: loaded.paths.appDir,
             async onChange(changedPath) {
-              await writeChangedDevArtifacts(loaded.paths, changedPath);
+              await writeChangedDevArtifacts(loaded.paths, changedPath, browserBuildDir);
             },
           },
     worker: loaded.worker,
@@ -315,12 +311,13 @@ export async function bundleApp(opts: BundleAppOpts): Promise<void> {
   const paths = resolveApp(opts.appDir);
   await writeGeneratedTypeArtifacts(paths);
   const browser = await writeBrowserEntrypoint(paths);
+  const outdir = opts.outdir ?? resolve(paths.appDir, ".poggers/build/web");
   const result = await Bun.build({
     entrypoints: [browser.entrypoint],
     format: "esm",
     jsx: poggersJsx,
     minify: opts.minify ?? true,
-    outdir: opts.outdir ?? resolve(paths.appDir, ".poggers/build/web"),
+    outdir,
     plugins: browser.plugins,
     target: "browser",
   });
@@ -328,6 +325,12 @@ export async function bundleApp(opts: BundleAppOpts): Promise<void> {
   if (!result.success) {
     throw new Error(result.logs.map(String).join("\n"));
   }
+
+  await appendStyleFilesToBuildOutput(
+    result.outputs,
+    browser.styleFiles,
+    resolve(outdir, "browser.entry.css"),
+  );
 }
 
 export async function buildApp(opts: BuildAppOpts): Promise<void> {
@@ -349,12 +352,15 @@ export async function buildApp(opts: BuildAppOpts): Promise<void> {
 
   const { script: browserBundle, style: browserStyle } = await readBuildOutputs(
     browserBuild.outputs,
+    browser.styleFiles,
   );
   if (!browserBundle) throw new Error("Browser bundle produced no output.");
 
   const buildDir = frameworkBuildDir(paths);
+  const serverAppStub = await writeServerAppStubFile(paths, buildDir);
+  const serverAppSource = await writeServerAppEntrypoint(paths, buildDir, serverAppStub);
   const appEntrypoint = await writeBuiltAppModule(
-    paths.api,
+    serverAppSource,
     resolve(buildDir, "app.generated.js"),
     [createPoggersAppAliasesPlugin(paths), createPoggersServerAppStubPlugin(paths)],
   );
@@ -514,13 +520,106 @@ export default {
 }
 
 function structuralHash(source: string): string {
-  const normalized = source
+  const normalized = persistentResourceSchemaSource(source)
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .replace(/\/\/[^\n\r]*/g, "")
     .replace(/\s+/g, " ")
     .trim();
   return createHash("sha256").update(normalized).digest("hex").slice(0, 12);
 }
+
+function persistentResourceSchemaSource(source: string): string {
+  const resourcesBlock = extractPropertyBlock(source, "Resources");
+  if (!resourcesBlock) return source;
+
+  const resourceParts = readObjectMemberEntries(resourcesBlock).map(({ name, value }) => {
+    const fields = ["Key", "State", "Events"]
+      .map((field) => `${field}: ${persistentResourceField(value, field)}`)
+      .join("; ");
+    return `${name}: { ${fields} }`;
+  });
+  const resourceSource = `Resources: { ${resourceParts.join("; ")} }`;
+  const aliases = referencedTypeAliases(source, resourceSource);
+  return [resourceSource, ...aliases].join("\n");
+}
+
+function persistentResourceField(resourceBlock: string, field: string): string {
+  const block = extractPropertyBlock(resourceBlock, field);
+  if (block) return `{ ${block} }`;
+  return extractPropertyValue(resourceBlock, field) ?? "never";
+}
+
+function referencedTypeAliases(source: string, seed: string): string[] {
+  const aliases: string[] = [];
+  const seen = new Set<string>();
+  const queue = identifiersInTypeText(seed);
+
+  for (let index = 0; index < queue.length; index++) {
+    const name = queue[index]!;
+    if (seen.has(name) || builtinTypeIdentifiers.has(name)) continue;
+    seen.add(name);
+
+    const alias = extractTypeAliasSource(source, name);
+    if (!alias) continue;
+    aliases.push(alias);
+    for (const identifier of identifiersInTypeText(alias)) {
+      if (!seen.has(identifier)) queue.push(identifier);
+    }
+  }
+
+  return aliases.sort();
+}
+
+function identifiersInTypeText(source: string): string[] {
+  return [...source.matchAll(/\b[A-Z][A-Za-z0-9_$]*\b/g)].map((match) => match[0]);
+}
+
+function extractTypeAliasSource(source: string, alias: string): string | undefined {
+  const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = new RegExp(`\\b(?:export\\s+)?type\\s+${escaped}(?:\\s*<[^=]+>)?\\s*=`).exec(
+    source,
+  );
+  if (!match) return undefined;
+
+  const end = findTypeAliasEnd(source, match.index + match[0].length);
+  return source.slice(match.index, end).trim();
+}
+
+function findTypeAliasEnd(source: string, index: number): number {
+  let depth = 0;
+  while (index < source.length) {
+    const char = source[index];
+    if (char === '"' || char === "'" || char === "`") {
+      const end = readQuotedStringEnd(source, index);
+      index = end < 0 ? source.length : end + 1;
+      continue;
+    }
+    if (char === "{" || char === "(" || char === "[") depth++;
+    if (char === "}" || char === ")" || char === "]") depth = Math.max(0, depth - 1);
+    if (char === ";" && depth === 0) return index + 1;
+    index++;
+  }
+  return index;
+}
+
+const builtinTypeIdentifiers = new Set([
+  "Array",
+  "Date",
+  "Error",
+  "Exclude",
+  "Extract",
+  "Map",
+  "NonNullable",
+  "Omit",
+  "Parameters",
+  "Partial",
+  "Pick",
+  "Promise",
+  "Readonly",
+  "Record",
+  "ReturnType",
+  "Set",
+]);
 
 async function latestMigrationSnapshot(
   sourceDir: string,
@@ -555,39 +654,29 @@ export function checkAppConventions(appDir: string): AppConventionIssue[] {
   const paths = resolveApp(appDir);
   const issues: AppConventionIssue[] = [];
   const appSource = readFileSync(paths.ui, "utf8");
-  const strictStyles = Boolean(paths.styleSource || /\bstyles\s*:/.test(appSource));
+  const strictStyles = /\bstyles\s*:/.test(appSource);
   if (!strictStyles) return [];
 
   collectForbiddenGeneratedSurface(paths.ui, appSource, issues);
   collectForbiddenAppStyling(paths.ui, appSource, issues);
-  if (appSource.includes("@poggers/kit/style")) {
-    issues.push({
-      file: paths.ui,
-      message: "app.ts must not import @poggers/kit/style; put styles in the app object.",
-    });
-  }
-
   const uiDir = resolve(paths.sourceDir, "ui");
   for (const file of sourceFiles(uiDir)) {
     const source = readFileSync(file, "utf8");
     collectUiFileConventions(uiDir, file, issues);
     collectForbiddenGeneratedSurface(file, source, issues);
     collectForbiddenUiStyling(file, source, issues);
+    if (sourceImportsStylex(source)) {
+      issues.push({
+        file,
+        message:
+          "ui files must not import @stylexjs/stylex in strict style apps; put visual rules in app styles.",
+      });
+    }
   }
 
   if (paths.types) {
     const typesSource = readFileSync(paths.types, "utf8");
     collectForbiddenSpecSurface(paths.types, typesSource, issues);
-  }
-
-  if (paths.styleSource) {
-    const stylesSource = readFileSync(paths.styleSource, "utf8");
-    if (/from\s+["']\.\/lib\//.test(stylesSource) || /from\s+["']\.\.\/lib\//.test(stylesSource)) {
-      issues.push({
-        file: paths.styleSource,
-        message: "styles.ts must stay visual; do not import app lib/runtime modules.",
-      });
-    }
   }
 
   return issues;
@@ -795,29 +884,75 @@ function firstExisting(paths: string[]): string | undefined {
   return paths.find((path) => existsSync(path));
 }
 
+type StylexBuildOptions = {
+  dev: boolean;
+  cssOutput: string;
+};
+
+function sourceImportsStylex(source: string): boolean {
+  return (
+    /from\s+["']@stylexjs\/stylex["']/.test(source) ||
+    /import\s*\(\s*["']@stylexjs\/stylex["']\s*\)/.test(source)
+  );
+}
+
+function stylexCssOutput(buildDir: string): string {
+  return resolve(buildDir, "stylex.generated.css");
+}
+
+async function createStylexBuildPlugins(options: StylexBuildOptions): Promise<Bun.BunPlugin[]> {
+  const { createStylexBunPlugin } = await import("@stylexjs/unplugin/bun");
+  const pluginOptions = {
+    dev: options.dev,
+    runtimeInjection: false,
+    useCSSLayers: true,
+    bunDevCssOutput: options.cssOutput,
+  };
+  return [
+    {
+      name: "poggers-stylex",
+      async setup(build) {
+        await createStylexBunPlugin(pluginOptions).setup(build);
+      },
+    },
+  ];
+}
+
 async function writeBrowserEntrypoint(
   paths: AppPaths,
-  options: { dev?: boolean; title?: string } = {},
+  options: { buildDir?: string; dev?: boolean; title?: string } = {},
 ): Promise<BrowserEntrypoint> {
-  const buildDir = options.dev ? frameworkDevDir(paths) : frameworkBuildDir(paths);
+  const buildDir =
+    options.buildDir ?? (options.dev ? frameworkDevDir(paths) : frameworkBuildDir(paths));
   const entrypoint = resolve(buildDir, "browser.entry.tsx");
   await mkdir(buildDir, { recursive: true });
   await writePoggersAppTypes(paths);
-  const compiledStyles = await compileBrowserStyles(paths, buildDir);
-  const plugins =
-    paths.embedded || paths.styleSource
-      ? [
-          createPoggersKitSourcePlugin(),
-          createPoggersAppAliasesPlugin(paths),
-          createPoggersAppPlugin(paths),
-        ]
-      : [createPoggersKitSourcePlugin(), createPoggersAppAliasesPlugin(paths)];
+  const visualModule = await writeVisualStylexModule(paths, buildDir);
+  const compiledStyles = await compileBrowserStyles(paths, buildDir, Boolean(visualModule));
+  const stylexStyles = visualModule ? stylexCssOutput(buildDir) : undefined;
+  const appPlugins = paths.embedded
+    ? [
+        createPoggersKitSourcePlugin(),
+        createPoggersAppAliasesPlugin(paths),
+        createPoggersAppPlugin(paths, visualModule),
+      ]
+    : [createPoggersKitSourcePlugin(), createPoggersAppAliasesPlugin(paths)];
+  const plugins = [
+    ...appPlugins,
+    ...(visualModule
+      ? await createStylexBuildPlugins({
+          dev: Boolean(options.dev),
+          cssOutput: stylexStyles ?? stylexCssOutput(buildDir),
+        })
+      : []),
+  ];
   const styleImport = compiledStyles
     ? `import ${JSON.stringify(importSpecifier(entrypoint, compiledStyles))};\n`
     : "";
   const source = paths.embedded
     ? nativeBrowserEntrySource(styleImport, {
-        rootImport: `import { Root } from "@poggers/app";`,
+        rootImport: `import { Root, initialize as initializePoggersApp } from "@poggers/app";`,
+        setup: "await initializePoggersApp();",
         rootExpression: "Root({})",
         dev: Boolean(options.dev),
       })
@@ -830,16 +965,22 @@ async function writeBrowserEntrypoint(
   return {
     entrypoint,
     styles: compiledStyles,
+    styleFiles: stylexStyles ? [stylexStyles] : undefined,
     plugins,
     html: undefined,
     development: options.dev ? { hmr: true, console: true } : undefined,
   };
 }
 
-async function writeChangedDevArtifacts(paths: AppPaths, changedPath: string): Promise<void> {
+async function writeChangedDevArtifacts(
+  paths: AppPaths,
+  changedPath: string,
+  buildDir: string,
+): Promise<void> {
   const changed = resolve(changedPath);
   if (shouldRebuildBrowserStyles(paths, changed)) {
-    await compileBrowserStyles(paths, frameworkDevDir(paths));
+    const visualModule = await writeVisualStylexModule(paths, buildDir);
+    await compileBrowserStyles(paths, buildDir, Boolean(visualModule));
   }
   if (changed === resolve(paths.api) || (paths.types && changed === resolve(paths.types))) {
     await writeGeneratedTypeArtifacts(paths);
@@ -847,10 +988,8 @@ async function writeChangedDevArtifacts(paths: AppPaths, changedPath: string): P
 }
 
 function shouldRebuildBrowserStyles(paths: AppPaths, changed: string): boolean {
-  if (paths.styleSource && changed === resolve(paths.styleSource)) return true;
-  if (paths.styles && changed === resolve(paths.styles)) return true;
   if (!isSourceReloadFile(paths, changed)) return false;
-  return Boolean(paths.embedded || paths.styleSource || paths.styles);
+  return paths.embedded;
 }
 
 function isSourceReloadFile(paths: AppPaths, changed: string): boolean {
@@ -861,22 +1000,26 @@ function isSourceReloadFile(paths: AppPaths, changed: string): boolean {
 }
 
 async function compileBrowserStyles(
-  paths: AppPaths,
+  _paths: AppPaths,
   buildDir: string,
+  visual = false,
 ): Promise<string | undefined> {
-  return paths.styleSource
-    ? compilePoggersStyles(paths, buildDir)
-    : paths.embedded
-      ? compileEmbeddedPoggersStyles(paths, buildDir)
-      : paths.styles
-        ? compileTailwindStyles(paths, buildDir)
-        : undefined;
+  return visual ? compileVisualReset(buildDir) : undefined;
+}
+
+export async function validateAppStyles(appDir: string): Promise<void> {
+  const paths = resolveApp(appDir);
+  await writePoggersAppTypes(paths);
+  const buildDir = frameworkDevDir(paths);
+  const visualModule = await writeVisualStylexModule(paths, buildDir);
+  await compileBrowserStyles(paths, buildDir, Boolean(visualModule));
 }
 
 function nativeBrowserEntrySource(
   styleImport: string,
   options: {
     rootImport: string;
+    setup?: string;
     rootExpression: string;
     renderImported?: boolean;
     dev: boolean;
@@ -930,67 +1073,147 @@ if (import.meta.hot) {
 ${renderImport}
 const root = document.getElementById("root");
 if (!root) throw new Error("Missing #root element.");
+${options.setup ? `\n${options.setup}\n` : ""}
 
 ${renderBlock}`;
 }
 
-async function compileTailwindStyles(paths: AppPaths, buildDir: string): Promise<string> {
-  if (!paths.styles) throw new Error("compileStyles called without styles path.");
-
-  const output = resolve(buildDir, "styles.generated.css");
-  await mkdir(buildDir, { recursive: true });
-  const result = Bun.spawnSync({
-    cmd: ["bunx", "tailwindcss", "-i", paths.styles, "-o", output],
-    cwd: paths.appDir,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-
-  if (!result.success) {
-    const stderr = new TextDecoder().decode(result.stderr);
-    const stdout = new TextDecoder().decode(result.stdout);
-    throw new Error(`Tailwind CSS build failed.\n${stderr || stdout}`);
-  }
-
-  return output;
-}
-
-async function compilePoggersStyles(paths: AppPaths, buildDir: string): Promise<string> {
-  if (!paths.styleSource) throw new Error("compilePoggersStyles called without styles.ts.");
-
-  const output = resolve(buildDir, "styles.generated.css");
-  await mkdir(buildDir, { recursive: true });
-  const stylesModule = await importBuiltSourceModule(paths.styleSource, buildDir, "style");
-  const styles = normalizeLoadedStyles(stylesModule.default ?? stylesModule.styles);
-  const css = renderPoggersCss(styles.def);
-  await writeFile(output, css, "utf8");
-  return output;
-}
-
-async function compileEmbeddedPoggersStyles(
+async function writeVisualStylexModule(
   paths: AppPaths,
   buildDir: string,
 ): Promise<string | undefined> {
+  if (!paths.embedded) return undefined;
   const apiModule = await importBuiltAppModule(paths);
   const api = normalizeLoadedApp(apiModule);
-  const rawStyles = api?.def?.styles;
-  if (!rawStyles) return paths.styles ? compileTailwindStyles(paths, buildDir) : undefined;
+  const styles = recordValue(api?.def?.styles);
+  const presets = recordValue(styles.presets);
+  if (!Object.keys(presets).length) return undefined;
 
-  const output = resolve(buildDir, "styles.generated.css");
-  await mkdir(buildDir, { recursive: true });
-  const styles = normalizeLoadedStyles(rawStyles);
-  const css = renderPoggersCss(styles.def);
-  await writeFile(output, css, "utf8");
+  if (!paths.types) throw new Error("Poggers visual apps require src/types.ts.");
+  const contract = analyzeVisualContract(paths.types);
+  const sourceLocations = analyzeVisualPresetSources(paths.api, paths.sourceDir);
+  const visualEntries = Object.entries(presets).filter(([, preset]) =>
+    looksLikeVisualPreset(preset),
+  );
+  if (!visualEntries.length) return undefined;
+  if (visualEntries.length !== Object.keys(presets).length) {
+    throw new Error("Every Poggers preset must use the closed visual preset format.");
+  }
+
+  const materialized = visualEntries.map(([name, preset]) => {
+    const declaration = contract.presets.find((candidate) => candidate.name === name);
+    if (!declaration)
+      throw new Error(`Visual preset ${JSON.stringify(name)} is missing from App.Styles.`);
+    try {
+      return materializeVisualPreset(name, preset, contract.surface);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const location = sourceLocations[name] ?? declaration.location;
+      throw new Error(`${location.file}:${location.line}:${location.column}: ${message}`);
+    }
+  });
+  const output = resolve(buildDir, "visual.generated.stylex.ts");
+  let generated: string;
+  try {
+    generated = generateVisualStylexModule(materialized);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const preset = visualEntries.find(([name]) => message.includes(name))?.[0];
+    const location = preset ? sourceLocations[preset] : undefined;
+    throw new Error(
+      location ? `${location.file}:${location.line}:${location.column}: ${message}` : message,
+    );
+  }
+  await writeGeneratedFile(output, generated);
   return output;
 }
 
-function normalizeLoadedStyles(styles: any) {
-  if (styles?.def?.presets) return styles;
-  return defineStyles(styles ?? { presets: { default: {} } });
+function looksLikeVisualPreset(value: unknown): boolean {
+  const preset = recordValue(value);
+  if (typeof preset.components !== "function" || !preset.tokens) return false;
+  const tokenRefs = Object.fromEntries(
+    Object.entries(recordValue(preset.tokens)).map(([group, definitions]) => [
+      group,
+      Object.fromEntries(
+        Object.keys(recordValue(definitions)).map((name) => [
+          name,
+          { $visual: "token", group, name },
+        ]),
+      ),
+    ]),
+  );
+  try {
+    const components = recordValue(preset.components({ tokens: tokenRefs }));
+    const values = Object.values(components);
+    return values.length > 0 && values.every((component) => typeof component === "function");
+  } catch {
+    return false;
+  }
+}
+
+async function compileVisualReset(buildDir: string): Promise<string> {
+  const output = resolve(buildDir, "styles.generated.css");
+  await writeGeneratedFile(output, visualResetCss);
+  return output;
+}
+
+const visualResetCss = `@layer reset {
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; min-inline-size: 0; }
+  html { min-block-size: 100%; -webkit-text-size-adjust: 100%; }
+  body, #root { min-block-size: 100%; }
+  #root { container: app / inline-size; }
+  body { line-height: 1; text-rendering: optimizeSpeed; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+  a { color: inherit; text-decoration: none; }
+  ol, ul { list-style: none; }
+  h1, h2, h3, h4, h5, h6 { font: inherit; }
+  button, input, textarea, select, option { appearance: none; border: 0; border-radius: 0; background: transparent; color: inherit; font: inherit; }
+  button, select { cursor: pointer; }
+  button:disabled, input:disabled, textarea:disabled, select:disabled { cursor: not-allowed; }
+  button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, a:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+  textarea { resize: vertical; }
+  img, picture, video, canvas, svg { display: block; max-inline-size: 100%; block-size: auto; }
+  table { border-collapse: collapse; border-spacing: 0; }
+  p, h1, h2, h3, h4, h5, h6 { overflow-wrap: break-word; }
+  [hidden] { display: none !important; }
+  [popover] { inset: auto; }
+  [popover]:not(:popover-open) { display: none !important; }
+}
+
+@layer motion {
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: 1ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; transition-duration: 0ms !important; }
+  }
+}
+`;
+
+async function writeGeneratedFile(path: string, source: string): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
+  try {
+    if ((await readFile(path, "utf8")) === source) return;
+  } catch {
+    // The first generation has no previous file.
+  }
+  const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(temporary, source, "utf8");
+  try {
+    await rename(temporary, path);
+  } catch (error) {
+    await rm(temporary, { force: true });
+    throw error;
+  }
+}
+
+function recordValue(value: unknown): Record<string, any> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, any>)
+    : {};
 }
 
 async function importBuiltAppModule(paths: AppPaths): Promise<Record<string, any>> {
-  return importBuiltSourceModule(paths.api, frameworkDevDir(paths), "app", [
+  const buildDir = frameworkDevDir(paths);
+  const serverAppStub = await writeServerAppStubFile(paths, buildDir);
+  const serverAppSource = await writeServerAppEntrypoint(paths, buildDir, serverAppStub);
+  return importBuiltSourceModule(serverAppSource, buildDir, "app", [
     createPoggersAppAliasesPlugin(paths),
     createPoggersServerAppStubPlugin(paths),
   ]);
@@ -1020,6 +1243,7 @@ async function writeBuiltAppModule(
   plugins: Bun.BunPlugin[] = [],
 ): Promise<string> {
   await mkdir(dirname(output), { recursive: true });
+  const tsconfig = await writeInternalBuildTsconfig(output);
   const result = await Bun.build({
     entrypoints: [entrypoint],
     format: "esm",
@@ -1027,6 +1251,7 @@ async function writeBuiltAppModule(
     minify: false,
     plugins: [createPoggersKitSourcePlugin(), ...plugins],
     target: "bun",
+    tsconfig,
   });
 
   if (!result.success) {
@@ -1044,7 +1269,31 @@ async function writeBuiltAppModule(
   return output;
 }
 
-function createPoggersAppPlugin(paths: AppPaths): Bun.BunPlugin {
+async function writeInternalBuildTsconfig(output: string): Promise<string> {
+  const tsconfig = resolve(dirname(output), "tsconfig.generated.json");
+  await writeFile(
+    tsconfig,
+    `${JSON.stringify(
+      {
+        compilerOptions: {
+          allowImportingTsExtensions: true,
+          jsx: "react-jsx",
+          module: "Preserve",
+          moduleResolution: "bundler",
+          target: "ESNext",
+          types: ["bun"],
+          verbatimModuleSyntax: true,
+        },
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+  return tsconfig;
+}
+
+function createPoggersAppPlugin(paths: AppPaths, visualModule?: string): Bun.BunPlugin {
   return {
     name: "poggers-app",
     setup(build) {
@@ -1058,7 +1307,7 @@ function createPoggersAppPlugin(paths: AppPaths): Bun.BunPlugin {
 
         return {
           loader: "tsx",
-          contents: poggersAppModuleSource(paths),
+          contents: poggersAppModuleSource(paths, visualModule),
         };
       });
     },
@@ -1108,6 +1357,8 @@ function createPoggersKitSourcePlugin(): Bun.BunPlugin {
 
 function resolvePoggersKitSource(path: string): string {
   const subpath = path.slice("@poggers/kit".length).replace(/^\//, "");
+  if (subpath === "style") return resolve(kitSourceDir, "preset.ts");
+  if (subpath === "internal-style") return resolve(kitSourceDir, "component-runtime.ts");
   return subpath ? resolve(kitSourceDir, `${subpath}.ts`) : resolve(kitSourceDir, "index.ts");
 }
 
@@ -1132,14 +1383,40 @@ function createPoggersServerAppStubPlugin(paths: AppPaths): Bun.BunPlugin {
   };
 }
 
-function poggersAppModuleSource(paths: AppPaths): string {
+async function writeServerAppStubFile(paths: AppPaths, buildDir: string): Promise<string> {
+  const stub = resolve(buildDir, "poggers-app-stub.generated.ts");
+  await mkdir(dirname(stub), { recursive: true });
+  await writeFile(stub, poggersServerAppStubSource(paths), "utf8");
+  return stub;
+}
+
+async function writeServerAppEntrypoint(
+  paths: AppPaths,
+  buildDir: string,
+  stubPath: string,
+): Promise<string> {
+  const output = resolve(buildDir, "app.source.generated.ts");
+  const source = rewriteServerAppImports(
+    readFileSync(paths.api, "utf8"),
+    dirname(paths.api),
+    stubPath,
+  );
+  await mkdir(dirname(output), { recursive: true });
+  await writeFile(output, source, "utf8");
+  return output;
+}
+
+function rewriteServerAppImports(source: string, appSourceDir: string, stubPath: string): string {
+  return source
+    .replaceAll(/from\s+["']@poggers\/app["']/g, `from ${JSON.stringify(stubPath)}`)
+    .replaceAll(/from\s+["'](\.[^"']*)["']/g, (_match, specifier: string) => {
+      return `from ${JSON.stringify(resolve(appSourceDir, specifier))}`;
+    });
+}
+
+function poggersAppModuleSource(paths: AppPaths, visualModule?: string): string {
   const surface = collectAppSurface(paths);
-  const stylesImport = paths.styleSource
-    ? `import rawStyles from ${JSON.stringify(paths.styleSource)};`
-    : "";
-  const stylesDeclaration = paths.styleSource
-    ? "const styles = rawStyles;"
-    : "const styles = app.def.styles ?? { presets: { default: {} } };";
+  const stylesLoad = "styles = app.def.styles ?? { presets: { default: {} } };";
   const componentParts = JSON.stringify(componentPartsRecord(surface));
   const resourceExports = surface.resources
     .map(({ name: resource }) => {
@@ -1158,19 +1435,42 @@ function poggersAppModuleSource(paths: AppPaths): string {
     })
     .join("\n\n");
 
-  return `import rawApp from ${JSON.stringify(paths.api)};
-${stylesImport}
-import { defineApp } from "@poggers/kit";
-import { createHooks } from "@poggers/kit/style";
+  const visualImport = visualModule
+    ? `import { compiledVisuals } from ${JSON.stringify(visualModule)};`
+    : "const compiledVisuals = undefined;";
+  return `import { defineApp } from "@poggers/kit";
+import { createHooks } from "@poggers/kit/internal-style";
 import { createBrowserConnectOptions } from "@poggers/kit/ui";
+${visualImport}
 
-let hooks;
-const app = rawApp?.def?.resources ? rawApp : defineApp(rawApp);
-${stylesDeclaration}
 const components = ${componentParts};
+let app;
+let styles;
+let hooks;
+let initializePromise;
+
+export async function initialize() {
+  if (app && styles) return;
+  if (!initializePromise) {
+    initializePromise = (async () => {
+      const appModule = await import(${JSON.stringify(paths.api)});
+      const rawApp = appModule.default ?? appModule.app ?? appModule;
+      app = rawApp?.def?.resources ? rawApp : defineApp(rawApp);
+      ${stylesLoad}
+    })();
+  }
+  await initializePromise;
+}
+
+function requireInitialized() {
+  if (!app || !styles) {
+    throw new Error("@poggers/app was used before it finished initializing.");
+  }
+}
 
 function getHooks() {
-  if (!hooks) hooks = createHooks({ app, styles, components });
+  requireInitialized();
+  if (!hooks) hooks = createHooks({ app, styles, components, compiledVisuals });
   return hooks;
 }
 
@@ -1196,12 +1496,12 @@ export function setPreset(preset) {
   getHooks().setPreset(preset);
 }
 
-export function useTheme() {
-  return getHooks().useTheme();
+export function useThemeName() {
+  return getHooks().useThemeName();
 }
 
-export function setThemeParam(param, value) {
-  getHooks().setThemeParam(param, value);
+export function setTheme(theme) {
+  getHooks().setTheme(theme);
 }
 
 export function start(connect) {
@@ -1210,6 +1510,7 @@ export function start(connect) {
 
 export function Root(props = {}) {
   start(props.connect);
+  requireInitialized();
   const root = app.def.root ?? app.def.ui;
   if (!root) throw new Error("App definition does not include a root function.");
   return root(getHooks());
@@ -1249,8 +1550,8 @@ export const nav = new Proxy({}, {
 export function useScreen() { throwUnavailable("useScreen"); }
 export function usePreset() { throwUnavailable("usePreset"); }
 export function setPreset() { throwUnavailable("setPreset"); }
-export function useTheme() { throwUnavailable("useTheme"); }
-export function setThemeParam() { throwUnavailable("setThemeParam"); }
+export function useThemeName() { throwUnavailable("useThemeName"); }
+export function setTheme() { throwUnavailable("setTheme"); }
 export function start() {}
 export function Root() {
   return null;
@@ -1279,11 +1580,6 @@ type AppSurfaceAction = {
   handlerType: string;
 };
 
-type AppSurfaceThemeParam = {
-  name: string;
-  valueType: string;
-};
-
 type AppSurfaceNavigation = {
   name: string;
   hasParams: boolean;
@@ -1298,6 +1594,8 @@ type AppSurfaceEnvironment = {
 type AppSurfaceComponent = {
   name: string;
   parts: Record<string, string>;
+  variants: AppSurfaceVariant[];
+  styleValues: AppSurfaceStyleValue[];
   hasInput: boolean;
   hasState: boolean;
   hasDerived: boolean;
@@ -1308,13 +1606,43 @@ type AppSurfaceComponent = {
   doc?: string;
 };
 
+type AppSurfaceVariant = {
+  name: string;
+  values: string[];
+};
+
+type AppSurfaceStyleValue = {
+  name: string;
+  kind: string;
+};
+
+type AppSurfaceStyleToken = {
+  group: string;
+  name: string;
+  kind: string;
+};
+
+type AppSurfaceStyleContainer = {
+  name: string;
+  min?: string;
+  max?: string;
+};
+
+type AppSurfaceStylePreset = {
+  name: string;
+  tokens: AppSurfaceStyleToken[];
+  themes: string[];
+  containers: AppSurfaceStyleContainer[];
+  visual: boolean;
+};
+
 type AppSurface = {
   resources: AppSurfaceResource[];
   environments: AppSurfaceEnvironment[];
   components: Record<string, AppSurfaceComponent>;
   navigation: AppSurfaceNavigation[];
   presetType?: string;
-  themeParams: AppSurfaceThemeParam[];
+  stylePresets: AppSurfaceStylePreset[];
 };
 
 function collectAppSurface(paths: AppPaths): AppSurface {
@@ -1323,7 +1651,7 @@ function collectAppSurface(paths: AppPaths): AppSurface {
     environments: [],
     components: {},
     navigation: [{ name: "home", hasParams: false, paramsType: "EmptyObject" }],
-    themeParams: [],
+    stylePresets: [],
   };
   if (!paths.types || !existsSync(paths.types)) return fallback;
 
@@ -1334,8 +1662,7 @@ function collectAppSurface(paths: AppPaths): AppSurface {
   const componentsBlock = extractPropertyBlock(source, "Components");
   const navigationBlock = extractPropertyBlock(source, "Navigation");
   const stylesBlock = extractPropertyBlock(source, "Styles");
-  const themeBlock = stylesBlock ? extractPropertyBlock(stylesBlock, "Theme") : undefined;
-  const paramsBlock = themeBlock ? extractPropertyBlock(themeBlock, "Params") : undefined;
+  const presetsBlock = stylesBlock ? extractPropertyBlock(stylesBlock, "Presets") : undefined;
   const resources = resourcesBlock
     ? readObjectMemberEntries(resourcesBlock).map(({ name, value, doc }) => {
         const viewsBlock = resolveTypePropertyBlock(source, value, "Views");
@@ -1367,6 +1694,12 @@ function collectAppSurface(paths: AppPaths): AppSurface {
     const componentMembers = readObjectMemberEntries(componentsBlock);
     for (const { name: componentName, value: componentBlock, doc } of componentMembers) {
       const partsBlock = extractPropertyBlock(componentBlock, "Parts");
+      const variantsBlock = extractPropertyBlock(componentBlock, "Variants");
+      const variants = variantsBlock ? readStyleVariants(source, variantsBlock) : [];
+      const styleValuesBlock = extractPropertyBlock(componentBlock, "StyleValues");
+      const styleValues = styleValuesBlock
+        ? readComponentStyleValues(styleValuesBlock, componentName)
+        : [];
       const derivedBlock = extractPropertyBlock(componentBlock, "Derived");
       const actionsBlock = extractPropertyBlock(componentBlock, "Actions");
       const actionEntries = actionsBlock ? readTypeMemberEntries(actionsBlock) : [];
@@ -1378,6 +1711,8 @@ function collectAppSurface(paths: AppPaths): AppSurface {
       components[componentName] = {
         name: componentName,
         parts: readStringMembers(partsBlock),
+        variants,
+        styleValues,
         hasInput,
         hasState,
         hasDerived,
@@ -1387,7 +1722,7 @@ function collectAppSurface(paths: AppPaths): AppSurface {
           name: action.name,
           handlerType: actionHandlerType(action.value),
         })),
-        needsInput: hasInput || hasState || hasDerived || hasActions,
+        needsInput: hasInput || variants.length > 0,
         doc,
       };
     }
@@ -1416,14 +1751,161 @@ function collectAppSurface(paths: AppPaths): AppSurface {
           paramsType: `AppSpec["Navigation"][${JSON.stringify(name)}]`,
         }))
       : [{ name: "home", hasParams: false, paramsType: "EmptyObject" }],
-    presetType: stylesBlock ? extractPropertyValue(stylesBlock, "Presets") : undefined,
-    themeParams: paramsBlock
-      ? readTypeMemberEntries(paramsBlock).map((param) => ({
-          name: param.name,
-          valueType: themeParamValueType(param.value),
-        }))
-      : [],
+    presetType: stylePresetType(stylesBlock, presetsBlock),
+    stylePresets: presetsBlock ? readStylePresets(source, presetsBlock) : [],
   };
+}
+
+function stylePresetType(
+  stylesBlock: string | undefined,
+  presetsBlock: string | undefined,
+): string | undefined {
+  if (presetsBlock) {
+    const names = readObjectMemberEntries(presetsBlock).map((preset) =>
+      JSON.stringify(preset.name),
+    );
+    return names.length ? names.join(" | ") : undefined;
+  }
+  return stylesBlock ? extractPropertyValue(stylesBlock, "Presets") : undefined;
+}
+
+function styleThemeNameType(surface: AppSurface): string {
+  const themes = new Set<string>(["default"]);
+  for (const preset of surface.stylePresets) {
+    for (const theme of preset.themes) themes.add(theme);
+  }
+  return [...themes].map((theme) => JSON.stringify(theme)).join(" | ");
+}
+
+function readStyleVariants(source: string, block: string): AppSurfaceVariant[] {
+  return readTypeMemberEntries(block).map((variant) => ({
+    name: variant.name,
+    values: stringLiteralsFromType(source, variant.value),
+  }));
+}
+
+function readComponentStyleValues(block: string, componentName: string): AppSurfaceStyleValue[] {
+  return readTypeMemberEntries(block).map((value) => ({
+    name: value.name,
+    kind: readKnownStyleValueKind(
+      stringLiteralValue(value.value) ?? value.value.trim(),
+      `Components.${componentName}.StyleValues.${value.name}`,
+    ),
+  }));
+}
+
+function readStylePresets(source: string, block: string): AppSurfaceStylePreset[] {
+  return readObjectMemberEntries(block).map(({ name, value }) => {
+    const tokensBlock = resolveTypePropertyBlock(source, value, "Tokens");
+    const themesValue = extractPropertyValue(value, "Themes");
+    const containersBlock = resolveTypePropertyBlock(source, value, "Containers");
+    return {
+      name,
+      tokens: tokensBlock ? readStyleTokens(tokensBlock, name) : [],
+      themes: themesValue ? stringLiteralsFromUnion(themesValue) : [],
+      containers: containersBlock ? readStyleContainers(containersBlock) : [],
+      visual: tokensBlock ? visualTokenContract(tokensBlock) : false,
+    };
+  });
+}
+
+function readStyleTokens(block: string, presetName: string): AppSurfaceStyleToken[] {
+  const tokens: AppSurfaceStyleToken[] = [];
+  const legacyGroups = readObjectMemberEntries(block);
+  if (!legacyGroups.length) {
+    for (const group of readTypeMemberEntries(block)) {
+      for (const name of stringLiteralsFromUnion(group.value)) {
+        tokens.push({ group: group.name, name, kind: group.name });
+      }
+    }
+    return tokens;
+  }
+  for (const group of legacyGroups) {
+    for (const token of readTypeMemberEntries(group.value)) {
+      const kind = readKnownTokenKind(
+        stringLiteralValue(token.value) ?? token.value.trim(),
+        `Styles.Presets.${presetName}.Tokens.${group.name}.${token.name}`,
+      );
+      tokens.push({ group: group.name, name: token.name, kind });
+    }
+  }
+  return tokens;
+}
+
+function visualTokenContract(block: string): boolean {
+  const groups = readTypeMemberEntries(block);
+  return (
+    groups.length > 0 &&
+    groups.every(
+      (group) =>
+        !group.value.trimStart().startsWith("{") && stringLiteralsFromUnion(group.value).length > 0,
+    )
+  );
+}
+
+const knownStyleValueKinds = new Set([
+  "number",
+  "progress",
+  "opacity",
+  "ratio",
+  "zIndex",
+  "length",
+  "space",
+  "size",
+  "radius",
+]);
+
+const knownTokenKinds = new Set([
+  "blur",
+  "color",
+  "duration",
+  "easing",
+  "font",
+  "length",
+  "motion",
+  "opacity",
+  "paint",
+  "radius",
+  "ratio",
+  "shadow",
+  "size",
+  "space",
+  "stroke",
+  "type",
+  "zIndex",
+]);
+
+function readKnownStyleValueKind(kind: string, path: string): string {
+  if (knownStyleValueKinds.has(kind)) return kind;
+  throw new Error(`Unknown Poggers component style value kind "${kind}" at ${path}.`);
+}
+
+function readKnownTokenKind(kind: string, path: string): string {
+  if (knownTokenKinds.has(kind)) return kind;
+  throw new Error(`Unknown Poggers token kind "${kind}" at ${path}.`);
+}
+
+function readStyleContainers(block: string): AppSurfaceStyleContainer[] {
+  return readObjectMemberEntries(block).map(({ name, value }) => ({
+    name,
+    min: stringLiteralValue(extractPropertyValue(value, "min")),
+    max: stringLiteralValue(extractPropertyValue(value, "max")),
+  }));
+}
+
+function stringLiteralsFromUnion(value: string): string[] {
+  return [...value.matchAll(/["']([^"']+)["']/g)].map((match) => match[1]!).filter(Boolean);
+}
+
+function stringLiteralsFromType(source: string, value: string): string[] {
+  const direct = stringLiteralsFromUnion(value);
+  if (direct.length) return direct;
+
+  const alias = /^([A-Za-z_$][\w$]*)$/.exec(value.trim());
+  if (!alias) return [];
+
+  const aliasValue = extractTypeAliasValue(source, alias[1]!);
+  return aliasValue ? stringLiteralsFromUnion(aliasValue) : [];
 }
 
 function componentPartsRecord(surface: AppSurface): Record<string, Record<string, string>> {
@@ -1464,6 +1946,16 @@ function extractTypeAliasBlock(source: string, alias: string): string | undefine
   if (openIndex < 0) return undefined;
   const closeIndex = findMatchingBrace(source, openIndex);
   return closeIndex < 0 ? undefined : source.slice(openIndex + 1, closeIndex);
+}
+
+function extractTypeAliasValue(source: string, alias: string): string | undefined {
+  const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = new RegExp(`\\b(?:export\\s+)?type\\s+${escaped}\\s*=`).exec(source);
+  if (!match) return undefined;
+
+  const valueStart = skipTrivia(source, match.index + match[0].length);
+  const valueEnd = trimMemberValueEnd(source, skipMemberValue(source, valueStart));
+  return source.slice(valueStart, valueEnd).trim();
 }
 
 function readObjectMembers(block: string): Record<string, string> {
@@ -1581,19 +2073,6 @@ function actionHandlerType(value: string): string {
 
   if (trimmed.startsWith("[")) return `(...args: ${trimmed}) => void`;
   return "() => void";
-}
-
-function themeParamValueType(value: string): string {
-  const defaultValue = extractPropertyValue(value, "default");
-  if (defaultValue) {
-    if (/^["'`]/.test(defaultValue)) return "string";
-    if (/^(true|false)\b/.test(defaultValue)) return "boolean";
-    if (/^-?\d+(?:\.\d+)?\b/.test(defaultValue)) return "number";
-  }
-
-  const trimmed = value.trim();
-  if (trimmed === "string" || trimmed === "number" || trimmed === "boolean") return trimmed;
-  return "number";
 }
 
 function stringLiteralValue(value: string | undefined): string | undefined {
@@ -1854,9 +2333,13 @@ function componentTypeDefinitions(component: AppSurfaceComponent): string {
   const specType = `AppSpec["Components"][${componentName}]`;
   const partNames = Object.keys(component.parts);
   const inputType = component.hasInput ? `${specType}["Input"]` : "EmptyObject";
+  const variantsType = component.variants.length ? `${specType}["Variants"]` : "EmptyObject";
   const stateType = component.hasState ? `${specType}["State"]` : "EmptyObject";
   const derivedType = component.hasDerived ? `${specType}["Derived"]` : "EmptyObject";
   const actionsType = component.hasActions ? `${specType}["Actions"]` : "EmptyObject";
+  const styleValuesType = component.styleValues.length
+    ? `ComponentStyleValues<${specType}["StyleValues"]>`
+    : "EmptyObject";
   const actionFields = component.actions.map(
     (action) => `  readonly ${propertyKey(action.name)}: ${action.handlerType};`,
   );
@@ -1875,13 +2358,9 @@ function componentTypeDefinitions(component: AppSurfaceComponent): string {
   );
   const optionFields = [
     component.hasInput ? `  input: ${typeName}Input;` : `  input?: ${typeName}Input;`,
-    component.hasState ? `  state: ${typeName}State;` : `  state?: ${typeName}State;`,
-    component.hasActions
-      ? `  actions: ${typeName}ActionFactory;`
-      : `  actions?: ${typeName}ActionFactory;`,
-    component.hasDerived
-      ? `  derived: ${typeName}DerivedFactory;`
-      : `  derived?: ${typeName}DerivedFactory;`,
+    component.variants.length
+      ? `  variants: ${typeName}Variants;`
+      : `  variants?: ${typeName}Variants;`,
   ];
   const actionHandlerBlock = actionFields.length
     ? `type ${typeName}ActionHandlers = {
@@ -1890,27 +2369,27 @@ ${actionFields.join("\n")}
     : `type ${typeName}ActionHandlers = {};`;
   return `${jsDoc(component.doc, `Create a ${component.name} component instance.`)}
 type ${typeName}Input = ${inputType};
+type ${typeName}Variants = ${variantsType};
 type ${typeName}State = ${stateType};
 type ${typeName}Derived = ${derivedType};
 type ${typeName}Actions = ${actionsType};
+type ${typeName}StyleValues = ${styleValuesType};
 ${actionHandlerBlock}
 type ${typeName}Refs = {
 ${refFields.join("\n")}
 };
 type ${typeName}DerivedContext = {
   readonly preset: AppPreset;
-  readonly theme: AppThemeValues;
+  readonly setPreset: (preset: AppPreset) => void;
+  readonly theme: AppThemeName;
+  readonly setTheme: (theme: AppThemeName) => void;
+  readonly variants: ${typeName}Variants;
   readonly input: ${typeName}Input;
   readonly state: ${typeName}State;
   readonly refs: ${typeName}Refs;
 };
-type ${typeName}Context = {
-  readonly preset: AppPreset;
-  readonly theme: AppThemeValues;
-  readonly input: ${typeName}Input;
-  readonly state: ${typeName}State;
+type ${typeName}Context = ${typeName}DerivedContext & {
   readonly derived: ${typeName}Derived;
-  readonly refs: ${typeName}Refs;
 };
 type ${typeName}ActionFactory = (ctx: ${typeName}Context) => ${typeName}ActionHandlers;
 type ${typeName}DerivedFactory = (ctx: ${typeName}DerivedContext) => ${typeName}Derived;
@@ -1919,9 +2398,11 @@ ${optionFields.join("\n")}
 };
 export type ${typeName}Instance = {
   readonly input: ${typeName}Input;
+  readonly variants: ${typeName}Variants;
   readonly state: ${typeName}State;
   readonly derived: ${typeName}Derived;
   readonly actions: ${typeName}ActionHandlers;
+  readonly values: ${typeName}StyleValues;
   readonly refs: ${typeName}Refs;
 ${[...derivedFields, ...actionInstanceFields, ...partFields].join("\n")}
 };
@@ -2011,7 +2492,7 @@ type AppRoot = (ctx: AppUIContext) => unknown;
 
 ${definitionSections}
 
-export type AppDefinition = AppDefinitionSpecMarker<AppSpec> & {
+export type AppDefinition<Spec extends AppSpec = AppSpec> = AppDefinitionSpecMarker<Spec> & {
   version: number;
   app?: AppMetadata;
   pwa?: PwaDef;
@@ -2118,45 +2599,12 @@ function environmentDepsType(env: AppSurfaceEnvironment): string {
 }
 
 function styleDefinitionTypes(surface: AppSurface): string {
-  const components = Object.values(surface.components);
-  const componentDefinitions = components.map(componentStyleDefinitionTypes).join("\n\n");
-  return `type StyleDefinitionSpecMarker<Spec> = {
-  readonly __poggersStyleSpec?: Spec;
-};
-type StyleOutput = Record<string, unknown>;
-type StyleSlot<Context> = StyleOutput | ((ctx: Context) => StyleOutput);
-
-${componentDefinitions}
-
-export type StyleDefinition = StyleDefinitionSpecMarker<AppSpec> & {
+  if (surface.stylePresets.some((preset) => !preset.visual)) {
+    throw new Error("Only v2 visual presets are supported in App.Styles.");
+  }
+  return `export type StyleDefinition = {
   defaultPreset?: AppPreset;
-  presets: {
-    [Preset in AppPreset]?: {
-${components
-  .map(
-    (component) =>
-      `      ${propertyKey(component.name)}?: ${pascalIdentifier(component.name)}StyleDefinition;`,
-  )
-  .join("\n")}
-    };
-  };
-};`;
-}
-
-function componentStyleDefinitionTypes(component: AppSurfaceComponent): string {
-  const typeName = pascalIdentifier(component.name);
-  const partFields = Object.keys(component.parts).map(
-    (partName) => `  ${propertyKey(partName)}?: StyleSlot<${typeName}StyleContext>;`,
-  );
-  return `type ${typeName}StyleContext = {
-  readonly preset: AppPreset;
-  readonly input: ${typeName}Input;
-  readonly state: ${typeName}State;
-  readonly derived: ${typeName}Derived;
-  readonly theme: AppThemeValues;
-};
-type ${typeName}StyleDefinition = {
-${partFields.join("\n")}
+  presets: { [Preset in AppPreset]: VisualPreset<AppSpec, Preset> };
 };`;
 }
 
@@ -2192,7 +2640,9 @@ function componentsDefinitionField(surface: AppSurface): string {
   return `  components?: {\n${components
     .map(
       (component) =>
-        `    ${propertyKey(component.name)}?: (ctx: ${pascalIdentifier(component.name)}ControllerContext) => ${pascalIdentifier(component.name)}ControllerResult;`,
+        `    ${propertyKey(component.name)}?:
+      | ((ctx: ${pascalIdentifier(component.name)}ControllerContext) => ${pascalIdentifier(component.name)}ControllerResult)
+      | ${pascalIdentifier(component.name)}Definition;`,
     )
     .join("\n")}\n  };\n`;
 }
@@ -2369,12 +2819,34 @@ function componentDefinitionTypes(component: AppSurfaceComponent): string {
     ([partName, elementName]) =>
       `  ${propertyKey(partName)}?: Partial<${partPropsType(elementName)}>;`,
   );
+  const stateField = component.hasState
+    ? `  state: ${typeName}State | ((ctx: ${typeName}StateContext) => ${typeName}State);`
+    : `  state?: ${typeName}State | ((ctx: ${typeName}StateContext) => ${typeName}State);`;
+  const derivedField = component.hasDerived
+    ? `  derived: ${typeName}DerivedFactory;`
+    : `  derived?: ${typeName}DerivedFactory;`;
+  const actionsField = component.hasActions
+    ? `  actions: ${typeName}ActionFactory;`
+    : `  actions?: ${typeName}ActionFactory;`;
   return `type ${typeName}ControllerContext = ${typeName}Context & {
   readonly actions: ${typeName}ActionHandlers;
 };
-type ${typeName}ControllerResult = Partial<{
+type ${typeName}ControllerResult = {
+  values?: Partial<${typeName}StyleValues>;
+} & Partial<{
 ${partFields.join("\n")}
-}>;`;
+}>;
+type ${typeName}StateContext = {
+  readonly input: ${typeName}Input;
+  readonly variants: ${typeName}Variants;
+};
+type ${typeName}Definition = {
+${stateField}
+${derivedField}
+${actionsField}
+  bind?(ctx: ${typeName}ControllerContext): ${typeName}ControllerResult;
+  setup?(ctx: ${typeName}ControllerContext): void | (() => void);
+};`;
 }
 
 function appPartPropsPrelude(): string {
@@ -2382,26 +2854,36 @@ function appPartPropsPrelude(): string {
 type PartEvent<T extends EventTarget, E extends Event> = {
   bivarianceHack(event: E & { readonly currentTarget: T }): void;
 }["bivarianceHack"];
-type PartStyle = string | Record<string, string | number | null | undefined>;
 type PartDataAttributes = {
   [Key in \`data-\${string}\`]?: PartValue<string | number | boolean>;
 };
 type PartAriaAttributes = {
   [Key in \`aria-\${string}\`]?: PartValue<string | number | boolean>;
 };
+type PartPopoverValue = "auto" | "hint" | "manual" | boolean;
+type PartPopoverTargetAction = "hide" | "show" | "toggle";
+type PartPopoverToggleEvent = Event & {
+  readonly newState: "closed" | "open";
+  readonly oldState: "closed" | "open";
+};
+type PartPopoverTargetProps = {
+  popovertarget?: PartValue<string>;
+  popovertargetaction?: PartValue<PartPopoverTargetAction>;
+  popoverTarget?: PartValue<string>;
+  popoverTargetAction?: PartValue<PartPopoverTargetAction>;
+};
 type PartCommonProps<T extends Element> = PartDataAttributes &
   PartAriaAttributes & {
     id?: PartValue<string>;
-    class?: PartValue<string | false>;
-    className?: PartValue<string | false>;
     hidden?: PartValue<boolean | "hidden" | "until-found">;
+    popover?: PartValue<PartPopoverValue>;
     role?: PartValue<string>;
-    style?: PartValue<PartStyle>;
     tabIndex?: PartValue<number>;
     tabindex?: PartValue<number>;
     title?: PartValue<string>;
     children?: Child;
     ref?: (element: T) => void;
+    onBeforeToggle?: PartEvent<T, PartPopoverToggleEvent>;
     onBlur?: PartEvent<T, FocusEvent>;
     onChange?: PartEvent<T, Event>;
     onClick?: PartEvent<T, MouseEvent>;
@@ -2411,21 +2893,34 @@ type PartCommonProps<T extends Element> = PartDataAttributes &
     onKeyUp?: PartEvent<T, KeyboardEvent>;
     onMouseDown?: PartEvent<T, MouseEvent>;
     onMouseUp?: PartEvent<T, MouseEvent>;
+    onGotPointerCapture?: PartEvent<T, PointerEvent>;
+    onLostPointerCapture?: PartEvent<T, PointerEvent>;
+    onPointerCancel?: PartEvent<T, PointerEvent>;
     onPointerDown?: PartEvent<T, PointerEvent>;
+    onPointerEnter?: PartEvent<T, PointerEvent>;
+    onPointerLeave?: PartEvent<T, PointerEvent>;
+    onPointerMove?: PartEvent<T, PointerEvent>;
+    onPointerOut?: PartEvent<T, PointerEvent>;
+    onPointerOver?: PartEvent<T, PointerEvent>;
     onPointerUp?: PartEvent<T, PointerEvent>;
     onSubmit?: PartEvent<T, SubmitEvent>;
+    onToggle?: PartEvent<T, PartPopoverToggleEvent>;
   };
 type PartHtmlProps = PartCommonProps<HTMLElement>;
-type PartButtonProps = PartCommonProps<HTMLButtonElement> & {
+type PartButtonProps = PartCommonProps<HTMLButtonElement> & PartPopoverTargetProps & {
   disabled?: PartValue<boolean>;
+  name?: PartValue<string>;
   type?: PartValue<"button" | "submit" | "reset">;
   value?: PartValue<string | number>;
 };
-type PartInputProps = PartCommonProps<HTMLInputElement> & {
+type PartInputProps = PartCommonProps<HTMLInputElement> & PartPopoverTargetProps & {
   checked?: PartValue<boolean>;
   disabled?: PartValue<boolean>;
+  max?: PartValue<number>;
+  min?: PartValue<number>;
   name?: PartValue<string>;
   placeholder?: PartValue<string>;
+  step?: PartValue<number>;
   type?: PartValue<string>;
   value?: PartValue<string | number | readonly string[]>;
 };
@@ -2446,6 +2941,13 @@ type PartAnchorProps = PartCommonProps<HTMLAnchorElement> & {
   href?: PartValue<string>;
   rel?: PartValue<string>;
   target?: PartValue<string>;
+};
+type PartImageProps = PartCommonProps<HTMLImageElement> & {
+  alt?: PartValue<string>;
+  height?: PartValue<string | number>;
+  loading?: PartValue<"eager" | "lazy">;
+  src?: PartValue<string>;
+  width?: PartValue<string | number>;
 };
 type PartFormProps = PartCommonProps<HTMLFormElement> & {
   action?: PartValue<string>;
@@ -2474,6 +2976,8 @@ function partPropsType(elementName: string): string {
       return "PartSelectProps";
     case "a":
       return "PartAnchorProps";
+    case "img":
+      return "PartImageProps";
     case "form":
       return "PartFormProps";
     case "svg":
@@ -2515,22 +3019,38 @@ async function writePoggersAppTypes(paths: AppPaths): Promise<string | undefined
   const styleDefinition = styleDefinitionTypes(surface);
   const appSchemaHash = structuralHash(readFileSync(paths.types, "utf8"));
   const appPreset = surface.presetType ?? '"default"';
-  const appThemeValues = surface.themeParams.length
-    ? `{\n${surface.themeParams
-        .map((param) => `  readonly ${propertyKey(param.name)}: ${param.valueType};`)
-        .join("\n")}\n}`
-    : "EmptyObject";
-  const setThemeParam = surface.themeParams.length
-    ? surface.themeParams
-        .map(
-          (param) =>
-            `export function setThemeParam(param: ${JSON.stringify(param.name)}, value: ${param.valueType}): void;`,
-        )
-        .join("\n")
-    : "export function setThemeParam(param: never, value: never): void;";
+  const appThemeName = styleThemeNameType(surface);
+  const componentStyleValueTypes = Object.values(surface.components).some(
+    (component) => component.styleValues.length > 0,
+  )
+    ? `type ComponentStyleValueKind =
+  | "number"
+  | "progress"
+  | "opacity"
+  | "ratio"
+  | "zIndex"
+  | "length"
+  | "space"
+  | "size"
+  | "radius";
+type ComponentStyleValueFor<Kind extends string> = Kind extends
+  | "number"
+  | "progress"
+  | "opacity"
+  | "ratio"
+  | "zIndex"
+  ? number
+  : Kind extends "length" | "space" | "size" | "radius"
+    ? number
+    : never;
+type ComponentStyleValues<Values extends Record<string, string>> = {
+  readonly [Value in keyof Values]: ComponentStyleValueFor<Values[Value] & string>;
+};`
+    : "";
   await writeFile(
     output,
-    `import type { App as AppSpec } from ${JSON.stringify(appSpecImport)};
+    `import type { Preset as VisualPreset } from "@poggers/kit/style";
+import type { App as AppSpec } from ${JSON.stringify(appSpecImport)};
 
 export const appSchemaHash: ${JSON.stringify(appSchemaHash)};
 
@@ -2540,6 +3060,7 @@ type Signal<T> = {
   (value: T): void;
 };
 type Child = Node | string | number | boolean | null | undefined | Child[] | (() => Child);
+${componentStyleValueTypes}
 type CommandReceipt<E = never> = Promise<
   { ok: true; cursor?: number } | { ok: false; error: E; data?: unknown }
 >;
@@ -2550,9 +3071,9 @@ type SyncMeta = {
   error: string | null;
 };
 type AppPreset = ${appPreset};
-type AppThemeValues = ${appThemeValues};
 export type StartConnect = unknown;
 type RootProps = { connect?: StartConnect };
+type AppThemeName = ${appThemeName};
 ${appPartPropsPrelude()}
 
 ${navigationExports}
@@ -2573,9 +3094,11 @@ export function usePreset(): AppPreset;
 
 export function setPreset(preset: AppPreset): void;
 
-export function useTheme(): AppThemeValues;
+export function useThemeName(): AppThemeName;
 
-${setThemeParam}
+export function setTheme(theme: AppThemeName): void;
+
+export function initialize(): Promise<void>;
 
 export function start(connect?: StartConnect): void;
 
@@ -2588,277 +3111,38 @@ export default Root;
   return output;
 }
 
-function renderPoggersCss(def: {
-  defaultPreset?: string;
-  presets?: Record<string, Record<string, Record<string, unknown>>>;
-}): string {
-  const lines = [
-    ":root {",
-    "  --pg-density: 0.5;",
-    "}",
-    "",
-    "*, *::before, *::after {",
-    "  box-sizing: border-box;",
-    "  margin: 0;",
-    "  padding: 0;",
-    "  min-width: 0;",
-    "}",
-    "",
-    "html {",
-    "  height: 100%;",
-    "  -webkit-text-size-adjust: 100%;",
-    "}",
-    "",
-    "body, #root { min-height: 100%; }",
-    "",
-    "body {",
-    "  line-height: 1;",
-    "  text-rendering: optimizeSpeed;",
-    "  -webkit-font-smoothing: antialiased;",
-    "  -moz-osx-font-smoothing: grayscale;",
-    "}",
-    "",
-    "a {",
-    "  color: inherit;",
-    "  text-decoration: none;",
-    "}",
-    "",
-    "ol, ul { list-style: none; }",
-    "",
-    "h1, h2, h3, h4, h5, h6 { font: inherit; }",
-    "",
-    "button, input, textarea, select, option {",
-    "  appearance: none;",
-    "  -webkit-appearance: none;",
-    "  border: 0;",
-    "  border-radius: 0;",
-    "  background: transparent;",
-    "  font: inherit;",
-    "  color: inherit;",
-    "}",
-    "",
-    "button, select { cursor: pointer; }",
-    "",
-    "button:disabled, input:disabled, textarea:disabled, select:disabled { cursor: not-allowed; }",
-    "",
-    "button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, a:focus-visible {",
-    "  outline: 2px solid currentColor;",
-    "  outline-offset: 2px;",
-    "}",
-    "",
-    "textarea { resize: vertical; }",
-    "",
-    "img, picture, video, canvas, svg {",
-    "  display: block;",
-    "  max-width: 100%;",
-    "  height: auto;",
-    "}",
-    "",
-    "table {",
-    "  border-collapse: collapse;",
-    "  border-spacing: 0;",
-    "}",
-    "",
-    "p, h1, h2, h3, h4, h5, h6 { overflow-wrap: break-word; }",
-    "",
-    "[hidden] { display: none !important; }",
-    "",
-  ];
+async function appendStyleFilesToBuildOutput(
+  outputs: Blob[],
+  styleFiles: string[] | undefined,
+  fallbackOutput: string,
+): Promise<void> {
+  const extraCss = await readStyleFiles(styleFiles);
+  if (!extraCss) return;
 
-  for (const [presetName, preset] of Object.entries(def.presets ?? {})) {
-    const isDefaultPreset = presetName === def.defaultPreset;
-    const scope = isDefaultPreset ? "" : `:root[data-poggers-preset="${cssEscape(presetName)}"] `;
-    for (const [styleName, slots] of Object.entries(preset ?? {})) {
-      for (const [slotName, slotDef] of Object.entries(slots ?? {})) {
-        const semantic = resolveStyleSlot(slotDef, presetName);
-        const declarations = semanticToCss(semantic);
-        if (declarations.length === 0) continue;
-        lines.push(
-          `${scope}.pg-${kebab(styleName)}__${kebab(slotName)}, ${scope}[data-pg-component="${cssEscape(
-            styleName,
-          )}"][data-pg-part="${cssEscape(slotName)}"] {`,
-        );
-        for (const declaration of declarations) lines.push(`  ${declaration}`);
-        lines.push("}", "");
-      }
-    }
+  const cssOutput = (outputs as Array<Blob & { path?: string }>).find((output) =>
+    (output.path ?? "").endsWith(".css"),
+  );
+  if (cssOutput?.path) {
+    const current = existsSync(cssOutput.path) ? await readFile(cssOutput.path, "utf8") : "";
+    await writeFile(cssOutput.path, joinCss(current, extraCss), "utf8");
+    return;
   }
 
-  if (def.defaultPreset) {
-    lines.push(
-      `:root:not([data-poggers-preset]) { --pg-active-preset: "${cssEscape(
-        String(def.defaultPreset),
-      )}"; }`,
-      "",
-    );
-  }
-
-  return `${lines.join("\n")}\n`;
-}
-
-function resolveStyleSlot(slotDef: unknown, preset: string): Record<string, unknown> {
-  if (typeof slotDef !== "function") return asRecord(slotDef);
-  try {
-    return asRecord(
-      (slotDef as (ctx: unknown) => unknown)({
-        preset,
-        variants: {},
-        state: {},
-        theme: {},
-      }),
-    );
-  } catch {
-    return {};
-  }
-}
-
-function semanticToCss(value: Record<string, unknown>): string[] {
-  const css: Record<string, string | number> = {};
-  collectCss(value, css);
-  return Object.entries(css).map(([property, propertyValue]) => `${property}: ${propertyValue};`);
-}
-
-function collectCss(value: unknown, css: Record<string, string | number>) {
-  if (!value || typeof value !== "object") return;
-  for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
-    if (raw == null || raw === false) continue;
-    if (key === "layout") {
-      applyLayout(raw, css);
-      continue;
-    }
-    if (key === "surface") {
-      applySurface(raw, css);
-      continue;
-    }
-    if (key === "typography") {
-      applyTypography(raw, css);
-      continue;
-    }
-    if (key === "shape") {
-      applyShape(raw, css);
-      continue;
-    }
-    if (key === "size") {
-      applySize(raw, css);
-      continue;
-    }
-    if (key === "motion") {
-      applyMotion(raw, css);
-      continue;
-    }
-    if (isCssProperty(key) && isCssValue(raw)) {
-      const property = kebab(key);
-      css[property] = formatCssValue(property, raw);
-      continue;
-    }
-    collectCss(raw, css);
-  }
-}
-
-function applyLayout(value: unknown, css: Record<string, string | number>) {
-  const layout = asRecord(value);
-  const kind = String(layout.kind ?? layout.display ?? "");
-  if (kind === "inlineCenter" || kind === "inline-center") {
-    css.display = "inline-flex";
-    css["align-items"] = "center";
-    css["justify-content"] = "center";
-  }
-  if (isCssValue(layout.display) && !css.display)
-    css.display = formatCssValue("display", layout.display);
-  if (isCssValue(layout.alignItems))
-    css["align-items"] = formatCssValue("align-items", layout.alignItems);
-  if (isCssValue(layout.justifyContent))
-    css["justify-content"] = formatCssValue("justify-content", layout.justifyContent);
-  if (kind === "stack") {
-    css.display = "flex";
-    css["flex-direction"] = "column";
-  }
-  if (isCssValue(layout.gap)) css.gap = formatCssValue("gap", layout.gap);
-  if (isCssValue(layout.padding)) css.padding = formatCssValue("padding", layout.padding);
-}
-
-function applySurface(value: unknown, css: Record<string, string | number>) {
-  const surface = asRecord(value);
-  if (isCssValue(surface.background))
-    css.background = formatCssValue("background", surface.background);
-  if (isCssValue(surface.color)) css.color = formatCssValue("color", surface.color);
-  if (isCssValue(surface.border)) css.border = formatCssValue("border", surface.border);
-  if (isCssValue(surface.shadow)) css["box-shadow"] = formatCssValue("box-shadow", surface.shadow);
-}
-
-function applyTypography(value: unknown, css: Record<string, string | number>) {
-  const typography = asRecord(value);
-  if (isCssValue(typography.size)) css["font-size"] = formatCssValue("font-size", typography.size);
-  if (isCssValue(typography.weight))
-    css["font-weight"] = formatCssValue("font-weight", typography.weight);
-  if (isCssValue(typography.lineHeight))
-    css["line-height"] = formatCssValue("line-height", typography.lineHeight);
-}
-
-function applyShape(value: unknown, css: Record<string, string | number>) {
-  const shape = asRecord(value);
-  if (isCssValue(shape.radius))
-    css["border-radius"] = formatCssValue("border-radius", shape.radius);
-}
-
-function applySize(value: unknown, css: Record<string, string | number>) {
-  const size = asRecord(value);
-  if (isCssValue(size.width)) css.width = formatCssValue("width", size.width);
-  if (isCssValue(size.minWidth)) css["min-width"] = formatCssValue("min-width", size.minWidth);
-  if (isCssValue(size.height)) css.height = formatCssValue("height", size.height);
-  if (isCssValue(size.minHeight)) css["min-height"] = formatCssValue("min-height", size.minHeight);
-  if (isCssValue(size.padding)) css.padding = formatCssValue("padding", size.padding);
-}
-
-function applyMotion(value: unknown, css: Record<string, string | number>) {
-  const motion = asRecord(value);
-  if (motion.pressable || motion.transition) {
-    css.transition = "transform 160ms ease, background 160ms ease, border-color 160ms ease";
-  }
-}
-
-function isCssProperty(key: string): boolean {
-  return key.startsWith("--") || /^[a-z][a-zA-Z0-9]*$/.test(key);
-}
-
-function isCssValue(value: unknown): value is string | number {
-  return typeof value === "string" || typeof value === "number";
-}
-
-function formatCssValue(property: string, value: string | number): string | number {
-  if (typeof value !== "number" || value === 0) return value;
-  if (unitlessCssProperties.has(property)) return value;
-  return `${value}px`;
-}
-
-const unitlessCssProperties = new Set([
-  "flex",
-  "font-weight",
-  "line-height",
-  "opacity",
-  "order",
-  "z-index",
-]);
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
-}
-
-function cssEscape(value: string): string {
-  return value.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
+  await mkdir(dirname(fallbackOutput), { recursive: true });
+  await writeFile(fallbackOutput, extraCss, "utf8");
 }
 
 function collectForbiddenAppStyling(file: string, source: string, issues: AppConventionIssue[]) {
   if (/\bclassName\s*=|\bclass\s*=/.test(source)) {
     issues.push({
       file,
-      message: "app.ts must not use class/className; style through semantic components.",
+      message: "app.ts must not use class/className; define visual rules in presets.",
     });
   }
   if (/\bstyle\s*=/.test(source)) {
     issues.push({
       file,
-      message: "app.ts must not use inline style; put visual rules in app styles.",
+      message: "app.ts must not use inline style; define visual rules in presets.",
     });
   }
 }
@@ -2867,15 +3151,13 @@ function collectForbiddenUiStyling(file: string, source: string, issues: AppConv
   if (/\bclassName\s*=|\bclass\s*=/.test(source)) {
     issues.push({
       file,
-      message:
-        "ui files must not use class/className in strict style apps; render generated component parts.",
+      message: "ui files must not use class/className; render generated component parts.",
     });
   }
   if (/\bstyle\s*=/.test(source)) {
     issues.push({
       file,
-      message:
-        "ui files must not use inline style in strict style apps; put visual rules in app styles.",
+      message: "ui files must not use inline style; define visual rules in presets.",
     });
   }
 }
@@ -2883,10 +3165,7 @@ function collectForbiddenUiStyling(file: string, source: string, issues: AppConv
 function collectUiFileConventions(uiDir: string, file: string, issues: AppConventionIssue[]) {
   const name = basename(file).replace(/\.[cm]?tsx?$/, "");
   if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name)) {
-    issues.push({
-      file,
-      message: "ui file names must be kebab-case.",
-    });
+    issues.push({ file, message: "ui file names must be kebab-case." });
   }
 
   const uiPath = relative(uiDir, file);
@@ -2903,8 +3182,8 @@ function sourceFiles(dir: string): string[] {
   const files: string[] = [];
   for (const entry of readdirSync(dir)) {
     const path = resolve(dir, entry);
-    const stat = statSync(path);
-    if (stat.isDirectory()) {
+    const info = statSync(path);
+    if (info.isDirectory()) {
       files.push(...sourceFiles(path));
       continue;
     }
@@ -2924,13 +3203,12 @@ function serverEntrypointSource(
   title?: string,
 ): string {
   const workerImport = paths.worker
-    ? `import * as workerModule from ${JSON.stringify(importSpecifier(serverEntrypoint, paths.worker))};
-`
+    ? `import * as workerModule from ${JSON.stringify(importSpecifier(serverEntrypoint, paths.worker))};\n`
     : "";
   const workerSetup = paths.worker
     ? `const workerExports = workerModule as Record<string, any>;
 const worker = workerExports.default ?? workerExports.worker;
-const deps = typeof workerExports.createWorkerDeps === "function"
+const workerDeps = typeof workerExports.createWorkerDeps === "function"
   ? await workerExports.createWorkerDeps()
   : "deps" in workerExports
     ? await workerExports.deps
@@ -2938,7 +3216,7 @@ const deps = typeof workerExports.createWorkerDeps === "function"
 const workerConfig = worker
   ? {
       worker,
-      deps,
+      deps: workerDeps,
       workerId: workerExports.workerId ?? ${JSON.stringify(`${titleFromDir(paths.appDir)}-worker`)},
       actor: workerExports.workerActor,
       store: workerExports.workerStore,
@@ -2947,31 +3225,20 @@ const workerConfig = worker
 `
     : "const workerConfig = undefined;\n";
   const depsImport = paths.deps
-    ? `import * as depsModule from ${JSON.stringify(importSpecifier(serverEntrypoint, paths.deps))};
-`
+    ? `import * as depsModule from ${JSON.stringify(importSpecifier(serverEntrypoint, paths.deps))};\n`
     : "";
   const depsSetup = paths.deps
     ? "const depsExports = depsModule as Record<string, any>;\n"
     : "const depsExports = {} as Record<string, any>;\n";
   const migrationImport = migrationRegistry
-    ? `import * as migrationRegistry from ${JSON.stringify(importSpecifier(serverEntrypoint, migrationRegistry))};
-`
+    ? `import * as migrationRegistry from ${JSON.stringify(importSpecifier(serverEntrypoint, migrationRegistry))};\n`
     : "const migrationRegistry = { hash: undefined, migrations: [] };\n";
 
   return `import * as apiModule from ${JSON.stringify(importSpecifier(serverEntrypoint, appEntrypoint))};
 import { defineApp } from "@poggers/kit";
 import { installAppMigrations, resolveDependencyMount, serveApp } from "@poggers/kit/app";
-${workerImport}
-${depsImport}
-${migrationImport}
-${workerSetup}
-${depsSetup}
+${workerImport}${depsImport}${migrationImport}${workerSetup}${depsSetup}
 const apiExports = apiModule as Record<string, any>;
-const depsDefault = depsExports.default;
-const depsMounts =
-  depsDefault && typeof depsDefault === "object" && !Array.isArray(depsDefault)
-    ? depsDefault
-    : {};
 const rawApi = apiExports.api ?? apiExports.default;
 if (!rawApi) throw new Error("App API module must export api or default.");
 const api = installAppMigrations(rawApi.def?.resources ? rawApi : defineApp(rawApi), {
@@ -2982,42 +3249,18 @@ const browserProgram = api.def?.programs?.browser;
 const serverProgram = api.def?.programs?.server;
 const programEnv = serverProgram ? "server" : browserProgram ? "browser" : undefined;
 const program = serverProgram ?? browserProgram;
-const defaultDepsMount =
-  programEnv && depsDefault !== undefined && !(programEnv in depsMounts) ? depsDefault : undefined;
-const programDepsMount = programEnv
-  ? api.def?.deps?.[programEnv] ??
-    depsMounts[programEnv] ??
-    defaultDepsMount ??
-    apiExports[\`create\${programEnv[0].toUpperCase()}\${programEnv.slice(1)}Deps\`] ??
-    apiExports.createProgramDeps ??
-    depsExports[\`create\${programEnv[0].toUpperCase()}\${programEnv.slice(1)}Deps\`] ??
-    depsExports.createProgramDeps
-  : undefined;
-const legacyProgramDepsMount = programEnv
-  ? \`\${programEnv}Deps\` in apiExports
-    ? apiExports[\`\${programEnv}Deps\`]
-    : \`\${programEnv}Deps\` in depsExports
-      ? depsExports[\`\${programEnv}Deps\`]
-      : programEnv in depsMounts
-        ? depsMounts[programEnv]
-        : defaultDepsMount ??
-          ("programDeps" in apiExports
-            ? apiExports.programDeps
-            : "programDeps" in depsExports
-              ? depsExports.programDeps
-              : {})
+const depsMount = programEnv
+  ? api.def?.deps?.[programEnv] ?? depsExports.default ?? {}
   : {};
-const programDeps = await resolveDependencyMount(
-  programDepsMount ?? legacyProgramDepsMount
-);
+const programDeps = await resolveDependencyMount(depsMount);
 const programConfig = program && programEnv
   ? {
       env: programEnv,
       program,
       deps: programDeps,
-      programId: apiExports.programId ?? depsExports.programId ?? \`${titleFromDir(paths.appDir)}-\${programEnv}\`,
-      actor: apiExports.programActor ?? depsExports.programActor,
-      store: apiExports.programStore ?? depsExports.programStore,
+      programId: apiExports.programId ?? \`${titleFromDir(paths.appDir)}-\${programEnv}\`,
+      actor: apiExports.programActor,
+      store: apiExports.programStore,
     }
   : undefined;
 
@@ -3044,7 +3287,10 @@ process.on("SIGTERM", () => {
 `;
 }
 
-async function readBuildOutputs(outputs: Blob[]): Promise<{ script?: string; style?: string }> {
+async function readBuildOutputs(
+  outputs: Blob[],
+  styleFiles?: string[],
+): Promise<{ script?: string; style?: string }> {
   let script: string | undefined;
   let style: string | undefined;
   for (const output of outputs as Array<Blob & { path?: string }>) {
@@ -3055,15 +3301,38 @@ async function readBuildOutputs(outputs: Blob[]): Promise<{ script?: string; sty
       script = await output.text();
     }
   }
-  return { script, style };
+  return { script, style: await appendStyleFiles(style, styleFiles) };
+}
+
+async function appendStyleFiles(
+  style: string | undefined,
+  styleFiles: string[] | undefined,
+): Promise<string | undefined> {
+  return joinCss(style, await readStyleFiles(styleFiles)) || undefined;
+}
+
+async function readStyleFiles(styleFiles: string[] | undefined): Promise<string | undefined> {
+  const chunks: string[] = [];
+  for (const path of styleFiles ?? []) {
+    if (!existsSync(path)) continue;
+    const css = await readFile(path, "utf8");
+    if (css.trim()) chunks.push(css);
+  }
+  return chunks.length ? chunks.join("\n") : undefined;
+}
+
+function joinCss(left: string | undefined, right: string | undefined): string {
+  if (!left) return right ?? "";
+  if (!right) return left;
+  return `${left}\n${right}`;
 }
 
 function frameworkBuildDir(paths: AppPaths): string {
   return resolve(paths.appDir, ".poggers/build");
 }
 
-function frameworkDevDir(paths: AppPaths): string {
-  return resolve(paths.appDir, ".poggers/dev");
+function frameworkDevDir(paths: AppPaths, scope = "shared"): string {
+  return resolve(paths.appDir, ".poggers/dev", scope);
 }
 
 function importSpecifier(fromFile: string, targetPath: string): string {
@@ -3084,12 +3353,4 @@ function pascalIdentifier(value: string): string {
   const parts = value.match(/[A-Za-z0-9]+/g) ?? ["Value"];
   const name = parts.map(capitalize).join("");
   return /^[A-Za-z_$]/.test(name) ? name : `Value${name}`;
-}
-
-function kebab(value: string): string {
-  return value
-    .replace(/([a-z0-9])([A-Z])/g, "$1-$2")
-    .replace(/[^a-zA-Z0-9_-]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .toLowerCase();
 }

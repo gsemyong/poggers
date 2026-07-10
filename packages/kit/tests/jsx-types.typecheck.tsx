@@ -58,6 +58,30 @@ const htmlOk = (
   </form>
 );
 
+const popoverOk = (
+  <section>
+    <button popoverTarget="menu" popoverTargetAction="toggle">
+      Toggle
+    </button>
+    <div
+      id="menu"
+      popover="auto"
+      onBeforeToggle={(event) => {
+        const state: "closed" | "open" = event.newState;
+        void state;
+      }}
+      onToggle={(event) => {
+        event.currentTarget.hidePopover();
+        const state: "closed" | "open" = event.oldState;
+        void state;
+      }}
+    />
+  </section>
+);
+
+// @ts-expect-error popover target actions are narrowed to platform-valid values.
+const _invalidPopoverTargetAction = <button popoverTargetAction="dismiss" />;
+
 const svgOk = (
   <svg viewBox="0 0 10 10" aria-hidden="true">
     <path d="M0 0h10" strokeWidth={2} strokeLinecap="round" />
@@ -89,5 +113,6 @@ const _invalidStyleProp = <div style={{ definitelyNotCss: "red" }} />;
 
 void componentOk;
 void htmlOk;
+void popoverOk;
 void svgOk;
 void customElementOk;

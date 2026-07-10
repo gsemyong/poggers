@@ -78,12 +78,16 @@ export type Props = Record<string, unknown> & {
 };
 export type Component<P extends object = Record<string, never>> = (props: P) => Child;
 export type HotRenderState = {
+  keyed?: Record<string, unknown>;
+  values?: unknown[];
   signals?: Signal<unknown>[];
+  mounted?: boolean;
 };
 export declare function runtimeSignal<T>(initialValue: T): Signal<T>;
-export declare function signal<T>(initialValue: T): Signal<T>;
+export declare function signal<T>(initialValue: T, hotKey?: string): Signal<T>;
 export declare function computed<T>(getter: (previousValue?: T) => T): () => T;
 export declare function effect(fn: () => void | (() => void)): () => void;
+export declare function untrack<T>(fn: () => T): T;
 export declare function onMount(fn: () => void | (() => void)): void;
 export declare function defineUI<
   Spec extends AppSpec,
@@ -105,11 +109,13 @@ export declare const jsxs: typeof jsx;
 export declare function Fragment(props: { children?: Child }): Child;
 export declare function For<Items extends readonly unknown[]>(props: {
   each: Items;
+  by?: (item: Items[number], index: number) => string | number;
   children: (item: Items[number], index: number) => Child;
   fallback?: Child;
 }): Child;
 export declare function Show(props: { when: unknown; children: Child; fallback?: Child }): Child;
 export declare function reactiveValue<T>(source: () => T): T;
+export declare function currentStructuralKey(): string | undefined;
 export declare function createBrowserConnectOptions(): ConnectOpts | undefined;
 export type {
   CSSProperties,

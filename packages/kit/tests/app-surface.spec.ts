@@ -184,8 +184,8 @@ describe("app surface", () => {
       app: { name: "Typed App" },
       pwa: {
         name: "Typed App",
-        themeColor: "#111827",
-        backgroundColor: "#ffffff",
+        themeColor: "oklch(21.01% 0.0318 264.66)",
+        backgroundColor: "oklch(100% 0 89.88)",
       },
       navigation: {
         home: "/",

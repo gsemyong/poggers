@@ -23,7 +23,19 @@
       "deps": ["${configDir}/src/deps.ts"],
       "types": ["${configDir}/src/types.ts"],
       "src/*": ["${configDir}/src/*"],
-      "ui/*": ["${configDir}/src/ui/*"]
+      "ui/*": ["${configDir}/src/ui/*"],
+      "ai": [
+        "${configDir}/../../packages/kit/types/vendor/ai.d.ts",
+        "${configDir}/node_modules/@poggers/kit/types/vendor/ai.d.ts",
+        "${configDir}/../node_modules/@poggers/kit/types/vendor/ai.d.ts",
+        "${configDir}/../../node_modules/@poggers/kit/types/vendor/ai.d.ts"
+      ],
+      "zod/v4-mini": [
+        "${configDir}/../../packages/kit/types/vendor/zod-v4-mini.d.ts",
+        "${configDir}/node_modules/@poggers/kit/types/vendor/zod-v4-mini.d.ts",
+        "${configDir}/../node_modules/@poggers/kit/types/vendor/zod-v4-mini.d.ts",
+        "${configDir}/../../node_modules/@poggers/kit/types/vendor/zod-v4-mini.d.ts"
+      ]
     }
   },
   "include": [
@@ -31,5 +43,5 @@
     "${configDir}/src/**/*.tsx",
     "${configDir}/src/**/*.d.ts"
   ],
-  "exclude": ["${configDir}/src/deps.ts", "${configDir}/src/migrations/**/*.ts"]
+  "exclude": ["${configDir}/src/migrations/**/*.ts"]
 }
