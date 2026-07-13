@@ -1,4 +1,2 @@
-export type PoggersEnv = Record<string, string | undefined>;
-
-export function env(name: string): string | undefined;
-export function env(): Readonly<PoggersEnv>;
+export declare function env(name: string): string | undefined;
+export declare function env(): Readonly<Record<string, string | undefined>>;

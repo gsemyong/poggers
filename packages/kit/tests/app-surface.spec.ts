@@ -1,8 +1,152 @@
 import { describe, expect, it } from "bun:test";
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { defineApp } from "../src/app";
 import { validateServerMessage } from "../src/protocol";
 
 describe("app surface", () => {
+  it("keeps app materialization behind the internal runtime boundary", async () => {
+    const [source, declaration] = await Promise.all([
+      readFile(resolve(import.meta.dir, "../src/index.ts"), "utf8"),
+      readFile(resolve(import.meta.dir, "../types/index.d.ts"), "utf8"),
+    ]);
+    expect(source).not.toMatch(/\bdefineApp\b/);
+    expect(declaration).not.toMatch(/\bdefineApp\b/);
+  });
+
+  it("keeps removed component declarations out of the destructive migration", async () => {
+    const source = await readFile(resolve(import.meta.dir, "../types/app.d.ts"), "utf8");
+    const forbidden = [
+      "ComponentDelayName",
+      "ComponentDerived",
+      "ComponentDerivedContext",
+      "ComponentEffectContext",
+      "ComponentEffectName",
+      "ComponentEffects",
+      "ComponentGuardName",
+      "ComponentGuards",
+      "ComponentMachineDefinition",
+      "ComponentMachineImplementation",
+      "ComponentMachineInvocation",
+      "ComponentMachineRun",
+      "ComponentMachineScope",
+      "ComponentMachineStateNode",
+      "ComponentMachineTransition",
+      "ComponentMachineTransitions",
+      "ComponentMachineUpdate",
+      "ComponentPublicActionName",
+      "ComponentPublicValueName",
+      "ComponentState",
+      "ComponentStatus",
+      "ComponentStatusView",
+      "ComponentStyleValues",
+      "ComponentView",
+      "ComponentViewContext",
+      "ComponentViewPart",
+    ];
+    const names = forbidden.filter((name) =>
+      new RegExp(`^export type ${name}(?:<|\\s|=)`, "m").test(source),
+    );
+    expect(names).toEqual([]);
+  });
+
+  it("keeps the public UI declaration intentionally shallow", async () => {
+    const source = await readFile(resolve(import.meta.dir, "../types/ui-public.d.ts"), "utf8");
+    expect(source).toContain("For, Show, effect");
+    expect(source).toContain("Child, VirtualForOptions");
+    expect(source).not.toContain("render");
+    expect(source).not.toContain("createBrowserConnectOptions");
+    expect(source).not.toContain("StyleX");
+    expect(source.split("\n")).toHaveLength(3);
+  });
+
+  it("keeps the public style surface author-facing rather than backend-facing", async () => {
+    const source = await readFile(resolve(import.meta.dir, "../src/preset.ts"), "utf8");
+    for (const name of [
+      "Preset",
+      "VisualFragment",
+      "VisualTokenRef",
+      "PresetTokens",
+      "VisualValueRef",
+    ]) {
+      expect(source).toContain(name);
+    }
+    expect(source).not.toContain('export type * from "./visual"');
+    expect(source).not.toContain("StyleX");
+    expect(source).not.toContain("Anime");
+    expect(source).not.toContain("PreText");
+  });
+
+  it("keeps semantic accessibility ownership out of the visual runtime", async () => {
+    const source = await readFile(resolve(import.meta.dir, "../src/visual-runtime.ts"), "utf8");
+    expect(source).not.toMatch(/\b(?:aria-hidden|inert)\b/);
+  });
+
+  it("ships declarations for the exact semantic, visual, and collection surface", async () => {
+    const [app, visual, ui, jsx] = await Promise.all(
+      ["app", "visual", "ui", "jsx-types"].map((name) =>
+        readFile(resolve(import.meta.dir, `../types/${name}.d.ts`), "utf8"),
+      ),
+    );
+    expect(app).not.toContain("export type AriaRole");
+    expect(app).not.toContain("export type PinchGesture");
+    expect(app).not.toContain("export type DragGesture");
+    expect(app).toContain("readonly appearance: PresetAppearance<Spec>");
+    expect(app).toContain("readonly setAppearance:");
+    expect(app).not.toContain("popoverOpen?: boolean");
+    expect(app).not.toContain("dialogOpen?:");
+    expect(app).toContain('| "angle"');
+    expect(app).toContain('| "time"');
+    expect(jsx).not.toContain("[Key in `aria-${string}`]");
+    expect(jsx).toContain('"aria-expanded"?: AttributeValue<Booleanish>');
+    expect(app).not.toContain("onClick?: ComponentEventHandler");
+    expect(app).not.toContain("popoverTargetAction");
+    expect(app).not.toContain("readonly setPreset:");
+    expect(app).not.toContain("readonly setTheme:");
+    expect(visual).not.toContain("presentations");
+    expect(visual).toContain("readonly delay?");
+    expect(visual).not.toContain("type DragGestureVisual");
+    expect(visual).not.toContain("type PinchGestureVisual");
+    expect(visual).toContain("readonly all?:");
+    expect(visual).not.toContain("= Partial<{\n    readonly [Part");
+    expect(ui).toContain("virtualItemPosition");
+    expect(ui).toContain("NoInfer<Extract<Items[number][Key], ForKey>>");
+  });
+
+  it("keeps the private statechart backend out of every public declaration", async () => {
+    const declarationNames = ["app", "index", "preset", "runtime", "ui-public", "visual"];
+    const declarations = await Promise.all(
+      declarationNames.map((name) =>
+        readFile(resolve(import.meta.dir, `../types/${name}.d.ts`), "utf8"),
+      ),
+    );
+    expect(declarations.join("\n")).not.toMatch(/xstate/i);
+  });
+
+  it("emits no author-facing any and keeps tasks capability-minimal", async () => {
+    const declarationNames = ["app", "ui-public", "preset", "visual"];
+    const declarations = await Promise.all(
+      declarationNames.map((name) =>
+        readFile(resolve(import.meta.dir, `../types/${name}.d.ts`), "utf8"),
+      ),
+    );
+    const publicSurface = declarations
+      .join("\n")
+      .replaceAll("readonly any:", "readonly anySelector:")
+      .replaceAll("any?: PwaIconDef", "anyPurpose?: PwaIconDef");
+    expect(publicSurface).not.toMatch(/\bany\b/);
+
+    const app = declarations[0]!;
+    const taskScope = app.slice(
+      app.indexOf("export type ComponentTaskScope"),
+      app.indexOf("type ComponentTaskDefinitions"),
+    );
+    expect(taskScope).toContain("readonly signal: AbortSignal");
+    expect(taskScope).not.toContain("setAppearance");
+    expect(taskScope).not.toContain("resources");
+    expect(taskScope).not.toContain("navigation");
+  });
+
   it("allows defineApp without Actor or identify", () => {
     const api = defineApp<{
       Resources: {
@@ -161,7 +305,7 @@ describe("app surface", () => {
     expect(typeof api.def.programs?.browser).toBe("function");
   });
 
-  it("keeps embedded UI, navigation, PWA, and deps generic-first", () => {
+  it("keeps the app definition, navigation, PWA, and deps generic-first", () => {
     const api = defineApp<{
       Resources: {
         counter: {
@@ -178,6 +322,9 @@ describe("app surface", () => {
       Navigation: {
         home: {};
         counter: { id: string };
+      };
+      Components: {
+        App: { Parts: { Root: "main" } };
       };
     }>({
       version: 1,
@@ -221,26 +368,30 @@ describe("app surface", () => {
           deps.now();
         },
       },
-      ui(ctx) {
-        ctx.nav.home();
-        ctx.nav.counter({ id: "main" });
-        // @ts-expect-error counter navigation requires an id.
-        ctx.nav.counter();
+      components: {
+        App: {
+          render({ navigation, parts: { Root }, resources, screen }) {
+            navigation.home();
+            navigation.counter({ id: "main" });
+            // @ts-expect-error counter navigation requires an id.
+            navigation.counter();
 
-        const screen = ctx.screen();
-        if (screen.name === "counter") {
-          const counter = ctx.useCounter({ id: screen.params.id });
-          void counter.increment();
-          void counter.count;
-        }
-        return null;
+            if (screen.name === "counter") {
+              const counter = resources.counter({ id: screen.params.id });
+              void counter.increment();
+              void counter.count;
+            }
+            return Root();
+          },
+        },
       },
+      root: "App",
     });
 
     expect(api.def.app?.name).toBe("Typed App");
     expect(api.def.pwa?.name).toBe("Typed App");
     expect(api.def.navigation?.counter).toBe("/counter/:id");
-    expect(typeof api.def.ui).toBe("function");
+    expect(api.def.root).toBe("App");
   });
 });
 

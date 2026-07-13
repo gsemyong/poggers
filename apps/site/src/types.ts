@@ -1,5 +1,7 @@
 export type Section = { heading: string; body: string };
 
+export type NavItem = { slug: string; title: string };
+
 export type Page = {
   slug: string;
   title: string;
@@ -10,7 +12,7 @@ export type Page = {
 export type SiteState = { pages: Page[] };
 export type SiteViews = {
   page: Page;
-  nav: Array<{ slug: string; title: string }>;
+  nav: NavItem[];
 };
 export type SiteCommands = { recordVisit: { args: []; error: never } };
 
@@ -30,14 +32,6 @@ export type App = {
   };
   Components: {
     SiteShell: {
-      Input: {
-        activeSlug: string;
-        navItems: Array<{ slug: string; title: string }>;
-      };
-      Derived: {
-        activeSlug: string;
-        navItems: Array<{ slug: string; title: string }>;
-      };
       Parts: {
         Root: "main";
         Sidebar: "aside";
@@ -48,13 +42,14 @@ export type App = {
     };
     NavButton: {
       Input: { active: boolean; label: string; navigate(): void };
-      Variants: { active: "yes" | "no" };
-      Actions: { navigate(): void };
+      Values: { active: boolean };
+      States: "active";
+      Events: { navigate(): void };
       Parts: { Root: "button"; Label: "span" };
     };
     PageHero: {
       Input: { page: Page };
-      Derived: { title: string; summary: string; sections: Section[] };
+      Values: { title: string; summary: string; sections: Section[] };
       Parts: {
         Root: "section";
         Mark: "div";
@@ -70,29 +65,6 @@ export type App = {
     };
   };
   Styles: {
-    Presets: {
-      docs: {
-        Tokens: {
-          color:
-            | "canvas"
-            | "panel"
-            | "panelMuted"
-            | "text"
-            | "muted"
-            | "line"
-            | "accent"
-            | "accentSoft"
-            | "focus";
-          space: "xs" | "sm" | "md" | "lg" | "xl";
-          size: "sidebar" | "content" | "measure";
-          radius: "control" | "panel";
-          shadow: "panel";
-          font: "body" | "display" | "mono";
-          motion: "quick" | "settle";
-        };
-        Themes: "default";
-        Containers: "compact";
-      };
-    };
+    Presets: "docs";
   };
 };

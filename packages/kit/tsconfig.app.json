@@ -18,12 +18,7 @@
     "noUncheckedIndexedAccess": true,
     "noImplicitOverride": true,
     "paths": {
-      "@poggers/app": ["${configDir}/.poggers/types/app.d.ts"],
-      "app": ["${configDir}/src/app.ts"],
-      "deps": ["${configDir}/src/deps.ts"],
-      "types": ["${configDir}/src/types.ts"],
       "src/*": ["${configDir}/src/*"],
-      "ui/*": ["${configDir}/src/ui/*"],
       "ai": [
         "${configDir}/../../packages/kit/types/vendor/ai.d.ts",
         "${configDir}/node_modules/@poggers/kit/types/vendor/ai.d.ts",

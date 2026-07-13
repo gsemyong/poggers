@@ -354,6 +354,62 @@ describe("web app shell", () => {
     });
   });
 
+  it("publishes only browser generations that compile successfully", async () => {
+    const watchDir = await mkdtemp(resolve(".poggers-live-reload-"));
+    temporaryDirs.push(watchDir);
+    const watchedFile = join(watchDir, "app.ts");
+    await writeFile(watchedFile, "globalThis.__reloadFixture = 1;\n");
+
+    let markAttempted: (() => void) | undefined;
+    const attempted = new Promise<void>((resolveAttempted) => {
+      markAttempted = resolveAttempted;
+    });
+
+    handle = serve(app, {
+      port: 0,
+      storage: createMemoryStore(),
+      web: {
+        entrypoint: watchedFile,
+        liveReload: {
+          watchDir,
+          onChange() {
+            markAttempted?.();
+          },
+        },
+      },
+    });
+
+    expect((await fetch(new URL("/client.js", handle.url))).status).toBe(200);
+    await writeFile(watchedFile, "globalThis.__reloadFixture = ;\n");
+    await Promise.race([
+      attempted,
+      Bun.sleep(2_000).then(() => {
+        throw new Error("live reload did not observe the invalid browser generation");
+      }),
+    ]);
+    await Bun.sleep(200);
+
+    const failed = (await fetch(new URL("/__poggers/live-poll?version=0", handle.url)).then(
+      (response) => response.json(),
+    )) as { changedPath: string; reload: boolean; version: number };
+    expect(failed).toEqual({ changedPath: "", reload: false, version: 0 });
+
+    await writeFile(watchedFile, "globalThis.__reloadFixture = 2;\n");
+    const deadline = Date.now() + 2_000;
+    let complete = failed;
+    while (!complete.reload && Date.now() < deadline) {
+      await Bun.sleep(20);
+      complete = (await fetch(new URL("/__poggers/live-poll?version=0", handle.url)).then(
+        (response) => response.json(),
+      )) as typeof complete;
+    }
+
+    expect(complete).toEqual({ changedPath: "app.ts", reload: true, version: 1 });
+    expect(
+      await fetch(new URL("/client.js", handle.url)).then((response) => response.text()),
+    ).toContain("__reloadFixture = 2");
+  });
+
   it("serializes rebuilds when another save arrives during hot refresh", async () => {
     const watchDir = await mkdtemp(resolve(".poggers-live-reload-"));
     temporaryDirs.push(watchDir);
@@ -364,12 +420,20 @@ describe("web app shell", () => {
     let calls = 0;
     let maxActive = 0;
     let releaseFirst: (() => void) | undefined;
+    let releaseSecond: (() => void) | undefined;
     let markFirstStarted: (() => void) | undefined;
+    let markSecondStarted: (() => void) | undefined;
     const firstStarted = new Promise<void>((resolveStarted) => {
       markFirstStarted = resolveStarted;
     });
+    const secondStarted = new Promise<void>((resolveStarted) => {
+      markSecondStarted = resolveStarted;
+    });
     const firstBlocked = new Promise<void>((resolveBlocked) => {
       releaseFirst = resolveBlocked;
+    });
+    const secondBlocked = new Promise<void>((resolveBlocked) => {
+      releaseSecond = resolveBlocked;
     });
 
     handle = serve(app, {
@@ -389,6 +453,10 @@ describe("web app shell", () => {
               markFirstStarted?.();
               await firstBlocked;
             }
+            if (calls === 2) {
+              markSecondStarted?.();
+              await secondBlocked;
+            }
             await Bun.sleep(10);
             active -= 1;
           },
@@ -402,11 +470,27 @@ describe("web app shell", () => {
     await Bun.sleep(150);
     releaseFirst?.();
 
+    await Promise.race([
+      secondStarted,
+      Bun.sleep(2_000).then(() => {
+        throw new Error("live reload did not start the queued rebuild");
+      }),
+    ]);
+    const pending = (await fetch(new URL("/__poggers/live-poll?version=0", handle.url)).then(
+      (response) => response.json(),
+    )) as { changedPath: string; reload: boolean; version: number };
+    expect(pending).toEqual({ changedPath: "", reload: false, version: 0 });
+    releaseSecond?.();
+
     const deadline = Date.now() + 2_000;
     while ((calls < 2 || active > 0) && Date.now() < deadline) await Bun.sleep(20);
 
     expect(calls).toBeGreaterThanOrEqual(2);
     expect(maxActive).toBe(1);
+    const complete = (await fetch(new URL("/__poggers/live-poll?version=0", handle.url)).then(
+      (response) => response.json(),
+    )) as { changedPath: string; reload: boolean; version: number };
+    expect(complete).toEqual({ changedPath: "app.ts", reload: true, version: 1 });
   });
 
   it("serves PWA metadata, bundled CSS, generated icon, and SPA fallback", async () => {
@@ -480,6 +564,18 @@ describe("web app shell", () => {
     const cssResponse = await fetch(new URL("/client.css", handle.url));
     expect(cssResponse.headers.get("Content-Type")).toContain("text/css");
     expect(await cssResponse.text()).toContain("oklch(21.01% 0.0318 264.66)");
+
+    const compressed = await fetch(new URL("/client.js", handle.url), {
+      headers: { "Accept-Encoding": "br" },
+    });
+    expect(compressed.headers.get("Content-Encoding")).toBe("br");
+    expect(await compressed.text()).toContain("console.log('client')");
+    const etag = compressed.headers.get("ETag");
+    expect(etag).toBeTruthy();
+    const cached = await fetch(new URL("/client.js", handle.url), {
+      headers: { "If-None-Match": etag! },
+    });
+    expect(cached.status).toBe(304);
 
     const iconResponse = await fetch(new URL("/_poggers/icon.svg", handle.url));
     expect(iconResponse.headers.get("Content-Type")).toContain("image/svg+xml");

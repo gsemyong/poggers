@@ -1,312 +1,171 @@
 # Poggers Architecture
 
-Poggers is a Bun framework for typed, event-sourced applications. It has one
-application contract, one generated app module, and one closed visual system.
+Poggers is a Bun framework for typed local-first applications. It has one generic application
+contract, one semantic DOM renderer, and one preset-driven visual target system.
 
-## Application Shape
+The normative web UI ownership model and public language are defined in `docs/web-ui-design.md`.
+Implementation and verification progress are tracked in `docs/web-ui-implementation-plan.md`.
+
+## Source Convention
 
 ```text
 src/
-  app.ts       resources, programs, component behavior, preset registry, root
-  types.ts     generic app contract and domain types
-  deps.ts      production and named dependency providers, when needed
-  presets.ts   visual tokens, themes, responsive rules, and motion
-  ui/          flat kebab-case JSX composition
-  migrations/  reviewed persistent-schema edges, when needed
+  app.tsx
+  types.ts
+  presets.ts          # or presets/<name>.ts when each preset is substantial
+  deps.ts             # only when the application has dependencies
+  migrations/         # only when a persisted resource schema changes
 ```
 
-Everything authored by an application lives under `src`. Generated declarations
-and compiler modules live under `.poggers`, are ignored by Git, and are safe to
-delete.
-
-The package TypeScript config provides `app`, `deps`, `types`, `src/*`, and
-`ui/*` aliases and checks every source file. Applications do not copy compiler
-options or commit generated declarations.
+Application tsconfigs extend `@poggers/kit/tsconfig`. Generated build artifacts are ephemeral under
+ignored `.poggers` directories and are never imported by authored application or preset source.
 
 ## Ownership
 
-| Surface                                                                  | Owner        |
-| ------------------------------------------------------------------------ | ------------ |
-| Resources, events, views, commands, programs                             | `app.ts`     |
-| Component state, derived values, actions, native bindings, accessibility | `app.ts`     |
-| DOM composition and dynamic collection rendering                         | `ui/`        |
-| Production and mock dependency implementations                           | `deps.ts`    |
-| Tokens, themes, visual states, responsive composition, motion            | `presets.ts` |
-| CSS extraction, animation scheduling, text geometry                      | Poggers Kit  |
+| Concern                                                                        | Owner         |
+| ------------------------------------------------------------------------------ | ------------- |
+| Local-first state, events, views, commands, programs, migrations               | resources     |
+| Semantic hierarchy, accessibility, data access, finite behavior, tasks         | `app.tsx`     |
+| Generic names and data shapes                                                  | `types.ts`    |
+| Production and mock dependency implementations                                 | `deps.ts`     |
+| Tokens, themes, paint, layout, responsive rules, choreography, gesture physics | presets       |
+| XState, Alien Signals, StyleX, Anime.js, virtualization                        | Kit internals |
 
-Applications cannot author raw CSS, classes, inline style, StyleX, Anime.js, or
-PreText. StyleX is the static backend; Anime.js and PreText are runtime details.
+The browser is the sole target-layout and paint authority. Poggers does not maintain a second
+absolute layout tree and applications do not author raw CSS, StyleX, Anime.js, or DOM event code.
 
-## App Contract
+## Generic Contract
 
-`types.ts` is the generic source of correctness:
+The explicit `App` generic is the source of correctness. `Components` declare input, context,
+addressable state paths, derived values, actions, tasks, gestures, and semantic
+parts. `Styles.Presets` declares the preset names; each preset infers its own token schema.
 
 ```ts
-export type App = {
-  Resources: {
-    note: {
-      Key: { id: string };
-      State: { title: string };
-      Events: { renamed: { title: string } };
-      Views: { title: string };
-      Commands: {
-        rename: { args: [title: string]; event: "renamed"; error: "empty" };
-      };
-    };
-  };
-  Deps: { logger: { write(message: string): Promise<void> } };
+type App = {
+  Resources: Resources;
   Components: {
-    NoteEditor: {
-      Input: { title: string; save(title: string): void };
-      State: { title: string };
-      Derived: { canSave: boolean };
-      Actions: { change(title: string): void; save(): void };
-      StyleValues: { saveProgress: "progress" };
-      Parts: { Root: "form"; Input: "input"; Save: "button" };
-    };
-  };
-  Styles: {
-    Presets: {
-      system: {
-        Tokens: {
-          color: "canvas" | "text" | "accent" | "focus";
-          space: "control";
-          motion: "quick" | "settle";
-        };
-        Themes: "default" | "dark";
-        Containers: "compact";
+    CommandMenu: {
+      Input: { commands: readonly Command[] };
+      Context: { query: string; selected: CommandId | undefined };
+      States: "closed" | "opening" | "open.ready" | "open.dragging" | "closing";
+      Values: { results: readonly Command[] };
+      Actions: { open(): void; close(): void; query(value: string): void };
+      Gestures: { dismiss: "drag" };
+      Parts: {
+        Trigger: "button";
+        Dialog: "dialog";
+        Surface: "section";
+        Results: "div";
       };
     };
   };
+  Styles: { Presets: "precision" | "tactile" };
 };
 ```
 
-Finite state and variants become typed visual conditions. `StyleValues` declares
-continuous values by interpolation kind; component controllers return ordinary
-numbers for them.
+Gesture declarations derive the statechart events `<gesture>.start`, `<gesture>.commit`, and
+`<gesture>.cancel`. A state node may wait for preset-owned visual targets with
+`settle: { phase: "enter" | "exit" }`. Misspelled states, actions, parts, gestures, tokens, or
+visual properties fail at typecheck or compile time.
 
-## App Definition
+## Application Components
 
-`app.ts` exports one object with `satisfies AppDefinition<App>`. There is no
-`defineApp` call in application code.
+`app.tsx` exports one object checked with `satisfies AppDef<App>`. A component definition is its
+statechart and semantic renderer. JSX provides only hierarchy, dynamic content, and composition.
+
+XState privately executes discrete state and task lifecycles. Alien Signals projects context,
+active state paths, derived values, text, attributes, conditions, and collection changes directly
+to affected DOM bindings. A component render function runs once per mounted instance; Poggers has
+no virtual DOM or component rerender loop.
+
+`For` is the single keyed/virtual collection primitive and `Show` is the single structural-presence
+primitive. Child application components are rendered directly from `render.components`; every JSX
+occurrence owns one component instance.
+
+## Presets
+
+A preset is a compile-time factory checked directly against `Preset<App, Name>`. The generic app
+contract supplies contextual types; there is no inference wrapper and no static-object form. A
+component implementation receives symbolic state, context, derived values, interaction, geometry,
+environment, and gesture channels. It returns the complete visual target for named semantic parts.
 
 ```ts
-export default {
-  version: 1,
-  resources: {
-    note: {
-      state: { title: "" },
-      events: {
-        renamed({ state, payload }) {
-          state.title = payload.title;
-        },
-      },
-      views: { title: ({ state }) => state.title },
-      commands: {
-        rename(ctx, title) {
-          if (!title.trim()) return ctx.error("empty");
-          return ctx.event.renamed({ title });
-        },
-      },
-    },
-  },
-  components: {
-    NoteEditor: {
-      state: ({ input }) => ({ title: input.title }),
-      derived: ({ state }) => ({
-        get canSave() {
-          return state.title.trim().length > 0;
-        },
-      }),
-      actions: ({ input, state }) => ({
-        change(title) {
-          state.title = title;
-        },
-        save() {
-          const title = state.title.trim();
-          if (title) input.save(title);
-        },
-      }),
-      bind({ state, derived, actions }) {
-        return {
-          values: { saveProgress: derived.canSave ? 1 : 0 },
-          Root: {
-            onSubmit(event) {
-              event.preventDefault();
-              actions.save();
-            },
-          },
-          Input: {
-            value: state.title,
-            onInput(event) {
-              actions.change(event.currentTarget.value);
-            },
-          },
-          Save: { type: "submit", disabled: !derived.canSave },
-        };
-      },
-    },
-  },
-  styles: { defaultPreset: "system", presets: { system: systemPreset } },
-  root: Root,
-} satisfies AppDefinition<App>;
-```
-
-Component contexts expose current `preset` and `theme` values plus `setPreset`
-and `setTheme`. These are reactive even when destructured in derived or action
-definitions. Token values never enter app behavior.
-
-## UI Composition
-
-`@poggers/app` is a virtual module generated from `types.ts`. Resources create
-`useX` functions and components create `createX` functions. A component factory
-accepts only declared input and variants; UI code cannot replace its state,
-derived values, or actions.
-
-```tsx
-export function NoteScreen() {
-  const note = useNote({ id: "main" });
-  const Editor = createNoteEditor({
-    input: {
-      get title() {
-        return note.title;
-      },
-      save(title) {
-        void note.rename(title);
+export const tactile = (({ tokens, createRecipe, createMotion, interpolate }) => {
+  const createResult = createRecipe({
+    variants: {
+      selected: {
+        true: { paint: { fill: tokens.color.accent } },
+        false: { paint: { fill: tokens.color.surface } },
       },
     },
   });
 
-  return (
-    <Editor.Root>
-      <Editor.Input />
-      <Editor.Save>Save</Editor.Save>
-    </Editor.Root>
-  );
-}
+  return {
+    theme: tactileTheme,
+    themes: { dark: tactileDarkTheme },
+    components: {
+      CommandMenu({ state, interaction, geometry, gestures }) {
+        const compact = geometry.inlineSize.isBelow(tokens.size.compact);
+        const hidden = state.matches("closed").or(state.matches("closing"));
+        const offset = createMotion({
+          target: hidden.choose(680, gestures.dismiss.active.choose(gestures.dismiss.offset, 0)),
+          transition: tokens.motion.presence,
+          range: [0, 680],
+        });
+        return {
+          Surface: {
+            motion: {
+              translation: { block: offset },
+              scale: compact.choose(1, hidden.choose(0.98, 1)),
+              transition: { transform: tokens.motion.presence },
+              reduceMotion: "crossfade",
+            },
+          },
+          Backdrop: {
+            paint: { opacity: interpolate(offset.progress, [0, 1], [1, 0]) },
+          },
+          Results: { motion: { layout: tokens.motion.layout } },
+          Result: createResult({ selected: interaction.selected }),
+        };
+      },
+    },
+  };
+}) satisfies Preset<App, "tactile">;
 ```
 
-UI files choose structure and children. Generated part types omit visual class
-and style props. Event and accessibility bindings shared by the component live
-in `app.ts`; per-item identity for dynamic collections remains structural UI
-data.
+The restricted compiler evaluates the factory into serializable symbolic IR, StyleX rules, exact
+reactive dependencies, gesture declarations, and retained motion targets. Presets cannot access
+resources, send events, change semantics, select DOM nodes, or call StyleX or Anime.js. A missing
+visual capability becomes one reviewed typed primitive instead of an escape hatch.
 
-## Visual Presets
+## Retained Motion
 
-Presets are plain objects checked with `satisfies Preset<App, Name>`:
+Every animated numeric value is a retained channel identified by component instance, part instance,
+and property. A channel has one owner, current value, velocity, target, and driver. The implemented
+drivers are target settlement, direct interaction, browser-layout projection, and paint values
+derived from an authoritative retained source. Retargeting starts from the current rendered value
+and compatible velocity. Replacement never restores an authored origin, and `revert()` is reserved
+for final component disposal.
 
-```ts
-export const systemPreset = {
-  tokens: {
-    color: {
-      canvas: { l: 0.98, c: 0.004, h: 255 },
-      text: { l: 0.2, c: 0.01, h: 255 },
-      accent: { l: 0.56, c: 0.18, h: 255 },
-      focus: { l: 0.64, c: 0.17, h: 250 },
-    },
-    space: { control: 12 },
-    motion: {
-      quick: { duration: 130, easing: "decelerate" },
-      settle: { spring: { duration: 380, bounce: 0.06 } },
-    },
-  },
-  themes: {
-    default: {},
-    dark: {
-      color: {
-        canvas: { l: 0.14, c: 0.008, h: 255 },
-        text: { l: 0.95, c: 0.004, h: 255 },
-      },
-    },
-  },
-  containers: { compact: { inlineBelow: 520 } },
-  components: ({ tokens }) => ({
-    NoteEditor: ({ values }) => ({
-      Root: {
-        layout: { kind: "stack", gap: tokens.space.control },
-        surface: { fill: tokens.color.canvas, text: tokens.color.text },
-        when: [{ container: "compact", apply: { frame: { inline: "fill" } } }],
-        motion: {
-          layout: { geometry: "position", using: tokens.motion.settle },
-        },
-      },
-      Save: {
-        effect: { opacity: values.saveProgress },
-        interaction: {
-          focusRing: { color: tokens.color.focus, width: 2, offset: 2 },
-        },
-        motion: { change: { opacity: tokens.motion.quick } },
-      },
-    }),
-  }),
-} satisfies Preset<App, "system">;
-```
+Each mounted component owns one Anime.js scope. Numeric target channels retain Anime `Animatable`
+controllers. Declared drags retain one Anime `Draggable` proxy and stream its direct trajectory into
+the same channel used by release and exit. Anime Layout controllers are retained by stable layout
+root; DOM mutations are coalesced, projected from the current geometry, and settled without a second
+layout tree. StyleX owns static appearance while the runtime transform composer exclusively owns
+animated transforms.
 
-The two callbacks are compile-time scopes for symbolic token and value
-references. They are not runtime wrappers. The compiler evaluates them once,
-validates serializable output, and emits a StyleX module plus a compact runtime
-manifest.
+XState coordinates only semantic phases. `settle: { phase: "enter" | "exit", done, cancelled }`
+waits for the current retained targets; it does not name or execute an animation program. Exiting
+native dialogs remain mounted, inert, and hidden from the accessibility tree until physical
+settlement. Aborting settlement restores accessibility and retargets existing channels without a
+visual rewind.
 
-## Visual Transactions
+High-frequency pointer and hover samples remain local to fine-grained signals. Only semantic gesture
+begin, commit, and cancel events enter the statechart. Reduced motion reaches the same semantic
+endpoint through an instant or crossfade policy. `For` and `Show` preserve keyed identity during
+structural entry, exit, and reversal.
 
-Each mounted component has one coordinator. It observes only parts with declared
-motion, batches geometry reads before writes, and gives each animated element
-one runtime owner. Preset replacement cancels old ownership and suppresses mount
-motion.
+## Boundary
 
-- Static rules, pseudo states, themes, and container queries compile through
-  StyleX.
-- Finite timing uses WAAPI through Anime.js.
-- Interruptible springs and gestures use Anime.js springs.
-- Declared layout and shared geometry use component-scoped FLIP.
-- `geometry: "text"` can use cached PreText prediction for named fonts.
-- Reduced motion resolves immediately and leaves no inline ownership residue.
-
-The generic JSX runtime does not scan the document or project layout. Layout
-motion exists only when a preset declares it.
-
-## Dependencies
-
-`deps.ts` directly implements the app contract. Values are values; providers are
-used only when runtime selection is needed.
-
-```ts
-export default {
-  logger: {
-    production: {
-      async write(message) {
-        console.log(message);
-      },
-    },
-    mock: { async write() {} },
-  },
-} satisfies DependencyConfig<App["Deps"]>;
-```
-
-`POGGERS_DEPS=mock` selects named providers. The production binary reads the
-single default dependency config or an explicit app environment mount; legacy
-`createXDeps` naming fallbacks are not generated.
-
-## Persistence And Migrations
-
-The server store is a snapshot plus an event tail. The built-in local server
-uses the filesystem; browser client snapshots use IndexedDB. Commands for one
-scope are serialized, while unrelated scopes remain independent.
-
-`poggers migrations snapshot` records the persistent resource schema under
-`src/migrations/snapshots`. `poggers migrations create <name>` creates a typed,
-review-required hash edge. Runtime migration finds a complete hash path before
-loading persisted state and fails explicitly when no path exists.
-
-## Build And HMR
-
-`poggers sync`, `typecheck`, `dev`, and `build` regenerate disposable artifacts
-as needed. The StyleX compiler extracts static CSS in development and production.
-HMR preserves render-owned state, refreshes generated visual output, replaces
-preset ownership without replaying entrance motion, and swaps the stylesheet
-only after the new one loads.
-
-The primary verification surface is `apps/visual-lab`: one accessible command
-menu, three independent presets, typed themes, desktop modal dialog, compact drag
-sheet, keyboard behavior, reduced motion, forced colors, RTL, reflow, HMR, and
-production-binary journeys.
+A missing capability becomes one reviewed typed primitive. It does not become a raw CSS, backend,
+event, layout, or animation escape hatch.

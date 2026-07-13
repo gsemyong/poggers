@@ -5,6 +5,7 @@
     "module": "Preserve",
     "moduleDetection": "force",
     "jsx": "react-jsx",
+    "jsxImportSource": "@poggers/kit",
     "allowJs": true,
     "allowImportingTsExtensions": true,
     "types": ["bun"],

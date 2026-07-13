@@ -2,16 +2,6 @@ node_modules
 .turbo
 dist
 coverage
-playwright-report
-test-results
 .DS_Store
 .env
 .poggers
-.chat-snapshot.json
-.chat-events.jsonl
-.chat-snapshot.json.tmp
-.chat-events.jsonl.tmp
-.na-client-snapshot.json
-.na-client-events.jsonl
-.na-worker-snapshot.json
-.na-worker-events.jsonl

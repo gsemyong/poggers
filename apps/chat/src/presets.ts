@@ -1,10 +1,11 @@
-import type { Preset } from "@poggers/kit/style";
-import type { App } from "types";
-
-type PaperTokens = Parameters<Preset<App, "paper">["components"]>[0]["tokens"];
-type ChatComponents = ReturnType<Preset<App, "paper">["components"]>;
+import type {
+  Preset,
+  PresetFactoryContract,
+  PresetFactoryResult,
+  Tokens,
+} from "@poggers/kit/style";
+import type { App } from "src/types";
 type Direction = "paper" | "mono" | "terminal";
-
 const paperTokens = {
   color: {
     canvas: { l: 0.9588, c: 0.0127, h: 86.83 },
@@ -19,29 +20,41 @@ const paperTokens = {
     buttonText: { l: 0.9862, c: 0.0142, h: 84.58 },
     focus: { l: 0.58, c: 0.16, h: 35 },
   },
-  space: { xs: 7, sm: 10, md: 14, lg: 22, xl: 24 },
-  radius: { sm: 3, md: 8, round: 999 },
-  size: { messageMax: 780, composerMin: 86, topbarButton: 34 },
+  space: {
+    xs: { kind: "space", value: 7 },
+    sm: { kind: "space", value: 10 },
+    md: { kind: "space", value: 14 },
+    lg: { kind: "space", value: 22 },
+    xl: { kind: "space", value: 24 },
+  },
+  radius: { edge: { kind: "radius", value: 8 }, round: { kind: "radius", value: 999 } },
+  size: {
+    compact: { kind: "size", value: 672 },
+    messageMax: { kind: "size", value: 780 },
+    composerMin: { kind: "size", value: 86 },
+    topbarButton: { kind: "size", value: 34 },
+  },
   font: {
     body: { families: ["Georgia", "Times New Roman", "serif"] },
     mono: { families: ["SFMono-Regular", "Consolas", "monospace"] },
   },
   shadow: {
-    soft: { y: 8, blur: 28, color: { l: 0.3337, c: 0.0577, h: 67.24, alpha: 0.08 } },
+    message: {
+      y: 8,
+      blur: 28,
+      color: { l: 0.3337, c: 0.0577, h: 67.24, alpha: 0.08 },
+    },
     inset: {
       inset: true,
       y: 1,
       blur: 4,
       color: { l: 0.3337, c: 0.0577, h: 67.24, alpha: 0.08 },
     },
-    none: "none",
   },
   motion: {
     fast: { duration: 160, easing: "decelerate" },
-    settle: { spring: { duration: 420, bounce: 0.04 } },
   },
-} as const;
-
+} satisfies Tokens;
 const monoTokens = {
   color: {
     canvas: { l: 0.987, c: 0.002, h: 255 },
@@ -56,28 +69,36 @@ const monoTokens = {
     buttonText: { l: 0.995, c: 0.001, h: 255 },
     focus: { l: 0.56, c: 0.1, h: 250 },
   },
-  space: { xs: 6, sm: 10, md: 14, lg: 20, xl: 28 },
-  radius: { sm: 6, md: 8, round: 999 },
-  size: { messageMax: 840, composerMin: 76, topbarButton: 32 },
+  space: {
+    xs: { kind: "space", value: 6 },
+    sm: { kind: "space", value: 10 },
+    md: { kind: "space", value: 14 },
+    lg: { kind: "space", value: 20 },
+    xl: { kind: "space", value: 28 },
+  },
+  radius: { edge: { kind: "radius", value: 8 }, round: { kind: "radius", value: 999 } },
+  size: {
+    compact: { kind: "size", value: 672 },
+    messageMax: { kind: "size", value: 840 },
+    composerMin: { kind: "size", value: 76 },
+    topbarButton: { kind: "size", value: 32 },
+  },
   font: {
     body: { families: ["Inter", "system-ui", "sans-serif"] },
     mono: { families: ["SFMono-Regular", "Consolas", "monospace"] },
   },
   shadow: {
-    soft: { y: 12, blur: 36, color: { l: 0.192, c: 0.004, h: 255, alpha: 0.06 } },
     inset: {
       inset: true,
       y: 1,
       color: { l: 0.192, c: 0.004, h: 255, alpha: 0.08 },
     },
-    none: "none",
+    message: "none",
   },
   motion: {
     fast: { duration: 140, easing: "decelerate" },
-    settle: { spring: { duration: 360, bounce: 0 } },
   },
-} as const;
-
+} satisfies Tokens;
 const terminalTokens = {
   color: {
     canvas: { l: 0.1386, c: 0.0077, h: 255.5 },
@@ -92,255 +113,426 @@ const terminalTokens = {
     buttonText: { l: 0.1693, c: 0.0248, h: 154.85 },
     focus: { l: 0.84, c: 0.16, h: 155 },
   },
-  space: { xs: 4, sm: 8, md: 10, lg: 14, xl: 16 },
-  radius: { sm: 2, md: 2, round: 2 },
-  size: { messageMax: 980, composerMin: 64, topbarButton: 30 },
+  space: {
+    xs: { kind: "space", value: 4 },
+    sm: { kind: "space", value: 8 },
+    md: { kind: "space", value: 10 },
+    lg: { kind: "space", value: 14 },
+    xl: { kind: "space", value: 16 },
+  },
+  radius: { edge: { kind: "radius", value: 2 }, round: { kind: "radius", value: 2 } },
+  size: {
+    compact: { kind: "size", value: 672 },
+    messageMax: { kind: "size", value: 980 },
+    composerMin: { kind: "size", value: 64 },
+    topbarButton: { kind: "size", value: 30 },
+  },
   font: {
     body: { families: ["SFMono-Regular", "Consolas", "monospace"] },
     mono: { families: ["SFMono-Regular", "Consolas", "monospace"] },
   },
   shadow: {
-    soft: "none",
     inset: {
       inset: true,
       spread: 1,
       color: { l: 0.7614, c: 0.1779, h: 153.55, alpha: 0.12 },
     },
-    none: "none",
+    message: "none",
   },
   motion: {
     fast: { duration: 110, easing: "linear" },
-    settle: { spring: { duration: 300, bounce: 0 } },
   },
-} as const;
-
-function chatComponents(tokens: PaperTokens, direction: Direction): ChatComponents {
+} satisfies Tokens;
+type TokenSetShape<Source extends Tokens> = {
+  readonly [Group in keyof Source]: Group extends keyof Tokens
+    ? {
+        readonly [Name in keyof Source[Group]]: NonNullable<Tokens[Group]>[string];
+      }
+    : never;
+};
+type SharedTokens = TokenSetShape<typeof paperTokens>;
+function createChatComponents<Name extends Direction>(
+  { tokens, createRecipe }: PresetFactoryContract<App, Name, SharedTokens>,
+  direction: Direction,
+): PresetFactoryResult<App, Name, SharedTokens>["components"] {
   const terminal = direction === "terminal";
   const mono = direction === "mono";
-  const edge = terminal ? tokens.radius.sm : tokens.radius.md;
   const messageFill = mono ? "transparent" : tokens.color.panel;
-  const messageShadow = direction === "paper" ? tokens.shadow.soft : tokens.shadow.none;
-
-  return {
-    ChatLayout: () => ({
-      Root: {
-        layout: { kind: "stack" },
-        frame: { block: { min: { viewport: { axis: "block", percent: 1 } } } },
-        surface: { fill: tokens.color.canvas, text: tokens.color.text },
-        text: { font: tokens.font.body },
+  const createControl = createRecipe({
+    base: {
+      paint: {
+        cursor: "pointer",
+        focusRing: { color: tokens.color.focus, width: 2, offset: 2 },
       },
-      Topbar: {
-        layout: { kind: "row", align: "center", distribute: "between", gap: tokens.space.md },
-        padding: { block: tokens.space.md, inline: tokens.space.lg },
-        surface: { fill: tokens.color.panel },
-        stroke: { blockEnd: { width: 1, line: "solid", color: tokens.color.border } },
-        effect: { shadow: direction === "paper" ? tokens.shadow.soft : tokens.shadow.none },
+      motion: {
+        transition: { opacity: tokens.motion.fast, transform: tokens.motion.fast },
       },
-      Brand: { layout: { kind: "row", align: "center", gap: tokens.space.sm } },
-      BrandMark: {
-        layout: { kind: "row", align: "center", distribute: "center" },
-        frame: { inline: { min: tokens.size.topbarButton }, block: tokens.size.topbarButton },
-        padding: { inline: tokens.space.xs },
-        surface: {
-          fill: terminal ? tokens.color.success : mono ? tokens.color.text : tokens.color.panel,
-          text: terminal || mono ? tokens.color.buttonText : tokens.color.accent,
-        },
-        stroke: {
-          width: 1,
-          line: "solid",
-          color: terminal ? tokens.color.success : mono ? tokens.color.text : tokens.color.accent,
-        },
-        shape: { radius: terminal ? tokens.radius.sm : tokens.radius.round },
-        text: { font: tokens.font.mono, size: 12, weight: 800, line: 1 },
-      },
-      BrandText: {
-        surface: { text: tokens.color.muted },
-        text: { size: terminal ? 13 : 15, line: 1.3 },
-      },
-      PresetSwitch: {
-        frame: { block: { min: tokens.size.topbarButton } },
-        padding: { inline: tokens.space.md },
-        surface: {
-          fill: terminal ? tokens.color.panelAlt : tokens.color.panel,
-          text: terminal ? tokens.color.accent : tokens.color.success,
-        },
-        stroke: {
-          width: 1,
-          line: "solid",
-          color: terminal ? tokens.color.accent : tokens.color.success,
-        },
-        shape: { radius: terminal ? tokens.radius.sm : tokens.radius.round },
-        text: { font: tokens.font.mono, size: 12, weight: 700 },
-        interaction: {
-          cursor: "pointer",
-          focusRing: { color: tokens.color.focus, width: 2, offset: 2 },
-        },
-        when: [
-          { native: "hover", apply: { effect: { opacity: 0.78 } } },
-          { native: "active", apply: { transform: { scale: 0.97 } } },
-        ],
-        motion: { change: { opacity: tokens.motion.fast, transform: tokens.motion.fast } },
-      },
-      Messages: {
-        layout: { kind: "stack", gap: terminal ? tokens.space.md : tokens.space.lg },
-        place: { flex: { grow: 1, shrink: 1, basis: 0 } },
-        padding: { block: tokens.space.xl, inline: tokens.space.lg },
-        surface: { fill: tokens.color.canvas },
-        scroll: { block: "auto", overscroll: "contain", scrollbar: "thin" },
-        when: [
-          {
-            container: "compact",
-            apply: {
-              padding: { block: tokens.space.md, inline: tokens.space.md },
-              layout: { kind: "stack", gap: tokens.space.sm },
-            },
+    },
+    variants: {
+      hovered: {
+        true: {
+          paint: {
+            opacity: 0.8,
           },
-        ],
+        },
+        false: {},
       },
-      Empty: {
-        padding: tokens.space.lg,
-        surface: { fill: tokens.color.panel, text: tokens.color.muted },
-        stroke: { width: 1, line: terminal ? "solid" : "dash", color: tokens.color.border },
-        shape: { radius: edge },
-        text: { line: 1.55, wrap: "pretty" },
+      pressed: {
+        true: {
+          motion: {
+            scale: 0.97,
+          },
+        },
+        false: {},
       },
-      Status: {
-        layout: { kind: "row", distribute: "between", gap: tokens.space.md },
-        padding: { block: tokens.space.xs, inline: tokens.space.lg },
-        surface: { fill: tokens.color.panelAlt },
-        stroke: { blockStart: { width: 1, line: "solid", color: tokens.color.border } },
-        text: { font: tokens.font.mono, size: terminal ? 12 : 13 },
+      disabled: {
+        true: {
+          paint: {
+            opacity: 0.45,
+            cursor: "default",
+          },
+        },
+        false: {},
       },
-      StatusText: { surface: { text: tokens.color.success } },
-      StatusMeta: { surface: { text: terminal ? tokens.color.accent : tokens.color.muted } },
-      Understanding: {
-        frame: { block: { max: terminal ? 72 : 80 } },
-        padding: { block: tokens.space.sm, inline: tokens.space.lg },
-        surface: { fill: tokens.color.panelAlt, text: tokens.color.muted },
-        stroke: { blockStart: { width: 1, line: "solid", color: tokens.color.border } },
-        scroll: { block: "auto" },
-        text: { size: terminal ? 12 : 13 },
-      },
-      Composer: {
-        padding: { block: tokens.space.md, inline: tokens.space.lg },
-        surface: { fill: tokens.color.panel },
-        stroke: { blockStart: { width: 1, line: "solid", color: tokens.color.border } },
-      },
-    }),
-    ChatMessage: () => ({
-      Root: {
-        layout: { kind: "stack", gap: tokens.space.xs },
-        frame: { inline: { max: tokens.size.messageMax } },
+    },
+    defaults: { hovered: false, pressed: false, disabled: false },
+  });
+  const createMessage = createRecipe({
+    base: {
+      shape: { radius: tokens.radius.edge },
+      layout: {
+        flow: { axis: "block", gap: tokens.space.xs },
+        size: { inline: { max: tokens.size.messageMax } },
         padding: { block: tokens.space.sm, inline: tokens.space.md },
-        surface: { fill: messageFill },
+      },
+      paint: {
+        fill: messageFill,
         stroke: { width: 1, line: "solid", color: mono ? "transparent" : tokens.color.border },
-        shape: { radius: edge },
-        effect: { shadow: messageShadow },
-        when: [
-          {
-            variant: { role: "user" },
-            apply: {
-              surface: { fill: mono ? tokens.color.panelAlt : messageFill },
-              stroke: { color: tokens.color.success },
+        shadow: tokens.shadow.message,
+      },
+    },
+    variants: {
+      role: {
+        user: {
+          paint: {
+            fill: mono ? tokens.color.panelAlt : messageFill,
+            stroke: { color: tokens.color.success },
+          },
+        },
+        assistant: {},
+      },
+      streaming: {
+        true: {
+          paint: {
+            stroke: { color: tokens.color.accent },
+          },
+        },
+        false: {},
+      },
+    },
+  });
+  return {
+    ChatLayout({ interaction, geometry }) {
+      const compact = geometry.inlineSize.isBelow(tokens.size.compact);
+      const control = createControl({
+        hovered: interaction.hovered,
+        pressed: interaction.pressed,
+        disabled: interaction.disabled,
+      });
+      return {
+        Root: {
+          layout: {
+            flow: { axis: "block" },
+            size: { block: { min: { viewport: { axis: "block", percent: 1 } } } },
+          },
+          paint: {
+            fill: tokens.color.canvas,
+          },
+          typography: {
+            font: tokens.font.body,
+            color: tokens.color.text,
+          },
+        },
+        Topbar: {
+          layout: {
+            flow: { axis: "inline", align: "center", distribute: "between", gap: tokens.space.md },
+            padding: { block: tokens.space.md, inline: tokens.space.lg },
+          },
+          paint: {
+            fill: tokens.color.panel,
+            stroke: { blockEnd: { width: 1, line: "solid", color: tokens.color.border } },
+            shadow: tokens.shadow.message,
+          },
+        },
+        Brand: {
+          layout: {
+            flow: { axis: "inline", align: "center", gap: tokens.space.sm },
+          },
+        },
+        BrandMark: {
+          shape: { radius: tokens.radius.round },
+          layout: {
+            flow: { axis: "inline", align: "center", distribute: "center" },
+            size: { inline: { min: tokens.size.topbarButton }, block: tokens.size.topbarButton },
+            padding: { inline: tokens.space.xs },
+          },
+          paint: {
+            fill: terminal ? tokens.color.success : mono ? tokens.color.text : tokens.color.panel,
+            stroke: {
+              width: 1,
+              line: "solid",
+              color: terminal
+                ? tokens.color.success
+                : mono
+                  ? tokens.color.text
+                  : tokens.color.accent,
             },
           },
-          { variant: { streaming: "yes" }, apply: { stroke: { color: tokens.color.accent } } },
-        ],
-        motion: {
-          enter: {
-            from: { effect: { opacity: 0 }, transform: { block: 8 } },
-            using: tokens.motion.settle,
+          typography: {
+            font: tokens.font.mono,
+            size: 12,
+            weight: 800,
+            line: 1,
+            color: terminal || mono ? tokens.color.buttonText : tokens.color.accent,
           },
         },
-      },
-      Role: {
-        surface: { text: tokens.color.accent },
-        text: { font: tokens.font.mono, size: terminal ? 12 : 13, weight: 700 },
-      },
-      Content: {
-        surface: { text: tokens.color.text },
-        text: { size: terminal ? 13 : 15, line: terminal ? 1.45 : 1.6, wrap: "wrap" },
-      },
-    }),
-    Composer: () => ({
-      Root: {
-        layout: {
-          kind: "grid",
-          columns: [{ minmax: [0, { fraction: 1 }] }, "content"],
-          align: "end",
-          gap: tokens.space.sm,
+        BrandText: {
+          typography: {
+            size: terminal ? 13 : 15,
+            line: 1.3,
+            color: tokens.color.muted,
+          },
         },
-      },
-      Input: {
-        frame: { inline: "fill", block: { min: tokens.size.composerMin } },
-        padding: tokens.space.md,
-        surface: { fill: tokens.color.field, text: tokens.color.text },
-        stroke: {
-          width: 1,
-          line: "solid",
-          color: terminal ? tokens.color.success : tokens.color.border,
-        },
-        shape: { radius: edge },
-        effect: { shadow: tokens.shadow.inset },
-        text: { font: tokens.font.body, line: 1.45 },
-        interaction: { focusRing: { color: tokens.color.focus, width: 2, offset: 1 } },
-      },
-      Send: {
-        frame: { block: { min: terminal ? 36 : 42 } },
-        padding: { inline: tokens.space.md },
-        surface: {
-          fill: terminal ? tokens.color.panelAlt : mono ? tokens.color.text : tokens.color.success,
-          text: terminal ? tokens.color.accent : tokens.color.buttonText,
-        },
-        stroke: {
-          width: 1,
-          line: "solid",
-          color: terminal ? tokens.color.accent : mono ? tokens.color.text : tokens.color.success,
-        },
-        shape: { radius: edge },
-        text: { font: tokens.font.body, weight: 800 },
-        interaction: {
-          cursor: "pointer",
-          focusRing: { color: tokens.color.focus, width: 2, offset: 2 },
-        },
-        when: [
-          { native: "hover", apply: { effect: { opacity: 0.8 } } },
-          { native: "active", apply: { transform: { scale: 0.97 } } },
+        PresetSwitch: [
           {
-            native: "disabled",
-            apply: { effect: { opacity: 0.45 }, interaction: { cursor: "default" } },
+            shape: { radius: tokens.radius.round },
+            layout: {
+              size: { block: { min: tokens.size.topbarButton } },
+              padding: { inline: tokens.space.md },
+            },
+            paint: {
+              fill: terminal ? tokens.color.panelAlt : tokens.color.panel,
+              stroke: {
+                width: 1,
+                line: "solid",
+                color: terminal ? tokens.color.accent : tokens.color.success,
+              },
+            },
+            typography: {
+              font: tokens.font.mono,
+              size: 12,
+              weight: 700,
+              color: terminal ? tokens.color.accent : tokens.color.success,
+            },
+          },
+          control,
+        ],
+        Messages: [
+          {
+            layout: {
+              flow: { axis: "block", gap: terminal ? tokens.space.md : tokens.space.lg },
+              item: { flex: { grow: 1, shrink: 1, basis: 0 } },
+              padding: { block: tokens.space.xl, inline: tokens.space.lg },
+              scroll: { block: "auto", overscroll: "contain", scrollbar: "thin" },
+            },
+            paint: {
+              fill: tokens.color.canvas,
+            },
+          },
+          {
+            when: compact,
+            layout: {
+              flow: { axis: "block", gap: tokens.space.sm },
+              padding: { block: tokens.space.md, inline: tokens.space.md },
+            },
           },
         ],
-        motion: { change: { opacity: tokens.motion.fast, transform: tokens.motion.fast } },
-      },
-    }),
-    AIPart: () => ({
-      Root: {
-        surface: { text: terminal ? tokens.color.muted : tokens.color.text },
-        text: { size: terminal ? 13 : 15, line: terminal ? 1.45 : 1.6 },
-      },
-      Item: { margin: { inlineStart: tokens.space.md }, text: { line: 1.55 } },
-    }),
+        Empty: {
+          shape: { radius: tokens.radius.edge },
+          layout: {
+            padding: tokens.space.lg,
+          },
+          paint: {
+            fill: tokens.color.panel,
+            stroke: { width: 1, line: terminal ? "solid" : "dash", color: tokens.color.border },
+          },
+          typography: {
+            line: 1.55,
+            wrap: "pretty",
+            color: tokens.color.muted,
+          },
+        },
+        Status: {
+          layout: {
+            flow: { axis: "inline", distribute: "between", gap: tokens.space.md },
+            padding: { block: tokens.space.xs, inline: tokens.space.lg },
+          },
+          paint: {
+            fill: tokens.color.panelAlt,
+            stroke: { blockStart: { width: 1, line: "solid", color: tokens.color.border } },
+          },
+          typography: {
+            font: tokens.font.mono,
+            size: terminal ? 12 : 13,
+          },
+        },
+        StatusText: {
+          typography: {
+            color: tokens.color.success,
+          },
+        },
+        StatusMeta: {
+          typography: {
+            color: terminal ? tokens.color.accent : tokens.color.muted,
+          },
+        },
+        Understanding: {
+          layout: {
+            size: { block: { max: terminal ? 72 : 80 } },
+            padding: { block: tokens.space.sm, inline: tokens.space.lg },
+            scroll: { block: "auto" },
+          },
+          paint: {
+            fill: tokens.color.panelAlt,
+            stroke: { blockStart: { width: 1, line: "solid", color: tokens.color.border } },
+          },
+          typography: {
+            size: terminal ? 12 : 13,
+            color: tokens.color.muted,
+          },
+        },
+        Composer: {
+          layout: {
+            padding: { block: tokens.space.md, inline: tokens.space.lg },
+          },
+          paint: {
+            fill: tokens.color.panel,
+            stroke: { blockStart: { width: 1, line: "solid", color: tokens.color.border } },
+          },
+        },
+      };
+    },
+    ChatMessage({ values }) {
+      return {
+        Root: createMessage({ role: values.role, streaming: values.streaming }),
+        Role: {
+          typography: {
+            font: tokens.font.mono,
+            size: terminal ? 12 : 13,
+            weight: 700,
+            color: tokens.color.accent,
+          },
+        },
+        Content: {
+          typography: {
+            size: terminal ? 13 : 15,
+            line: terminal ? 1.45 : 1.6,
+            wrap: "wrap",
+            color: tokens.color.text,
+          },
+        },
+      };
+    },
+    Composer({ interaction }) {
+      return {
+        Root: {
+          layout: {
+            grid: {
+              columns: [{ minmax: [0, { fraction: 1 }] }, "content"],
+              align: "end",
+              gap: tokens.space.sm,
+            },
+          },
+        },
+        Input: {
+          shape: { radius: tokens.radius.edge },
+          layout: {
+            size: { inline: "fill", block: { min: tokens.size.composerMin } },
+            padding: tokens.space.md,
+          },
+          paint: {
+            fill: tokens.color.field,
+            stroke: {
+              width: 1,
+              line: "solid",
+              color: terminal ? tokens.color.success : tokens.color.border,
+            },
+            shadow: tokens.shadow.inset,
+            focusRing: { color: tokens.color.focus, width: 2, offset: 1 },
+          },
+          typography: {
+            font: tokens.font.body,
+            line: 1.45,
+            color: tokens.color.text,
+          },
+        },
+        Send: [
+          {
+            shape: { radius: tokens.radius.edge },
+            layout: {
+              size: { block: { min: terminal ? 36 : 42 } },
+              padding: { inline: tokens.space.md },
+            },
+            paint: {
+              fill: terminal
+                ? tokens.color.panelAlt
+                : mono
+                  ? tokens.color.text
+                  : tokens.color.success,
+              stroke: {
+                width: 1,
+                line: "solid",
+                color: terminal
+                  ? tokens.color.accent
+                  : mono
+                    ? tokens.color.text
+                    : tokens.color.success,
+              },
+            },
+            typography: {
+              font: tokens.font.body,
+              weight: 800,
+              color: terminal ? tokens.color.accent : tokens.color.buttonText,
+            },
+          },
+          createControl({
+            hovered: interaction.hovered,
+            pressed: interaction.pressed,
+            disabled: interaction.disabled,
+          }),
+        ],
+      };
+    },
+    AIPart() {
+      return {
+        Root: {
+          typography: {
+            size: terminal ? 13 : 15,
+            line: terminal ? 1.45 : 1.6,
+            color: terminal ? tokens.color.muted : tokens.color.text,
+          },
+        },
+        Item: {
+          layout: {
+            margin: { inlineStart: tokens.space.md },
+          },
+          typography: {
+            line: 1.55,
+          },
+        },
+      };
+    },
   };
 }
-
-export const paperPreset = {
-  tokens: paperTokens,
-  themes: { default: {} },
-  containers: { compact: { inlineBelow: 672 } },
-  components: ({ tokens }) => chatComponents(tokens, "paper"),
-} satisfies Preset<App, "paper">;
-
-export const monoPreset = {
-  tokens: monoTokens,
-  themes: { default: {} },
-  containers: { compact: { inlineBelow: 672 } },
-  components: ({ tokens }) => chatComponents(tokens, "mono"),
-} satisfies Preset<App, "mono">;
-
-export const terminalPreset = {
-  tokens: terminalTokens,
-  themes: { default: {} },
-  containers: { compact: { inlineBelow: 672 } },
-  components: ({ tokens }) => chatComponents(tokens, "terminal"),
-} satisfies Preset<App, "terminal">;
+export const paperPreset = ((contract) => ({
+  theme: paperTokens,
+  components: createChatComponents(contract, "paper"),
+})) satisfies Preset<App, "paper", typeof paperTokens>;
+export const monoPreset = ((contract) => ({
+  theme: monoTokens,
+  components: createChatComponents(contract, "mono"),
+})) satisfies Preset<App, "mono", typeof monoTokens>;
+export const terminalPreset = ((contract) => ({
+  theme: terminalTokens,
+  components: createChatComponents(contract, "terminal"),
+})) satisfies Preset<App, "terminal", typeof terminalTokens>;

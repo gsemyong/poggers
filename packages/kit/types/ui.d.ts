@@ -9,6 +9,7 @@ import type {
   SyncMeta,
 } from "./app";
 import { type ConnectOpts } from "./client";
+import { type VirtualCollectionGeometry } from "./visual-runtime";
 type ResourceName<Spec extends AppSpec> = Extract<keyof Spec["Resources"], string>;
 type HookName<Name extends string> = `use${Capitalize<Name>}`;
 type ResourceFor<
@@ -79,16 +80,22 @@ export type Props = Record<string, unknown> & {
 export type Component<P extends object = Record<string, never>> = (props: P) => Child;
 export type HotRenderState = {
   keyed?: Record<string, unknown>;
+  scroll?: Record<string, { left: number; top: number }>;
   values?: unknown[];
-  signals?: Signal<unknown>[];
   mounted?: boolean;
 };
+export declare function bindVirtualCollectionHost(
+  element: HTMLElement,
+  read: () => VirtualCollectionGeometry | undefined,
+): void;
 export declare function runtimeSignal<T>(initialValue: T): Signal<T>;
 export declare function signal<T>(initialValue: T, hotKey?: string): Signal<T>;
+export declare function isHotRefresh(): boolean;
 export declare function computed<T>(getter: (previousValue?: T) => T): () => T;
 export declare function effect(fn: () => void | (() => void)): () => void;
 export declare function untrack<T>(fn: () => T): T;
 export declare function onMount(fn: () => void | (() => void)): void;
+export declare function onCleanup(fn: () => void): void;
 export declare function defineUI<
   Spec extends AppSpec,
   Props extends object = Record<string, never>,
@@ -96,10 +103,6 @@ export declare function defineUI<
   app: App<Spec>,
   setup: (hooks: NativeUIHooks<Spec>) => (props: Props) => Child,
 ): ({ connect, ...props }?: Props & DefineUIProps<Spec>) => Child;
-export declare function createAppUI<
-  Spec extends AppSpec,
-  Props extends object = Record<string, never>,
->(app: App<Spec>): ({ connect, ..._props }?: Props & DefineUIProps<Spec>) => Child;
 export declare function createNativeAppRuntime<Spec extends AppSpec>(
   app: App<Spec>,
 ): NativeAppRuntime<Spec>;
@@ -107,15 +110,61 @@ export declare function render(child: Child, root: Element, hotState?: HotRender
 export declare function jsx(type: string | Component<any>, props: Props | null): Child;
 export declare const jsxs: typeof jsx;
 export declare function Fragment(props: { children?: Child }): Child;
-export declare function For<Items extends readonly unknown[]>(props: {
-  each: Items;
-  by?: (item: Items[number], index: number) => string | number;
+type ForKey = string | number;
+export type VirtualForOptions = {
+  readonly anchor?: "start" | "end";
+  readonly follow?: "never" | "auto" | "smooth" | "instant";
+};
+type ForProps<Items extends readonly unknown[]> = {
+  each: Items | (() => Items);
+  by?: Extract<keyof Items[number], string> | ((item: Items[number], index: number) => ForKey);
   children: (item: Items[number], index: number) => Child;
   fallback?: Child;
-}): Child;
+  virtual?: false;
+};
+type VirtualActive<Key extends ForKey> = Key | (() => Key | undefined);
+type VirtualPropertyKey<Items extends readonly unknown[]> = {
+  [Key in Extract<keyof Items[number], string>]: Extract<Items[number][Key], ForKey> extends never
+    ? never
+    : Key;
+}[Extract<keyof Items[number], string>];
+type VirtualForByProperty<
+  Items extends readonly unknown[],
+  Key extends VirtualPropertyKey<Items> = VirtualPropertyKey<Items>,
+> = Omit<ForProps<Items>, "by" | "virtual"> & {
+  by: Key;
+  virtual: true | VirtualForOptions;
+  active?: VirtualActive<NoInfer<Extract<Items[number][Key], ForKey>>>;
+};
+type VirtualForByFunction<Items extends readonly unknown[]> = Omit<
+  ForProps<Items>,
+  "by" | "virtual"
+> & {
+  by: (item: Items[number], index: number) => ForKey;
+  virtual: true | VirtualForOptions;
+  active?: VirtualActive<ForKey>;
+};
+type VirtualForProps<
+  Items extends readonly unknown[],
+  Key extends VirtualPropertyKey<Items> = VirtualPropertyKey<Items>,
+> = VirtualForByProperty<Items, Key> | VirtualForByFunction<Items>;
+export declare function currentStructuralKey(): string | undefined;
+export declare function For<
+  Items extends readonly unknown[],
+  Key extends VirtualPropertyKey<Items> = VirtualPropertyKey<Items>,
+>(props: ForProps<Items> | VirtualForProps<Items, Key>): Child;
+export declare function virtualItemPosition(
+  start: number,
+  lane: number,
+  geometry: VirtualCollectionGeometry,
+): {
+  insetInlineStart: string;
+  insetBlockStart: string;
+  inlineSize: string;
+  blockSize: string;
+};
 export declare function Show(props: { when: unknown; children: Child; fallback?: Child }): Child;
 export declare function reactiveValue<T>(source: () => T): T;
-export declare function currentStructuralKey(): string | undefined;
 export declare function createBrowserConnectOptions(): ConnectOpts | undefined;
 export type {
   CSSProperties,

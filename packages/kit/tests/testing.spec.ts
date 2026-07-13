@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import { defineApp } from "@poggers/kit";
-import { testApp } from "@poggers/kit/testing";
+import { defineApp } from "../src/app";
+import { testApp } from "../src/testing";
 
 type CounterState = {
   count: number;

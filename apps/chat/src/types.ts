@@ -8,6 +8,13 @@ export type AIPart =
 
 export type AIResponse = { parts: AIPart[] };
 
+export type AIPartKind = "heading" | "text" | "questions" | "summary" | "separator";
+
+export type AIPartView = {
+  kind: AIPartKind;
+  lines: readonly string[];
+};
+
 export type DisplayMessage = {
   id: string;
   role: "user" | "assistant";
@@ -88,21 +95,9 @@ export type App = {
   Deps: ChatProgramDeps;
   Components: {
     ChatLayout: {
-      Input: {
-        status: ChatState["status"];
-        error: string | null;
-        stale: boolean;
-        understanding: string | null;
-      };
-      Derived: {
-        brandText: string;
-        presetSwitchLabel: string;
-        statusText: string;
-        statusMeta: string;
-        understandingText: string;
-        hasUnderstanding: boolean;
-      };
-      Actions: { togglePreset(): void };
+      States: "active";
+      Values: { brandText: string; presetSwitchLabel: string };
+      Events: { togglePreset(): void };
       Parts: {
         Root: "div";
         Topbar: "header";
@@ -125,13 +120,22 @@ export type App = {
         streaming: boolean;
         content: string;
         hidden: boolean;
+        parts: readonly AIPart[] | null;
       };
-      Variants: { role: "user" | "assistant"; streaming: "yes" | "no" };
-      Derived: { roleLabel: string; contentText: string; hidden: boolean };
+      Values: {
+        role: "user" | "assistant";
+        streaming: boolean;
+        roleLabel: string;
+        contentText: string;
+        hidden: boolean;
+        parts: readonly AIPartView[];
+        hasParts: boolean;
+      };
       Parts: { Root: "div"; Role: "div"; Content: "div" };
     };
     AIPart: {
-      Input: { kind: "heading" | "text" | "questions" | "summary" | "separator" };
+      Input: { kind: AIPartKind; lines: readonly string[] };
+      Values: { lines: readonly string[] };
       Parts: { Root: "div"; Item: "div" };
     };
     Composer: {
@@ -139,91 +143,18 @@ export type App = {
         status: ChatState["status"];
         sendMessage(text: string): void;
       };
-      State: { value: string };
-      Derived: { canSubmit: boolean; busy: boolean };
-      Actions: {
+      Context: { value: string; submission: string };
+      States: "active";
+      Values: { canSubmit: boolean; busy: boolean };
+      Events: {
         clear(): void;
         change(value: string): void;
         submit(): void;
-        submitFromKeyboard(event: KeyboardEvent): void;
       };
       Parts: { Root: "form"; Input: "textarea"; Send: "button" };
     };
   };
   Styles: {
-    Presets: {
-      paper: {
-        Tokens: {
-          color:
-            | "canvas"
-            | "panel"
-            | "panelAlt"
-            | "text"
-            | "muted"
-            | "accent"
-            | "success"
-            | "border"
-            | "field"
-            | "buttonText"
-            | "focus";
-          space: "xs" | "sm" | "md" | "lg" | "xl";
-          radius: "sm" | "md" | "round";
-          size: "messageMax" | "composerMin" | "topbarButton";
-          font: "body" | "mono";
-          shadow: "soft" | "inset" | "none";
-          motion: "fast" | "settle";
-        };
-        Themes: "default";
-        Containers: "compact";
-      };
-      mono: {
-        Tokens: {
-          color:
-            | "canvas"
-            | "panel"
-            | "panelAlt"
-            | "text"
-            | "muted"
-            | "accent"
-            | "success"
-            | "border"
-            | "field"
-            | "buttonText"
-            | "focus";
-          space: "xs" | "sm" | "md" | "lg" | "xl";
-          radius: "sm" | "md" | "round";
-          size: "messageMax" | "composerMin" | "topbarButton";
-          font: "body" | "mono";
-          shadow: "soft" | "inset" | "none";
-          motion: "fast" | "settle";
-        };
-        Themes: "default";
-        Containers: "compact";
-      };
-      terminal: {
-        Tokens: {
-          color:
-            | "canvas"
-            | "panel"
-            | "panelAlt"
-            | "text"
-            | "muted"
-            | "accent"
-            | "success"
-            | "border"
-            | "field"
-            | "buttonText"
-            | "focus";
-          space: "xs" | "sm" | "md" | "lg" | "xl";
-          radius: "sm" | "md" | "round";
-          size: "messageMax" | "composerMin" | "topbarButton";
-          font: "body" | "mono";
-          shadow: "soft" | "inset" | "none";
-          motion: "fast" | "settle";
-        };
-        Themes: "default";
-        Containers: "compact";
-      };
-    };
+    Presets: "paper" | "mono" | "terminal";
   };
 };

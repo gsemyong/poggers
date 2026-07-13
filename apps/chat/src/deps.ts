@@ -2,7 +2,7 @@ import { Output, gateway, streamText } from "ai";
 import { z } from "zod/v4-mini";
 import { env } from "@poggers/kit/env";
 import type { DependencyConfig } from "@poggers/kit/deps";
-import type { AIResponse, ChatProgramDeps } from "types";
+import type { AIResponse, ChatProgramDeps } from "src/types";
 
 const aiPartSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("text"), content: z.string() }),

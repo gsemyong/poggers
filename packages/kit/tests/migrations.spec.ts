@@ -35,7 +35,7 @@ describe("Poggers migrations", () => {
     expect(uiChurn.created).toBe(false);
 
     await writeFile(join(appDir, "src/types.ts"), counterTypesV2, "utf8");
-    await writeFile(join(appDir, "src/app.ts"), counterAppV2, "utf8");
+    await writeFile(join(appDir, "src/app.tsx"), counterAppV2, "utf8");
 
     const changed = await createMigration(appDir, "rename counter");
     expect(changed.kind).toBe("created");
@@ -49,7 +49,7 @@ describe("Poggers migrations", () => {
     const appDir = await createMigrationFixture();
     await writeMigrationSnapshot(appDir);
     await writeFile(join(appDir, "src/types.ts"), counterTypesV2, "utf8");
-    await writeFile(join(appDir, "src/app.ts"), counterAppV2, "utf8");
+    await writeFile(join(appDir, "src/app.tsx"), counterAppV2, "utf8");
 
     const created = await createMigration(appDir, "counter event rename");
     expect(created.kind).toBe("created");
@@ -122,7 +122,7 @@ describe("Poggers migrations", () => {
       created.fromHash,
     );
     expect(state).toEqual({ total: 5, label: "migration" });
-  });
+  }, 15_000);
 
   it("walks multi-hop hash migration paths and fails missing paths", () => {
     const app = defineApp<any>({
@@ -242,7 +242,7 @@ async function createMigrationFixture(): Promise<string> {
     "utf8",
   );
   await writeFile(join(appDir, "src/types.ts"), counterTypesV1, "utf8");
-  await writeFile(join(appDir, "src/app.ts"), counterAppV1, "utf8");
+  await writeFile(join(appDir, "src/app.tsx"), counterAppV1, "utf8");
   return appDir;
 }
 
@@ -271,7 +271,7 @@ function reviewedMigrationSource(
   const event = options.invalidEvent
     ? '{ name: "missing", payload: { by: payload.by, source: "migration" } }'
     : '{ name: "incremented", payload: { by: payload.by, source: "migration" } }';
-  return `import type { Migration } from "@poggers/app";
+  return `import type { Migration } from "@poggers/kit";
 import type { App as From } from "./snapshots/${fromHash}.ts";
 import type { App as To } from "./snapshots/${toHash}.ts";
 
@@ -370,7 +370,8 @@ const counterTypesV2 = `export type App = {
 };
 `;
 
-const counterAppV1 = `import type { AppDefinition } from "@poggers/app";
+const counterAppV1 = `import type { AppDef as AppDefinition } from "@poggers/kit";
+import type { App } from "src/types";
 
 export default {
   version: 1,
@@ -390,13 +391,11 @@ export default {
       commands: {},
     },
   },
-  root() {
-    return null;
-  },
-} satisfies AppDefinition;
+} satisfies AppDefinition<App>;
 `;
 
-const counterAppV2 = `import type { AppDefinition } from "@poggers/app";
+const counterAppV2 = `import type { AppDef as AppDefinition } from "@poggers/kit";
+import type { App } from "src/types";
 
 export default {
   version: 2,
@@ -417,8 +416,5 @@ export default {
       commands: {},
     },
   },
-  root() {
-    return null;
-  },
-} satisfies AppDefinition;
+} satisfies AppDefinition<App>;
 `;

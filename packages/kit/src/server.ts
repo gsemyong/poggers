@@ -22,6 +22,7 @@ import {
 import { readdirSync, statSync, watch, type FSWatcher } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { extname, relative, resolve } from "node:path";
+import { brotliCompressSync, constants as zlibConstants, gzipSync } from "node:zlib";
 
 const SNAPSHOT_INTERVAL = 5000;
 const DELTA_THRESHOLD = 200;
@@ -185,6 +186,7 @@ export function serve<Spec extends AppSpec>(
   let browserAssetsBuild:
     | { version: number; promise: Promise<{ script: string; style?: string } | Response> }
     | undefined;
+  const encodedBrowserAssets = new Map<string, Uint8Array>();
 
   function getEventBuffer(key: string): unknown[] {
     let buf = eventBuffers.get(key);
@@ -459,6 +461,7 @@ export function serve<Spec extends AppSpec>(
     const entrypoint =
       web.entrypoint instanceof URL ? fileURLToPath(web.entrypoint) : web.entrypoint;
     const result = await Bun.build({
+      define: { __POGGERS_HMR__: "true" },
       entrypoints: [entrypoint],
       format: "esm",
       jsx: poggersJsx,
@@ -508,28 +511,60 @@ export function serve<Spec extends AppSpec>(
     return next;
   }
 
-  async function buildBrowserBundle(): Promise<Response> {
+  async function buildBrowserBundle(req: Request): Promise<Response> {
     const assets = await buildBrowserAssets();
     if (assets instanceof Response) return assets;
-
-    return new Response(assets.script, {
-      headers: {
-        "Cache-Control": "no-store",
-        "Content-Type": "text/javascript; charset=utf-8",
-      },
-    });
+    return browserAssetResponse(req, "script", assets.script, "text/javascript; charset=utf-8");
   }
 
-  async function buildBrowserStyle(): Promise<Response> {
+  async function buildBrowserStyle(req: Request): Promise<Response> {
     const assets = await buildBrowserAssets();
     if (assets instanceof Response) return assets;
     if (!assets.style) return new Response("", { status: 204 });
 
-    return new Response(assets.style, {
-      headers: {
-        "Cache-Control": "no-store",
-        "Content-Type": "text/css; charset=utf-8",
-      },
+    return browserAssetResponse(req, "style", assets.style, "text/css; charset=utf-8");
+  }
+
+  function browserAssetResponse(
+    req: Request,
+    name: "script" | "style",
+    body: string,
+    contentType: string,
+  ): Response {
+    const development = Boolean(web?.development || web?.liveReload);
+    const etag = `"${body.length.toString(16)}-${Bun.hash(body).toString(16)}"`;
+    const baseHeaders = {
+      "Cache-Control": development ? "no-store" : "no-cache",
+      "Content-Type": contentType,
+      ETag: etag,
+      Vary: "Accept-Encoding",
+    };
+    if (!development && req.headers.get("if-none-match") === etag) {
+      return new Response(null, { status: 304, headers: baseHeaders });
+    }
+    if (development) return new Response(body, { headers: baseHeaders });
+
+    const accepted = req.headers.get("accept-encoding") ?? "";
+    const encoding = /(?:^|,)\s*br(?:\s*;|\s*,|\s*$)/i.test(accepted)
+      ? "br"
+      : /(?:^|,)\s*gzip(?:\s*;|\s*,|\s*$)/i.test(accepted)
+        ? "gzip"
+        : undefined;
+    if (!encoding) return new Response(body, { headers: baseHeaders });
+
+    const cacheKey = `${liveReloadVersion}:${name}:${encoding}`;
+    let encoded = encodedBrowserAssets.get(cacheKey);
+    if (!encoded) {
+      encoded =
+        encoding === "br"
+          ? brotliCompressSync(body, {
+              params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 5 },
+            })
+          : gzipSync(body, { level: 6 });
+      encodedBrowserAssets.set(cacheKey, encoded);
+    }
+    return new Response(encoded as BodyInit, {
+      headers: { ...baseHeaders, "Content-Encoding": encoding },
     });
   }
 
@@ -537,7 +572,7 @@ export function serve<Spec extends AppSpec>(
     if (!web?.liveReload) return "";
     return `<script type="module">
       (() => {
-        let version = 0;
+        let version = ${liveReloadVersion};
         let importing = Promise.resolve();
         const scriptPath = ${JSON.stringify(webScriptPath)};
         const stylePath = ${JSON.stringify(web.styles || web.styleBundle || web.styleFiles?.length ? webStylePath : "")};
@@ -750,14 +785,24 @@ export function serve<Spec extends AppSpec>(
   }
 
   async function rebuildAndPublish(changedPath: string) {
+    let assets: { script: string; style?: string } | Response;
     try {
       if (browserAssetsBuild) await browserAssetsBuild.promise;
       await web?.liveReload?.onChange?.(changedPath);
+      if (liveReloadPendingPath) return;
+      assets = await compileBrowserAssets();
     } catch (error) {
       console.error("poggers live reload rebuild failed", error);
       return;
     }
+    if (assets instanceof Response) {
+      console.error("poggers live reload browser build failed", await assets.text());
+      return;
+    }
+    if (liveReloadPendingPath) return;
     liveReloadVersion += 1;
+    browserAssetsCache = { version: liveReloadVersion, assets };
+    encodedBrowserAssets.clear();
     liveReloadChangedPath = relative(web?.liveReload?.watchDir ?? "", changedPath);
     const message = JSON.stringify({
       type: "reload",
@@ -1099,10 +1144,10 @@ self.addEventListener("fetch", (event) => {
       return renderIndex();
     }
     if (web && url.pathname === webScriptPath) {
-      return buildBrowserBundle();
+      return buildBrowserBundle(req);
     }
     if (web && url.pathname === webStylePath) {
-      return buildBrowserStyle();
+      return buildBrowserStyle(req);
     }
     if (web && url.pathname === "/manifest.webmanifest") {
       return renderManifest();
@@ -1491,8 +1536,6 @@ function shouldLiveReload(changedPath: string, watchDir: string): boolean {
   if (rel.startsWith("dist/")) return false;
   if (rel.startsWith("node_modules/")) return false;
   if (rel.startsWith("coverage/")) return false;
-  if (rel.startsWith("playwright-report/")) return false;
-  if (rel.startsWith("test-results/")) return false;
   if (rel.includes("/node_modules/")) return false;
   if (rel.endsWith(".jsonl")) return false;
   if (rel.endsWith(".snapshot.json")) return false;
@@ -1521,15 +1564,11 @@ function collectLiveReloadFiles(dir: string, watchDir: string): string[] {
       rel === "dist" ||
       rel === "node_modules" ||
       rel === "coverage" ||
-      rel === "playwright-report" ||
-      rel === "test-results" ||
       rel.startsWith(".poggers-") ||
       rel.startsWith(".poggers/") ||
       rel.startsWith("dist/") ||
       rel.startsWith("node_modules/") ||
       rel.startsWith("coverage/") ||
-      rel.startsWith("playwright-report/") ||
-      rel.startsWith("test-results/") ||
       rel.includes("/node_modules/")
     ) {
       continue;

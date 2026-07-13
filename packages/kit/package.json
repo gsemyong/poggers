@@ -35,11 +35,23 @@
       "default": "./src/storage.ts"
     },
     "./ui": {
+      "types": "./types/ui-public.d.ts",
+      "default": "./src/ui-public.ts"
+    },
+    "./web": {
+      "types": "./types/web.d.ts",
+      "default": "./src/web.ts"
+    },
+    "./internal/ui": {
       "types": "./types/ui.d.ts",
       "default": "./src/ui.ts"
     },
+    "./internal/app": {
+      "types": "./types/app.d.ts",
+      "default": "./src/app.ts"
+    },
     "./style": {
-      "types": "./src/preset.ts",
+      "types": "./types/preset.d.ts",
       "default": "./src/preset.ts"
     },
     "./worker": {
@@ -82,16 +94,16 @@
     "check": "bun run typecheck && bun run lint && bun run test"
   },
   "dependencies": {
-    "@babel/preset-typescript": "^7.29.1",
-    "@chenglou/pretext": "^0.0.8",
     "@stylexjs/stylex": "^0.19.0",
     "@stylexjs/unplugin": "^0.19.0",
+    "@tanstack/virtual-core": "^3.17.3",
     "@types/bun": "^1.3.14",
     "@typescript/typescript6": "^6.0.2",
     "alien-signals": "^3.2.1",
     "animejs": "^4.5.0",
     "typescript": "^7.0.2",
-    "unplugin": "^2.3.11"
+    "unplugin": "^2.3.11",
+    "xstate": "5.32.4"
   },
   "devDependencies": {
     "fake-indexeddb": "^6.2.5",

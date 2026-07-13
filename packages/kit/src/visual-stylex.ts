@@ -1,4 +1,4 @@
-import type { MaterializedVisualPreset } from "./visual-compiler";
+import { validateVisualTokenUsage, type MaterializedVisualPreset } from "./visual-compiler";
 
 type RawCode = { readonly $code: string };
 type CodeValue = string | number | boolean | null | RawCode | CodeValue[] | CodeObject;
@@ -8,6 +8,7 @@ type ValueArgument = {
   readonly name: string;
   readonly kind: string;
   readonly parameter: string;
+  readonly expression?: unknown;
 };
 
 type StyleEntry = {
@@ -16,10 +17,20 @@ type StyleEntry = {
   readonly values: readonly ValueArgument[];
 };
 
-type RuntimeCondition = {
-  readonly state?: Readonly<Record<string, unknown>>;
-  readonly variant?: Readonly<Record<string, unknown>>;
+type RuntimePredicate = {
   readonly theme?: string;
+  readonly expression?: unknown;
+  readonly not?: true;
+};
+
+type RuntimeCondition = {
+  readonly all: readonly RuntimePredicate[];
+};
+
+type ConditionLeaf = {
+  readonly selector: string;
+  readonly value: unknown;
+  readonly not: boolean;
 };
 
 type PartPlan = {
@@ -29,6 +40,14 @@ type PartPlan = {
     readonly entry: StyleEntry;
   }[];
   readonly motion: unknown;
+  readonly collection: unknown;
+  readonly layout: {
+    readonly base: Readonly<Record<string, unknown>>;
+    readonly conditions: readonly {
+      readonly when: unknown;
+      readonly apply: Readonly<Record<string, unknown>>;
+    }[];
+  };
 };
 
 type ComponentPlan = {
@@ -41,6 +60,7 @@ type ResolvedPart = {
   readonly base: Record<string, unknown>;
   readonly when: readonly unknown[];
   readonly motion: Record<string, unknown>;
+  readonly collection: Record<string, unknown>;
 };
 
 type LoweringContext = {
@@ -84,7 +104,7 @@ export function generateVisualStylexModule(presets: readonly MaterializedVisualP
 
     const themeReferences: Record<string, RawCode | null> = { default: null };
     for (const [themeName, themeValue] of Object.entries(preset.themes)) {
-      const overrides = themeVariableDefinitions(preset, themeValue);
+      const overrides = themeVariableDefinitions(preset, themeName, themeValue);
       if (!Object.keys(overrides).length || themeName === "default") {
         themeReferences[themeName] = null;
         continue;
@@ -103,12 +123,24 @@ export function generateVisualStylexModule(presets: readonly MaterializedVisualP
       componentPlans[componentName] = plan;
       declarations.push(stylexCreateSource(plan), "");
     }
+    validateVisualTokenUsage(preset.name, preset.tokens, preset.themes, {
+      components: preset.components,
+      parameters: preset.parameters,
+      interactions: preset.interactions,
+    });
 
     presetEntries.push(
       `${JSON.stringify(preset.name)}: ${printCode({
         themes: themeReferences as unknown as CodeObject,
         motion: recordAt(preset.tokens.motion),
         themeMotion: themeMotionDefinitions(preset),
+        metrics: metricDefinitions(preset),
+        themeMetrics: themeMetricDefinitions(preset),
+        fonts: fontDefinitions(preset),
+        themeFonts: themeFontDefinitions(preset),
+        containers: preset.containers as CodeObject,
+        parameters: preset.parameters as CodeObject,
+        interactions: preset.interactions as unknown as CodeObject,
         components: raw(componentManifestSource(componentPlans)),
       })}`,
     );
@@ -135,7 +167,8 @@ function tokenVariableDefinitions(preset: MaterializedVisualPreset): CodeObject 
     for (const [name, value] of Object.entries(values)) {
       result[tokenVariableName(group, name)] = tokenDefinitionCode(
         group,
-        resolveTokenAlias(preset, group, name, value),
+        unwrapMetricToken(resolveTokenAlias(preset, group, name, value), group),
+        `${preset.name}.tokens.${group}.${name}`,
       );
     }
   }
@@ -144,6 +177,7 @@ function tokenVariableDefinitions(preset: MaterializedVisualPreset): CodeObject 
 
 function themeVariableDefinitions(
   preset: MaterializedVisualPreset,
+  themeName: string,
   themeValue: unknown,
 ): CodeObject {
   const result: Record<string, CodeValue> = {};
@@ -159,7 +193,8 @@ function themeVariableDefinitions(
       }
       result[tokenVariableName(group, name)] = tokenDefinitionCode(
         group,
-        resolveTokenAlias(preset, group, name, value, theme),
+        unwrapMetricToken(resolveTokenAlias(preset, group, name, value, theme), group),
+        `${preset.name}.themes.${themeName}.${group}.${name}`,
       );
     }
   }
@@ -185,28 +220,99 @@ function themeMotionDefinitions(preset: MaterializedVisualPreset): CodeObject {
   return result;
 }
 
-function tokenDefinitionCode(group: string, value: unknown): CodeValue {
+const metricGroups = new Set(["space", "size", "radius", "blur", "z"]);
+
+function metricDefinitions(preset: MaterializedVisualPreset): CodeObject {
+  const metrics: Record<string, CodeValue> = {};
+  for (const [group, values] of Object.entries(preset.tokens)) {
+    if (!metricGroups.has(group)) continue;
+    const resolved: Record<string, CodeValue> = {};
+    for (const [name, value] of Object.entries(values)) {
+      resolved[name] = numberAt(
+        unwrapMetricToken(resolveTokenAlias(preset, group, name, value), group),
+        `${preset.name}.tokens.${group}.${name}`,
+      );
+    }
+    metrics[group] = resolved;
+  }
+  return metrics;
+}
+
+function themeMetricDefinitions(preset: MaterializedVisualPreset): CodeObject {
+  const themes: Record<string, CodeValue> = {};
+  for (const [themeName, rawTheme] of Object.entries(preset.themes)) {
+    const theme = recordAt(rawTheme);
+    const metrics: Record<string, CodeValue> = {};
+    for (const [group, rawValues] of Object.entries(theme)) {
+      if (!metricGroups.has(group)) continue;
+      const values: Record<string, CodeValue> = {};
+      for (const [name, value] of Object.entries(recordAt(rawValues))) {
+        values[name] = numberAt(
+          unwrapMetricToken(resolveTokenAlias(preset, group, name, value, theme), group),
+          `${preset.name}.themes.${themeName}.${group}.${name}`,
+        );
+      }
+      metrics[group] = values;
+    }
+    if (Object.keys(metrics).length) themes[themeName] = metrics;
+  }
+  return themes;
+}
+
+function fontDefinitions(preset: MaterializedVisualPreset): CodeObject {
+  const fonts: Record<string, CodeValue> = {};
+  for (const [name, value] of Object.entries(recordAt(preset.tokens.font))) {
+    fonts[name] = resolveTokenAlias(preset, "font", name, value) as CodeObject;
+  }
+  return fonts;
+}
+
+function themeFontDefinitions(preset: MaterializedVisualPreset): CodeObject {
+  const themes: Record<string, CodeValue> = {};
+  for (const [themeName, rawTheme] of Object.entries(preset.themes)) {
+    const theme = recordAt(rawTheme);
+    const fonts: Record<string, CodeValue> = {};
+    for (const [name, value] of Object.entries(recordAt(theme.font))) {
+      fonts[name] = resolveTokenAlias(preset, "font", name, value, theme) as CodeObject;
+    }
+    if (Object.keys(fonts).length) themes[themeName] = fonts;
+  }
+  return themes;
+}
+
+function tokenDefinitionCode(group: string, value: unknown, path: string): CodeValue {
   switch (group) {
     case "color":
-      return raw(`stylex.types.color(${JSON.stringify(colorLiteral(value, "token color"))})`);
+      return raw(`stylex.types.color(${JSON.stringify(colorLiteral(value, path))})`);
     case "space":
     case "size":
     case "radius":
     case "blur":
-      return raw(`stylex.types.length(${JSON.stringify(lengthLiteral(value, "token length"))})`);
+      return raw(
+        `stylex.types.length(${JSON.stringify(lengthLiteral(numberInRange(value, 0, Infinity, path), path))})`,
+      );
     case "z":
-      return raw(`stylex.types.integer(${numberAt(value, "z token")})`);
+      return raw(`stylex.types.integer(${integerAt(value, path)})`);
     case "gradient":
-      return raw(`stylex.types.image(${JSON.stringify(gradientLiteral(value, "gradient token"))})`);
+      return raw(`stylex.types.image(${JSON.stringify(gradientLiteral(value, path))})`);
     case "stroke":
-      return strokeTokenLiteral(value, "stroke token");
+      return strokeTokenLiteral(value, path);
     case "shadow":
-      return shadowLiteral(value, "shadow token");
+      return shadowLiteral(value, path);
     case "font":
-      return fontLiteral(value, "font token");
+      return fontLiteral(value, path);
     default:
       throw new Error(`Unknown visual token group ${JSON.stringify(group)}.`);
   }
+}
+
+function unwrapMetricToken(value: unknown, group: string): unknown {
+  if (!metricGroups.has(group)) return value;
+  const token = requiredRecord(value, `${group} token`);
+  assertKnownKeys(token, ["kind", "value"], `${group} token`);
+  if (token.kind !== group)
+    throw new Error(`${group} token has mismatched kind ${String(token.kind)}.`);
+  return token.value;
 }
 
 function resolveTokenAlias(
@@ -238,17 +344,67 @@ function validateMotionTokenDefinition(value: unknown, path: string): void {
   if (token.spring != null) {
     assertKnownKeys(token, ["spring", "delay"], path);
     const spring = requiredRecord(token.spring, `${path}.spring`);
-    assertKnownKeys(spring, ["duration", "bounce"], `${path}.spring`);
-    numberAt(spring.duration, `${path}.spring.duration`);
-    if (spring.bounce != null) numberAt(spring.bounce, `${path}.spring.bounce`);
+    assertKnownKeys(
+      spring,
+      ["duration", "bounce", "mass", "stiffness", "damping", "velocity"],
+      `${path}.spring`,
+    );
+    if (spring.duration != null) {
+      numberInRange(spring.duration, 0, 60_000, `${path}.spring.duration`);
+    }
+    if (spring.bounce != null) {
+      numberInRange(spring.bounce, -0.5, 0.5, `${path}.spring.bounce`);
+    }
+    if (spring.mass != null) numberInRange(spring.mass, 0.001, 10_000, `${path}.spring.mass`);
+    if (spring.stiffness != null) {
+      numberInRange(spring.stiffness, 0.001, 100_000, `${path}.spring.stiffness`);
+    }
+    if (spring.damping != null) {
+      numberInRange(spring.damping, 0.001, 100_000, `${path}.spring.damping`);
+    }
+    if (spring.velocity != null) {
+      numberInRange(spring.velocity, -100_000, 100_000, `${path}.spring.velocity`);
+    }
+    const perceptual = spring.duration != null || spring.bounce != null;
+    const physical =
+      spring.mass != null ||
+      spring.stiffness != null ||
+      spring.damping != null ||
+      spring.velocity != null;
+    if (perceptual && physical) {
+      throw new Error(
+        `${path}.spring cannot mix perceptual duration/bounce with physical spring parameters.`,
+      );
+    }
+    if (perceptual && spring.duration == null) {
+      throw new Error(`${path}.spring.duration is required for a perceptual spring.`);
+    }
+    if (physical && (spring.stiffness == null || spring.damping == null)) {
+      throw new Error(`${path}.spring requires physical stiffness and damping.`);
+    }
+    if (!perceptual && !physical) {
+      throw new Error(`${path}.spring requires perceptual or physical spring parameters.`);
+    }
   } else {
     assertKnownKeys(token, ["duration", "easing", "delay"], path);
-    numberAt(token.duration, `${path}.duration`);
+    numberInRange(token.duration, 0, 60_000, `${path}.duration`);
     if (token.easing != null) {
-      enumAt(token.easing, ["linear", "smooth", "accelerate", "decelerate"], `${path}.easing`);
+      if (typeof token.easing === "string") {
+        enumAt(token.easing, ["linear", "smooth", "accelerate", "decelerate"], `${path}.easing`);
+      } else {
+        const easing = requiredRecord(token.easing, `${path}.easing`);
+        assertKnownKeys(easing, ["cubic"], `${path}.easing`);
+        if (!Array.isArray(easing.cubic) || easing.cubic.length !== 4) {
+          throw new Error(`${path}.easing.cubic must contain four control-point numbers.`);
+        }
+        numberInRange(easing.cubic[0], 0, 1, `${path}.easing.cubic[0]`);
+        numberInRange(easing.cubic[1], -10, 10, `${path}.easing.cubic[1]`);
+        numberInRange(easing.cubic[2], 0, 1, `${path}.easing.cubic[2]`);
+        numberInRange(easing.cubic[3], -10, 10, `${path}.easing.cubic[3]`);
+      }
     }
   }
-  if (token.delay != null) numberAt(token.delay, `${path}.delay`);
+  if (token.delay != null) numberInRange(token.delay, 0, 60_000, `${path}.delay`);
 }
 
 function planComponent(
@@ -270,16 +426,14 @@ function planComponent(
   const hasContainers = Object.values(resolvedParts).some(partUsesContainer);
 
   for (const [partName, part] of Object.entries(resolvedParts)) {
-    const partPath = `${preset.name}.${component}.${partName}`;
     const baseSource = part.base;
-    validateMotionSafety({ motion: part.motion }, baseSource, partPath);
     const baseExtra: Record<string, CodeValue> = {};
     if (partName === "Root" && hasContainers) baseExtra.containerType = "inline-size";
     if (anchorNames[partName]) baseExtra.anchorName = anchorNames[partName]!;
     Object.assign(
       baseExtra,
       motionTransitionStyle(
-        recordAt(part.motion).change,
+        cssTransitionDomains(recordAt(part.motion)),
         preset,
         `${preset.name}.${component}.${partName}`,
       ),
@@ -303,34 +457,76 @@ function planComponent(
     for (const [index, conditionValue] of when.entries()) {
       const condition = recordAt(conditionValue);
       const apply = recordAt(condition.apply);
-      const key = `${partName}_when_${index}`;
-      const staticWrapper = staticConditionWrapper(condition, preset);
-      const entry = createStyleEntry(
-        key,
-        apply,
-        {
-          path: `${preset.name}.${component}.${partName}.when[${index}]`,
-          varsName,
-          component,
-          anchorNames,
-        },
-        undefined,
-        staticWrapper,
-      );
-      entries.push(entry);
-      const runtime = runtimeCondition(condition);
-      if (runtime) conditions.push({ when: runtime, entry });
-      else always.push(entry);
+      const branches = conditionBranches(condition);
+      for (const [branchIndex, branch] of branches.entries()) {
+        const key = `${partName}_when_${index}_${branchIndex}`;
+        const wrappers: string[] = [];
+        const predicates: RuntimePredicate[] = [];
+        for (const leaf of branch) {
+          const wrapper = staticConditionWrapper(leaf, preset);
+          if (wrapper) {
+            wrappers.push(wrapper);
+            continue;
+          }
+          const predicate = runtimePredicate(leaf);
+          if (!predicate) {
+            throw new Error(
+              `${preset.name}.${component}.${partName}.when[${index}] cannot be lowered.`,
+            );
+          }
+          predicates.push(predicate);
+        }
+        const entry = createStyleEntry(
+          key,
+          apply,
+          {
+            path: `${preset.name}.${component}.${partName}.when[${index}]`,
+            varsName,
+            component,
+            anchorNames,
+          },
+          undefined,
+          wrappers,
+        );
+        entries.push(entry);
+        if (predicates.length) conditions.push({ when: { all: predicates }, entry });
+        else always.push(entry);
+      }
     }
 
     plans[partName] = {
       always,
       conditions,
       motion: Object.keys(part.motion).length ? part.motion : null,
+      collection: Object.keys(part.collection).length ? part.collection : null,
+      layout: {
+        base: pickLayoutProgram(part.base),
+        conditions: part.when.flatMap((value) => {
+          const condition = recordAt(value);
+          const apply = pickLayoutProgram(recordAt(condition.apply));
+          if (!Object.keys(apply).length) return [];
+          const { apply: _apply, ...when } = condition;
+          return [{ when, apply }];
+        }),
+      },
     };
   }
 
   return { stylesName, entries, parts: plans };
+}
+
+function cssTransitionDomains(motion: Record<string, unknown>): Record<string, unknown> {
+  const transition = { ...recordAt(motion.transition) };
+  const target = recordAt(motion.target);
+  if (target.opacity != null) delete transition.opacity;
+  if (
+    ["inline", "block", "depth", "scale", "scaleInline", "scaleBlock", "rotate"].some(
+      (property) => target[property] != null,
+    )
+  ) {
+    delete transition.transform;
+  }
+  return transition;
 }
 
 function validatePartShape(
@@ -338,114 +534,156 @@ function validatePartShape(
   preset: MaterializedVisualPreset,
   path: string,
 ): void {
-  assertKnownKeys(part, [...visualStyleKeys, "use", "when", "motion"], path);
+  assertKnownKeys(part, [...visualStyleKeys, "use", "when", "motion", "collection"], path);
   validateMotionShape(part.motion, preset, `${path}.motion`);
+  validateCollectionShape(part.collection, preset, `${path}.collection`);
   if (part.when == null) return;
   if (!Array.isArray(part.when)) throw new Error(`${path}.when must be an array.`);
   const selectors = [
     "state",
-    "variant",
+    "context",
+    "input",
     "native",
     "container",
     "theme",
     "preference",
     "capability",
+    "all",
+    "any",
+    "not",
+    "expression",
   ];
   for (const [index, rawCondition] of part.when.entries()) {
     const conditionPath = `${path}.when[${index}]`;
     const condition = requiredRecord(rawCondition, conditionPath);
     assertKnownKeys(condition, [...selectors, "apply"], conditionPath);
-    const active = selectors.filter((selector) => condition[selector] != null);
-    if (active.length !== 1) {
-      throw new Error(`${conditionPath} must contain exactly one condition selector.`);
-    }
+    const { apply: _apply, ...selector } = condition;
+    validateConditionSelector(selector, conditionPath);
     requiredRecord(condition.apply, `${conditionPath}.apply`);
+  }
+}
+
+function validateConditionSelector(condition: Record<string, unknown>, path: string): void {
+  const selectors = [
+    "state",
+    "context",
+    "input",
+    "native",
+    "container",
+    "theme",
+    "preference",
+    "capability",
+    "all",
+    "any",
+    "not",
+    "expression",
+  ];
+  assertKnownKeys(condition, selectors, path);
+  const active = selectors.filter((selector) => condition[selector] != null);
+  if (active.length !== 1) {
+    throw new Error(`${path} must contain exactly one condition selector.`);
+  }
+  const selector = active[0]!;
+  if (selector === "all" || selector === "any") {
+    const children = condition[selector];
+    if (!Array.isArray(children) || children.length === 0) {
+      throw new Error(`${path}.${selector} must be a non-empty array.`);
+    }
+    for (const [index, child] of children.entries()) {
+      validateConditionSelector(
+        requiredRecord(child, `${path}.${selector}[${index}]`),
+        `${path}.${selector}[${index}]`,
+      );
+    }
+  } else if (selector === "not") {
+    validateConditionSelector(requiredRecord(condition.not, `${path}.not`), `${path}.not`);
   }
 }
 
 function validateMotionShape(value: unknown, preset: MaterializedVisualPreset, path: string): void {
   if (value == null) return;
   const motion = requiredRecord(value, path);
-  assertKnownKeys(motion, ["change", "enter", "exit", "layout", "shared", "gesture"], path);
+  assertKnownKeys(motion, ["target", "presence", "transition", "layout", "reduceMotion"], path);
 
-  if (motion.change != null) {
-    const change = requiredRecord(motion.change, `${path}.change`);
-    assertKnownKeys(change, Object.keys(transitionProperties), `${path}.change`);
-    for (const [domain, reference] of Object.entries(change)) {
-      motionToken(preset, reference, `${path}.change.${domain}`);
-    }
-  }
-  for (const lifecycle of ["enter", "exit"] as const) {
-    if (motion[lifecycle] == null) continue;
-    const item = requiredRecord(motion[lifecycle], `${path}.${lifecycle}`);
-    assertKnownKeys(item, [lifecycle === "enter" ? "from" : "to", "using"], `${path}.${lifecycle}`);
-    const frameName = lifecycle === "enter" ? "from" : "to";
-    const frame = requiredRecord(item[frameName], `${path}.${lifecycle}.${frameName}`);
-    assertKnownKeys(frame, ["effect", "transform"], `${path}.${lifecycle}.${frameName}`);
-    if (frame.effect != null) {
-      const effect = requiredRecord(frame.effect, `${path}.${lifecycle}.${frameName}.effect`);
-      assertKnownKeys(effect, ["opacity"], `${path}.${lifecycle}.${frameName}.effect`);
-      if (effect.opacity != null) {
-        numberAt(effect.opacity, `${path}.${lifecycle}.${frameName}.effect.opacity`);
-      }
-    }
-    if (frame.transform != null) {
-      const transform = requiredRecord(
-        frame.transform,
-        `${path}.${lifecycle}.${frameName}.transform`,
-      );
-      assertKnownKeys(
-        transform,
-        ["inline", "block", "scale", "rotate"],
-        `${path}.${lifecycle}.${frameName}.transform`,
-      );
-      for (const [name, rawValue] of Object.entries(transform)) {
-        numberAt(rawValue, `${path}.${lifecycle}.${frameName}.transform.${name}`);
-      }
-    }
-    motionToken(preset, item.using, `${path}.${lifecycle}.using`);
-  }
-  if (motion.layout != null) {
-    const layout = requiredRecord(motion.layout, `${path}.layout`);
-    assertKnownKeys(layout, ["geometry", "using"], `${path}.layout`);
-    enumAt(layout.geometry, ["position", "frame", "text"], `${path}.layout.geometry`);
-    motionToken(preset, layout.using, `${path}.layout.using`);
-  }
-  if (motion.shared != null) {
-    const shared = requiredRecord(motion.shared, `${path}.shared`);
-    assertKnownKeys(shared, ["id", "using"], `${path}.shared`);
-    stringAt(shared.id, `${path}.shared.id`);
-    motionToken(preset, shared.using, `${path}.shared.using`);
-  }
-  if (motion.gesture != null) {
-    const gesture = requiredRecord(motion.gesture, `${path}.gesture`);
+  const validateTarget = (value: unknown, targetPath: string) => {
+    const target = requiredRecord(value, targetPath);
     assertKnownKeys(
-      gesture,
-      ["axis", "value", "handle", "bounds", "rubberBand", "dismiss", "settle"],
-      `${path}.gesture`,
+      target,
+      ["opacity", "inline", "block", "depth", "scale", "scaleInline", "scaleBlock", "rotate"],
+      targetPath,
     );
-    enumAt(gesture.axis, ["inline", "block", "both"], `${path}.gesture.axis`);
-    if (!isValueReference(gesture.value) || gesture.value.kind !== "length") {
-      throw new Error(`${path}.gesture.value must reference a length component value.`);
+    if (target.opacity != null && !isExpression(target.opacity)) {
+      numberInRange(target.opacity, 0, 1, `${targetPath}.opacity`);
     }
-    if (gesture.handle != null) stringAt(gesture.handle, `${path}.gesture.handle`);
-    if (
-      gesture.bounds != null &&
-      (!Array.isArray(gesture.bounds) ||
-        gesture.bounds.length !== 2 ||
-        gesture.bounds.some((bound) => typeof bound !== "number" || Number.isNaN(bound)))
-    ) {
-      throw new Error(`${path}.gesture.bounds must contain two numeric bounds.`);
+  };
+  if (motion.target != null) validateTarget(motion.target, `${path}.target`);
+  if (motion.presence != null) {
+    const presence = requiredRecord(motion.presence, `${path}.presence`);
+    assertKnownKeys(presence, ["enterFrom", "exitTo", "layout"], `${path}.presence`);
+    if (presence.enterFrom != null) {
+      validateTarget(presence.enterFrom, `${path}.presence.enterFrom`);
     }
-    if (gesture.rubberBand != null) numberAt(gesture.rubberBand, `${path}.gesture.rubberBand`);
-    if (gesture.dismiss != null) {
-      const dismiss = requiredRecord(gesture.dismiss, `${path}.gesture.dismiss`);
-      assertKnownKeys(dismiss, ["distance", "velocity"], `${path}.gesture.dismiss`);
-      numberAt(dismiss.distance, `${path}.gesture.dismiss.distance`);
-      numberAt(dismiss.velocity, `${path}.gesture.dismiss.velocity`);
+    if (presence.exitTo != null) validateTarget(presence.exitTo, `${path}.presence.exitTo`);
+    if (presence.layout != null) {
+      enumAt(presence.layout, ["preserve", "pop"], `${path}.presence.layout`);
     }
-    motionToken(preset, gesture.settle, `${path}.gesture.settle`);
   }
+  if (motion.transition != null) {
+    const transition = requiredRecord(motion.transition, `${path}.transition`);
+    assertKnownKeys(transition, Object.keys(transitionProperties), `${path}.transition`);
+    for (const [domain, reference] of Object.entries(transition)) {
+      motionToken(preset, reference, `${path}.transition.${domain}`);
+    }
+  }
+  if (motion.layout != null) motionToken(preset, motion.layout, `${path}.layout`);
+  if (motion.reduceMotion != null) {
+    enumAt(motion.reduceMotion, ["instant", "crossfade"], `${path}.reduceMotion`);
+  }
+}
+
+function numberInRange(value: unknown, minimum: number, maximum: number, path: string): number {
+  const number = numberAt(value, path);
+  if (number < minimum || number > maximum) {
+    throw new Error(`${path} must be between ${minimum} and ${maximum}.`);
+  }
+  return number;
+}
+
+function validateCollectionShape(
+  value: unknown,
+  preset: MaterializedVisualPreset,
+  path: string,
+): void {
+  if (value == null) return;
+  const collection = requiredRecord(value, path);
+  assertKnownKeys(collection, ["axis", "estimate", "gap", "lanes"], path);
+  if (collection.axis != null) enumAt(collection.axis, ["block", "inline"], `${path}.axis`);
+  metricAt(collection.estimate, preset, ["size", "space"], `${path}.estimate`);
+  if (collection.gap != null) metricAt(collection.gap, preset, ["space"], `${path}.gap`);
+  if (collection.lanes != null) {
+    const lanes = numberAt(collection.lanes, `${path}.lanes`);
+    if (!Number.isInteger(lanes) || lanes < 1) throw new Error(`${path}.lanes must be positive.`);
+  }
+}
+
+function metricAt(
+  value: unknown,
+  preset: MaterializedVisualPreset,
+  groups: readonly string[],
+  path: string,
+): number | unknown {
+  if (typeof value === "number") return numberAt(value, path);
+  const reference = requiredRecord(value, path);
+  if (
+    reference.$visual !== "token" ||
+    typeof reference.group !== "string" ||
+    !groups.includes(reference.group) ||
+    typeof reference.name !== "string" ||
+    !(reference.name in recordAt(preset.tokens[reference.group]))
+  ) {
+    throw new Error(`${path} must be a number or ${groups.join("/")} token.`);
+  }
+  return value;
 }
 
 function motionToken(preset: MaterializedVisualPreset, value: unknown, path: string): unknown {
@@ -471,13 +709,14 @@ function motionTransitionStyle(
   preset: MaterializedVisualPreset,
   path: string,
 ): Record<string, CodeValue> {
-  const change = recordAt(value);
-  if (!Object.keys(change).length) return {};
+  const transition = recordAt(value);
+  if (!Object.keys(transition).length) return {};
   const owners = new Map<string, { driver: unknown; domain: string }>();
-  for (const [domain, reference] of Object.entries(change)) {
+  for (const [domain, reference] of Object.entries(transition)) {
     const properties = transitionProperties[domain];
-    if (!properties) throw new Error(`${path}.motion.change contains unknown domain ${domain}.`);
-    const driver = motionToken(preset, reference, `${path}.motion.change.${domain}`);
+    if (!properties)
+      throw new Error(`${path}.motion.transition contains unknown domain ${domain}.`);
+    const driver = motionToken(preset, reference, `${path}.motion.transition.${domain}`);
     for (const property of properties) {
       const current = owners.get(property);
       if (current && JSON.stringify(current.driver) !== JSON.stringify(driver)) {
@@ -501,7 +740,11 @@ function motionTransitionStyle(
   };
 }
 
-function motionCssTiming(value: unknown): { duration: string; delay: string; easing: string } {
+function motionCssTiming(value: unknown): {
+  duration: string;
+  delay: string;
+  easing: string;
+} {
   if (value === "none") return { duration: "0ms", delay: "0ms", easing: "linear" };
   const driver = recordAt(value);
   const delay = `${numberOr(driver.delay, 0)}ms`;
@@ -512,9 +755,8 @@ function motionCssTiming(value: unknown): { duration: string; delay: string; eas
     return {
       duration: `${duration}ms`,
       delay,
-      // Safari does not offload custom linear() easings. Keep native-state
-      // transitions compositor eligible; lifecycle springs use sampled WAAPI
-      // keyframes in the runtime instead.
+      // Keep static native-state transitions compositor eligible. Retained
+      // lifecycle springs are driven by the motion runtime instead.
       easing:
         bounce > 0
           ? `cubic-bezier(.2, ${1 + bounce * 0.9}, .3, 1)`
@@ -529,10 +771,14 @@ function motionCssTiming(value: unknown): { duration: string; delay: string; eas
     accelerate: "cubic-bezier(.32, 0, .67, 0)",
     decelerate: "cubic-bezier(.33, 1, .68, 1)",
   };
+  const cubic = recordAt(driver.easing).cubic;
   return {
     duration: `${numberOr(driver.duration, 180)}ms`,
     delay,
-    easing: easings[String(driver.easing)] ?? easings.decelerate!,
+    easing:
+      Array.isArray(cubic) && cubic.length === 4
+        ? `cubic-bezier(${cubic.join(", ")})`
+        : (easings[String(driver.easing)] ?? easings.decelerate!),
   };
 }
 
@@ -540,41 +786,24 @@ function numberOr(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
-function validateMotionSafety(
-  part: Record<string, unknown>,
-  resolved: Record<string, unknown>,
-  path: string,
-): void {
-  const motion = recordAt(part.motion);
-  const layout = recordAt(motion.layout);
-  if (!Object.keys(layout).length) return;
-  const geometry = layout.geometry;
-  if (geometry === "frame" || geometry === "text") {
-    const contain = recordAt(resolved.frame).contain;
-    if (contain !== "layout" && contain !== "strict") {
-      throw new Error(`${path}.motion.layout with ${geometry} geometry requires frame.contain.`);
-    }
-  }
-  const transform = recordAt(resolved.transform);
-  if (transform.skewInline != null || transform.skewBlock != null) {
-    throw new Error(`${path} cannot combine layout motion with an authored transform matrix.`);
-  }
-}
-
 function createStyleEntry(
   key: string,
   source: Record<string, unknown>,
   base: Omit<LoweringContext, "values">,
   extra?: Readonly<Record<string, CodeValue>>,
-  wrapper?: string,
+  wrappers: readonly string[] = [],
 ): StyleEntry {
   const values: ValueArgument[] = [];
   const context: LoweringContext = { ...base, values };
   const style = lowerVisualFragment(source, context);
   if (extra) Object.assign(style, extra);
+  const wrapped = wrappers.reduceRight<Record<string, CodeValue>>(
+    (current, wrapper) => ({ [wrapper]: current }),
+    style,
+  );
   return {
     key,
-    style: wrapper ? { [wrapper]: style } : style,
+    style: wrapped,
     values,
   };
 }
@@ -601,7 +830,7 @@ function componentManifestSource(plans: Readonly<Record<string, ComponentPlan>>)
             ({ when, entry }) =>
               `{ when: ${JSON.stringify(when)}, entry: ${entryManifestSource(plan.stylesName, entry)} }`,
           );
-          return `${JSON.stringify(partName)}: { always: [${always.join(", ")}], conditions: [${conditions.join(", ")}], motion: ${JSON.stringify(part.motion)} }`;
+          return `${JSON.stringify(partName)}: { always: [${always.join(", ")}], conditions: [${conditions.join(", ")}], motion: ${JSON.stringify(part.motion)}, collection: ${JSON.stringify(part.collection)}, layout: ${JSON.stringify(part.layout)} }`;
         })
         .join(",\n      ");
       return `${JSON.stringify(componentName)}: {\n      ${parts}\n    }`;
@@ -610,9 +839,28 @@ function componentManifestSource(plans: Readonly<Record<string, ComponentPlan>>)
   return `{\n    ${components}\n  }`;
 }
 
+const retainedLayoutKeys = new Set([
+  "layout",
+  "frame",
+  "place",
+  "padding",
+  "margin",
+  "position",
+  "scroll",
+  "text",
+]);
+
+function pickLayoutProgram(source: Readonly<Record<string, unknown>>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(source).filter(([key]) => retainedLayoutKeys.has(key)));
+}
+
 function entryManifestSource(stylesName: string, entry: StyleEntry): string {
   return `{ style: ${stylesName}[${JSON.stringify(entry.key)}], values: ${JSON.stringify(
-    entry.values.map(({ name, kind }) => ({ name, kind })),
+    entry.values.map(({ name, kind, expression }) => ({
+      name,
+      kind,
+      expression,
+    })),
   )} }`;
 }
 
@@ -788,12 +1036,12 @@ function lowerLayout(
     default:
       throw new Error(`${context.path}.kind has unsupported value ${JSON.stringify(kind)}.`);
   }
-  if (layout.gap != null) style.gap = cssLength(layout.gap, childPath(context, "gap"));
+  if (layout.gap != null) style.gap = cssLength(layout.gap, childPath(context, "gap"), ["space"]);
   if (layout.columnGap != null) {
-    style.columnGap = cssLength(layout.columnGap, childPath(context, "columnGap"));
+    style.columnGap = cssLength(layout.columnGap, childPath(context, "columnGap"), ["space"]);
   }
   if (layout.rowGap != null) {
-    style.rowGap = cssLength(layout.rowGap, childPath(context, "rowGap"));
+    style.rowGap = cssLength(layout.rowGap, childPath(context, "rowGap"), ["space"]);
   }
   if (layout.align != null) style.alignItems = alignValue(layout.align, `${context.path}.align`);
   if (layout.distribute != null) {
@@ -883,7 +1131,7 @@ function lowerLogicalSpace(
   context: LoweringContext,
 ): void {
   if (!isPlainRecord(value) || isVisualReference(value)) {
-    style[prefix] = cssLength(value, context);
+    style[prefix] = cssLength(value, context, ["space"]);
     return;
   }
   const space = value as Record<string, unknown>;
@@ -898,7 +1146,39 @@ function lowerLogicalSpace(
   for (const [name, rawValue] of Object.entries(space)) {
     const target = property[name];
     if (!target) throw new Error(`${context.path} contains unknown logical side ${name}.`);
-    style[target] = cssLength(rawValue, childPath(context, name));
+    style[target] = cssLength(rawValue, childPath(context, name), ["space"]);
+  }
+}
+
+function lowerLogicalInset(
+  value: unknown,
+  style: Record<string, CodeValue>,
+  context: LoweringContext,
+): void {
+  if (!isPlainRecord(value) || isVisualReference(value)) {
+    const length = cssLength(value, context, ["space"]);
+    style.insetInlineStart = length;
+    style.insetInlineEnd = length;
+    style.insetBlockStart = length;
+    style.insetBlockEnd = length;
+    return;
+  }
+
+  const inset = value as Record<string, unknown>;
+  assertKnownKeys(
+    inset,
+    ["inline", "block", "inlineStart", "inlineEnd", "blockStart", "blockEnd"],
+    context.path,
+  );
+  const sides = [
+    ["insetInlineStart", "inlineStart", inset.inlineStart ?? inset.inline],
+    ["insetInlineEnd", "inlineEnd", inset.inlineEnd ?? inset.inline],
+    ["insetBlockStart", "blockStart", inset.blockStart ?? inset.block],
+    ["insetBlockEnd", "blockEnd", inset.blockEnd ?? inset.block],
+  ] as const;
+  for (const [property, name, rawValue] of sides) {
+    if (rawValue != null)
+      style[property] = cssLength(rawValue, childPath(context, name), ["space"]);
   }
 }
 
@@ -946,16 +1226,24 @@ function lowerText(
     context.path,
   );
   if (text.font != null) style.fontFamily = cssToken(text.font, context, "font");
-  if (text.size != null) style.fontSize = cssLength(text.size, childPath(context, "size"));
+  if (text.size != null)
+    style.fontSize = cssLength(text.size, childPath(context, "size"), ["size"]);
   if (text.weight != null) style.fontWeight = numberAt(text.weight, `${context.path}.weight`);
   if (text.line != null) {
-    style.lineHeight =
-      typeof text.line === "number"
-        ? numberAt(text.line, `${context.path}.line`)
-        : cssLength(text.line, childPath(context, "line"));
+    if (typeof text.line === "number") {
+      const ratio = numberAt(text.line, `${context.path}.line`);
+      if (ratio <= 0 || ratio > 4) {
+        throw new Error(
+          `${context.path}.line unitless ratio must be greater than 0 and at most 4; use a size token for an absolute line height.`,
+        );
+      }
+      style.lineHeight = ratio;
+    } else {
+      style.lineHeight = cssLength(text.line, childPath(context, "line"), ["size"]);
+    }
   }
   if (text.tracking != null) {
-    style.letterSpacing = cssLength(text.tracking, childPath(context, "tracking"));
+    style.letterSpacing = cssLength(text.tracking, childPath(context, "tracking"), ["space"]);
   }
   if (text.align != null) style.textAlign = stringAt(text.align, `${context.path}.align`);
   if (text.transform != null) {
@@ -973,9 +1261,7 @@ function lowerText(
   }
   if (text.lines != null) {
     const lines = numberAt(text.lines, `${context.path}.lines`);
-    style.display = "-webkit-box";
-    style.WebkitBoxOrient = "vertical";
-    style.WebkitLineClamp = lines;
+    style.lineClamp = lines;
     style.overflow = "hidden";
   }
   if (text.decoration === "strike") style.textDecorationLine = "line-through";
@@ -1023,7 +1309,10 @@ function lowerStroke(
   const stroke = requiredRecord(value, context.path);
   const logicalSides = ["all", "inlineStart", "inlineEnd", "blockStart", "blockEnd"];
   if (logicalSides.some((side) => side in stroke)) {
-    assertKnownKeys(stroke, logicalSides, context.path);
+    assertKnownKeys(stroke, [...logicalSides, "alignment"], context.path);
+    if (stroke.alignment != null && stroke.alignment !== "inside") {
+      throw new Error(`${context.path}.alignment must be inside for logical-side strokes.`);
+    }
     for (const side of logicalSides) {
       if (stroke[side] == null) continue;
       lowerStrokeLine(
@@ -1035,8 +1324,51 @@ function lowerStroke(
     }
     return;
   }
-  assertKnownKeys(stroke, ["width", "line", "color"], context.path);
+  if (stroke.value != null) {
+    assertKnownKeys(stroke, ["value", "alignment"], context.path);
+    if (stroke.alignment != null && stroke.alignment !== "inside") {
+      throw new Error(
+        `${context.path}.alignment must be inside when using a compound stroke token.`,
+      );
+    }
+    style.border = cssToken(stroke.value, childPath(context, "value"), "stroke");
+    return;
+  }
+  assertKnownKeys(stroke, ["width", "line", "color", "alignment"], context.path);
+  if (stroke.alignment === "center" || stroke.alignment === "outside") {
+    lowerOuterStroke(stroke, style, context);
+    return;
+  }
+  if (stroke.alignment != null && stroke.alignment !== "inside") {
+    throw new Error(`${context.path}.alignment is invalid.`);
+  }
   lowerStrokeLine(stroke, style, "border", context);
+}
+
+function lowerOuterStroke(
+  stroke: Record<string, unknown>,
+  style: Record<string, CodeValue>,
+  context: LoweringContext,
+): void {
+  if (stroke.width == null || stroke.line == null || stroke.color == null) {
+    throw new Error(`${context.path} requires width, line, and color for aligned strokes.`);
+  }
+  const width = cssLength(stroke.width, childPath(context, "width"), ["size"]);
+  const line = strokeLine(stroke.line, `${context.path}.line`);
+  const color = cssColor(stroke.color, childPath(context, "color"));
+  if (stroke.alignment === "center") {
+    const half = cssTemplate(["calc(", width, " / 2)"]);
+    style.borderWidth = half;
+    style.borderStyle = line;
+    style.borderColor = color;
+    style.outlineWidth = half;
+  } else {
+    style.borderWidth = 0;
+    style.outlineWidth = width;
+  }
+  style.outlineStyle = line;
+  style.outlineColor = color;
+  style.outlineOffset = 0;
 }
 
 function lowerStrokeLine(
@@ -1048,7 +1380,7 @@ function lowerStrokeLine(
   const stroke = requiredRecord(value, context.path);
   assertKnownKeys(stroke, ["width", "line", "color"], context.path);
   if (stroke.width != null)
-    style[`${prefix}Width`] = cssLength(stroke.width, childPath(context, "width"));
+    style[`${prefix}Width`] = cssLength(stroke.width, childPath(context, "width"), ["size"]);
   if (stroke.line != null)
     style[`${prefix}Style`] = strokeLine(stroke.line, `${context.path}.line`);
   if (stroke.color != null)
@@ -1061,10 +1393,10 @@ function lowerShape(
   context: LoweringContext,
 ): void {
   const shape = requiredRecord(value, context.path);
-  assertKnownKeys(shape, ["radius", "clip", "mask"], context.path);
+  assertKnownKeys(shape, ["radius", "corners", "clip", "mask"], context.path);
   if (shape.radius != null) {
     if (!isPlainRecord(shape.radius) || isVisualReference(shape.radius)) {
-      style.borderRadius = cssLength(shape.radius, childPath(context, "radius"));
+      style.borderRadius = cssLength(shape.radius, childPath(context, "radius"), ["radius"]);
     } else {
       const radius = shape.radius as Record<string, unknown>;
       assertKnownKeys(
@@ -1081,22 +1413,79 @@ function lowerShape(
       for (const [corner, rawValue] of Object.entries(radius)) {
         const property = properties[corner];
         if (!property) throw new Error(`${context.path}.radius contains unknown corner ${corner}.`);
-        style[property] = cssLength(rawValue, childPath(context, `radius.${corner}`));
+        style[property] = cssLength(rawValue, childPath(context, `radius.${corner}`), ["radius"]);
       }
     }
   }
+  if (shape.corners != null) lowerContinuousCorners(shape.corners, style, context);
   if (shape.clip === "content") style.overflow = "clip";
   else if (shape.clip === "none") style.clipPath = "none";
   else if (isPlainRecord(shape.clip)) {
     const clip = shape.clip as Record<string, unknown>;
     assertKnownKeys(clip, ["circle", "inset"], `${context.path}.clip`);
     if (clip.circle != null)
-      style.clipPath = `circle(${numberAt(clip.circle, `${context.path}.clip.circle`) * 100}%)`;
+      style.clipPath = `circle(${numberInRange(clip.circle, 0, 1, `${context.path}.clip.circle`) * 100}%)`;
     else if (clip.inset != null) {
       style.clipPath = cssInset(clip.inset, childPath(context, "clip.inset"));
     }
   }
   if (shape.mask != null) style.maskImage = cssToken(shape.mask, context, "gradient");
+}
+
+function lowerContinuousCorners(
+  value: unknown,
+  style: Record<string, CodeValue>,
+  context: LoweringContext,
+): void {
+  const corners = requiredRecord(value, `${context.path}.corners`);
+  if (corners.radius != null) {
+    validateContinuousCorner(corners, `${context.path}.corners`);
+    style.borderRadius = cssLength(corners.radius, childPath(context, "corners.radius"), [
+      "radius",
+    ]);
+    style.cornerShape = continuousCornerShape(corners, `${context.path}.corners`);
+    return;
+  }
+  const names = ["startStart", "startEnd", "endStart", "endEnd"];
+  assertKnownKeys(corners, names, `${context.path}.corners`);
+  const properties: Record<string, string> = {
+    startStart: "borderStartStartRadius",
+    startEnd: "borderStartEndRadius",
+    endStart: "borderEndStartRadius",
+    endEnd: "borderEndEndRadius",
+  };
+  const shapeProperties: Record<string, string> = {
+    startStart: "cornerStartStartShape",
+    startEnd: "cornerStartEndShape",
+    endStart: "cornerEndStartShape",
+    endEnd: "cornerEndEndShape",
+  };
+  for (const [name, rawCorner] of Object.entries(corners)) {
+    const corner = requiredRecord(rawCorner, `${context.path}.corners.${name}`);
+    validateContinuousCorner(corner, `${context.path}.corners.${name}`);
+    style[properties[name]!] = cssLength(
+      corner.radius,
+      childPath(context, `corners.${name}.radius`),
+      ["radius"],
+    );
+    style[shapeProperties[name]!] = continuousCornerShape(
+      corner,
+      `${context.path}.corners.${name}`,
+    );
+  }
+}
+
+function continuousCornerShape(corner: Record<string, unknown>, path: string): string {
+  const continuity = numberInRange(corner.continuity ?? 0, 0, 1, `${path}.continuity`);
+  return `superellipse(${1 + continuity})`;
+}
+
+function validateContinuousCorner(corner: Record<string, unknown>, path: string): void {
+  assertKnownKeys(corner, ["radius", "continuity", "preserveContinuity"], path);
+  if (corner.continuity != null) numberInRange(corner.continuity, 0, 1, `${path}.continuity`);
+  if (corner.preserveContinuity != null && typeof corner.preserveContinuity !== "boolean") {
+    throw new Error(`${path}.preserveContinuity must be a boolean.`);
+  }
 }
 
 function lowerEffect(
@@ -1110,15 +1499,19 @@ function lowerEffect(
     ["opacity", "shadow", "blur", "backdrop", "brightness", "contrast", "saturation", "blend"],
     context.path,
   );
-  if (effect.opacity != null)
-    style.opacity = cssNumber(effect.opacity, childPath(context, "opacity"));
+  if (effect.opacity != null) {
+    style.opacity =
+      typeof effect.opacity === "number"
+        ? numberInRange(effect.opacity, 0, 1, `${context.path}.opacity`)
+        : cssNumber(effect.opacity, childPath(context, "opacity"));
+  }
   if (effect.shadow != null) {
     style.boxShadow =
       effect.shadow === "none" ? "none" : cssToken(effect.shadow, context, "shadow");
   }
   const filters: CodeValue[] = [];
   if (effect.blur != null)
-    filters.push(cssFunction("blur", cssLength(effect.blur, childPath(context, "blur"))));
+    filters.push(cssFunction("blur", cssLength(effect.blur, childPath(context, "blur"), ["blur"])));
   if (effect.brightness != null)
     filters.push(`brightness(${numberAt(effect.brightness, `${context.path}.brightness`)})`);
   if (effect.contrast != null)
@@ -1131,7 +1524,7 @@ function lowerEffect(
   const backdropFilters: CodeValue[] = [];
   if (backdrop.blur != null)
     backdropFilters.push(
-      cssFunction("blur", cssLength(backdrop.blur, childPath(context, "backdrop.blur"))),
+      cssFunction("blur", cssLength(backdrop.blur, childPath(context, "backdrop.blur"), ["blur"])),
     );
   if (backdrop.saturation != null)
     backdropFilters.push(
@@ -1170,11 +1563,17 @@ function lowerTransform(
   );
   if (transform.inline != null || transform.block != null || transform.depth != null) {
     const inline =
-      transform.inline == null ? "0px" : cssLength(transform.inline, childPath(context, "inline"));
+      transform.inline == null
+        ? "0px"
+        : cssLength(transform.inline, childPath(context, "inline"), ["size"]);
     const block =
-      transform.block == null ? "0px" : cssLength(transform.block, childPath(context, "block"));
+      transform.block == null
+        ? "0px"
+        : cssLength(transform.block, childPath(context, "block"), ["size"]);
     const depth =
-      transform.depth == null ? undefined : cssLength(transform.depth, childPath(context, "depth"));
+      transform.depth == null
+        ? undefined
+        : cssLength(transform.depth, childPath(context, "depth"), ["size"]);
     style.translate = depth == null ? cssList([inline, block]) : cssList([inline, block, depth]);
   }
   if (transform.scale != null)
@@ -1205,7 +1604,9 @@ function lowerTransform(
     style.transformOrigin = `${numberAt(origin.inline, `${context.path}.origin.inline`) * 100}% ${numberAt(origin.block, `${context.path}.origin.block`) * 100}%`;
   }
   if (transform.perspective != null)
-    style.perspective = cssLength(transform.perspective, childPath(context, "perspective"));
+    style.perspective = cssLength(transform.perspective, childPath(context, "perspective"), [
+      "size",
+    ]);
 }
 
 function lowerPosition(
@@ -1216,14 +1617,6 @@ function lowerPosition(
   const position = requiredRecord(value, context.path);
   assertKnownKeys(position, ["kind", "inset", "layer", "anchor", "place"], context.path);
   style.position = stringAt(position.kind, `${context.path}.kind`);
-  if (position.inset != null) {
-    const insetStyle: Record<string, CodeValue> = {};
-    lowerLogicalSpace(position.inset, insetStyle, "margin", childPath(context, "inset"));
-    for (const key of Object.keys(insetStyle)) {
-      const insetKey = key.replace(/^margin/, "inset");
-      style[insetKey] = insetStyle[key]!;
-    }
-  }
   if (position.layer != null) style.zIndex = cssNumber(position.layer, childPath(context, "layer"));
   const anchor = recordAt(position.anchor);
   if (position.anchor != null && position.anchor !== "none") {
@@ -1242,6 +1635,14 @@ function lowerPosition(
       style.margin = "auto";
       style.positionArea = "none";
     } else {
+      // Conditional styles compose with the base style. Clear every centering
+      // longhand before applying a new edge placement so `inset: 0` cannot
+      // survive from a base `place: "center"` declaration.
+      style.insetBlockStart = "auto";
+      style.insetBlockEnd = "auto";
+      style.insetInlineStart = "auto";
+      style.insetInlineEnd = "auto";
+      style.margin = 0;
       style.positionArea = place === "auto" ? "none" : place;
     }
     if (anchor.part != null && place !== "auto" && place !== "center") {
@@ -1249,6 +1650,9 @@ function lowerPosition(
       style.positionTryFallbacks = `flip-${axis}`;
       style.positionTryOrder = `most-${axis}-size`;
     }
+  }
+  if (position.inset != null) {
+    lowerLogicalInset(position.inset, style, childPath(context, "inset"));
   }
 }
 
@@ -1314,10 +1718,12 @@ function lowerInteraction(
     const focus: Record<string, CodeValue> = {
       outlineStyle: "solid",
       outlineColor: cssColor(ring.color, childPath(context, "focusRing.color")),
-      outlineWidth: cssLength(ring.width, childPath(context, "focusRing.width")),
+      outlineWidth: cssLength(ring.width, childPath(context, "focusRing.width"), ["size"]),
     };
     if (ring.offset != null)
-      focus.outlineOffset = cssLength(ring.offset, childPath(context, "focusRing.offset"));
+      focus.outlineOffset = cssLength(ring.offset, childPath(context, "focusRing.offset"), [
+        "space",
+      ]);
     style[":focus-visible"] = focus;
   }
 }
@@ -1334,8 +1740,8 @@ function lowerDecor(
     backdrop: "::backdrop",
     placeholder: "::placeholder",
     selection: "::selection",
-    track: "::-webkit-slider-runnable-track",
-    thumb: "::-webkit-slider-thumb",
+    track: "::slider-track",
+    thumb: "::slider-thumb",
   };
   assertKnownKeys(decor, Object.keys(pseudos), context.path);
   for (const [name, pseudo] of Object.entries(pseudos)) {
@@ -1350,9 +1756,23 @@ function lowerDecor(
   }
 }
 
-function cssLength(value: unknown, context: LoweringContext): CodeValue {
+function cssLength(
+  value: unknown,
+  context: LoweringContext,
+  tokenGroups: readonly string[] = ["space", "size"],
+): CodeValue {
   if (typeof value === "number") return lengthLiteral(value, context.path);
-  if (isTokenReference(value)) return cssToken(value, context);
+  if (isTokenReference(value)) {
+    const group = stringAt(value.group, `${context.path}.group`);
+    if (!tokenGroups.includes(group)) {
+      const name = stringAt(value.name, `${context.path}.name`);
+      throw new Error(
+        `${context.path} requires a ${tokenGroups.join("/")} token, received ${group}.${name}.`,
+      );
+    }
+    return cssToken(value, context);
+  }
+  if (isExpression(value)) return expressionArgument(value, context);
   if (isValueReference(value)) return valueArgument(value, context);
   const length = requiredRecord(value, context.path);
   const operators = [
@@ -1389,43 +1809,47 @@ function cssLength(value: unknown, context: LoweringContext): CodeValue {
     assertKnownKeys(fluid, ["min", "ideal", "max"], `${context.path}.fluid`);
     return cssTemplate([
       "clamp(",
-      cssLength(fluid.min, childPath(context, "fluid.min")),
+      cssLength(fluid.min, childPath(context, "fluid.min"), tokenGroups),
       ", ",
-      cssLength(fluid.ideal, childPath(context, "fluid.ideal")),
+      cssLength(fluid.ideal, childPath(context, "fluid.ideal"), tokenGroups),
       ", ",
-      cssLength(fluid.max, childPath(context, "fluid.max")),
+      cssLength(fluid.max, childPath(context, "fluid.max"), tokenGroups),
       ")",
     ]);
   }
   if (Array.isArray(length.add) && length.add.length === 2) {
     return cssTemplate([
       "calc(",
-      cssLength(length.add[0], childPath(context, "add[0]")),
+      cssLength(length.add[0], childPath(context, "add[0]"), tokenGroups),
       " + ",
-      cssLength(length.add[1], childPath(context, "add[1]")),
+      cssLength(length.add[1], childPath(context, "add[1]"), tokenGroups),
       ")",
     ]);
   }
   if (Array.isArray(length.subtract) && length.subtract.length === 2) {
     return cssTemplate([
       "calc(",
-      cssLength(length.subtract[0], childPath(context, "subtract[0]")),
+      cssLength(length.subtract[0], childPath(context, "subtract[0]"), tokenGroups),
       " - ",
-      cssLength(length.subtract[1], childPath(context, "subtract[1]")),
+      cssLength(length.subtract[1], childPath(context, "subtract[1]"), tokenGroups),
       ")",
     ]);
   }
   if (Array.isArray(length.multiply) && length.multiply.length === 2) {
     return cssTemplate([
       "calc(",
-      cssLength(length.multiply[0], childPath(context, "multiply[0]")),
+      cssLength(length.multiply[0], childPath(context, "multiply[0]"), tokenGroups),
       " * ",
       cssNumber(length.multiply[1], childPath(context, "multiply[1]")),
       ")",
     ]);
   }
   if (length.negate != null) {
-    return cssTemplate(["calc(-1 * ", cssLength(length.negate, childPath(context, "negate")), ")"]);
+    return cssTemplate([
+      "calc(-1 * ",
+      cssLength(length.negate, childPath(context, "negate"), tokenGroups),
+      ")",
+    ]);
   }
   throw new Error(`${context.path} is not a valid visual length.`);
 }
@@ -1433,6 +1857,7 @@ function cssLength(value: unknown, context: LoweringContext): CodeValue {
 function cssNumber(value: unknown, context: LoweringContext): CodeValue {
   if (typeof value === "number") return numberAt(value, context.path);
   if (isTokenReference(value)) return cssToken(value, context, "z");
+  if (isExpression(value)) return expressionArgument(value, context);
   if (isValueReference(value)) return valueArgument(value, context);
   const number = requiredRecord(value, context.path);
   if (Array.isArray(number.mix) && number.mix.length === 2 && number.by != null) {
@@ -1459,6 +1884,7 @@ function cssNumber(value: unknown, context: LoweringContext): CodeValue {
 
 function cssAngle(value: unknown, context: LoweringContext): CodeValue {
   if (typeof value === "number") return `${numberAt(value, context.path)}deg`;
+  if (isExpression(value)) return expressionArgument(value, context);
   if (isValueReference(value)) return valueArgument(value, context);
   throw new Error(`${context.path} is not a valid visual angle.`);
 }
@@ -1471,7 +1897,23 @@ function cssColor(value: unknown, context: LoweringContext): CodeValue {
   const color = requiredRecord(value, context.path);
   if (Array.isArray(color.mix) && color.mix.length === 2) {
     assertKnownKeys(color, ["mix", "by"], context.path);
-    const by = numberAt(color.by, `${context.path}.by`);
+    const by =
+      typeof color.by === "number"
+        ? numberInRange(color.by, 0, 1, `${context.path}.by`)
+        : cssNumber(color.by, childPath(context, "by"));
+    if (typeof by !== "number") {
+      return cssTemplate([
+        "color-mix(in oklch, ",
+        cssColor(color.mix[0], childPath(context, "mix[0]")),
+        " calc((1 - ",
+        by,
+        ") * 100%), ",
+        cssColor(color.mix[1], childPath(context, "mix[1]")),
+        " calc(",
+        by,
+        " * 100%))",
+      ]);
+    }
     return cssTemplate([
       "color-mix(in oklch, ",
       cssColor(color.mix[0], childPath(context, "mix[0]")),
@@ -1514,10 +1956,14 @@ function cssMeasure(value: unknown, context: LoweringContext): CodeValue {
     }
     if (value.fit != null) {
       assertKnownKeys(value, ["fit"], context.path);
-      return cssTemplate(["fit-content(", cssLength(value.fit, childPath(context, "fit")), ")"]);
+      return cssTemplate([
+        "fit-content(",
+        cssLength(value.fit, childPath(context, "fit"), ["size"]),
+        ")",
+      ]);
     }
   }
-  return cssLength(value, context);
+  return cssLength(value, context, ["size"]);
 }
 
 function cssGridTrack(value: unknown, context: LoweringContext): CodeValue {
@@ -1567,7 +2013,7 @@ function cssGridLine(value: unknown, path: string): CodeValue {
 
 function cssInset(value: unknown, context: LoweringContext): CodeValue {
   if (!isPlainRecord(value) || isVisualReference(value)) {
-    return cssTemplate(["inset(", cssLength(value, context), ")"]);
+    return cssTemplate(["inset(", cssLength(value, context, ["space"]), ")"]);
   }
   const inset = value as Record<string, unknown>;
   const values = [
@@ -1575,7 +2021,7 @@ function cssInset(value: unknown, context: LoweringContext): CodeValue {
     inset.inlineEnd ?? inset.inline ?? 0,
     inset.blockEnd ?? inset.block ?? 0,
     inset.inlineStart ?? inset.inline ?? 0,
-  ].map((item, index) => cssLength(item, childPath(context, `[${index}]`)));
+  ].map((item, index) => cssLength(item, childPath(context, `[${index}]`), ["space"]));
   return cssTemplate(["inset(", cssList(values), ")"]);
 }
 
@@ -1604,6 +2050,25 @@ function valueArgument(value: Record<string, unknown>, context: LoweringContext)
   return raw(argument.parameter);
 }
 
+function expressionArgument(value: Record<string, unknown>, context: LoweringContext): RawCode {
+  const serialized = JSON.stringify(value);
+  const kind = typeof value.kind === "string" ? value.kind : "number";
+  let argument = context.values.find(
+    (candidate) =>
+      candidate.expression != null && JSON.stringify(candidate.expression) === serialized,
+  );
+  if (!argument) {
+    argument = {
+      name: `expression${context.values.length}`,
+      kind,
+      parameter: `value${context.values.length}`,
+      expression: value,
+    };
+    context.values.push(argument);
+  }
+  return raw(argument.parameter);
+}
+
 function cssFunction(name: string, argument: CodeValue): CodeValue {
   return cssTemplate([`${name}(`, argument, ")"]);
 }
@@ -1628,17 +2093,25 @@ function childPath(context: LoweringContext, suffix: string): LoweringContext {
 }
 
 function resolvePart(
-  source: Record<string, unknown>,
+  rawSource: Record<string, unknown>,
   path: string,
   preset: MaterializedVisualPreset,
   ancestors: ReadonlySet<object> = new Set(),
 ): ResolvedPart {
+  let source = rawSource;
+  if (source.$visual === "recipe") source = expandRecipe(source, path);
+  else if (isExpression(source.when)) {
+    const { when, ...apply } = source;
+    source = { when: [{ expression: when, apply }] };
+  }
+  source = normalizeSemanticPart(source, path);
   if (ancestors.has(source)) throw new Error(`${path}.use contains a cycle.`);
   validatePartShape(source, preset, path);
   const nextAncestors = new Set(ancestors).add(source);
   const uses = Array.isArray(source.use) ? source.use : source.use == null ? [] : [source.use];
   let base: Record<string, unknown> = {};
   let motion: Record<string, unknown> = {};
+  let collection: Record<string, unknown> = {};
   const when: unknown[] = [];
   for (const [index, use] of uses.entries()) {
     const resolved = resolvePart(
@@ -1649,16 +2122,423 @@ function resolvePart(
     );
     base = deepMerge(base, resolved.base);
     motion = deepMerge(motion, resolved.motion);
+    collection = deepMerge(collection, resolved.collection);
     when.push(...resolved.when);
   }
   const own = { ...source };
   delete own.use;
   delete own.when;
   delete own.motion;
+  delete own.collection;
   base = deepMerge(base, own);
   motion = deepMerge(motion, recordAt(source.motion));
+  collection = deepMerge(collection, recordAt(source.collection));
   if (Array.isArray(source.when)) when.push(...source.when);
-  return { base, motion, when };
+  return { base, motion, collection, when };
+}
+
+function normalizeSemanticPart(
+  source: Record<string, unknown>,
+  path: string,
+): Record<string, unknown> {
+  const layout = recordAt(source.layout);
+  const isSemantic =
+    source.paint != null ||
+    source.typography != null ||
+    source.decorations != null ||
+    [
+      "flow",
+      "grid",
+      "overlay",
+      "display",
+      "size",
+      "item",
+      "padding",
+      "margin",
+      "position",
+      "scroll",
+      "collection",
+    ].some((key) => layout[key] != null) ||
+    ["opacity", "translation", "scale", "scaleInline", "scaleBlock", "rotate"].some(
+      (key) => recordAt(source.motion)[key] != null,
+    );
+  if (!isSemantic) {
+    const removed = [
+      "frame",
+      "place",
+      "padding",
+      "margin",
+      "surface",
+      "text",
+      "media",
+      "stroke",
+      "effect",
+      "transform",
+      "position",
+      "scroll",
+      "interaction",
+      "decor",
+      "collection",
+    ].filter((key) => source[key] != null);
+    if (recordAt(source.layout).kind != null) removed.push("layout.kind");
+    if (recordAt(source.motion).target != null) removed.push("motion.target");
+    if (removed.length) {
+      throw new Error(
+        `${path} uses removed visual fields ${removed.join(", ")}; use the six semantic algebras.`,
+      );
+    }
+    return normalizeSemanticConditions(source, path);
+  }
+
+  validateSemanticPart(source, path);
+
+  const result: Record<string, unknown> = {};
+  if (source.use != null) result.use = source.use;
+  if (source.when != null) result.when = source.when;
+  if (source.shape != null) result.shape = source.shape;
+
+  if (layout.flow != null) {
+    const flow = requiredRecord(layout.flow, `${path}.layout.flow`);
+    result.layout = {
+      ...flow,
+      kind: flow.axis === "inline" ? "row" : "stack",
+    };
+    delete recordAt(result.layout).axis;
+  }
+  if (layout.grid != null) result.layout = { ...recordAt(layout.grid), kind: "grid" };
+  if (layout.overlay != null) result.layout = { ...recordAt(layout.overlay), kind: "overlay" };
+  if (layout.display != null) result.layout = { kind: layout.display };
+  if (layout.size != null) result.frame = layout.size;
+  if (layout.item != null) result.place = layout.item;
+  if (layout.padding != null) result.padding = layout.padding;
+  if (layout.margin != null) result.margin = layout.margin;
+  if (layout.position != null) result.position = layout.position;
+  if (layout.scroll != null) result.scroll = layout.scroll;
+  if (layout.collection != null) result.collection = layout.collection;
+
+  const paint = recordAt(source.paint);
+  if (paint.fill != null) result.surface = { fill: paint.fill };
+  if (paint.stroke != null) result.stroke = paint.stroke;
+  if (paint.media != null) result.media = paint.media;
+  const effect = pickFields(paint, [
+    "opacity",
+    "shadow",
+    "blur",
+    "backdrop",
+    "brightness",
+    "contrast",
+    "saturation",
+    "blend",
+  ]);
+  if (Object.keys(effect).length) result.effect = effect;
+  const interaction = pickFields(paint, ["cursor", "select", "caret", "focusRing"]);
+  if (Object.keys(interaction).length) result.interaction = interaction;
+
+  const typography = { ...recordAt(source.typography) };
+  if (typography.color != null) {
+    result.surface = { ...recordAt(result.surface), text: typography.color };
+    delete typography.color;
+  }
+  if (Object.keys(typography).length) result.text = typography;
+
+  if (source.motion != null) result.motion = normalizeSemanticMotion(recordAt(source.motion));
+  if (source.decorations != null) {
+    const decorations = recordAt(source.decorations);
+    const decor: Record<string, unknown> = {};
+    const names: Readonly<Record<string, string>> = {
+      background: "before",
+      overlay: "after",
+      backdrop: "backdrop",
+      placeholder: "placeholder",
+      selection: "selection",
+      track: "track",
+      thumb: "thumb",
+    };
+    for (const [semanticName, backendName] of Object.entries(names)) {
+      if (decorations[semanticName] == null) continue;
+      const normalized = normalizeSemanticPart(
+        requiredRecord(decorations[semanticName], `${path}.decorations.${semanticName}`),
+        `${path}.decorations.${semanticName}`,
+      );
+      decor[backendName] =
+        semanticName === "background" || semanticName === "overlay"
+          ? { content: "", ...normalized }
+          : normalized;
+    }
+    if (Object.keys(decor).length) result.decor = decor;
+  }
+
+  return normalizeSemanticConditions(result, path);
+}
+
+function validateSemanticPart(source: Record<string, unknown>, path: string): void {
+  assertKnownKeys(
+    source,
+    ["layout", "shape", "paint", "typography", "motion", "decorations", "use", "when"],
+    path,
+  );
+  assertKnownKeys(
+    recordAt(source.layout),
+    [
+      "flow",
+      "grid",
+      "overlay",
+      "display",
+      "size",
+      "item",
+      "padding",
+      "margin",
+      "position",
+      "scroll",
+      "collection",
+    ],
+    `${path}.layout`,
+  );
+  const algorithms = ["flow", "grid", "overlay", "display"].filter(
+    (name) => recordAt(source.layout)[name] != null,
+  );
+  if (algorithms.length > 1) {
+    throw new Error(
+      `${path}.layout must declare one layout algorithm, received ${algorithms.join(", ")}.`,
+    );
+  }
+  if (recordAt(source.layout).flow != null) {
+    const flow = requiredRecord(recordAt(source.layout).flow, `${path}.layout.flow`);
+    assertKnownKeys(
+      flow,
+      ["axis", "gap", "align", "distribute", "wrap", "reverse"],
+      `${path}.layout.flow`,
+    );
+    enumAt(flow.axis, ["inline", "block"], `${path}.layout.flow.axis`);
+  }
+  assertKnownKeys(
+    recordAt(source.paint),
+    [
+      "fill",
+      "stroke",
+      "opacity",
+      "shadow",
+      "blur",
+      "backdrop",
+      "brightness",
+      "contrast",
+      "saturation",
+      "blend",
+      "media",
+      "cursor",
+      "select",
+      "caret",
+      "focusRing",
+    ],
+    `${path}.paint`,
+  );
+  assertKnownKeys(
+    recordAt(source.typography),
+    [
+      "color",
+      "font",
+      "size",
+      "weight",
+      "line",
+      "tracking",
+      "align",
+      "transform",
+      "wrap",
+      "overflow",
+      "lines",
+      "decoration",
+      "smoothing",
+      "features",
+    ],
+    `${path}.typography`,
+  );
+  const motion = recordAt(source.motion);
+  assertKnownKeys(
+    motion,
+    [
+      "opacity",
+      "translation",
+      "scale",
+      "scaleInline",
+      "scaleBlock",
+      "rotate",
+      "presence",
+      "transition",
+      "layout",
+      "reduceMotion",
+    ],
+    `${path}.motion`,
+  );
+  assertKnownKeys(
+    recordAt(motion.translation),
+    ["inline", "block", "depth"],
+    `${path}.motion.translation`,
+  );
+  const presence = recordAt(motion.presence);
+  assertKnownKeys(presence, ["enter", "exit", "layout"], `${path}.motion.presence`);
+  if (presence.enter != null) {
+    assertKnownKeys(
+      requiredRecord(presence.enter, `${path}.motion.presence.enter`),
+      ["from"],
+      `${path}.motion.presence.enter`,
+    );
+  }
+  if (presence.exit != null) {
+    assertKnownKeys(
+      requiredRecord(presence.exit, `${path}.motion.presence.exit`),
+      ["to"],
+      `${path}.motion.presence.exit`,
+    );
+  }
+  assertKnownKeys(
+    recordAt(source.decorations),
+    ["background", "overlay", "backdrop", "placeholder", "selection", "track", "thumb"],
+    `${path}.decorations`,
+  );
+}
+
+function normalizeSemanticMotion(motion: Record<string, unknown>): Record<string, unknown> {
+  if (motion.target != null) return motion;
+  const target: Record<string, unknown> = {};
+  if (motion.opacity != null) target.opacity = motion.opacity;
+  const translation = recordAt(motion.translation);
+  for (const axis of ["inline", "block", "depth"] as const) {
+    if (translation[axis] != null) target[axis] = translation[axis];
+  }
+  for (const property of ["scale", "scaleInline", "scaleBlock", "rotate"] as const) {
+    if (motion[property] != null) target[property] = motion[property];
+  }
+  const result = pickFields(motion, ["transition", "layout", "reduceMotion"]);
+  if (Object.keys(target).length) result.target = target;
+  const presence = recordAt(motion.presence);
+  if (Object.keys(presence).length) {
+    const normalizedPresence: Record<string, unknown> = {};
+    if (presence.enter != null) {
+      normalizedPresence.enterFrom = requiredRecord(presence.enter, "motion.presence.enter").from;
+    }
+    if (presence.exit != null) {
+      normalizedPresence.exitTo = requiredRecord(presence.exit, "motion.presence.exit").to;
+    }
+    if (presence.layout != null) normalizedPresence.layout = presence.layout;
+    result.presence = normalizedPresence;
+  }
+  return result;
+}
+
+function normalizeSemanticConditions(
+  source: Record<string, unknown>,
+  path: string,
+): Record<string, unknown> {
+  if (!Array.isArray(source.when)) return source;
+  return {
+    ...source,
+    when: source.when.map((rawCondition, index) => {
+      const condition = requiredRecord(rawCondition, `${path}.when[${index}]`);
+      return {
+        ...condition,
+        apply: normalizeSemanticPart(
+          requiredRecord(condition.apply, `${path}.when[${index}].apply`),
+          `${path}.when[${index}].apply`,
+        ),
+      };
+    }),
+  };
+}
+
+function pickFields(
+  source: Record<string, unknown>,
+  names: readonly string[],
+): Record<string, unknown> {
+  return Object.fromEntries(
+    names.flatMap((name) => (source[name] == null ? [] : [[name, source[name]]])),
+  );
+}
+
+function expandRecipe(source: Record<string, unknown>, path: string): Record<string, unknown> {
+  const definition = requiredRecord(source.definition, `${path}.definition`);
+  const variants = requiredRecord(definition.variants, `${path}.definition.variants`);
+  const defaults = recordAt(definition.defaults);
+  const values = requiredRecord(source.values, `${path}.values`);
+  const use: unknown[] = [];
+  const when: unknown[] = [];
+  if (definition.base != null) use.push(definition.base);
+
+  for (const [variant, rawBranches] of Object.entries(variants)) {
+    const branches = requiredRecord(rawBranches, `${path}.definition.variants.${variant}`);
+    const selected = values[variant] ?? defaults[variant];
+    if (isExpression(selected)) {
+      for (const [value, apply] of Object.entries(branches)) {
+        when.push({
+          expression: expressionEquals(selected, recipeValue(value)),
+          apply,
+        });
+      }
+      continue;
+    }
+    const branch = branches[String(selected)];
+    if (branch != null) use.push(branch);
+  }
+
+  const combinations = definition.combinations;
+  if (combinations != null && !Array.isArray(combinations)) {
+    throw new Error(`${path}.definition.combinations must be an array.`);
+  }
+  for (const [index, rawCombination] of (combinations ?? []).entries()) {
+    const combination = requiredRecord(rawCombination, `${path}.definition.combinations[${index}]`);
+    const matches = requiredRecord(
+      combination.when,
+      `${path}.definition.combinations[${index}].when`,
+    );
+    const conditions: unknown[] = [];
+    let rejected = false;
+    for (const [variant, expected] of Object.entries(matches)) {
+      const selected = values[variant] ?? defaults[variant];
+      const choices = Array.isArray(expected) ? expected : [expected];
+      if (isExpression(selected)) {
+        const alternatives = choices.map((choice) => expressionEquals(selected, choice));
+        conditions.push(
+          alternatives.length === 1 ? alternatives[0] : expressionBoolean("or", alternatives),
+        );
+      } else if (!choices.some((choice) => Object.is(choice, selected))) {
+        rejected = true;
+        break;
+      }
+    }
+    if (rejected) continue;
+    if (!conditions.length) use.push(combination.use);
+    else {
+      when.push({
+        expression: conditions.length === 1 ? conditions[0] : expressionBoolean("and", conditions),
+        apply: combination.use,
+      });
+    }
+  }
+  return { use, when };
+}
+
+function expressionEquals(left: unknown, right: unknown): Record<string, unknown> {
+  return {
+    $visual: "expression",
+    kind: "boolean",
+    operation: "equal",
+    left,
+    right,
+  };
+}
+
+function expressionBoolean(operation: "and" | "or", values: unknown[]): Record<string, unknown> {
+  return { $visual: "expression", kind: "boolean", operation, values };
+}
+
+function recipeValue(value: string): string | boolean | number {
+  if (value === "true") return true;
+  if (value === "false") return false;
+  const number = Number(value);
+  return value.trim() !== "" && Number.isFinite(number) ? number : value;
+}
+
+function isExpression(value: unknown): value is Record<string, unknown> {
+  return isPlainRecord(value) && value.$visual === "expression";
 }
 
 function deepMerge(
@@ -1679,41 +2559,221 @@ function deepMerge(
   return result;
 }
 
-function runtimeCondition(condition: Record<string, unknown>): RuntimeCondition | undefined {
-  if (condition.state != null) return { state: requiredRecord(condition.state, "when.state") };
-  if (condition.variant != null) {
-    return { variant: requiredRecord(condition.variant, "when.variant") };
+function runtimePredicate(leaf: ConditionLeaf): RuntimePredicate | undefined {
+  const predicate =
+    leaf.selector === "state" && typeof leaf.value === "string"
+      ? { state: leaf.value }
+      : leaf.selector === "context"
+        ? { context: requiredRecord(leaf.value, "when.context") }
+        : leaf.selector === "input"
+          ? { input: requiredRecord(leaf.value, "when.input") }
+          : leaf.selector === "theme" && typeof leaf.value === "string"
+            ? { theme: leaf.value }
+            : leaf.selector === "expression"
+              ? { expression: leaf.value }
+              : undefined;
+  return predicate && leaf.not ? { ...predicate, not: true } : predicate;
+}
+
+function conditionBranches(
+  condition: Record<string, unknown>,
+  negated = false,
+): readonly (readonly ConditionLeaf[])[] {
+  if (condition.expression != null) {
+    return expressionBranches(requiredRecord(condition.expression, "when.expression"), negated);
   }
-  if (typeof condition.theme === "string") return { theme: condition.theme };
-  return undefined;
+  if (condition.not != null) {
+    return conditionBranches(requiredRecord(condition.not, "when.not"), !negated);
+  }
+  const compound = condition.all != null ? "all" : condition.any != null ? "any" : undefined;
+  if (compound) {
+    const children = condition[compound];
+    if (!Array.isArray(children) || children.length === 0) {
+      throw new Error(`when.${compound} must be a non-empty array.`);
+    }
+    const joinWithAll = (compound === "all") !== negated;
+    const branches = children.map((child) =>
+      conditionBranches(requiredRecord(child, `when.${compound}`), negated),
+    );
+    if (!joinWithAll) return branches.flat();
+    return branches.reduce<readonly (readonly ConditionLeaf[])[]>(
+      (products, choices) =>
+        products.flatMap((product) => choices.map((choice) => [...product, ...choice])),
+      [[]],
+    );
+  }
+  const selectors = [
+    "active",
+    "state",
+    "input",
+    "native",
+    "container",
+    "theme",
+    "preference",
+    "capability",
+    "expression",
+  ];
+  const selector = selectors.find((candidate) => condition[candidate] != null);
+  if (!selector) throw new Error("Visual condition is missing a selector.");
+  return [[{ selector, value: condition[selector], not: negated }]];
+}
+
+function expressionBranches(
+  expression: Record<string, unknown>,
+  negated: boolean,
+): readonly (readonly ConditionLeaf[])[] {
+  const operation = String(expression.operation ?? "");
+  if (operation === "not") {
+    return expressionBranches(requiredRecord(expression.value, "expression.not"), !negated);
+  }
+  if (operation === "and" || operation === "or") {
+    const values = expression.values;
+    if (!Array.isArray(values) || values.length === 0) {
+      throw new Error(`expression.${operation} must contain values.`);
+    }
+    const joinWithAll = (operation === "and") !== negated;
+    const branches = values.map((value) =>
+      expressionBranches(requiredRecord(value, `expression.${operation}`), negated),
+    );
+    if (!joinWithAll) return branches.flat();
+    return branches.reduce<readonly (readonly ConditionLeaf[])[]>(
+      (products, choices) =>
+        products.flatMap((product) => choices.map((choice) => [...product, ...choice])),
+      [[]],
+    );
+  }
+  if (operation === "matches" && expression.source === "state") {
+    return [[{ selector: "state", value: expression.name, not: negated }]];
+  }
+  if (operation === "equal") {
+    const left = requiredRecord(expression.left, "expression.equal.left");
+    const right = expression.right;
+    if (left.kind === "boolean" && typeof right === "boolean") {
+      return expressionBranches(left, right ? negated : !negated);
+    }
+    if (left.source === "context" && typeof left.name === "string") {
+      return [[{ selector: "context", value: { [left.name]: right }, not: negated }]];
+    }
+    if (left.source === "input" && typeof left.name === "string") {
+      return [[{ selector: "input", value: { [left.name]: right }, not: negated }]];
+    }
+    if (left.source === "state" && left.name === "value") {
+      return [[{ selector: "state", value: right, not: negated }]];
+    }
+  }
+  return [[{ selector: "expression", value: expression, not: negated }]];
 }
 
 function staticConditionWrapper(
-  condition: Record<string, unknown>,
+  leaf: ConditionLeaf,
   preset: MaterializedVisualPreset,
 ): string | undefined {
-  if (condition.native != null) return nativeSelector(condition.native);
-  if (condition.container != null) {
-    const name = stringAt(condition.container, "when.container");
+  let wrapper: string | undefined;
+  if (leaf.selector === "native") wrapper = nativeSelector(leaf.value);
+  else if (leaf.selector === "container") {
+    const name = stringAt(leaf.value, "when.container");
     const definition = recordAt(preset.containers[name]);
     if (!Object.keys(definition).length) {
       throw new Error(`${preset.name} references unknown container ${JSON.stringify(name)}.`);
     }
-    return `@container ${containerQuery(definition, `${preset.name}.containers.${name}`)}`;
+    wrapper = `@container ${containerQuery(definition, `${preset.name}.containers.${name}`)}`;
+  } else if (leaf.selector === "preference") wrapper = preferenceQuery(leaf.value);
+  else if (leaf.selector === "capability") wrapper = capabilityQuery(leaf.value);
+  else if (leaf.selector === "expression") wrapper = staticExpressionWrapper(leaf.value, preset);
+  else if (
+    leaf.selector !== "active" &&
+    leaf.selector !== "state" &&
+    leaf.selector !== "input" &&
+    leaf.selector !== "theme"
+  ) {
+    throw new Error(`${preset.name} contains an unknown visual condition.`);
   }
-  if (condition.preference != null) return preferenceQuery(condition.preference);
-  if (condition.capability != null) return capabilityQuery(condition.capability);
-  if (condition.state != null || condition.variant != null || condition.theme != null) return;
-  throw new Error(`${preset.name} contains an unknown visual condition.`);
+  return wrapper && leaf.not ? negateStaticWrapper(wrapper) : wrapper;
+}
+
+function staticExpressionWrapper(
+  value: unknown,
+  preset: MaterializedVisualPreset,
+): string | undefined {
+  const expression = requiredRecord(value, "when.expression");
+  if (expression.source === "interaction") {
+    const native: Record<string, string> = {
+      hovered: "tracked-hover",
+      pressed: "active",
+      focusVisible: "focus-visible",
+      focusWithin: "focus-within",
+      selected: "selected",
+      disabled: "disabled",
+      expanded: "expanded",
+    };
+    const state = native[String(expression.name)];
+    return state ? nativeSelector(state) : undefined;
+  }
+  if (expression.source === "environment") {
+    const preference: Record<string, string> = {
+      reducedMotion: "reduced-motion",
+      moreContrast: "more-contrast",
+      forcedColors: "forced-colors",
+      dark: "dark",
+    };
+    const capability: Record<string, string> = {
+      hover: "hover",
+      finePointer: "fine-pointer",
+      coarsePointer: "coarse-pointer",
+    };
+    const name = String(expression.name);
+    if (preference[name]) return preferenceQuery(preference[name]);
+    if (capability[name]) return capabilityQuery(capability[name]);
+  }
+  if (["below", "at-most", "above", "at-least"].includes(String(expression.operation))) {
+    const left = requiredRecord(expression.left, "when.expression.left");
+    if (left.source !== "geometry") return;
+    const right = expression.right;
+    const length = expressionMetric(right, preset);
+    const axis = left.name === "blockSize" ? "block-size" : "inline-size";
+    const operator: Record<string, string> = {
+      below: "<",
+      "at-most": "<=",
+      above: ">",
+      "at-least": ">=",
+    };
+    return `@container (${axis} ${operator[String(expression.operation)]} ${length}px)`;
+  }
+  return;
+}
+
+function expressionMetric(value: unknown, preset: MaterializedVisualPreset): number {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  const reference = requiredRecord(value, "condition metric");
+  if (
+    reference.$visual !== "token" ||
+    typeof reference.group !== "string" ||
+    typeof reference.name !== "string"
+  ) {
+    throw new Error("A geometry condition must compare with a metric token or number.");
+  }
+  const token = recordAt(preset.tokens[reference.group])[reference.name];
+  const definition = requiredRecord(token, `tokens.${reference.group}.${reference.name}`);
+  return numberAt(definition.value, `tokens.${reference.group}.${reference.name}.value`);
+}
+
+function negateStaticWrapper(wrapper: string): string {
+  if (wrapper.startsWith(":")) return `:not(${wrapper})`;
+  for (const prefix of ["@media ", "@supports ", "@container "] as const) {
+    if (wrapper.startsWith(prefix)) return `${prefix}not ${wrapper.slice(prefix.length)}`;
+  }
+  throw new Error(`Visual condition ${JSON.stringify(wrapper)} cannot be negated.`);
 }
 
 function nativeSelector(value: unknown): string {
   const name = stringAt(value, "when.native");
   const selectors: Record<string, string> = {
     hover: ":hover",
+    "tracked-hover": ':is([data-hovered="true"])',
     active: ":active",
     focus: ":focus",
     "focus-visible": ":focus-visible",
+    "focus-within": ":focus-within",
     disabled: ":disabled",
     checked: ":checked",
     selected: ':is([aria-selected="true"])',
@@ -1750,6 +2810,9 @@ function capabilityQuery(value: unknown): string {
     "view-transitions": "@supports (view-transition-name: none)",
     "scroll-timeline": "@supports (animation-timeline: scroll())",
     "wide-gamut": "@media (color-gamut: p3)",
+    hover: "@media (hover: hover)",
+    "fine-pointer": "@media (pointer: fine)",
+    "coarse-pointer": "@media (pointer: coarse)",
   };
   const query = queries[name];
   if (!query) throw new Error(`Unknown visual capability ${JSON.stringify(name)}.`);
@@ -1793,7 +2856,20 @@ function collectAnchorNames(
 }
 
 function partUsesContainer(part: ResolvedPart): boolean {
-  return part.when.some((condition) => typeof recordAt(condition).container === "string");
+  return part.when.some((condition) => {
+    const source = recordAt(condition);
+    return typeof source.container === "string" || containsGeometryExpression(source.expression);
+  });
+}
+
+function containsGeometryExpression(value: unknown): boolean {
+  if (!isPlainRecord(value)) return false;
+  if (value.source === "geometry") return true;
+  return Object.values(value).some((child) =>
+    Array.isArray(child)
+      ? child.some(containsGeometryExpression)
+      : containsGeometryExpression(child),
+  );
 }
 
 function isTokenReference(value: unknown): value is Record<string, unknown> & {
@@ -1809,7 +2885,7 @@ function isValueReference(value: unknown): value is Record<string, unknown> & {
 }
 
 function isVisualReference(value: unknown): boolean {
-  return isTokenReference(value) || isValueReference(value);
+  return isTokenReference(value) || isValueReference(value) || isExpression(value);
 }
 
 function isPlainRecord(value: unknown): value is Record<string, any> {
@@ -1857,6 +2933,12 @@ function numberAt(value: unknown, path: string): number {
   return value;
 }
 
+function integerAt(value: unknown, path: string): number {
+  const number = numberAt(value, path);
+  if (!Number.isInteger(number)) throw new Error(`${path} must be an integer.`);
+  return number;
+}
+
 function stringAt(value: unknown, path: string): string {
   if (typeof value !== "string") throw new Error(`${path} must be a string.`);
   return value;
@@ -1872,10 +2954,11 @@ function colorLiteral(value: unknown, path: string): string {
   if (value === "current") return "currentColor";
   const color = requiredRecord(value, path);
   assertKnownKeys(color, ["l", "c", "h", "alpha"], path);
-  const l = numberAt(color.l, `${path}.l`);
-  const c = numberAt(color.c, `${path}.c`);
-  const h = numberAt(color.h, `${path}.h`);
-  const alpha = color.alpha == null ? "" : ` / ${numberAt(color.alpha, `${path}.alpha`)}`;
+  const l = numberInRange(color.l, 0, 1, `${path}.l`);
+  const c = numberInRange(color.c, 0, 0.5, `${path}.c`);
+  const h = numberInRange(color.h, 0, 360, `${path}.h`);
+  const alpha =
+    color.alpha == null ? "" : ` / ${numberInRange(color.alpha, 0, 1, `${path}.alpha`)}`;
   return `oklch(${l * 100}% ${c} ${h}${alpha})`;
 }
 
@@ -1894,7 +2977,7 @@ function gradientLiteral(value: unknown, path: string): string {
     .map((stopValue: unknown, index: number) => {
       const stop = requiredRecord(stopValue, `${path}.stops[${index}]`);
       assertKnownKeys(stop, ["at", "color"], `${path}.stops[${index}]`);
-      return `${colorLiteral(stop.color, `${path}.stops[${index}].color`)} ${numberAt(stop.at, `${path}.stops[${index}].at`) * 100}%`;
+      return `${colorLiteral(stop.color, `${path}.stops[${index}].color`)} ${numberInRange(stop.at, 0, 1, `${path}.stops[${index}].at`) * 100}%`;
     })
     .join(", ");
   if (kind === "linear")

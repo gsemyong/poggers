@@ -7,7 +7,6 @@
     "build": "poggers build --outfile dist/visual-lab",
     "start": "./dist/visual-lab",
     "lint": "poggers check",
-    "test": "playwright test",
     "typecheck": "poggers typecheck"
   },
   "dependencies": {

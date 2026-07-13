@@ -1,36 +1,80 @@
 import type { JsonValue, SessionData } from "./protocol";
-import type { PresetName, PresetThemeName } from "../src/preset";
+import type { PresetAppearance } from "./preset";
+import type { IntrinsicElements as NativeIntrinsicElements } from "./jsx-types";
 export type LocalActor = {
   id: string;
+};
+type MigrationSpec = {
+  Resources: Record<string, unknown>;
+};
+type MigrationResourceName<Spec extends MigrationSpec> = Extract<keyof Spec["Resources"], string>;
+type MigrationResourceEvents<
+  Spec extends MigrationSpec,
+  Resource extends MigrationResourceName<Spec>,
+> = Spec["Resources"][Resource] extends { Events: infer Events extends Record<string, unknown> }
+  ? Events
+  : Record<string, never>;
+export type Migration<From extends MigrationSpec, To extends MigrationSpec> = {
+  readonly draft?: false;
+  readonly from: string;
+  readonly to: string;
+  readonly migrate: {
+    readonly [Resource in Extract<MigrationResourceName<From>, MigrationResourceName<To>>]?: {
+      readonly state?: (
+        state: From["Resources"][Resource] extends { State: infer State } ? State : never,
+      ) => To["Resources"][Resource] extends { State: infer State } ? State : never;
+      readonly event?: <
+        Event extends Extract<keyof MigrationResourceEvents<From, Resource>, string>,
+      >(
+        name: Event,
+        payload: MigrationResourceEvents<From, Resource>[Event],
+      ) => {
+        [Name in Extract<keyof MigrationResourceEvents<To, Resource>, string>]: {
+          readonly name: Name;
+          readonly payload: MigrationResourceEvents<To, Resource>[Name];
+        };
+      }[Extract<keyof MigrationResourceEvents<To, Resource>, string>];
+    };
+  };
 };
 export type AppSpec = {
   Actor?: {
     id: string;
   };
-  Resources: Record<string, any>;
-  Deps?: any;
+  Resources: Record<string, unknown>;
+  Deps?: unknown;
   Environments?: Record<
     string,
     {
-      Deps?: any;
+      Deps?: unknown;
     }
   >;
-  Navigation?: Record<string, Record<string, any>>;
+  Navigation?: Record<string, Record<string, unknown>>;
   Components?: Record<
     string,
     {
-      Input?: Record<string, any>;
-      Variants?: Record<string, any>;
-      State?: Record<string, any>;
-      Derived?: Record<string, any>;
-      Actions?: Record<string, (...args: any[]) => any>;
-      StyleValues?: Record<string, string>;
-      Shared?: string;
+      Input?: Record<string, unknown>;
+      Context?: Record<string, unknown>;
+      States?: string;
+      Output?: unknown;
+      Values?: Record<string, unknown>;
+      Events?: Record<string, (...args: never[]) => unknown>;
+      Actions?: never;
+      Parameters?: Record<string, unknown>;
+      Tasks?: Record<
+        string,
+        {
+          Input: unknown;
+          Output: unknown;
+          Error: unknown;
+        }
+      >;
+      Slots?: Record<string, unknown>;
       Parts: Record<string, string>;
     }
   >;
   Styles?: {
-    Presets?: string | Record<string, any>;
+    Presets?: string | Record<string, unknown>;
   };
 };
 export type ActorOf<Spec extends AppSpec> = Spec extends {
@@ -42,16 +86,16 @@ export type ActorOf<Spec extends AppSpec> = Spec extends {
   : LocalActor;
 export type ResourceSpec = {
   Key: JsonValue;
-  State: any;
-  Presence?: any;
-  Events: Record<string, any>;
-  Views: Record<string, any>;
-  Commands: Record<string, any>;
+  State: unknown;
+  Presence?: unknown;
+  Events: Record<string, unknown>;
+  Views: Record<string, unknown>;
+  Commands: Record<string, unknown>;
 };
 export type CommandSpec = {
-  args: any[];
+  args: unknown[];
   event?: string;
-  error?: string | [string, any];
+  error?: string | [string, unknown];
 };
 type EventNameFor<C> = C extends {
   event: infer E;
@@ -73,7 +117,7 @@ export type EnvironmentName<Spec extends AppSpec> = Spec extends {
 }
   ? Extract<keyof Environments, string>
   : Spec extends {
-        Deps: any;
+        Deps: unknown;
       }
     ? "server"
     : never;
@@ -111,7 +155,7 @@ export type AppDependencies<Spec extends AppSpec> = Spec extends {
         ? Deps
         : Record<string, never>
       : Record<string, never>
-    : Record<string, never>;
+    : Record<never, never>;
 export type NavigationName<Spec extends AppSpec> = Spec extends {
   Navigation: infer Navigation;
 }
@@ -124,7 +168,7 @@ export type NavigationParams<
   Navigation: infer Navigation;
 }
   ? Screen extends keyof Navigation
-    ? Navigation[Screen] extends Record<string, any>
+    ? Navigation[Screen] extends Record<string, unknown>
       ? Navigation[Screen]
       : Record<string, never>
     : Record<string, never>
@@ -154,7 +198,7 @@ type CommandShape<Spec extends AppSpec, Resource extends ResourceName<Spec>> = {
   [Command in keyof ResourceFor<Spec, Resource>["Commands"]]: (
     ...args: ResourceFor<Spec, Resource>["Commands"][Command] extends CommandSpec
       ? ResourceFor<Spec, Resource>["Commands"][Command]["args"]
-      : ResourceFor<Spec, Resource>["Commands"][Command] extends any[]
+      : ResourceFor<Spec, Resource>["Commands"][Command] extends unknown[]
         ? ResourceFor<Spec, Resource>["Commands"][Command]
         : []
   ) => CommandReceipt<
@@ -186,10 +230,6 @@ export type SemanticUIHooks<Spec extends AppSpec> = {
     resource: Resource,
     key: ResourceFor<Spec, Resource>["Key"],
   ) => UIResource<Spec, Resource>;
-};
-export type AppUIContext<Spec extends AppSpec> = SemanticUIHooks<Spec> & {
-  readonly screen: UISignal<AppScreen<Spec>>;
-  readonly nav: AppNavigation<Spec>;
 };
 export type AppMetadata = {
   name?: string;
@@ -306,10 +346,10 @@ export type AppPrograms<Spec extends AppSpec> = {
   ) => void | Promise<void>;
 };
 type ComponentsOf<Spec extends AppSpec> = Spec extends {
-  Components: infer Components extends Record<string, any>;
+  Components: infer Components extends Record<string, unknown>;
 }
   ? Components
-  : Record<string, never>;
+  : Record<never, never>;
 export type ComponentName<Spec extends AppSpec> = Extract<keyof ComponentsOf<Spec>, string>;
 export type ComponentFor<
   Spec extends AppSpec,
@@ -321,55 +361,153 @@ export type ComponentFor<
   : never;
 export type ComponentInput<Spec extends AppSpec, Component extends ComponentName<Spec>> =
   ComponentFor<Spec, Component> extends {
-    Input: infer Input extends Record<string, any>;
+    Input: infer Input extends Record<string, unknown>;
   }
     ? Input
     : Record<never, never>;
-export type ComponentState<Spec extends AppSpec, Component extends ComponentName<Spec>> =
+export type ComponentContext<Spec extends AppSpec, Component extends ComponentName<Spec>> =
   ComponentFor<Spec, Component> extends {
-    State: infer State extends Record<string, any>;
+    Context: infer Context extends Record<string, unknown>;
   }
-    ? State
+    ? Context
     : Record<never, never>;
-export type ComponentDerived<Spec extends AppSpec, Component extends ComponentName<Spec>> =
-  ComponentFor<Spec, Component> extends {
-    Derived: infer Derived extends Record<string, any>;
-  }
-    ? Derived
-    : Record<never, never>;
-export type ComponentActions<Spec extends AppSpec, Component extends ComponentName<Spec>> =
-  ComponentFor<Spec, Component> extends {
-    Actions: infer Actions extends Record<string, (...args: any[]) => any>;
-  }
-    ? Actions
-    : Record<never, never>;
-export type ComponentStyleValueKind =
+export type ComponentValueKind =
   | "number"
   | "progress"
   | "opacity"
   | "ratio"
+  | "angle"
+  | "time"
   | "zIndex"
   | "length"
   | "space"
   | "size"
   | "radius";
-type ComponentStyleValueFor<Kind extends string> = Kind extends
-  | "number"
-  | "progress"
-  | "opacity"
-  | "ratio"
-  | "zIndex"
-  ? number
-  : Kind extends "length" | "space" | "size" | "radius"
-    ? number
-    : never;
-export type ComponentStyleValues<Spec extends AppSpec, Component extends ComponentName<Spec>> =
+declare const visualValueKind: unique symbol;
+declare const writableValueKind: unique symbol;
+export type VisualValue<Kind extends ComponentValueKind> = {
+  readonly [visualValueKind]: Kind;
+};
+export type Writable<Value> = {
+  readonly [writableValueKind]: Value;
+};
+type ComponentValueSource<Value> = Value extends Writable<infer Source> ? Source : Value;
+type ComponentValueFor<Value> =
+  ComponentValueSource<Value> extends VisualValue<infer Kind>
+    ? Kind extends ComponentValueKind
+      ? number
+      : never
+    : ComponentValueSource<Value>;
+type ComponentValueContract<Spec extends AppSpec, Component extends ComponentName<Spec>> =
   ComponentFor<Spec, Component> extends {
-    StyleValues: infer Values extends Record<string, string>;
+    Values: infer Values extends Record<string, unknown>;
   }
-    ? {
-        [Value in keyof Values]: ComponentStyleValueFor<Values[Value] & string>;
+    ? Values
+    : Record<never, never>;
+type ComponentWritableValueName<Spec extends AppSpec, Component extends ComponentName<Spec>> = {
+  [Value in keyof ComponentValueContract<Spec, Component>]-?: ComponentValueContract<
+    Spec,
+    Component
+  >[Value] extends Writable<unknown>
+    ? Value
+    : never;
+}[keyof ComponentValueContract<Spec, Component>];
+export type ComponentWritableValues<
+  Spec extends AppSpec,
+  Component extends ComponentName<Spec>,
+> = Pick<ComponentValues<Spec, Component>, ComponentWritableValueName<Spec, Component>>;
+type ComponentReadableValues<Spec extends AppSpec, Component extends ComponentName<Spec>> = {
+  readonly [Value in keyof ComponentValueContract<Spec, Component>]: ComponentValueFor<
+    ComponentValueContract<Spec, Component>[Value]
+  >;
+};
+export type ComponentValues<
+  Spec extends AppSpec,
+  Component extends ComponentName<Spec>,
+> = ComponentReadableValues<Spec, Component> & {
+  -readonly [Value in ComponentWritableValueName<Spec, Component>]: ComponentValueFor<
+    ComponentValueContract<Spec, Component>[Value]
+  >;
+};
+export type ComponentVisualValues<Spec extends AppSpec, Component extends ComponentName<Spec>> = {
+  [Value in keyof ComponentValueContract<Spec, Component> as ComponentValueContract<
+    Spec,
+    Component
+  >[Value] extends VisualValue<ComponentValueKind> | Writable<VisualValue<ComponentValueKind>>
+    ? Value
+    : never]: ComponentValueFor<ComponentValueContract<Spec, Component>[Value]>;
+};
+export type ComponentValueKinds<Spec extends AppSpec, Component extends ComponentName<Spec>> = {
+  [Value in keyof ComponentValueContract<Spec, Component> as ComponentValueContract<
+    Spec,
+    Component
+  >[Value] extends VisualValue<ComponentValueKind> | Writable<VisualValue<ComponentValueKind>>
+    ? Value
+    : never]: ComponentValueSource<
+    ComponentValueContract<Spec, Component>[Value]
+  > extends VisualValue<infer Kind>
+    ? Kind
+    : never;
+};
+export type ComponentSlots<Spec extends AppSpec, Component extends ComponentName<Spec>> =
+  ComponentFor<Spec, Component> extends {
+    Slots: infer Slots extends Record<string, unknown>;
+  }
+    ? Slots
+    : Record<never, never>;
+type ExplicitComponentEvents<Spec extends AppSpec, Component extends ComponentName<Spec>> =
+  ComponentFor<Spec, Component> extends {
+    Events: infer Events extends Record<string, (...args: never[]) => unknown>;
+  }
+    ? Events
+    : Record<never, never>;
+export type ComponentStatePath<Spec extends AppSpec, Component extends ComponentName<Spec>> =
+  ComponentFor<Spec, Component> extends {
+    States: infer States extends string;
+  }
+    ? States
+    : "active";
+type ComponentStateSegment<Path extends string> = Path extends `${infer Head}.${infer Tail}`
+  ? Head | ComponentStateSegment<Tail>
+  : Path;
+type ComponentStateValueMap<Path extends string> = {
+  readonly [region: string]: ComponentStateValue<Path>;
+};
+export type ComponentStateValue<Path extends string> =
+  | ComponentStateSegment<Path>
+  | ComponentStateValueMap<Path>;
+export type ComponentOutput<Spec extends AppSpec, Component extends ComponentName<Spec>> =
+  ComponentFor<Spec, Component> extends {
+    Output: infer Output;
+  }
+    ? Output
+    : void;
+export type ComponentTasks<Spec extends AppSpec, Component extends ComponentName<Spec>> =
+  ComponentFor<Spec, Component> extends {
+    Tasks: infer Tasks extends Record<
+      string,
+      {
+        Input: unknown;
+        Output: unknown;
+        Error: unknown;
       }
+    >;
+  }
+    ? Tasks
+    : Record<never, never>;
+export type ComponentTaskName<
+  Spec extends AppSpec,
+  Component extends ComponentName<Spec>,
+> = Extract<keyof ComponentTasks<Spec, Component>, string>;
+export type ComponentEvents<
+  Spec extends AppSpec,
+  Component extends ComponentName<Spec>,
+> = ExplicitComponentEvents<Spec, Component>;
+export type ComponentParameters<Spec extends AppSpec, Component extends ComponentName<Spec>> =
+  ComponentFor<Spec, Component> extends {
+    Parameters: infer Parameters extends Record<string, unknown>;
+  }
+    ? Parameters
     : Record<never, never>;
 export type ComponentParts<Spec extends AppSpec, Component extends ComponentName<Spec>> =
   ComponentFor<Spec, Component> extends {
@@ -386,250 +524,366 @@ export type ComponentPartElement<
   Component extends ComponentName<Spec>,
   Part extends ComponentPartName<Spec, Component>,
 > = ComponentParts<Spec, Component>[Part] & string;
-export type ComponentActionArgs<Action> = Action extends (...args: infer Args) => any ? Args : [];
-type ComponentControllerEvent<T extends EventTarget, E extends Event> = {
-  bivarianceHack(
-    event: E & {
-      readonly currentTarget: T;
-    },
-  ): void;
-}["bivarianceHack"];
-type ComponentControllerChild =
+export type ComponentEventArgs<Event> = Event extends (...args: infer Args) => unknown ? Args : [];
+export type ComponentTransitionScope<
+  Spec extends AppSpec,
+  Component extends ComponentName<Spec>,
+> = {
+  readonly input: ComponentInput<Spec, Component>;
+  readonly context: Readonly<ComponentContext<Spec, Component>>;
+  readonly parameters: Readonly<ComponentParameters<Spec, Component>>;
+  readonly appearance: PresetAppearance<Spec>;
+  readonly setAppearance: (appearance: PresetAppearance<Spec>) => void;
+  readonly resources: ComponentResourceFactories<Spec>;
+  readonly navigation: AppNavigation<Spec>;
+  readonly screen: AppScreen<Spec>;
+};
+type ComponentTaskContext<Spec extends AppSpec, Component extends ComponentName<Spec>> = {
+  readonly input: ComponentInput<Spec, Component>;
+  readonly context: Readonly<ComponentContext<Spec, Component>>;
+};
+export type ComponentContextUpdate<
+  Spec extends AppSpec,
+  Component extends ComponentName<Spec>,
+  Args extends readonly unknown[] = readonly [],
+> = (
+  scope: ComponentTransitionScope<Spec, Component>,
+  ...args: Args
+) => Partial<ComponentContext<Spec, Component>> | void;
+
+type ComponentSettlementInvocation<Spec extends AppSpec, Component extends ComponentName<Spec>> = {
+  readonly phase: "enter" | "exit";
+  readonly done?: ComponentStatePath<Spec, Component>;
+  readonly cancelled?: ComponentStatePath<Spec, Component>;
+};
+type ComponentTransitionConfig<
+  Spec extends AppSpec,
+  Component extends ComponentName<Spec>,
+  Args extends readonly unknown[] = readonly [],
+> = {
+  readonly target?:
+    | ComponentStatePath<Spec, Component>
+    | readonly ComponentStatePath<Spec, Component>[];
+  readonly allow?: (scope: ComponentTransitionScope<Spec, Component>, ...args: Args) => boolean;
+  readonly update?: ComponentContextUpdate<Spec, Component, Args>;
+  readonly perform?: (scope: ComponentTransitionScope<Spec, Component>, ...args: Args) => void;
+  readonly reenter?: boolean;
+};
+export type ComponentTransition<
+  Spec extends AppSpec,
+  Component extends ComponentName<Spec>,
+  Args extends readonly unknown[] = readonly [],
+> = ComponentStatePath<Spec, Component> | ComponentTransitionConfig<Spec, Component, Args>;
+export type ComponentTransitions<
+  Spec extends AppSpec,
+  Component extends ComponentName<Spec>,
+  Args extends readonly unknown[] = readonly [],
+> =
+  | ComponentTransition<Spec, Component, Args>
+  | readonly ComponentTransition<Spec, Component, Args>[];
+type ComponentEventTransitions<Spec extends AppSpec, Component extends ComponentName<Spec>> = {
+  readonly [Action in keyof ComponentEvents<Spec, Component>]?: ComponentTransitions<
+    Spec,
+    Component,
+    ComponentEventArgs<ComponentEvents<Spec, Component>[Action]>
+  >;
+};
+type ComponentTaskFor<
+  Spec extends AppSpec,
+  Component extends ComponentName<Spec>,
+  Task extends ComponentTaskName<Spec, Component>,
+> = ComponentTasks<Spec, Component>[Task];
+export type ComponentTaskInput<
+  Spec extends AppSpec,
+  Component extends ComponentName<Spec>,
+  Task extends ComponentTaskName<Spec, Component>,
+> =
+  ComponentTaskFor<Spec, Component, Task> extends {
+    Input: infer Input;
+  }
+    ? Input
+    : never;
+export type ComponentTaskOutput<
+  Spec extends AppSpec,
+  Component extends ComponentName<Spec>,
+  Task extends ComponentTaskName<Spec, Component>,
+> =
+  ComponentTaskFor<Spec, Component, Task> extends {
+    Output: infer Output;
+  }
+    ? Output
+    : never;
+export type ComponentTaskError<
+  Spec extends AppSpec,
+  Component extends ComponentName<Spec>,
+  Task extends ComponentTaskName<Spec, Component>,
+> =
+  ComponentTaskFor<Spec, Component, Task> extends {
+    Error: infer Error;
+  }
+    ? Error
+    : never;
+type ComponentOutcomeTransition<
+  Spec extends AppSpec,
+  Component extends ComponentName<Spec>,
+  Value,
+> = ComponentTransitions<Spec, Component, readonly [value: Value]>;
+export type ComponentTaskInvocation<Spec extends AppSpec, Component extends ComponentName<Spec>> = {
+  readonly [Task in ComponentTaskName<Spec, Component>]: {
+    readonly run: Task;
+    readonly input: (
+      scope: ComponentTransitionScope<Spec, Component>,
+    ) => ComponentTaskInput<Spec, Component, Task>;
+    readonly done?: ComponentOutcomeTransition<
+      Spec,
+      Component,
+      ComponentTaskOutput<Spec, Component, Task>
+    >;
+    readonly fail?: ComponentOutcomeTransition<
+      Spec,
+      Component,
+      ComponentTaskError<Spec, Component, Task>
+    >;
+  };
+}[ComponentTaskName<Spec, Component>];
+export type ComponentDelayedTransition<
+  Spec extends AppSpec,
+  Component extends ComponentName<Spec>,
+> = ComponentTransitionConfig<Spec, Component> & {
+  readonly wait: number | ((scope: ComponentTransitionScope<Spec, Component>) => number);
+};
+export type ComponentStateNode<Spec extends AppSpec, Component extends ComponentName<Spec>> = {
+  readonly type?: "atomic" | "compound" | "parallel" | "final";
+  readonly initial?: ComponentStatePath<Spec, Component>;
+  readonly states?: Readonly<Record<string, ComponentStateNode<Spec, Component>>>;
+  readonly on?: ComponentEventTransitions<Spec, Component>;
+  readonly always?: ComponentTransitions<Spec, Component>;
+  readonly after?:
+    | ComponentDelayedTransition<Spec, Component>
+    | readonly ComponentDelayedTransition<Spec, Component>[];
+  readonly task?:
+    | ComponentTaskInvocation<Spec, Component>
+    | readonly ComponentTaskInvocation<Spec, Component>[];
+  readonly settle?: ComponentSettlementInvocation<Spec, Component>;
+  readonly done?: ComponentTransitions<
+    Spec,
+    Component,
+    readonly [value: ComponentOutput<Spec, Component>]
+  >;
+  readonly output?:
+    | ComponentOutput<Spec, Component>
+    | ((scope: ComponentTransitionScope<Spec, Component>) => ComponentOutput<Spec, Component>);
+};
+export type ComponentStatechart<
+  Spec extends AppSpec,
+  Component extends ComponentName<Spec>,
+> = ComponentStateNode<Spec, Component> & {
+  readonly states: Readonly<Record<string, ComponentStateNode<Spec, Component>>>;
+};
+export type ComponentStateView<Spec extends AppSpec, Component extends ComponentName<Spec>> = {
+  readonly value: ComponentStateValue<ComponentStatePath<Spec, Component>>;
+  readonly active: readonly ComponentStatePath<Spec, Component>[];
+  readonly done: boolean;
+  readonly output: ComponentOutput<Spec, Component> | undefined;
+  readonly error: unknown;
+  matches(state: ComponentStatePath<Spec, Component>): boolean;
+  can<Action extends keyof ComponentEvents<Spec, Component>>(
+    action: Action,
+    ...args: ComponentEventArgs<ComponentEvents<Spec, Component>[Action]>
+  ): boolean;
+  subscribe(observer: (state: ComponentStateView<Spec, Component>) => void): () => void;
+};
+export type ComponentTaskScope<
+  Spec extends AppSpec,
+  Component extends ComponentName<Spec>,
+  Task extends ComponentTaskName<Spec, Component>,
+> = ComponentTaskContext<Spec, Component> & {
+  readonly value: ComponentTaskInput<Spec, Component, Task>;
+  readonly signal: AbortSignal;
+};
+type ComponentTaskDefinitions<Spec extends AppSpec, Component extends ComponentName<Spec>> = [
+  ComponentTaskName<Spec, Component>,
+] extends [never]
+  ? {
+      tasks?: never;
+    }
+  : {
+      tasks: {
+        readonly [Task in ComponentTaskName<Spec, Component>]: (
+          scope: ComponentTaskScope<Spec, Component, Task>,
+        ) =>
+          | ComponentTaskOutput<Spec, Component, Task>
+          | Promise<ComponentTaskOutput<Spec, Component, Task>>;
+      };
+    };
+type ComponentRenderChild =
   | Node
   | string
   | number
   | boolean
   | null
   | undefined
-  | ComponentControllerChild[]
-  | (() => ComponentControllerChild);
-type ComponentControllerValue<T> = T | null | undefined;
-type ComponentControllerPopoverValue = "auto" | "hint" | "manual" | boolean;
-type ComponentControllerPopoverTargetAction = "hide" | "show" | "toggle";
-type ComponentControllerPopoverToggleEvent = Event & {
-  readonly newState: "closed" | "open";
-  readonly oldState: "closed" | "open";
-};
-type ComponentControllerDataAttributes = {
-  [Key in `data-${string}`]?: ComponentControllerValue<string | number | boolean>;
-};
-type ComponentControllerAriaAttributes = {
-  [Key in `aria-${string}`]?: ComponentControllerValue<string | number | boolean>;
-};
-type ComponentControllerPopoverTargetProps = {
-  popovertarget?: ComponentControllerValue<string>;
-  popovertargetaction?: ComponentControllerValue<ComponentControllerPopoverTargetAction>;
-  popoverTarget?: ComponentControllerValue<string>;
-  popoverTargetAction?: ComponentControllerValue<ComponentControllerPopoverTargetAction>;
-};
-type ComponentControllerCommonProps<T extends Element> = ComponentControllerDataAttributes &
-  ComponentControllerAriaAttributes & {
-    id?: string;
-    children?: ComponentControllerChild;
-    hidden?: boolean;
-    popover?: ComponentControllerPopoverValue;
-    role?: string;
-    tabIndex?: number;
-    tabindex?: number;
-    title?: string;
-    onBeforeToggle?: ComponentControllerEvent<T, ComponentControllerPopoverToggleEvent>;
-    onCancel?: ComponentControllerEvent<T, Event>;
-    onClick?: ComponentControllerEvent<T, MouseEvent>;
-    onClose?: ComponentControllerEvent<T, Event>;
-    onInput?: ComponentControllerEvent<T, InputEvent>;
-    onSubmit?: ComponentControllerEvent<T, SubmitEvent>;
-    onToggle?: ComponentControllerEvent<T, ComponentControllerPopoverToggleEvent>;
-    onKeyDown?: ComponentControllerEvent<T, KeyboardEvent>;
-    onKeyUp?: ComponentControllerEvent<T, KeyboardEvent>;
-    onFocus?: ComponentControllerEvent<T, FocusEvent>;
-    onBlur?: ComponentControllerEvent<T, FocusEvent>;
-    onGotPointerCapture?: ComponentControllerEvent<T, PointerEvent>;
-    onLostPointerCapture?: ComponentControllerEvent<T, PointerEvent>;
-    onPointerDown?: ComponentControllerEvent<T, PointerEvent>;
-    onPointerEnter?: ComponentControllerEvent<T, PointerEvent>;
-    onPointerMove?: ComponentControllerEvent<T, PointerEvent>;
-    onPointerOut?: ComponentControllerEvent<T, PointerEvent>;
-    onPointerOver?: ComponentControllerEvent<T, PointerEvent>;
-    onPointerUp?: ComponentControllerEvent<T, PointerEvent>;
-    onPointerCancel?: ComponentControllerEvent<T, PointerEvent>;
-    onPointerLeave?: ComponentControllerEvent<T, PointerEvent>;
-  };
-type ComponentPartBindingForElement<ElementName extends string> = ElementName extends "button"
-  ? ComponentControllerCommonProps<HTMLButtonElement> & {
-      disabled?: boolean;
-      name?: string;
-      value?: string | number;
-      type?: "button" | "submit" | "reset";
-    } & ComponentControllerPopoverTargetProps
-  : ElementName extends "input"
-    ? ComponentControllerCommonProps<HTMLInputElement> & {
-        checked?: boolean;
-        disabled?: boolean;
-        max?: number;
-        min?: number;
-        name?: string;
-        placeholder?: string;
-        step?: number;
-        type?: string;
-        value?: string | number | readonly string[];
-      } & ComponentControllerPopoverTargetProps
-    : ElementName extends "textarea"
-      ? ComponentControllerCommonProps<HTMLTextAreaElement> & {
-          disabled?: boolean;
-          placeholder?: string;
-          rows?: number;
-          value?: string | number;
-        }
-      : ElementName extends "select"
-        ? ComponentControllerCommonProps<HTMLSelectElement> & {
-            disabled?: boolean;
-            multiple?: boolean;
-            value?: string | number | readonly string[];
-          }
-        : ElementName extends "dialog"
-          ? ComponentControllerCommonProps<HTMLDialogElement> & {
-              dialogOpen?: boolean;
-            }
-          : ElementName extends "img"
-            ? ComponentControllerCommonProps<HTMLImageElement> & {
-                alt?: string;
-                height?: string | number;
-                loading?: "eager" | "lazy";
-                src?: string;
-                width?: string | number;
-              }
-            : ElementName extends "a"
-              ? ComponentControllerCommonProps<HTMLAnchorElement> & {
-                  href?: string;
-                  target?: string;
-                }
-              : ElementName extends keyof HTMLElementTagNameMap
-                ? ComponentControllerCommonProps<HTMLElementTagNameMap[ElementName]>
-                : ElementName extends keyof SVGElementTagNameMap
-                  ? ComponentControllerCommonProps<SVGElementTagNameMap[ElementName]>
-                  : Record<string, unknown>;
+  | ComponentRenderChild[]
+  | (() => ComponentRenderChild);
+type ComponentNativeProps<ElementName extends string> =
+  ElementName extends keyof NativeIntrinsicElements
+    ? Omit<NativeIntrinsicElements[ElementName], "class" | "className" | "style">
+    : Record<string, unknown>;
+type ComponentPartBindingForElement<ElementName extends string> = ComponentNativeProps<ElementName>;
 export type ComponentPartBinding<
   Spec extends AppSpec,
   Component extends ComponentName<Spec>,
   Part extends ComponentPartName<Spec, Component>,
 > = ComponentPartBindingForElement<ComponentPartElement<Spec, Component, Part>>;
-export type ComponentControllerContext<
+type HasNoKeys<Value extends Record<string, unknown>> = keyof Value extends never ? true : false;
+export type ComponentInstanceInput<
   Spec extends AppSpec,
   Component extends ComponentName<Spec>,
+> = ComponentInput<Spec, Component>;
+type ComponentInstanceNeedsInput<Spec extends AppSpec, Component extends ComponentName<Spec>> =
+  HasNoKeys<ComponentInput<Spec, Component>> extends true ? false : true;
+type RequiredKeys<Value extends Record<string, unknown>> = {
+  [Key in keyof Value]-?: Record<string, never> extends Pick<Value, Key> ? never : Key;
+}[keyof Value];
+export type ComponentProps<
+  Spec extends AppSpec,
+  Component extends ComponentName<Spec>,
+> = ComponentInstanceInput<Spec, Component> & ComponentSlots<Spec, Component>;
+type ComponentRenderer<Spec extends AppSpec, Component extends ComponentName<Spec>> = [
+  RequiredKeys<ComponentProps<Spec, Component>>,
+] extends [never]
+  ? (props?: ComponentProps<Spec, Component>) => ComponentRenderChild
+  : (props: ComponentProps<Spec, Component>) => ComponentRenderChild;
+export type ComponentRenderers<Spec extends AppSpec> = {
+  readonly [Component in ComponentName<Spec>]: ComponentInstanceNeedsInput<
+    Spec,
+    Component
+  > extends true
+    ? ComponentRenderer<Spec, Component>
+    : ComponentRenderer<Spec, Component>;
+};
+export type ComponentResourceFactories<Spec extends AppSpec> = {
+  readonly [Resource in ResourceName<Spec>]: (
+    key: ResourceFor<Spec, Resource>["Key"],
+  ) => UIResource<Spec, Resource>;
+};
+type ComponentPartNativeElement<ElementName extends string> =
+  ElementName extends keyof HTMLElementTagNameMap
+    ? HTMLElementTagNameMap[ElementName]
+    : ElementName extends keyof SVGElementTagNameMap
+      ? SVGElementTagNameMap[ElementName]
+      : Element;
+export type ComponentPart<
+  Spec extends AppSpec,
+  Component extends ComponentName<Spec>,
+  Part extends ComponentPartName<Spec, Component>,
 > = {
-  readonly preset: PresetName<Spec>;
-  readonly setPreset: (preset: PresetName<Spec>) => void;
-  readonly theme: PresetThemeName<Spec>;
-  readonly setTheme: (theme: PresetThemeName<Spec>) => void;
+  (props?: ComponentPartBinding<Spec, Component, Part>): ComponentRenderChild;
+  readonly element: ComponentPartNativeElement<ComponentPartElement<Spec, Component, Part>> | null;
+  readonly elements: readonly ComponentPartNativeElement<
+    ComponentPartElement<Spec, Component, Part>
+  >[];
+};
+export type ComponentRenderScope<Spec extends AppSpec, Component extends ComponentName<Spec>> = {
   readonly input: ComponentInput<Spec, Component>;
-  readonly variants: ComponentVariants<Spec, Component>;
-  readonly state: ComponentState<Spec, Component>;
-  readonly derived: ComponentDerived<Spec, Component>;
-  readonly actions: ComponentActionHandlers<Spec, Component>;
-  readonly refs: ComponentRefs<Spec, Component>;
+  readonly context: Readonly<ComponentContext<Spec, Component>>;
+  readonly state: ComponentStateView<Spec, Component>;
+  readonly values: ComponentValues<Spec, Component>;
+  readonly parameters: Readonly<ComponentParameters<Spec, Component>>;
+  readonly appearance: PresetAppearance<Spec>;
+  readonly events: ComponentEventHandlers<Spec, Component>;
+  readonly slots: ComponentSlots<Spec, Component>;
+  readonly components: ComponentRenderers<Spec>;
+  readonly resources: ComponentResourceFactories<Spec>;
+  readonly navigation: AppNavigation<Spec>;
+  readonly screen: AppScreen<Spec>;
+  readonly parts: {
+    readonly [Part in ComponentPartName<Spec, Component>]: ComponentPart<Spec, Component, Part>;
+  };
 };
-export type ComponentVariants<Spec extends AppSpec, Component extends ComponentName<Spec>> =
-  ComponentFor<Spec, Component> extends {
-    Variants: infer Variants extends Record<string, any>;
-  }
-    ? Variants
-    : Record<never, never>;
-export type ComponentRefs<Spec extends AppSpec, Component extends ComponentName<Spec>> = {
-  readonly [Part in ComponentPartName<Spec, Component>]?: Element | null;
-};
-export type ComponentActionHandlers<Spec extends AppSpec, Component extends ComponentName<Spec>> = {
-  [Action in keyof ComponentActions<Spec, Component>]: (
-    ...args: ComponentActionArgs<ComponentActions<Spec, Component>[Action]>
+export type ComponentRender<Spec extends AppSpec, Component extends ComponentName<Spec>> = (
+  scope: ComponentRenderScope<Spec, Component>,
+) => ComponentRenderChild;
+export type ComponentEventHandlers<Spec extends AppSpec, Component extends ComponentName<Spec>> = {
+  [Action in keyof ComponentEvents<Spec, Component>]: (
+    ...args: ComponentEventArgs<ComponentEvents<Spec, Component>[Action]>
   ) => void;
 };
-export type ComponentControllerResult<
-  Spec extends AppSpec,
-  Component extends ComponentName<Spec>,
-> = {
-  values?: Partial<ComponentStyleValues<Spec, Component>>;
-} & Partial<{
-  [Part in ComponentPartName<Spec, Component>]: Partial<
-    ComponentPartBinding<Spec, Component, Part>
-  >;
-}>;
-export type ComponentStateContext<Spec extends AppSpec, Component extends ComponentName<Spec>> = {
+export type ComponentDeriveScope<Spec extends AppSpec, Component extends ComponentName<Spec>> = {
   readonly input: ComponentInput<Spec, Component>;
-  readonly variants: ComponentVariants<Spec, Component>;
+  readonly context: Readonly<ComponentContext<Spec, Component>>;
+  readonly state: ComponentStateView<Spec, Component>;
+  readonly parameters: Readonly<ComponentParameters<Spec, Component>>;
+  readonly appearance: PresetAppearance<Spec>;
+  readonly screen: AppScreen<Spec>;
 };
-export type ComponentDerivedContext<
+type ComponentValuesDefinition<Spec extends AppSpec, Component extends ComponentName<Spec>> = [
+  keyof ComponentValues<Spec, Component>,
+] extends [never]
+  ? {
+      values?: never;
+      derive?: (scope: ComponentDeriveScope<Spec, Component>) => ComponentValues<Spec, Component>;
+    }
+  : {
+      values?: Partial<
+        Pick<ComponentValues<Spec, Component>, ComponentWritableValueName<Spec, Component>>
+      >;
+      derive?: (
+        scope: ComponentDeriveScope<Spec, Component>,
+      ) => Partial<
+        Omit<ComponentValues<Spec, Component>, ComponentWritableValueName<Spec, Component>>
+      >;
+    };
+type ComponentContextDefinition<Spec extends AppSpec, Component extends ComponentName<Spec>> =
+  HasNoKeys<ComponentContext<Spec, Component>> extends true
+    ? {
+        context?: never;
+      }
+    : {
+        context: ComponentContext<Spec, Component>;
+      };
+export type ComponentStatechartDefinition<
   Spec extends AppSpec,
   Component extends ComponentName<Spec>,
-> = ComponentStateContext<Spec, Component> & {
-  readonly preset: PresetName<Spec>;
-  readonly setPreset: (preset: PresetName<Spec>) => void;
-  readonly theme: PresetThemeName<Spec>;
-  readonly setTheme: (theme: PresetThemeName<Spec>) => void;
-  readonly state: ComponentState<Spec, Component>;
-  readonly refs: ComponentRefs<Spec, Component>;
-};
-export type ComponentActionContext<
-  Spec extends AppSpec,
-  Component extends ComponentName<Spec>,
-> = ComponentDerivedContext<Spec, Component> & {
-  readonly preset: PresetName<Spec>;
-  readonly setPreset: (preset: PresetName<Spec>) => void;
-  readonly derived: ComponentDerived<Spec, Component>;
-};
-type ComponentStateDefinition<Spec extends AppSpec, Component extends ComponentName<Spec>> = [
-  keyof ComponentState<Spec, Component>,
-] extends [never]
-  ? {
-      state?:
-        | ComponentState<Spec, Component>
-        | ((ctx: ComponentStateContext<Spec, Component>) => ComponentState<Spec, Component>);
-    }
-  : {
-      state:
-        | ComponentState<Spec, Component>
-        | ((ctx: ComponentStateContext<Spec, Component>) => ComponentState<Spec, Component>);
-    };
-type ComponentDerivedDefinition<Spec extends AppSpec, Component extends ComponentName<Spec>> = [
-  keyof ComponentDerived<Spec, Component>,
-] extends [never]
-  ? {
-      derived?: (
-        ctx: ComponentDerivedContext<Spec, Component>,
-      ) => ComponentDerived<Spec, Component>;
-    }
-  : {
-      derived: (ctx: ComponentDerivedContext<Spec, Component>) => ComponentDerived<Spec, Component>;
-    };
-type ComponentActionsDefinition<Spec extends AppSpec, Component extends ComponentName<Spec>> = [
-  keyof ComponentActions<Spec, Component>,
-] extends [never]
-  ? {
-      actions?: (
-        ctx: ComponentActionContext<Spec, Component>,
-      ) => ComponentActionHandlers<Spec, Component>;
-    }
-  : {
-      actions: (
-        ctx: ComponentActionContext<Spec, Component>,
-      ) => ComponentActionHandlers<Spec, Component>;
-    };
+> =
+  ComponentFor<Spec, Component> extends {
+    States: string;
+  }
+    ? ComponentContextDefinition<Spec, Component> &
+        ComponentTaskDefinitions<Spec, Component> & {
+          initial: ComponentStatePath<Spec, Component>;
+          on?: ComponentEventTransitions<Spec, Component>;
+          states: Readonly<Record<string, ComponentStateNode<Spec, Component>>>;
+        }
+    : keyof ComponentEvents<Spec, Component> extends never
+      ? {
+          context?: never;
+          initial?: never;
+          on?: never;
+          states?: never;
+          tasks?: never;
+        }
+      : ComponentContextDefinition<Spec, Component> & {
+          initial?: never;
+          on: ComponentEventTransitions<Spec, Component>;
+          states?: never;
+          tasks?: never;
+        };
 export type ComponentDefinition<
   Spec extends AppSpec,
   Component extends ComponentName<Spec>,
-> = ComponentStateDefinition<Spec, Component> &
-  ComponentDerivedDefinition<Spec, Component> &
-  ComponentActionsDefinition<Spec, Component> & {
-    bind?: (
-      ctx: ComponentControllerContext<Spec, Component>,
-    ) => ComponentControllerResult<Spec, Component>;
-    setup?: (ctx: ComponentControllerContext<Spec, Component>) => void | (() => void);
+> = ComponentValuesDefinition<Spec, Component> &
+  ComponentStatechartDefinition<Spec, Component> & {
+    render: ComponentRender<Spec, Component>;
   };
-export type ComponentControllers<Spec extends AppSpec> = Partial<{
-  [Component in ComponentName<Spec>]:
-    | ((
-        ctx: ComponentControllerContext<Spec, Component>,
-      ) => ComponentControllerResult<Spec, Component>)
-    | ComponentDefinition<Spec, Component>;
-}>;
+export type ComponentDefinitions<Spec extends AppSpec> = {
+  [Component in ComponentName<Spec>]: ComponentDefinition<Spec, Component>;
+};
+export type RootComponentName<Spec extends AppSpec> = {
+  [Component in ComponentName<Spec>]: ComponentInstanceNeedsInput<Spec, Component> extends false
+    ? Component
+    : never;
+}[ComponentName<Spec>];
 export type ResourceDef<Spec extends AppSpec, R extends ResourceSpec> = {
   state: R["State"];
   presence?: R["Presence"];
@@ -655,7 +909,7 @@ export type ResourceDef<Spec extends AppSpec, R extends ResourceSpec> = {
       ctx: CommandCtx<Spec, R, R["Commands"][K] extends CommandSpec ? R["Commands"][K] : never>,
       ...args: R["Commands"][K] extends CommandSpec
         ? R["Commands"][K]["args"]
-        : R["Commands"][K] extends any[]
+        : R["Commands"][K] extends unknown[]
           ? R["Commands"][K]
           : []
     ) => void;
@@ -671,10 +925,9 @@ export type AppDef<Spec extends AppSpec> = {
   identify?: (opts: { token: string }) => ActorOf<Spec> | null;
   deps?: AppDepsDef<Spec>;
   programs?: AppPrograms<Spec>;
-  components?: ComponentControllers<Spec>;
+  components?: ComponentDefinitions<Spec>;
   styles?: unknown;
-  root?: (ctx: AppUIContext<Spec>) => unknown;
-  ui?: (ctx: AppUIContext<Spec>) => unknown;
+  root?: RootComponentName<Spec>;
   resources: {
     [K in keyof Spec["Resources"]]: ResourceDef<
       Spec,
@@ -688,8 +941,14 @@ export type RuntimeMigrationEdge = {
   readonly migrate?: Record<
     string,
     {
-      readonly state?: (state: any) => any;
-      readonly event?: (name: string, payload: any) => { name: string; payload: any };
+      readonly state?: (state: Readonly<Record<string, unknown>>) => unknown;
+      readonly event?: (
+        name: string,
+        payload: Readonly<Record<string, unknown>>,
+      ) => {
+        name: string;
+        payload: unknown;
+      };
     }
   >;
 };
@@ -711,7 +970,7 @@ export type CommandCtx<
   readonly key: R["Key"];
   event: EventForCmd<R, Cmd>;
   setPresence: (patch: Partial<R["Presence"]>) => void;
-  error: ErrorFor<Cmd> extends string | [string, any]
+  error: ErrorFor<Cmd> extends string | [string, unknown]
     ? ErrorFor<Cmd> extends string
       ? (code: ErrorFor<Cmd>) => void
       : ErrorFor<Cmd> extends [infer Code extends string, infer Data]
@@ -728,7 +987,7 @@ export type CommandReceipt<E = never> = Promise<
     }
   | {
       ok: false;
-      error: E extends string ? E : E extends [infer Code, any] ? Code : never;
+      error: E extends string ? E : E extends [infer Code, unknown] ? Code : never;
       data?: E extends [string, infer Data] ? Data : never;
     }
 >;
@@ -752,7 +1011,7 @@ type ResourceClient<Spec extends AppSpec> = {
         [CK in keyof Spec["Resources"][K]["Commands"]]: (
           ...args: Spec["Resources"][K]["Commands"][CK] extends CommandSpec
             ? Spec["Resources"][K]["Commands"][CK]["args"]
-            : Spec["Resources"][K]["Commands"][CK] extends any[]
+            : Spec["Resources"][K]["Commands"][CK] extends unknown[]
               ? Spec["Resources"][K]["Commands"][CK]
               : []
         ) => CommandReceipt<
@@ -776,20 +1035,31 @@ export type ResolvedAppDef<Spec extends AppSpec> = Omit<AppDef<Spec>, "identify"
 export type TypedAppDefinition<Spec extends AppSpec> = {
   readonly __poggersAppSpec?: Spec;
 };
+type IsAny<Value> = 0 extends 1 & Value ? true : false;
+type ResourceStateForName<Spec extends AppSpec, Resource extends string> =
+  IsAny<Spec> extends true
+    ? unknown
+    : AppSpec extends Spec
+      ? unknown
+      : Resource extends ResourceName<Spec>
+        ? ResourceFor<Spec, Extract<Resource, ResourceName<Spec>>>["State"]
+        : unknown;
 export type App<Spec extends AppSpec> = {
   def: ResolvedAppDef<Spec>;
-  previous?: App<any>;
-  createState: (resource: string) => any;
-  applyEvent: (
-    resource: string,
-    state: any,
+  previous?: unknown;
+  createState: <Resource extends string>(
+    resource: Resource,
+  ) => ResourceStateForName<Spec, Resource>;
+  applyEvent: <Resource extends string>(
+    resource: Resource,
+    state: ResourceStateForName<Spec, Resource>,
     event: {
       id: string;
       seq: number;
       at: number;
       actor: ActorOf<Spec>;
       name: string;
-      payload: any;
+      payload: unknown;
       hash?: string;
     },
     eventVersion?: number,
@@ -799,19 +1069,19 @@ export type App<Spec extends AppSpec> = {
     resource: string,
     event: {
       name: string;
-      payload: any;
+      payload: unknown;
       hash?: string;
     },
     eventVersion?: number,
     eventHash?: string,
   ) => {
     name: string;
-    payload: any;
+    payload: unknown;
     version: number;
     hash?: string;
   };
   snapshot: (
-    state: any,
+    state: unknown,
     seq: number,
   ) => {
     version: number;
@@ -819,40 +1089,33 @@ export type App<Spec extends AppSpec> = {
     data: unknown;
     hash?: string;
   };
-  restore: (
-    resource: string,
+  restore: <Resource extends string>(
+    resource: Resource,
     snap: {
       version: number;
       data: unknown;
       hash?: string;
     },
-  ) => any;
+  ) => ResourceStateForName<Spec, Resource>;
   runCommand: (
     resource: string,
-    state: any,
+    state: unknown,
     actor: ActorOf<Spec>,
-    key: any,
+    key: unknown,
     name: string,
-    args: any[],
+    args: unknown[],
     onEvent: (event: {
       id: string;
       seq: number;
       at: number;
       actor: ActorOf<Spec>;
       name: string;
-      payload: any;
+      payload: unknown;
     }) => void,
-    onSetPresence: (patch: any) => void,
-    onError: (error: string, data?: any) => void,
+    onSetPresence: (patch: unknown) => void,
+    onError: (error: string, data?: unknown) => void,
   ) => void;
 };
-export declare function installAppMigrations<Spec extends AppSpec>(
-  app: App<Spec>,
-  options: {
-    hash?: string;
-    migrations?: readonly RuntimeMigrationEdge[];
-  },
-): App<Spec>;
 type ResourcesOf<A> =
   A extends App<infer S>
     ? S extends AppSpec & {
@@ -861,7 +1124,26 @@ type ResourcesOf<A> =
       ? R
       : never
     : never;
-type MigrateDef<Prev extends App<any>> = {
+type TargetResourceState<Spec extends AppSpec, Resource> = Resource extends keyof Spec["Resources"]
+  ? Spec["Resources"][Resource] extends {
+      State: infer State;
+    }
+    ? State
+    : never
+  : never;
+type TargetResourceEvent<Spec extends AppSpec, Resource> = Resource extends keyof Spec["Resources"]
+  ? Spec["Resources"][Resource] extends {
+      Events: infer Events;
+    }
+    ? {
+        [Event in keyof Events & string]: {
+          name: Event;
+          payload: Events[Event];
+        };
+      }[keyof Events & string]
+    : never
+  : never;
+type MigrateDef<Spec extends AppSpec, Prev> = {
   previous: Prev;
   migrate?: {
     state?: {
@@ -871,7 +1153,7 @@ type MigrateDef<Prev extends App<any>> = {
         }
           ? S
           : never,
-      ) => any;
+      ) => TargetResourceState<Spec, R>;
     };
     event?: {
       [R in keyof ResourcesOf<Prev>]?: <
@@ -888,15 +1170,24 @@ type MigrateDef<Prev extends App<any>> = {
         }
           ? EV[E & keyof EV]
           : never,
-      ) => {
-        name: string;
-        payload: any;
-      };
+      ) =>
+        | TargetResourceEvent<Spec, R>
+        | {
+            name: string;
+            payload: unknown;
+          };
     };
   };
 };
 export declare function defineApp<Spec extends AppSpec>(def: TypedAppDefinition<Spec>): App<Spec>;
-export declare function defineApp<Spec extends AppSpec, Prev extends App<any> = never>(
-  def: AppDef<Spec> & ([Prev] extends [never] ? {} : MigrateDef<Prev>),
+export declare function defineApp<Spec extends AppSpec, Prev = never>(
+  def: AppDef<Spec> & ([Prev] extends [never] ? {} : MigrateDef<Spec, Prev>),
+): App<Spec>;
+export declare function installAppMigrations<Spec extends AppSpec>(
+  app: App<Spec>,
+  options: {
+    hash?: string;
+    migrations?: readonly RuntimeMigrationEdge[];
+  },
 ): App<Spec>;
 export {};

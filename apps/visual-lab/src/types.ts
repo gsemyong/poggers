@@ -1,164 +1,95 @@
-export type CommandId = "compose" | "search" | "review" | "share" | "settings";
-export type PresetName = "precision" | "tactile" | "editorial";
-
-export type Command = {
-  id: CommandId;
-  label: string;
-  detail: string;
-  shortcut: string;
-};
+import type { VisualValue, Writable } from "@poggers/kit";
+import type { DragRelease } from "@poggers/kit/web";
 
 export type App = {
   Resources: {};
   Components: {
-    CommandMenu: {
-      State: {
-        open: boolean;
-        phase: "idle" | "opening" | "open" | "closing" | "dragging" | "settling";
-        query: string;
-        selected: CommandId | undefined;
-        mode: "ready" | "loading" | "error";
-        dragOffset: number;
+    Drawer: {
+      Context: {};
+      States:
+        | "closed"
+        | "open"
+        | "open.view"
+        | "open.view.default"
+        | "open.view.key"
+        | "open.view.phrase"
+        | "open.view.remove"
+        | "open.gesture"
+        | "open.gesture.idle"
+        | "open.gesture.dragging"
+        | "closing"
+        | "closing.default"
+        | "closing.key"
+        | "closing.phrase"
+        | "closing.remove";
+      Values: {
+        opened: boolean;
+        dragging: boolean;
+        dialog: false | "modal" | "nonmodal";
+        presetSwitchLabel: "Family" | "Studio";
+        defaultVisible: boolean;
+        keyVisible: boolean;
+        phraseVisible: boolean;
+        removeVisible: boolean;
+        dragOffset: Writable<VisualValue<"length">>;
+        dragVelocity: Writable<number>;
+        dragProgress: Writable<VisualValue<"progress">>;
+        sheetHeight: Writable<VisualValue<"size">>;
       };
-      Derived: {
-        commands: Command[];
-        resultText: string;
-        statusTitle: string;
-        statusDetail: string;
-      };
-      Actions: {
-        toggleOpen(): void;
+      Events: {
+        open(): void;
         close(): void;
-        selectPrecision(): void;
-        selectTactile(): void;
-        selectEditorial(): void;
-        toggleTheme(): void;
-        syncOpen(open: boolean): void;
-        setQuery(query: string): void;
-        select(id: CommandId): void;
-        move(delta: number): void;
-        choose(id: CommandId): void;
-        retry(): void;
+        toggle(): void;
+        back(): void;
+        showKey(): void;
+        showPhrase(): void;
+        showRemove(): void;
+        startDragging(): void;
+        releaseDragging(release: DragRelease): void;
+        cancelDragging(): void;
+        togglePreset(): void;
       };
-      StyleValues: {
-        dragOffset: "length";
-        openness: "progress";
+      Parameters: {
+        dismissDistance: number;
+        dismissVelocity: number;
       };
-      Shared: "active-result";
       Parts: {
         Root: "main";
-        Stage: "section";
-        Heading: "div";
-        Kicker: "p";
-        Title: "h1";
-        Summary: "p";
-        PresetNav: "nav";
-        PrecisionPreset: "button";
-        TactilePreset: "button";
-        EditorialPreset: "button";
-        ThemeToggle: "button";
+        Page: "section";
+        PresetSwitch: "button";
         Trigger: "button";
-        TriggerIcon: "span";
-        TriggerLabel: "span";
-        TriggerKey: "span";
         Panel: "dialog";
         Backdrop: "div";
-        Surface: "div";
+        Surface: "section";
         Handle: "div";
-        Search: "label";
-        SearchIcon: "span";
-        SearchInput: "input";
-        Results: "div";
-        Status: "div";
-        StatusTitle: "strong";
-        StatusDetail: "span";
-        Retry: "button";
-        Result: "button";
-        Selection: "span";
-        ResultCopy: "span";
-        ResultLabel: "span";
-        ResultDetail: "span";
-        ResultKey: "span";
-        Footer: "footer";
-        ResultCount: "span";
+        HandleBar: "div";
         Close: "button";
+        CloseIcon: "img";
+        Viewport: "div";
+        DefaultView: "section";
+        DefaultHeader: "header";
+        DefaultTitle: "h2";
+        OptionList: "div";
+        OptionButton: "button";
+        DangerOption: "button";
+        OptionIcon: "img";
+        DetailView: "section";
+        DetailBody: "div";
+        ViewHeader: "header";
+        ViewIcon: "img";
+        ViewTitle: "h2";
+        ViewDescription: "p";
+        AdviceList: "ul";
+        AdviceItem: "li";
+        AdviceIcon: "img";
+        Actions: "div";
+        DangerActions: "div";
+        SecondaryButton: "button";
+        PrimaryButton: "button";
+        DangerButton: "button";
+        PrimaryIcon: "img";
       };
     };
   };
-  Styles: {
-    Presets: {
-      precision: {
-        Tokens: {
-          color:
-            | "canvas"
-            | "panel"
-            | "panelRaised"
-            | "text"
-            | "muted"
-            | "line"
-            | "active"
-            | "activeText"
-            | "focus"
-            | "backdrop";
-          space: "xs" | "sm" | "md" | "lg" | "xl" | "stage";
-          size: "panel" | "result";
-          radius: "control" | "panel";
-          shadow: "panel";
-          font: "body";
-          motion: "fast" | "settle";
-          z: "popover";
-        };
-        Themes: "default" | "dark";
-        Containers: "compact" | "roomy";
-      };
-      tactile: {
-        Tokens: {
-          color:
-            | "canvas"
-            | "panel"
-            | "panelRaised"
-            | "well"
-            | "text"
-            | "muted"
-            | "line"
-            | "accent"
-            | "accentInk"
-            | "focus"
-            | "backdrop"
-            | "handle";
-          space: "xs" | "sm" | "md" | "lg" | "xl" | "stage";
-          size: "panel" | "result";
-          radius: "control" | "panel" | "key";
-          shadow: "panel" | "control" | "pressed";
-          font: "body" | "mono";
-          gradient: "canvas" | "panel" | "selection";
-          motion: "snap" | "settle" | "press";
-          z: "popover";
-        };
-        Containers: "compact" | "roomy";
-      };
-      editorial: {
-        Tokens: {
-          color:
-            | "canvas"
-            | "paper"
-            | "text"
-            | "muted"
-            | "line"
-            | "accent"
-            | "accentSoft"
-            | "focus"
-            | "backdrop";
-          space: "xs" | "sm" | "md" | "lg" | "xl" | "stage";
-          size: "panel" | "result";
-          radius: "control" | "panel";
-          shadow: "panel";
-          font: "body" | "display";
-          motion: "quick" | "layout";
-          z: "popover";
-        };
-        Containers: "compact" | "roomy";
-      };
-    };
-  };
+  Styles: { Presets: "family" | "studio" };
 };

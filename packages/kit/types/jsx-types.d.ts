@@ -3,7 +3,7 @@ type AttributeValue<T> = T | null | undefined;
 type PrimitiveAttribute = string | number | boolean | null | undefined;
 type Booleanish = boolean | "true" | "false";
 type CrossOrigin = "anonymous" | "use-credentials" | "";
-type Ref<T extends Element> = (element: T) => void;
+type Ref<T extends Element> = (element: T) => void | (() => void);
 type PopoverValue = "auto" | "hint" | "manual" | boolean;
 type PopoverTargetAction = "hide" | "show" | "toggle";
 type PopoverToggleEvent = Event & {
@@ -164,8 +164,129 @@ type DataAttributes = {
   [Key in `data-${string}`]?: AttributeValue<PrimitiveAttribute>;
 };
 type AriaAttributes = {
-  [Key in `aria-${string}`]?: AttributeValue<string | number | Booleanish>;
+  "aria-activedescendant"?: AttributeValue<string>;
+  "aria-atomic"?: AttributeValue<Booleanish>;
+  "aria-autocomplete"?: AttributeValue<"none" | "inline" | "list" | "both">;
+  "aria-braillelabel"?: AttributeValue<string>;
+  "aria-brailleroledescription"?: AttributeValue<string>;
+  "aria-busy"?: AttributeValue<Booleanish>;
+  "aria-checked"?: AttributeValue<Booleanish | "mixed">;
+  "aria-colcount"?: AttributeValue<number>;
+  "aria-colindex"?: AttributeValue<number>;
+  "aria-colindextext"?: AttributeValue<string>;
+  "aria-colspan"?: AttributeValue<number>;
+  "aria-controls"?: AttributeValue<string>;
+  "aria-current"?: AttributeValue<Booleanish | "page" | "step" | "location" | "date" | "time">;
+  "aria-describedby"?: AttributeValue<string>;
+  "aria-description"?: AttributeValue<string>;
+  "aria-details"?: AttributeValue<string>;
+  "aria-disabled"?: AttributeValue<Booleanish>;
+  "aria-errormessage"?: AttributeValue<string>;
+  "aria-expanded"?: AttributeValue<Booleanish>;
+  "aria-flowto"?: AttributeValue<string>;
+  "aria-haspopup"?: AttributeValue<Booleanish | "menu" | "listbox" | "tree" | "grid" | "dialog">;
+  "aria-hidden"?: AttributeValue<Booleanish>;
+  "aria-invalid"?: AttributeValue<Booleanish | "grammar" | "spelling">;
+  "aria-keyshortcuts"?: AttributeValue<string>;
+  "aria-label"?: AttributeValue<string>;
+  "aria-labelledby"?: AttributeValue<string>;
+  "aria-level"?: AttributeValue<number>;
+  "aria-live"?: AttributeValue<"off" | "assertive" | "polite">;
+  "aria-modal"?: AttributeValue<Booleanish>;
+  "aria-multiline"?: AttributeValue<Booleanish>;
+  "aria-multiselectable"?: AttributeValue<Booleanish>;
+  "aria-orientation"?: AttributeValue<"horizontal" | "vertical">;
+  "aria-owns"?: AttributeValue<string>;
+  "aria-placeholder"?: AttributeValue<string>;
+  "aria-posinset"?: AttributeValue<number>;
+  "aria-pressed"?: AttributeValue<Booleanish | "mixed">;
+  "aria-readonly"?: AttributeValue<Booleanish>;
+  "aria-relevant"?: AttributeValue<string>;
+  "aria-required"?: AttributeValue<Booleanish>;
+  "aria-roledescription"?: AttributeValue<string>;
+  "aria-rowcount"?: AttributeValue<number>;
+  "aria-rowindex"?: AttributeValue<number>;
+  "aria-rowindextext"?: AttributeValue<string>;
+  "aria-rowspan"?: AttributeValue<number>;
+  "aria-selected"?: AttributeValue<Booleanish>;
+  "aria-setsize"?: AttributeValue<number>;
+  "aria-sort"?: AttributeValue<"none" | "ascending" | "descending" | "other">;
+  "aria-valuemax"?: AttributeValue<number>;
+  "aria-valuemin"?: AttributeValue<number>;
+  "aria-valuenow"?: AttributeValue<number>;
+  "aria-valuetext"?: AttributeValue<string>;
 };
+type AriaRole =
+  | "alert"
+  | "alertdialog"
+  | "application"
+  | "article"
+  | "banner"
+  | "button"
+  | "cell"
+  | "checkbox"
+  | "columnheader"
+  | "combobox"
+  | "complementary"
+  | "contentinfo"
+  | "definition"
+  | "dialog"
+  | "document"
+  | "feed"
+  | "figure"
+  | "form"
+  | "generic"
+  | "grid"
+  | "gridcell"
+  | "group"
+  | "heading"
+  | "img"
+  | "link"
+  | "list"
+  | "listbox"
+  | "listitem"
+  | "log"
+  | "main"
+  | "marquee"
+  | "math"
+  | "menu"
+  | "menubar"
+  | "menuitem"
+  | "menuitemcheckbox"
+  | "menuitemradio"
+  | "meter"
+  | "navigation"
+  | "none"
+  | "note"
+  | "option"
+  | "presentation"
+  | "progressbar"
+  | "radio"
+  | "radiogroup"
+  | "region"
+  | "row"
+  | "rowgroup"
+  | "rowheader"
+  | "scrollbar"
+  | "search"
+  | "searchbox"
+  | "separator"
+  | "slider"
+  | "spinbutton"
+  | "status"
+  | "switch"
+  | "tab"
+  | "table"
+  | "tablist"
+  | "tabpanel"
+  | "term"
+  | "textbox"
+  | "timer"
+  | "toolbar"
+  | "tooltip"
+  | "tree"
+  | "treegrid"
+  | "treeitem";
 type GlobalAttributes<T extends Element> = EventHandlerProps<T> &
   DataAttributes &
   AriaAttributes & {
@@ -199,9 +320,8 @@ type GlobalAttributes<T extends Element> = EventHandlerProps<T> &
     lang?: AttributeValue<string>;
     part?: AttributeValue<string>;
     popover?: AttributeValue<PopoverValue>;
-    popoverOpen?: AttributeValue<boolean>;
     ref?: Ref<T>;
-    role?: AttributeValue<string>;
+    role?: AttributeValue<AriaRole>;
     slot?: AttributeValue<string>;
     spellcheck?: AttributeValue<boolean>;
     style?: AttributeValue<string | CSSProperties>;
@@ -266,185 +386,181 @@ type HTMLSpecificAttributes<Tag extends keyof HTMLElementTagNameMap> = Tag exten
         type?: AttributeValue<ButtonType>;
         value?: AttributeValue<string | number>;
       }
-    : Tag extends "dialog"
+    : Tag extends "form"
       ? {
-          dialogOpen?: AttributeValue<boolean>;
+          acceptCharset?: AttributeValue<string>;
+          action?: AttributeValue<string>;
+          autocomplete?: AttributeValue<"off" | "on">;
+          enctype?: AttributeValue<FormEncType>;
+          method?: AttributeValue<FormMethod>;
+          novalidate?: AttributeValue<boolean>;
+          target?: AttributeValue<Target>;
         }
-      : Tag extends "form"
+      : Tag extends "iframe"
         ? {
-            acceptCharset?: AttributeValue<string>;
-            action?: AttributeValue<string>;
-            autocomplete?: AttributeValue<"off" | "on">;
-            enctype?: AttributeValue<FormEncType>;
-            method?: AttributeValue<FormMethod>;
-            novalidate?: AttributeValue<boolean>;
-            target?: AttributeValue<Target>;
+            allow?: AttributeValue<string>;
+            allowfullscreen?: AttributeValue<boolean>;
+            loading?: AttributeValue<Loading>;
+            referrerpolicy?: AttributeValue<ReferrerPolicy>;
+            src?: AttributeValue<string>;
+            srcdoc?: AttributeValue<string>;
           }
-        : Tag extends "iframe"
+        : Tag extends "img"
           ? {
-              allow?: AttributeValue<string>;
-              allowfullscreen?: AttributeValue<boolean>;
+              alt?: AttributeValue<string>;
+              crossorigin?: AttributeValue<CrossOrigin>;
+              decoding?: AttributeValue<"async" | "auto" | "sync">;
+              fetchpriority?: AttributeValue<"auto" | "high" | "low">;
+              height?: AttributeValue<number | string>;
               loading?: AttributeValue<Loading>;
               referrerpolicy?: AttributeValue<ReferrerPolicy>;
+              sizes?: AttributeValue<string>;
               src?: AttributeValue<string>;
-              srcdoc?: AttributeValue<string>;
+              srcset?: AttributeValue<string>;
+              width?: AttributeValue<number | string>;
             }
-          : Tag extends "img"
+          : Tag extends "input"
             ? {
-                alt?: AttributeValue<string>;
-                crossorigin?: AttributeValue<CrossOrigin>;
-                decoding?: AttributeValue<"async" | "auto" | "sync">;
-                fetchpriority?: AttributeValue<"auto" | "high" | "low">;
-                height?: AttributeValue<number | string>;
-                loading?: AttributeValue<Loading>;
-                referrerpolicy?: AttributeValue<ReferrerPolicy>;
-                sizes?: AttributeValue<string>;
-                src?: AttributeValue<string>;
-                srcset?: AttributeValue<string>;
-                width?: AttributeValue<number | string>;
+                accept?: AttributeValue<string>;
+                autocomplete?: AttributeValue<string>;
+                capture?: AttributeValue<boolean | "environment" | "user">;
+                checked?: AttributeValue<boolean>;
+                disabled?: AttributeValue<boolean>;
+                form?: AttributeValue<string>;
+                formaction?: AttributeValue<string>;
+                formenctype?: AttributeValue<FormEncType>;
+                formmethod?: AttributeValue<FormMethod>;
+                formnovalidate?: AttributeValue<boolean>;
+                formtarget?: AttributeValue<Target>;
+                list?: AttributeValue<string>;
+                max?: AttributeValue<number | string>;
+                maxlength?: AttributeValue<number>;
+                min?: AttributeValue<number | string>;
+                minlength?: AttributeValue<number>;
+                multiple?: AttributeValue<boolean>;
+                name?: AttributeValue<string>;
+                pattern?: AttributeValue<string>;
+                placeholder?: AttributeValue<string>;
+                popovertarget?: AttributeValue<string>;
+                popovertargetaction?: AttributeValue<PopoverTargetAction>;
+                popoverTarget?: AttributeValue<string>;
+                popoverTargetAction?: AttributeValue<PopoverTargetAction>;
+                readonly?: AttributeValue<boolean>;
+                required?: AttributeValue<boolean>;
+                size?: AttributeValue<number>;
+                step?: AttributeValue<number | "any" | (string & {})>;
+                type?: AttributeValue<InputType>;
+                value?: AttributeValue<string | number | readonly string[]>;
               }
-            : Tag extends "input"
+            : Tag extends "label"
               ? {
-                  accept?: AttributeValue<string>;
-                  autocomplete?: AttributeValue<string>;
-                  capture?: AttributeValue<boolean | "environment" | "user">;
-                  checked?: AttributeValue<boolean>;
-                  disabled?: AttributeValue<boolean>;
-                  form?: AttributeValue<string>;
-                  formaction?: AttributeValue<string>;
-                  formenctype?: AttributeValue<FormEncType>;
-                  formmethod?: AttributeValue<FormMethod>;
-                  formnovalidate?: AttributeValue<boolean>;
-                  formtarget?: AttributeValue<Target>;
-                  list?: AttributeValue<string>;
-                  max?: AttributeValue<number | string>;
-                  maxlength?: AttributeValue<number>;
-                  min?: AttributeValue<number | string>;
-                  minlength?: AttributeValue<number>;
-                  multiple?: AttributeValue<boolean>;
-                  name?: AttributeValue<string>;
-                  pattern?: AttributeValue<string>;
-                  placeholder?: AttributeValue<string>;
-                  popovertarget?: AttributeValue<string>;
-                  popovertargetaction?: AttributeValue<PopoverTargetAction>;
-                  popoverTarget?: AttributeValue<string>;
-                  popoverTargetAction?: AttributeValue<PopoverTargetAction>;
-                  readonly?: AttributeValue<boolean>;
-                  required?: AttributeValue<boolean>;
-                  size?: AttributeValue<number>;
-                  step?: AttributeValue<number | "any" | (string & {})>;
-                  type?: AttributeValue<InputType>;
-                  value?: AttributeValue<string | number | readonly string[]>;
+                  for?: AttributeValue<string>;
+                  htmlFor?: AttributeValue<string>;
                 }
-              : Tag extends "label"
+              : Tag extends "link"
                 ? {
-                    for?: AttributeValue<string>;
-                    htmlFor?: AttributeValue<string>;
+                    as?: AttributeValue<string>;
+                    crossorigin?: AttributeValue<CrossOrigin>;
+                    href?: AttributeValue<string>;
+                    hreflang?: AttributeValue<string>;
+                    media?: AttributeValue<string>;
+                    referrerpolicy?: AttributeValue<ReferrerPolicy>;
+                    rel?: AttributeValue<string>;
+                    sizes?: AttributeValue<string>;
+                    type?: AttributeValue<string>;
                   }
-                : Tag extends "link"
+                : Tag extends "meta"
                   ? {
-                      as?: AttributeValue<string>;
-                      crossorigin?: AttributeValue<CrossOrigin>;
-                      href?: AttributeValue<string>;
-                      hreflang?: AttributeValue<string>;
-                      media?: AttributeValue<string>;
-                      referrerpolicy?: AttributeValue<ReferrerPolicy>;
-                      rel?: AttributeValue<string>;
-                      sizes?: AttributeValue<string>;
-                      type?: AttributeValue<string>;
+                      charset?: AttributeValue<string>;
+                      content?: AttributeValue<string>;
+                      "http-equiv"?: AttributeValue<string>;
+                      name?: AttributeValue<string>;
                     }
-                  : Tag extends "meta"
+                  : Tag extends "option"
                     ? {
-                        charset?: AttributeValue<string>;
-                        content?: AttributeValue<string>;
-                        "http-equiv"?: AttributeValue<string>;
-                        name?: AttributeValue<string>;
+                        disabled?: AttributeValue<boolean>;
+                        label?: AttributeValue<string>;
+                        selected?: AttributeValue<boolean>;
+                        value?: AttributeValue<string | number>;
                       }
-                    : Tag extends "option"
+                    : Tag extends "script"
                       ? {
-                          disabled?: AttributeValue<boolean>;
-                          label?: AttributeValue<string>;
-                          selected?: AttributeValue<boolean>;
-                          value?: AttributeValue<string | number>;
+                          async?: AttributeValue<boolean>;
+                          crossorigin?: AttributeValue<CrossOrigin>;
+                          defer?: AttributeValue<boolean>;
+                          integrity?: AttributeValue<string>;
+                          nomodule?: AttributeValue<boolean>;
+                          referrerpolicy?: AttributeValue<ReferrerPolicy>;
+                          src?: AttributeValue<string>;
+                          type?: AttributeValue<string>;
                         }
-                      : Tag extends "script"
+                      : Tag extends "select"
                         ? {
-                            async?: AttributeValue<boolean>;
-                            crossorigin?: AttributeValue<CrossOrigin>;
-                            defer?: AttributeValue<boolean>;
-                            integrity?: AttributeValue<string>;
-                            nomodule?: AttributeValue<boolean>;
-                            referrerpolicy?: AttributeValue<ReferrerPolicy>;
-                            src?: AttributeValue<string>;
-                            type?: AttributeValue<string>;
+                            autocomplete?: AttributeValue<string>;
+                            disabled?: AttributeValue<boolean>;
+                            form?: AttributeValue<string>;
+                            multiple?: AttributeValue<boolean>;
+                            name?: AttributeValue<string>;
+                            required?: AttributeValue<boolean>;
+                            size?: AttributeValue<number>;
+                            value?: AttributeValue<string | number | readonly string[]>;
                           }
-                        : Tag extends "select"
+                        : Tag extends "source"
                           ? {
-                              autocomplete?: AttributeValue<string>;
-                              disabled?: AttributeValue<boolean>;
-                              form?: AttributeValue<string>;
-                              multiple?: AttributeValue<boolean>;
-                              name?: AttributeValue<string>;
-                              required?: AttributeValue<boolean>;
-                              size?: AttributeValue<number>;
-                              value?: AttributeValue<string | number | readonly string[]>;
+                              height?: AttributeValue<number | string>;
+                              media?: AttributeValue<string>;
+                              sizes?: AttributeValue<string>;
+                              src?: AttributeValue<string>;
+                              srcset?: AttributeValue<string>;
+                              type?: AttributeValue<string>;
+                              width?: AttributeValue<number | string>;
                             }
-                          : Tag extends "source"
+                          : Tag extends "textarea"
                             ? {
-                                height?: AttributeValue<number | string>;
-                                media?: AttributeValue<string>;
-                                sizes?: AttributeValue<string>;
-                                src?: AttributeValue<string>;
-                                srcset?: AttributeValue<string>;
-                                type?: AttributeValue<string>;
-                                width?: AttributeValue<number | string>;
+                                autocomplete?: AttributeValue<string>;
+                                cols?: AttributeValue<number>;
+                                disabled?: AttributeValue<boolean>;
+                                dirname?: AttributeValue<string>;
+                                form?: AttributeValue<string>;
+                                maxlength?: AttributeValue<number>;
+                                minlength?: AttributeValue<number>;
+                                name?: AttributeValue<string>;
+                                placeholder?: AttributeValue<string>;
+                                readonly?: AttributeValue<boolean>;
+                                required?: AttributeValue<boolean>;
+                                rows?: AttributeValue<number>;
+                                value?: AttributeValue<string | number>;
+                                wrap?: AttributeValue<"hard" | "off" | "soft">;
                               }
-                            : Tag extends "textarea"
+                            : Tag extends "track"
                               ? {
-                                  autocomplete?: AttributeValue<string>;
-                                  cols?: AttributeValue<number>;
-                                  disabled?: AttributeValue<boolean>;
-                                  dirname?: AttributeValue<string>;
-                                  form?: AttributeValue<string>;
-                                  maxlength?: AttributeValue<number>;
-                                  minlength?: AttributeValue<number>;
-                                  name?: AttributeValue<string>;
-                                  placeholder?: AttributeValue<string>;
-                                  readonly?: AttributeValue<boolean>;
-                                  required?: AttributeValue<boolean>;
-                                  rows?: AttributeValue<number>;
-                                  value?: AttributeValue<string | number>;
-                                  wrap?: AttributeValue<"hard" | "off" | "soft">;
+                                  default?: AttributeValue<boolean>;
+                                  kind?: AttributeValue<
+                                    | "captions"
+                                    | "chapters"
+                                    | "descriptions"
+                                    | "metadata"
+                                    | "subtitles"
+                                  >;
+                                  label?: AttributeValue<string>;
+                                  src?: AttributeValue<string>;
+                                  srclang?: AttributeValue<string>;
                                 }
-                              : Tag extends "track"
+                              : Tag extends "video"
                                 ? {
-                                    default?: AttributeValue<boolean>;
-                                    kind?: AttributeValue<
-                                      | "captions"
-                                      | "chapters"
-                                      | "descriptions"
-                                      | "metadata"
-                                      | "subtitles"
-                                    >;
-                                    label?: AttributeValue<string>;
+                                    autoplay?: AttributeValue<boolean>;
+                                    controls?: AttributeValue<boolean>;
+                                    crossorigin?: AttributeValue<CrossOrigin>;
+                                    height?: AttributeValue<number | string>;
+                                    loop?: AttributeValue<boolean>;
+                                    muted?: AttributeValue<boolean>;
+                                    playsinline?: AttributeValue<boolean>;
+                                    poster?: AttributeValue<string>;
+                                    preload?: AttributeValue<"auto" | "metadata" | "none">;
                                     src?: AttributeValue<string>;
-                                    srclang?: AttributeValue<string>;
+                                    width?: AttributeValue<number | string>;
                                   }
-                                : Tag extends "video"
-                                  ? {
-                                      autoplay?: AttributeValue<boolean>;
-                                      controls?: AttributeValue<boolean>;
-                                      crossorigin?: AttributeValue<CrossOrigin>;
-                                      height?: AttributeValue<number | string>;
-                                      loop?: AttributeValue<boolean>;
-                                      muted?: AttributeValue<boolean>;
-                                      playsinline?: AttributeValue<boolean>;
-                                      poster?: AttributeValue<string>;
-                                      preload?: AttributeValue<"auto" | "metadata" | "none">;
-                                      src?: AttributeValue<string>;
-                                      width?: AttributeValue<number | string>;
-                                    }
-                                  : {};
+                                : {};
 export type HTMLAttributes<Tag extends keyof HTMLElementTagNameMap> = GlobalAttributes<
   HTMLElementTagNameMap[Tag]
 > &

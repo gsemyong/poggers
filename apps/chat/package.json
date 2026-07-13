@@ -3,12 +3,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "postinstall": "poggers sync",
     "dev": "poggers dev",
     "build": "poggers build --outfile dist/chat",
     "start": "./dist/chat",
     "lint": "poggers check",
-    "check": "bun run typecheck && bun run lint",
     "typecheck": "poggers typecheck"
   },
   "dependencies": {

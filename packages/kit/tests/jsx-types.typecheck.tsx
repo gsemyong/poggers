@@ -1,5 +1,24 @@
-/** @jsxImportSource @poggers/kit */
 import type { Child } from "../src/ui";
+
+const _cleanupRef = (
+  <button
+    ref={(element) => {
+      element.disabled = true;
+      return () => {
+        element.disabled = false;
+      };
+    }}
+  />
+);
+
+const _dialogRef = (
+  <dialog
+    ref={(element) => {
+      element.showModal();
+      return () => element.close();
+    }}
+  />
+);
 
 function Button(props: { label: string; children?: Child; onPress?: () => void }) {
   return <button onClick={props.onPress}>{props.children ?? props.label}</button>;
@@ -81,11 +100,22 @@ const popoverOk = (
 
 const _dialogOk = (
   <dialog
-    dialogOpen={enabled}
     onCancel={(event) => event.preventDefault()}
     onClose={(event) => event.currentTarget.returnValue}
   />
 );
+
+// @ts-expect-error ARIA booleans accept only platform-valid boolean values.
+const _invalidAriaExpanded = <button aria-expanded="yes" />;
+
+// @ts-expect-error Roles are restricted to the platform role vocabulary.
+const _invalidRole = <div role="drawer" />;
+
+// @ts-expect-error Dialog lifecycle is mounted through the web toolkit, not a custom DOM prop.
+const _removedDialogBinding = <dialog dialogOpen={enabled ? "modal" : false} />;
+
+// @ts-expect-error dialog lifecycle modes are explicit.
+const _invalidDialogMode = <dialog dialogOpen />;
 
 // @ts-expect-error dialogOpen is a dialog lifecycle binding, not a global attribute.
 const _invalidDialogOpen = <div dialogOpen />;

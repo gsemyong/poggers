@@ -1,3 +1,4 @@
+import { endBatch, startBatch } from "alien-signals";
 import {
   defineApp,
   type App,
@@ -5,398 +6,72 @@ import {
   type AppNavigation,
   type AppScreen,
   type AppSpec,
+  type ComponentInput,
+  type ComponentName,
+  type ComponentRenderScope,
+  type ComponentValues,
   type ResourceFor,
   type ResourceName,
   type TypedAppDefinition,
   type UISignal,
 } from "./app";
 import type { ConnectOpts } from "./client";
+import type { PresetAppearance, PresetName, PresetThemeName } from "./preset";
+import { PresenceScene } from "./scene";
+import {
+  createComponentActor,
+  type ComponentActor,
+  type StatechartDefinition,
+  type StatechartNode,
+  type StatechartSnapshot,
+  type StatechartSettlementDriver,
+  type StatechartTask,
+  type StatechartTransitions,
+} from "./component-machine";
+
+declare const __POGGERS_HMR__: boolean;
 import {
   createVisualCoordinator,
   isCompiledVisualPreset,
+  registerVisualHover,
   visualPartAttributes,
+  visualPartCollection,
+  visualPartDependencies,
+  visualPartPresence,
+  type VisualCoordinator,
   type CompiledVisuals,
 } from "./visual-runtime";
 import {
   computed,
+  bindVirtualCollectionHost,
+  allocateSceneOwner,
+  captureSignalOnHotRefresh,
   createNativeAppRuntime,
+  currentPresenceScene,
+  currentStructuralKey,
   effect,
   isHotRefresh,
   jsx,
+  onCleanup,
   onMount,
   reactiveValue,
   signal,
   untrack,
   type Child,
+  type Component,
   type NativeResource,
   type Props,
   type Signal,
 } from "./ui";
 
 type HookName<Name extends string> = `use${Capitalize<Name>}`;
-type CreateName<Name extends string> = `create${Capitalize<Name>}`;
-
-type ComponentsOf<Spec extends AppSpec> = Spec extends {
-  Components: infer Components extends Record<string, any>;
-}
-  ? Components
-  : Record<string, never>;
-
-type StylesOf<Spec extends AppSpec> = Spec extends {
-  Styles: infer Styles extends Record<string, any>;
-}
-  ? Styles
-  : Record<string, never>;
-
-export type ComponentName<Spec extends AppSpec> = Extract<keyof ComponentsOf<Spec>, string>;
-
-export type ComponentFor<
-  Spec extends AppSpec,
-  Component extends ComponentName<Spec>,
-> = ComponentsOf<Spec>[Component] extends {
-  Parts: Record<string, string>;
-}
-  ? ComponentsOf<Spec>[Component]
-  : never;
-
-export type ComponentInput<Spec extends AppSpec, Component extends ComponentName<Spec>> =
-  ComponentFor<Spec, Component> extends {
-    Input: infer Input extends Record<string, any>;
-  }
-    ? Input
-    : Record<never, never>;
-
-export type ComponentState<Spec extends AppSpec, Component extends ComponentName<Spec>> =
-  ComponentFor<Spec, Component> extends {
-    State: infer State extends Record<string, any>;
-  }
-    ? State
-    : Record<never, never>;
-
-export type ComponentVariants<Spec extends AppSpec, Component extends ComponentName<Spec>> =
-  ComponentFor<Spec, Component> extends {
-    Variants: infer Variants extends Record<string, any>;
-  }
-    ? Variants
-    : Record<never, never>;
-
-export type ComponentDerived<Spec extends AppSpec, Component extends ComponentName<Spec>> =
-  ComponentFor<Spec, Component> extends {
-    Derived: infer Derived extends Record<string, any>;
-  }
-    ? Derived
-    : Record<never, never>;
-
-export type ComponentActions<Spec extends AppSpec, Component extends ComponentName<Spec>> =
-  ComponentFor<Spec, Component> extends {
-    Actions: infer Actions extends Record<string, any>;
-  }
-    ? Actions
-    : Record<never, never>;
-
-type ComponentStyleValueFor<Kind extends string> = Kind extends
-  | "number"
-  | "progress"
-  | "opacity"
-  | "ratio"
-  | "zIndex"
-  ? number
-  : Kind extends "length" | "space" | "size" | "radius"
-    ? number
-    : never;
-
-export type ComponentStyleValues<Spec extends AppSpec, Component extends ComponentName<Spec>> =
-  ComponentFor<Spec, Component> extends {
-    StyleValues: infer Values extends Record<string, string>;
-  }
-    ? {
-        [Value in keyof Values]: ComponentStyleValueFor<Values[Value] & string>;
-      }
-    : Record<never, never>;
-
-export type ComponentParts<Spec extends AppSpec, Component extends ComponentName<Spec>> =
-  ComponentFor<Spec, Component> extends {
-    Parts: infer Parts extends Record<string, string>;
-  }
-    ? Parts
-    : Record<never, never>;
-
-export type ComponentPartName<
-  Spec extends AppSpec,
-  Component extends ComponentName<Spec>,
-> = Extract<keyof ComponentParts<Spec, Component>, string>;
-
-export type ComponentPartElement<
-  Spec extends AppSpec,
-  Component extends ComponentName<Spec>,
-  Part extends ComponentPartName<Spec, Component>,
-> = ComponentParts<Spec, Component>[Part] & string;
-
-export type ComponentActionArgs<Action> = Action extends (...args: infer Args) => any
-  ? Args
-  : Action extends readonly [...infer Args]
-    ? Args
-    : [];
-
-type HasNoKeys<T extends Record<string, any>> = keyof T extends never ? true : false;
-
-export type ComponentStateObject<Spec extends AppSpec, Component extends ComponentName<Spec>> = {
-  [State in keyof ComponentState<Spec, Component>]: ComponentState<Spec, Component>[State];
-};
-
-export type ComponentRefs<Spec extends AppSpec, Component extends ComponentName<Spec>> = {
-  readonly [Part in ComponentPartName<Spec, Component>]?: Element | null;
-};
-
-export type ComponentInstanceActionHandlers<
-  Spec extends AppSpec,
-  Component extends ComponentName<Spec>,
-> = {
-  [Action in keyof ComponentActions<Spec, Component>]: (
-    ...args: ComponentActionArgs<ComponentActions<Spec, Component>[Action]>
-  ) => void;
-};
-
-type ComponentPartValue<T> = T | null | undefined;
-
-type ComponentPartEvent<T extends EventTarget, E extends Event> = {
-  bivarianceHack(event: E & { readonly currentTarget: T }): void;
-}["bivarianceHack"];
-
-type ComponentPartDataAttributes = {
-  [Key in `data-${string}`]?: ComponentPartValue<string | number | boolean>;
-};
-
-type ComponentPartAriaAttributes = {
-  [Key in `aria-${string}`]?: ComponentPartValue<string | number | boolean>;
-};
-
-type ComponentPartPopoverValue = "auto" | "hint" | "manual" | boolean;
-type ComponentPartPopoverTargetAction = "hide" | "show" | "toggle";
-type ComponentPartPopoverToggleEvent = Event & {
-  readonly newState: "closed" | "open";
-  readonly oldState: "closed" | "open";
-};
-type ComponentPartPopoverTargetProps = {
-  popovertarget?: ComponentPartValue<string>;
-  popovertargetaction?: ComponentPartValue<ComponentPartPopoverTargetAction>;
-  popoverTarget?: ComponentPartValue<string>;
-  popoverTargetAction?: ComponentPartValue<ComponentPartPopoverTargetAction>;
-};
-
-type ComponentPartCommonProps<T extends Element> = ComponentPartDataAttributes &
-  ComponentPartAriaAttributes & {
-    class?: ComponentPartValue<string | false>;
-    className?: ComponentPartValue<string | false>;
-    id?: ComponentPartValue<string>;
-    hidden?: ComponentPartValue<boolean | "hidden" | "until-found">;
-    popover?: ComponentPartValue<ComponentPartPopoverValue>;
-    role?: ComponentPartValue<string>;
-    tabIndex?: ComponentPartValue<number>;
-    tabindex?: ComponentPartValue<number>;
-    title?: ComponentPartValue<string>;
-    children?: Child;
-    ref?: (element: T) => void;
-    onBeforeToggle?: ComponentPartEvent<T, ComponentPartPopoverToggleEvent>;
-    onBlur?: ComponentPartEvent<T, FocusEvent>;
-    onCancel?: ComponentPartEvent<T, Event>;
-    onChange?: ComponentPartEvent<T, Event>;
-    onClick?: ComponentPartEvent<T, MouseEvent>;
-    onClose?: ComponentPartEvent<T, Event>;
-    onFocus?: ComponentPartEvent<T, FocusEvent>;
-    onInput?: ComponentPartEvent<T, InputEvent>;
-    onKeyDown?: ComponentPartEvent<T, KeyboardEvent>;
-    onKeyUp?: ComponentPartEvent<T, KeyboardEvent>;
-    onMouseDown?: ComponentPartEvent<T, MouseEvent>;
-    onMouseUp?: ComponentPartEvent<T, MouseEvent>;
-    onGotPointerCapture?: ComponentPartEvent<T, PointerEvent>;
-    onLostPointerCapture?: ComponentPartEvent<T, PointerEvent>;
-    onPointerCancel?: ComponentPartEvent<T, PointerEvent>;
-    onPointerDown?: ComponentPartEvent<T, PointerEvent>;
-    onPointerEnter?: ComponentPartEvent<T, PointerEvent>;
-    onPointerLeave?: ComponentPartEvent<T, PointerEvent>;
-    onPointerMove?: ComponentPartEvent<T, PointerEvent>;
-    onPointerOut?: ComponentPartEvent<T, PointerEvent>;
-    onPointerOver?: ComponentPartEvent<T, PointerEvent>;
-    onPointerUp?: ComponentPartEvent<T, PointerEvent>;
-    onSubmit?: ComponentPartEvent<T, SubmitEvent>;
-    onToggle?: ComponentPartEvent<T, ComponentPartPopoverToggleEvent>;
-  };
-
-type ComponentPartSvgProps = {
-  cx?: ComponentPartValue<string | number>;
-  cy?: ComponentPartValue<string | number>;
-  d?: ComponentPartValue<string>;
-  fill?: ComponentPartValue<string>;
-  height?: ComponentPartValue<string | number>;
-  r?: ComponentPartValue<string | number>;
-  stroke?: ComponentPartValue<string>;
-  strokeWidth?: ComponentPartValue<string | number>;
-  viewBox?: ComponentPartValue<string>;
-  width?: ComponentPartValue<string | number>;
-  x?: ComponentPartValue<string | number>;
-  y?: ComponentPartValue<string | number>;
-};
-
-export type ComponentPartBindingForElement<ElementName extends string> =
-  ElementName extends "button"
-    ? ComponentPartCommonProps<HTMLButtonElement> &
-        ComponentPartPopoverTargetProps & {
-          disabled?: ComponentPartValue<boolean>;
-          name?: ComponentPartValue<string>;
-          type?: ComponentPartValue<"button" | "submit" | "reset">;
-          value?: ComponentPartValue<string | number>;
-        }
-    : ElementName extends "input"
-      ? ComponentPartCommonProps<HTMLInputElement> &
-          ComponentPartPopoverTargetProps & {
-            accept?: ComponentPartValue<string>;
-            checked?: ComponentPartValue<boolean>;
-            disabled?: ComponentPartValue<boolean>;
-            max?: ComponentPartValue<string | number>;
-            min?: ComponentPartValue<string | number>;
-            multiple?: ComponentPartValue<boolean>;
-            name?: ComponentPartValue<string>;
-            pattern?: ComponentPartValue<string>;
-            placeholder?: ComponentPartValue<string>;
-            readOnly?: ComponentPartValue<boolean>;
-            readonly?: ComponentPartValue<boolean>;
-            required?: ComponentPartValue<boolean>;
-            step?: ComponentPartValue<string | number>;
-            type?: ComponentPartValue<string>;
-            value?: ComponentPartValue<string | number | readonly string[]>;
-          }
-      : ElementName extends "textarea"
-        ? ComponentPartCommonProps<HTMLTextAreaElement> & {
-            cols?: ComponentPartValue<number>;
-            disabled?: ComponentPartValue<boolean>;
-            maxLength?: ComponentPartValue<number>;
-            minLength?: ComponentPartValue<number>;
-            name?: ComponentPartValue<string>;
-            placeholder?: ComponentPartValue<string>;
-            readOnly?: ComponentPartValue<boolean>;
-            readonly?: ComponentPartValue<boolean>;
-            required?: ComponentPartValue<boolean>;
-            rows?: ComponentPartValue<number>;
-            value?: ComponentPartValue<string | number>;
-            wrap?: ComponentPartValue<"hard" | "soft" | "off">;
-          }
-        : ElementName extends "select"
-          ? ComponentPartCommonProps<HTMLSelectElement> & {
-              disabled?: ComponentPartValue<boolean>;
-              multiple?: ComponentPartValue<boolean>;
-              name?: ComponentPartValue<string>;
-              required?: ComponentPartValue<boolean>;
-              value?: ComponentPartValue<string | number | readonly string[]>;
-            }
-          : ElementName extends "option"
-            ? ComponentPartCommonProps<HTMLOptionElement> & {
-                disabled?: ComponentPartValue<boolean>;
-                selected?: ComponentPartValue<boolean>;
-                value?: ComponentPartValue<string | number>;
-              }
-            : ElementName extends "a"
-              ? ComponentPartCommonProps<HTMLAnchorElement> & {
-                  download?: ComponentPartValue<string | boolean>;
-                  href?: ComponentPartValue<string>;
-                  rel?: ComponentPartValue<string>;
-                  target?: ComponentPartValue<string>;
-                }
-              : ElementName extends "form"
-                ? ComponentPartCommonProps<HTMLFormElement> & {
-                    action?: ComponentPartValue<string>;
-                    method?: ComponentPartValue<"dialog" | "get" | "post">;
-                  }
-                : ElementName extends "dialog"
-                  ? ComponentPartCommonProps<HTMLDialogElement> & {
-                      dialogOpen?: ComponentPartValue<boolean>;
-                    }
-                  : ElementName extends "img"
-                    ? ComponentPartCommonProps<HTMLImageElement> & {
-                        alt?: ComponentPartValue<string>;
-                        height?: ComponentPartValue<string | number>;
-                        loading?: ComponentPartValue<"eager" | "lazy">;
-                        src?: ComponentPartValue<string>;
-                        width?: ComponentPartValue<string | number>;
-                      }
-                    : ElementName extends keyof HTMLElementTagNameMap
-                      ? ComponentPartCommonProps<HTMLElementTagNameMap[ElementName]>
-                      : ElementName extends keyof SVGElementTagNameMap
-                        ? ComponentPartCommonProps<SVGElementTagNameMap[ElementName]> &
-                            ComponentPartSvgProps
-                        : ComponentPartCommonProps<Element>;
-
-export type ComponentPartBinding<
-  Spec extends AppSpec,
-  Component extends ComponentName<Spec>,
-  Part extends ComponentPartName<Spec, Component>,
-> = ComponentPartBindingForElement<ComponentPartElement<Spec, Component, Part>> & {
-  readonly class: string;
-};
-
-export type ComponentPartComponent<
-  Spec extends AppSpec,
-  Component extends ComponentName<Spec>,
-  Part extends ComponentPartName<Spec, Component>,
-> = (
-  props?: Partial<Omit<ComponentPartBinding<Spec, Component, Part>, "class" | "style">> & {
-    children?: Child;
-  },
-) => Child;
-
-export type ComponentInstanceInput<
-  Spec extends AppSpec,
-  Component extends ComponentName<Spec>,
-> = (HasNoKeys<ComponentInput<Spec, Component>> extends true
-  ? { input?: ComponentInput<Spec, Component> }
-  : { input: ComponentInput<Spec, Component> }) &
-  (HasNoKeys<ComponentVariants<Spec, Component>> extends true
-    ? { variants?: ComponentVariants<Spec, Component> }
-    : { variants: ComponentVariants<Spec, Component> });
-
-type ComponentInstanceNeedsInput<Spec extends AppSpec, Component extends ComponentName<Spec>> =
-  HasNoKeys<ComponentInput<Spec, Component>> extends true
-    ? HasNoKeys<ComponentVariants<Spec, Component>> extends true
-      ? false
-      : true
-    : true;
-
-export type ComponentInstanceResult<Spec extends AppSpec, Component extends ComponentName<Spec>> = {
-  readonly [Derived in keyof ComponentDerived<Spec, Component>]: ComponentDerived<
-    Spec,
-    Component
-  >[Derived];
-} & {
-  readonly [Action in keyof ComponentActions<Spec, Component>]: (
-    ...args: ComponentActionArgs<ComponentActions<Spec, Component>[Action]>
-  ) => void;
-} & {
-  readonly [Part in ComponentPartName<Spec, Component>]: ComponentPartComponent<
-    Spec,
-    Component,
-    Part
-  >;
-} & {
-  readonly input: ComponentInput<Spec, Component>;
-  readonly variants: ComponentVariants<Spec, Component>;
-  readonly state: ComponentStateObject<Spec, Component>;
-  readonly derived: ComponentDerived<Spec, Component>;
-  readonly actions: ComponentInstanceActionHandlers<Spec, Component>;
-  readonly values: ComponentStyleValues<Spec, Component>;
-  readonly refs: ComponentRefs<Spec, Component>;
-};
 
 export type ComponentRuntimeParts<Spec extends AppSpec> = {
-  [Component in ComponentName<Spec>]?: Record<string, string>;
-};
-
-export type ComponentFactoryHooks<Spec extends AppSpec> = {
-  [Component in ComponentName<Spec> as CreateName<Component>]: ComponentInstanceNeedsInput<
-    Spec,
-    Component
-  > extends true
-    ? (input: ComponentInstanceInput<Spec, Component>) => ComponentInstanceResult<Spec, Component>
-    : (input?: ComponentInstanceInput<Spec, Component>) => ComponentInstanceResult<Spec, Component>;
+  [Component in ComponentName<Spec>]?: {
+    readonly parts: Record<string, string>;
+    readonly values?: readonly (keyof ComponentValues<Spec, Component> & string)[];
+    readonly inputCallbacks?: readonly (keyof ComponentInput<Spec, Component> & string)[];
+  };
 };
 
 export type ApiHooks<Spec extends AppSpec> = {
@@ -413,54 +88,27 @@ export type ApiHooks<Spec extends AppSpec> = {
   useScreen(): AppScreen<Spec>;
 };
 
-export type PresetName<Spec extends AppSpec> =
-  StylesOf<Spec> extends {
-    Presets: infer Presets extends string;
-  }
-    ? Presets
-    : StylesOf<Spec> extends {
-          Presets: infer Presets extends Record<string, any>;
-        }
-      ? Extract<keyof Presets, string>
-      : "default";
-
-type PresetSpecsOf<Spec extends AppSpec> =
-  StylesOf<Spec> extends {
-    Presets: infer Presets extends Record<string, any>;
-  }
-    ? Presets
-    : Record<string, never>;
-
-type ThemeNamesOf<Spec extends AppSpec> = {
-  [Preset in keyof PresetSpecsOf<Spec>]: PresetSpecsOf<Spec>[Preset] extends {
-    Themes: infer Themes extends string;
-  }
-    ? Themes
-    : never;
-}[keyof PresetSpecsOf<Spec>];
-
-export type ThemeName<Spec extends AppSpec> = [ThemeNamesOf<Spec>] extends [never]
-  ? "default"
-  : ThemeNamesOf<Spec> | "default";
-
 export type StylesDef<Spec extends AppSpec> = {
   readonly defaultPreset?: PresetName<Spec>;
   readonly presets: Partial<Record<PresetName<Spec>, unknown>>;
 };
 
 export type StyleControls<Spec extends AppSpec> = {
-  readonly preset: Signal<PresetName<Spec>>;
-  readonly themeName: Signal<ThemeName<Spec>>;
-  usePreset(): PresetName<Spec>;
-  setPreset(preset: PresetName<Spec>): void;
-  useThemeName(): ThemeName<Spec>;
-  setTheme(theme: ThemeName<Spec>): void;
+  readonly appearance: Signal<PresetAppearance<Spec>>;
+  useAppearance(): PresetAppearance<Spec>;
+  setAppearance(appearance: PresetAppearance<Spec>): void;
 };
 
 export type AppHooks<Spec extends AppSpec> = ApiHooks<Spec> &
-  ComponentFactoryHooks<Spec> &
   StyleControls<Spec> & {
+    readonly components: {
+      readonly [Component in ComponentName<Spec>]: ComponentRenderScope<
+        Spec,
+        Component
+      >["components"][Component];
+    };
     start(connect?: ConnectOpts | (() => Promise<import("./app").Client<Spec>>)): void;
+    renderRoot(): Child;
   };
 
 export type AppInput<Spec extends AppSpec> = App<Spec> | AppDef<Spec> | TypedAppDefinition<Spec>;
@@ -472,40 +120,62 @@ export type CreateHooksOpts<Spec extends AppSpec> = {
   compiledVisuals?: CompiledVisuals;
 };
 
-type RuntimeComponentParts = Record<string, Record<string, string>>;
-
-type RuntimeHookInput = {
-  input?: Record<string, unknown>;
-  variants?: Record<string, unknown>;
+type RuntimeComponentConfig = {
+  parts: Record<string, string>;
+  values?: readonly string[];
+  inputCallbacks?: readonly string[];
 };
+
+type RuntimeComponentParts = Record<string, RuntimeComponentConfig>;
+
+type RuntimeHookInput = Record<string, unknown>;
 
 type RuntimeComponentDefinition = {
-  state?:
-    | Record<string, unknown>
-    | ((ctx: {
-        input: Record<string, unknown>;
-        variants: Record<string, unknown>;
-      }) => Record<string, unknown>);
-  derived?: (ctx: Omit<RuntimeComponentInstanceContext, "derived">) => Record<string, unknown>;
-  actions?: (ctx: RuntimeComponentInstanceContext) => Record<string, (...args: any[]) => void>;
-  bind?: (ctx: RuntimeComponentControllerContext) => Record<string, unknown>;
-  setup?: (ctx: RuntimeComponentControllerContext) => void | (() => void);
+  context?: Record<string, unknown>;
+  values?: Record<string, unknown>;
+  initial?: string;
+  on?: Readonly<Record<string, StatechartTransitions>>;
+  states?: Readonly<Record<string, StatechartNode>>;
+  tasks?: Record<string, StatechartTask>;
+  derive?: (scope: Omit<RuntimeComponentInstanceScope, "values">) => Record<string, unknown>;
+  render?: (scope: RuntimeComponentRenderScope) => Child;
 };
 
-type RuntimeComponentInstanceContext = {
-  readonly preset: string;
-  readonly setPreset: (preset: string) => void;
-  readonly theme: string;
-  readonly setTheme: (theme: string) => void;
-  readonly variants: Record<string, unknown>;
+type RuntimeComponentState = {
+  readonly paths: readonly string[];
+  readonly value: unknown;
+  readonly active: readonly string[];
+  readonly done: boolean;
+  readonly output: unknown;
+  readonly error: unknown;
+  matches(path: string): boolean;
+  can(event: string, ...args: readonly unknown[]): boolean;
+  subscribe(observer: (state: RuntimeComponentState) => void): () => void;
+};
+
+type RuntimeComponentInstanceScope = {
   readonly input: Record<string, unknown>;
-  readonly state: Record<string, unknown>;
-  readonly derived: Record<string, unknown>;
-  readonly refs: Record<string, Element | null>;
+  readonly context: Record<string, unknown>;
+  readonly state: RuntimeComponentState;
+  readonly values: Record<string, unknown>;
+  readonly parameters: Record<string, unknown>;
 };
 
-type RuntimeComponentControllerContext = RuntimeComponentInstanceContext & {
-  readonly actions: Record<string, (...args: any[]) => void>;
+type RuntimeComponentComposition = {
+  readonly components: Record<string, (props?: RuntimeHookInput) => Child>;
+  readonly resources: Record<string, (key: Record<string, unknown>) => unknown>;
+  readonly navigation: Record<string, (...args: any[]) => void>;
+  readonly screen: () => unknown;
+};
+
+type RuntimeComponentRenderScope = RuntimeComponentInstanceScope & {
+  readonly events: Record<string, (...args: any[]) => void>;
+  readonly slots: Record<string, unknown>;
+  readonly parts: Record<string, Component<Props>>;
+  readonly components: RuntimeComponentComposition["components"];
+  readonly resources: RuntimeComponentComposition["resources"];
+  readonly navigation: RuntimeComponentComposition["navigation"];
+  readonly screen: unknown;
 };
 
 export function createHooks<Spec extends AppSpec>({
@@ -517,55 +187,106 @@ export function createHooks<Spec extends AppSpec>({
   const runtimeApp = normalizeAppInput(app);
   const runtime = createNativeAppRuntime(runtimeApp);
   const defaultPreset = firstPreset(styles) as PresetName<Spec>;
-  const preset = signal(defaultPreset);
-  const themeName = signal("default" as ThemeName<Spec>);
+  const appearance = signal({
+    preset: defaultPreset,
+    theme: "default",
+  } as PresetAppearance<Spec>);
+  const preset = () => appearance().preset;
+  const themeName = () => appearance().theme as PresetThemeName<Spec>;
   updateRootPreset(preset());
   const runtimeParts = normalizeRuntimeParts(components);
-  const selectPreset = (nextPreset: PresetName<Spec>) => {
-    if (!(String(nextPreset) in styles.presets)) {
-      throw new Error(`Unknown Poggers preset "${String(nextPreset)}".`);
+  const selectAppearance = (nextAppearance: PresetAppearance<Spec>) => {
+    const nextPreset = String(nextAppearance.preset);
+    const nextTheme = String(nextAppearance.theme);
+    if (!(nextPreset in styles.presets)) {
+      throw new Error(`Unknown Poggers preset "${nextPreset}".`);
     }
-    preset(nextPreset);
+    if (!presetSupportsTheme(compiledVisuals, nextPreset, nextTheme)) {
+      throw new Error(`Poggers preset "${nextPreset}" does not define theme "${nextTheme}".`);
+    }
+    appearance(nextAppearance);
     updateRootPreset(nextPreset);
-  };
-  const selectTheme = (nextTheme: ThemeName<Spec>) => {
-    themeName(nextTheme);
     updateRootTheme(nextTheme);
   };
   const hooks: Record<string, unknown> = {
     ...(runtime.api as Record<string, unknown>),
-    preset,
-    themeName,
-    usePreset() {
-      return preset();
+    appearance,
+    useAppearance() {
+      return appearance();
     },
-    setPreset: selectPreset,
-    useThemeName() {
-      return themeName();
-    },
-    setTheme: selectTheme,
+    setAppearance: selectAppearance,
     start: runtime.start,
   };
 
-  for (const componentName of collectComponentNames(runtimeApp, runtimeParts)) {
-    hooks[`create${capitalize(componentName)}`] = (input: RuntimeHookInput = {}) =>
-      createComponentInstance(componentName, {
-        app: runtimeApp,
-        preset,
-        setPreset(nextPreset) {
-          selectPreset(nextPreset as PresetName<Spec>);
-        },
-        themeName,
-        setTheme(nextTheme) {
-          selectTheme(nextTheme as ThemeName<Spec>);
-        },
-        parts: runtimeParts[componentName] ?? {},
-        compiledVisuals,
-        input,
-      });
+  const componentRenderers = Object.create(null) as RuntimeComponentComposition["components"];
+  const resources = Object.create(null) as RuntimeComponentComposition["resources"];
+  for (const resourceName of Object.keys(runtimeApp.def.resources)) {
+    resources[resourceName] = (key) =>
+      createDynamicResource(() => runtime.api.useResource(resourceName as never, key as never));
   }
+  const composition: RuntimeComponentComposition = {
+    components: componentRenderers,
+    resources,
+    navigation: runtime.api.nav as RuntimeComponentComposition["navigation"],
+    screen: runtime.api.useScreen,
+  };
+
+  for (const componentName of collectComponentNames(runtimeApp, runtimeParts)) {
+    componentRenderers[componentName] = (props: RuntimeHookInput = {}) => {
+      const instance = createComponentInstance(componentName, {
+        app: runtimeApp,
+        appearance,
+        setAppearance(nextAppearance) {
+          selectAppearance(nextAppearance as PresetAppearance<Spec>);
+        },
+        preset,
+        themeName,
+        config: runtimeParts[componentName] ?? { parts: {} },
+        compiledVisuals,
+        input: props,
+        composition,
+      });
+      return instance(props as Props);
+    };
+  }
+  hooks.components = componentRenderers;
+
+  hooks.renderRoot = () => {
+    const rootName = runtimeApp.def.root;
+    if (typeof rootName !== "string") {
+      throw new Error("App definition must select a root component by name.");
+    }
+    const component = componentRenderers[rootName];
+    if (!component) throw new Error(`Unknown Poggers root component "${rootName}".`);
+    return component();
+  };
 
   return hooks as AppHooks<Spec>;
+}
+
+function createDynamicResource(
+  readResource: () => Record<string, unknown>,
+): Record<string, unknown> {
+  return new Proxy(Object.create(null), {
+    get(_target, prop) {
+      const value = Reflect.get(readResource(), prop);
+      if (typeof value !== "function") return value;
+      return (...args: unknown[]) => {
+        const current = Reflect.get(readResource(), prop);
+        return typeof current === "function" ? current(...args) : undefined;
+      };
+    },
+    has(_target, prop) {
+      return prop in readResource();
+    },
+    ownKeys() {
+      return Reflect.ownKeys(readResource());
+    },
+    getOwnPropertyDescriptor(_target, prop) {
+      if (!(prop in readResource())) return undefined;
+      return { enumerable: true, configurable: true };
+    },
+  });
 }
 
 function normalizeAppInput<Spec extends AppSpec>(app: AppInput<Spec>): App<Spec> {
@@ -580,164 +301,302 @@ function createComponentInstance(
   componentName: string,
   options: {
     app: App<any>;
+    appearance: () => { readonly preset: string; readonly theme: string };
+    setAppearance: (appearance: { readonly preset: string; readonly theme: string }) => void;
     preset: () => string;
-    setPreset: (preset: string) => void;
     themeName: () => string;
-    setTheme: (theme: string) => void;
-    parts: Record<string, string>;
+    config: RuntimeComponentConfig;
     compiledVisuals?: CompiledVisuals;
     input: RuntimeHookInput;
+    composition: RuntimeComponentComposition;
   },
 ) {
   const suppressInitialEnter = isHotRefresh();
-  const input = options.input.input ?? {};
-  const variants = options.input.variants ?? {};
-  const componentEntry = options.app.def.components?.[componentName];
+  const callbacks = new Set(options.config.inputCallbacks ?? []);
+  const readInput = (name: string, value: unknown) =>
+    typeof value === "function" && !callbacks.has(name) ? value() : value;
+  const input = Object.create(null) as Record<string, unknown>;
+  for (const [name, descriptor] of Object.entries(
+    Object.getOwnPropertyDescriptors(options.input),
+  )) {
+    Object.defineProperty(input, name, {
+      configurable: true,
+      enumerable: descriptor.enumerable,
+      get() {
+        const value = descriptor.get ? descriptor.get.call(options.input) : descriptor.value;
+        return readInput(name, value);
+      },
+    });
+  }
+  const componentEntry = (options.app.def.components as Record<string, unknown> | undefined)?.[
+    componentName
+  ];
   const definition =
     componentEntry && typeof componentEntry === "object"
       ? (componentEntry as RuntimeComponentDefinition)
       : undefined;
+  const statechartDefinition = definition?.states
+    ? {
+        initial: definition.initial,
+        on: definition.on,
+        states: definition.states,
+      }
+    : definition?.on
+      ? {
+          initial: "active",
+          states: { active: { on: definition.on } },
+        }
+      : undefined;
   const signals = Object.create(null) as Record<string, Signal<unknown>>;
   const refs = Object.create(null) as Record<string, Element | null>;
   const partElements = Object.create(null) as Record<string, Set<Element>>;
-  const state = createStateObject(signals);
-  const definitionState =
-    typeof definition?.state === "function"
-      ? definition.state({ input, variants })
-      : definition?.state;
-  const initialState = cloneComponentState({
-    ...definitionState,
-  });
+  const sharedScene = currentPresenceScene();
+  const scene = sharedScene ?? new PresenceScene<Element>();
+  const sceneOwner = allocateSceneOwner(componentName);
+  const context = createContextObject(signals);
+  const initialContext = cloneComponentContext(definition?.context ?? {});
 
-  for (const [name, value] of Object.entries(initialState)) {
-    signals[name] = signal(value, `component:${componentName}:state:${name}`);
+  for (const [name, value] of Object.entries(initialContext)) {
+    signals[name] = signal(value, `component:${componentName}:context:${name}`);
   }
 
-  const derivedSignals = Object.create(null) as Record<string, () => unknown>;
-  const derivedValues = Object.create(null) as Record<string, unknown>;
-  const derived = Object.create(null) as Record<string, unknown>;
-  const baseContext = {
-    get preset() {
-      return options.preset();
+  const events = Object.create(null) as Record<string, (...args: any[]) => void>;
+  const parameterSignals = Object.create(null) as Record<string, Signal<unknown>>;
+  const parameters = new Proxy(Object.create(null) as Record<string, unknown>, {
+    get(_target, name) {
+      if (typeof name !== "string") return undefined;
+      return parameterSignals[name]?.();
     },
-    setPreset: options.setPreset,
-    get theme() {
-      return options.themeName();
+    ownKeys() {
+      return Reflect.ownKeys(parameterSignals);
     },
-    setTheme: options.setTheme,
-    variants,
-    input,
-    state,
-    refs,
+    getOwnPropertyDescriptor(_target, name) {
+      return typeof name === "string" && name in parameterSignals
+        ? { configurable: true, enumerable: true }
+        : undefined;
+    },
+  });
+  const updateParameters = (next: Readonly<Record<string, unknown>>) => {
+    startBatch();
+    try {
+      const names = new Set(Object.keys(next));
+      for (const [name, value] of Object.entries(next)) {
+        const current = parameterSignals[name];
+        if (current) current(value);
+        else parameterSignals[name] = signal(value, `component:${componentName}:parameter:${name}`);
+      }
+      for (const [name, current] of Object.entries(parameterSignals)) {
+        if (!names.has(name)) current(undefined);
+      }
+    } finally {
+      endBatch();
+    }
   };
-  const derivedFactory = definition?.derived;
-  const readDerivedSource = derivedFactory
-    ? computed(() => asRecord(derivedFactory(baseContext as never)))
-    : () => ({});
-  const derivedDescriptors = Object.getOwnPropertyDescriptors(untrack(readDerivedSource));
+  const refreshSnapshot =
+    statechartDefinition && (typeof __POGGERS_HMR__ === "undefined" || __POGGERS_HMR__)
+      ? signal<unknown | undefined>(undefined, `component:${componentName}:statechart`)
+      : undefined;
+  const services = componentServices({ ...options, parameters });
+  const settlement = createSettlementPort(componentName);
+  const actor = statechartDefinition
+    ? createRestoredComponentActor(
+        {
+          id: componentName,
+          definition: statechartDefinition,
+          input,
+          context: { ...context },
+          tasks: definition?.tasks,
+          settle: settlement.wait,
+          services,
+        },
+        untrack(() => refreshSnapshot?.()),
+      )
+    : undefined;
+  const actorController = actor
+    ? createActorController(componentName, actor, signals, refreshSnapshot)
+    : undefined;
+  if (actor && refreshSnapshot) {
+    captureSignalOnHotRefresh(refreshSnapshot, actor.getRefreshSnapshot);
+  }
+  const state = actorController?.state ?? createStaticState();
 
-  for (const name of Object.keys(derivedDescriptors)) {
+  const mutableValueSignals = Object.create(null) as Record<string, Signal<unknown>>;
+  const reactiveValues = Object.create(null) as Record<string, unknown>;
+  const values = Object.create(null) as Record<string, unknown>;
+  for (const [name, initial] of Object.entries(definition?.values ?? {})) {
+    const value = signal(initial, `component:${componentName}:value:${name}`);
+    mutableValueSignals[name] = value;
+    Object.defineProperty(values, name, {
+      enumerable: true,
+      get: value,
+      set: value,
+    });
+  }
+  const baseScope = extendContext<RuntimeComponentInstanceScope>(services, {
+    input,
+    context,
+    state,
+  });
+  const deriveServices = Object.create(null) as Record<string, unknown>;
+  for (const name of ["appearance", "screen", "parameters"] as const) {
+    const descriptor = Object.getOwnPropertyDescriptor(services, name);
+    if (descriptor) Object.defineProperty(deriveServices, name, descriptor);
+  }
+  const deriveScope = extendContext<RuntimeComponentInstanceScope>(deriveServices, {
+    input,
+    context,
+    state,
+  });
+  const derive = definition?.derive;
+  const readValueSource = derive
+    ? computed(() => asRecord(derive(deriveScope as never)))
+    : () => ({});
+  const valueDescriptors = Object.getOwnPropertyDescriptors(untrack(readValueSource));
+
+  for (const name of Object.keys(valueDescriptors)) {
+    if (name in mutableValueSignals) {
+      throw new Error(`Component ${componentName} value "${name}" cannot be mutable and derived.`);
+    }
     const value = computed(() => {
-      const descriptor = Object.getOwnPropertyDescriptor(readDerivedSource(), name);
+      const descriptor = Object.getOwnPropertyDescriptor(readValueSource(), name);
       if (!descriptor) return undefined;
-      if (typeof descriptor.get === "function") return descriptor.get.call(derived);
-      if (typeof descriptor.value === "function") return descriptor.value.call(derived);
+      if (typeof descriptor.get === "function") return descriptor.get.call(values);
+      if (typeof descriptor.value === "function") return descriptor.value.call(values);
       return descriptor.value;
     });
-    derivedSignals[name] = value;
     const initialValue = value();
     if (initialValue != null && typeof initialValue === "object") {
-      derivedValues[name] = reactiveValue(value);
+      reactiveValues[name] = reactiveValue(value);
     }
-    Object.defineProperty(derived, name, {
+    Object.defineProperty(values, name, {
       enumerable: true,
       get() {
-        return value();
+        return name in reactiveValues ? reactiveValues[name] : value();
       },
     });
   }
 
-  const instanceContext = extendContext<RuntimeComponentInstanceContext>(baseContext, {
-    derived,
+  const instanceScope = extendContext<RuntimeComponentInstanceScope>(baseScope, {
+    values,
   });
-  const actions = Object.create(null) as Record<string, (...args: any[]) => void>;
-  const actionsFactory = definition?.actions;
-  const actionSource = untrack(() => actionsFactory?.(instanceContext) ?? {});
-  for (const name of Object.keys(actionSource)) {
-    actions[name] = (...args: any[]) => {
-      const handler = actionsFactory?.(instanceContext)?.[name] ?? actionSource[name];
-      return handler?.(...args);
-    };
+  if (actor && statechartDefinition) {
+    for (const name of collectStatechartEventNames(statechartDefinition)) {
+      events[name] = (...args: any[]) => settlement.transition(() => actor.send(name, ...args));
+    }
   }
 
-  const controllerContext = extendContext<RuntimeComponentControllerContext>(instanceContext, {
-    actions,
+  const visualValues = createComponentValuesObject(
+    options.config.values ?? [],
+    (name) => values[name],
+  );
+  const motionSignals = Object.create(null) as Record<string, Signal<number | undefined>>;
+  const visualMotion = new Proxy(Object.create(null) as Record<string, number | undefined>, {
+    get(_target, name) {
+      if (typeof name !== "string") return undefined;
+      return (motionSignals[name] ??= signal(
+        undefined as number | undefined,
+        `component:${componentName}:motion:${name}`,
+      ))();
+    },
   });
-  const controller = typeof componentEntry === "function" ? componentEntry : definition?.bind;
-  const readControllerResult = () => {
-    if (typeof controller !== "function") return {};
-    return asRecord(
-      (controller as (ctx: RuntimeComponentControllerContext) => unknown)(controllerContext),
-    );
-  };
-  const readControllerPart = (partName: string) => {
-    return readControllerResult()[partName];
-  };
-  const readControllerValues = () => asRecord(readControllerResult().values);
-  const values = createControllerValuesObject(readControllerValues);
-  const target = Object.create(null) as Record<string, unknown>;
+  const parts = Object.create(null) as Record<string, Component<Props>>;
 
-  target.input = input;
-  target.variants = variants;
-  target.state = state;
-  target.derived = derived;
-  target.actions = actions;
-  target.values = values;
-  target.refs = refs;
-
-  for (const name of Object.keys(derivedDescriptors)) {
-    Object.defineProperty(target, name, {
-      enumerable: true,
-      get() {
-        return name in derivedValues ? derivedValues[name] : derived[name];
-      },
-    });
-  }
-
-  for (const [name, handler] of Object.entries(actions)) {
-    target[name] = handler;
-  }
-
-  for (const [partName, elementName] of Object.entries(options.parts)) {
-    target[partName] = createComponentPartComponent(componentName, partName, elementName, {
+  for (const [partName, elementName] of Object.entries(options.config.parts)) {
+    parts[partName] = createComponentPartComponent(componentName, partName, elementName, {
       refs,
       partElements,
-      variants,
-      state,
-      controller: () => readControllerPart(partName),
-      values: readControllerValues,
+      values: visualValues,
+      motion: visualMotion,
       compiledVisuals: options.compiledVisuals,
       preset: options.preset,
       themeName: options.themeName,
+      scene,
+      sceneOwner,
     });
   }
 
-  mountComponentSetup(definition?.setup, controllerContext);
+  let renderPending = false;
+  let mounted = false;
+  const renderComponent = (slots: Props = {}) => {
+    if (!definition?.render) {
+      throw new Error(`Component ${componentName} does not define render.`);
+    }
+    if (renderPending || mounted) {
+      throw new Error(
+        `Component ${componentName} instance is already rendered. Create a separate instance for each owner.`,
+      );
+    }
+    renderPending = true;
+    onMount(() => {
+      renderPending = false;
+      mounted = true;
+      return () => {
+        mounted = false;
+      };
+    });
+    mountCompiledVisualComponent({
+      componentName,
+      compiledVisuals: options.compiledVisuals,
+      preset: options.preset,
+      themeName: options.themeName,
+      state,
+      visualValues,
+      writableValues: values,
+      refs,
+      partElements,
+      suppressInitialEnter,
+      settlement,
+      events,
+      onParametersChange: updateParameters,
+      onMotionChange(source, value) {
+        (motionSignals[source] ??= signal(
+          undefined as number | undefined,
+          `component:${componentName}:motion:${source}`,
+        ))(value);
+      },
+    });
+    if (actorController) {
+      onMount(() => {
+        actorController.start();
+        return actorController.dispose;
+      });
+    }
+    onMount(() => () => {
+      for (const partName of Object.keys(refs)) refs[partName] = null;
+      for (const elements of Object.values(partElements)) elements.clear();
+      if (!sharedScene) scene.dispose();
+    });
+    const renderScope = extendContext<RuntimeComponentRenderScope>(instanceScope, {
+      events,
+      slots,
+      parts,
+      components: options.composition.components,
+      resources: options.composition.resources,
+      navigation: options.composition.navigation,
+    });
+    return definition.render(renderScope);
+  };
 
-  mountCompiledVisualComponent({
-    componentName,
-    compiledVisuals: options.compiledVisuals,
-    preset: options.preset,
-    themeName: options.themeName,
-    variants,
-    state,
-    values,
-    refs,
-    partElements,
-    suppressInitialEnter,
+  return renderComponent;
+}
+
+function componentServices(options: {
+  appearance: () => { readonly preset: string; readonly theme: string };
+  setAppearance: (appearance: { readonly preset: string; readonly theme: string }) => void;
+  composition: RuntimeComponentComposition;
+  parameters: Readonly<Record<string, unknown>>;
+}): Readonly<Record<string, unknown>> {
+  const services = {
+    setAppearance: options.setAppearance,
+    resources: options.composition.resources,
+    navigation: options.composition.navigation,
+  } as Record<string, unknown>;
+  Object.defineProperties(services, {
+    appearance: { enumerable: true, get: options.appearance },
+    screen: { enumerable: true, get: options.composition.screen },
+    parameters: { enumerable: true, get: () => options.parameters },
   });
-
-  return target;
+  return services;
 }
 
 function mountCompiledVisualComponent(options: {
@@ -745,12 +604,16 @@ function mountCompiledVisualComponent(options: {
   compiledVisuals?: CompiledVisuals;
   preset: () => string;
   themeName: () => string;
-  variants: Record<string, unknown>;
-  state: Record<string, unknown>;
-  values: Record<string, unknown>;
+  state: RuntimeComponentState;
+  visualValues: Record<string, unknown>;
+  writableValues: Record<string, unknown>;
   refs: Record<string, Element | null>;
   partElements: Record<string, Set<Element>>;
   suppressInitialEnter: boolean;
+  settlement: SettlementPort;
+  events: Readonly<Record<string, (...args: any[]) => void>>;
+  onParametersChange(parameters: Readonly<Record<string, unknown>>): void;
+  onMotionChange(source: string, value: number): void;
 }) {
   if (!options.compiledVisuals) return;
   onMount(() => {
@@ -760,42 +623,217 @@ function mountCompiledVisualComponent(options: {
       refs: options.refs,
       elements: options.partElements,
       suppressInitialEnter: options.suppressInitialEnter,
+      onMotionChange: options.onMotionChange,
+      events: options.events,
+      values: options.writableValues,
+      onParametersChange: options.onParametersChange,
     });
+    const detachSettlement = options.settlement.attach(coordinator);
     const disposeEffect = effect(() => {
       const preset = options.preset();
       if (!isCompiledVisualPreset(options.compiledVisuals, preset)) return;
       coordinator.update({
         preset,
         theme: options.themeName(),
-        variants: { ...options.variants },
-        state: { ...options.state },
-        values: { ...options.values },
+        states: Object.fromEntries(
+          options.state.paths.map((path) => [path, options.state.matches(path)]),
+        ),
+        values: options.visualValues,
       });
     });
     return () => {
+      detachSettlement();
       disposeEffect();
       coordinator.dispose();
     };
   });
 }
 
-function cloneComponentState(state: Record<string, unknown>): Record<string, unknown> {
+type SettlementPort = {
+  readonly wait: StatechartSettlementDriver;
+  attach(coordinator: VisualCoordinator): () => void;
+  transition(run: () => void): void;
+};
+
+function createSettlementPort(component: string): SettlementPort {
+  let coordinator: VisualCoordinator | undefined;
+  const wait: StatechartSettlementDriver = ({ phase, state, signal }) => {
+    if (!coordinator) {
+      throw new Error(`Component ${component} requested visual settlement before it mounted.`);
+    }
+    return coordinator.settle(phase, state, signal);
+  };
+  return {
+    wait,
+    attach(next) {
+      if (coordinator && coordinator !== next) {
+        throw new Error(`Component ${component} mounted more than one visual coordinator.`);
+      }
+      coordinator = next;
+      return () => {
+        if (coordinator === next) coordinator = undefined;
+      };
+    },
+    transition(run) {
+      coordinator?.captureLayouts();
+      run();
+      coordinator?.animateLayouts();
+    },
+  };
+}
+
+function cloneComponentContext(context: Record<string, unknown>): Record<string, unknown> {
   try {
-    return structuredClone(state);
+    return structuredClone(context);
   } catch {
-    return { ...state };
+    return { ...context };
   }
 }
 
-function mountComponentSetup(
-  setup: RuntimeComponentDefinition["setup"],
-  context: RuntimeComponentControllerContext,
-) {
-  if (!setup) return;
-  onMount(() => setup(context));
+function createActorController(
+  componentName: string,
+  actor: ComponentActor,
+  contextSignals: Record<string, Signal<unknown>>,
+  refreshSnapshot: Signal<unknown | undefined> | undefined,
+): { state: RuntimeComponentState; start: () => void; dispose: () => void } {
+  const initial = actor.getSnapshot();
+  const activeSignals = Object.fromEntries(
+    actor.paths.map((path) => [
+      path,
+      signal(initial.matches(path), `component:${componentName}:state:${path}`),
+    ]),
+  ) as Record<string, Signal<boolean>>;
+  const value = signal(initial.value, `component:${componentName}:state:value`);
+  const lifecycle = signal(initial.status, `component:${componentName}:state:lifecycle`);
+  const output = signal(initial.output, `component:${componentName}:state:output`);
+  const error = signal(initial.error, `component:${componentName}:state:error`);
+  const version = signal(0, `component:${componentName}:state:version`);
+  const observers = new Set<(state: RuntimeComponentState) => void>();
+
+  const project = (snapshot: StatechartSnapshot) => {
+    startBatch();
+    try {
+      const nextKeys = new Set(Object.keys(snapshot.context));
+      for (const [name, next] of Object.entries(snapshot.context)) {
+        const current = contextSignals[name];
+        if (!current) {
+          contextSignals[name] = signal(next, `component:${componentName}:context:${name}`);
+        } else if (!Object.is(current(), next)) {
+          current(next);
+        }
+      }
+      for (const [name, current] of Object.entries(contextSignals)) {
+        if (!nextKeys.has(name) && current() !== undefined) current(undefined);
+      }
+      for (const [path, current] of Object.entries(activeSignals)) {
+        const next = snapshot.matches(path);
+        if (current() !== next) current(next);
+      }
+      if (!Object.is(value(), snapshot.value)) value(snapshot.value);
+      if (lifecycle() !== snapshot.status) lifecycle(snapshot.status);
+      if (!Object.is(output(), snapshot.output)) output(snapshot.output);
+      if (!Object.is(error(), snapshot.error)) error(snapshot.error);
+      version(version() + 1);
+    } finally {
+      endBatch();
+    }
+    for (const observer of observers) observer(state);
+  };
+  const unsubscribe = actor.subscribe(project);
+  let disposed = false;
+  const state: RuntimeComponentState = {
+    paths: actor.paths,
+    get value() {
+      return value();
+    },
+    get active() {
+      return actor.paths.filter((path) => activeSignals[path]?.() ?? false);
+    },
+    get done() {
+      return lifecycle() === "done";
+    },
+    get output() {
+      return output();
+    },
+    get error() {
+      return error();
+    },
+    matches(path) {
+      return activeSignals[path]?.() ?? false;
+    },
+    can(event, ...args) {
+      version();
+      return actor.getSnapshot().can(event, ...args);
+    },
+    subscribe(observer) {
+      observer(state);
+      observers.add(observer);
+      return () => observers.delete(observer);
+    },
+  };
+
+  return {
+    state,
+    start() {
+      if (disposed) return;
+      actor.start();
+    },
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      observers.clear();
+      refreshSnapshot?.(actor.getRefreshSnapshot());
+      unsubscribe();
+      actor.stop();
+    },
+  };
 }
 
-function createStateObject(signals: Record<string, Signal<unknown>>): Record<string, unknown> {
+function createRestoredComponentActor(
+  options: Parameters<typeof createComponentActor>[0],
+  snapshot: unknown,
+): ComponentActor {
+  if (snapshot === undefined) return createComponentActor(options);
+  try {
+    return createComponentActor({ ...options, refreshSnapshot: snapshot });
+  } catch (error) {
+    console.warn("Poggers could not restore a component statechart after hot refresh.", error);
+    return createComponentActor(options);
+  }
+}
+
+function createStaticState(): RuntimeComponentState {
+  return {
+    paths: ["active"],
+    value: "active",
+    active: ["active"],
+    done: false,
+    output: undefined,
+    error: undefined,
+    matches(path) {
+      return path === "active";
+    },
+    can() {
+      return false;
+    },
+    subscribe(observer) {
+      observer(this);
+      return () => {};
+    },
+  };
+}
+
+function collectStatechartEventNames(statechart: StatechartDefinition): string[] {
+  const names = new Set<string>();
+  const visit = (node: StatechartDefinition | StatechartNode) => {
+    for (const name of Object.keys(node.on ?? {})) names.add(name);
+    for (const child of Object.values(node.states ?? {})) visit(child);
+  };
+  visit(statechart);
+  return [...names];
+}
+
+function createContextObject(signals: Record<string, Signal<unknown>>): Record<string, unknown> {
   return new Proxy(Object.create(null), {
     get(_target, prop: string) {
       if (typeof prop !== "string") return undefined;
@@ -803,13 +841,10 @@ function createStateObject(signals: Record<string, Signal<unknown>>): Record<str
     },
     set(_target, prop: string, value: unknown) {
       if (typeof prop !== "string") return false;
-      const existing = signals[prop];
-      if (existing) {
-        existing(value);
-      } else {
-        signals[prop] = signal(value);
-      }
-      return true;
+      void value;
+      throw new TypeError(
+        "Component context is readonly. Return a context patch from a transition instead.",
+      );
     },
     ownKeys() {
       return Reflect.ownKeys(signals);
@@ -837,20 +872,22 @@ function extendContext<T extends Record<string, unknown>>(
   return context as T;
 }
 
-function createControllerValuesObject(
-  readValues: () => Record<string, unknown>,
+function createComponentValuesObject(
+  names: readonly string[],
+  readValue: (name: string) => unknown,
 ): Record<string, unknown> {
+  const available = new Set(names);
   return new Proxy(Object.create(null), {
     get(_target, prop: string) {
-      if (typeof prop !== "string") return undefined;
-      return readValues()[prop];
+      return typeof prop === "string" && available.has(prop) ? readValue(prop) : undefined;
     },
     ownKeys() {
-      return Reflect.ownKeys(readValues());
+      return [...names];
     },
     getOwnPropertyDescriptor(_target, prop: string) {
-      if (prop in readValues()) return { enumerable: true, configurable: true };
-      return undefined;
+      return typeof prop === "string" && available.has(prop)
+        ? { enumerable: true, configurable: true }
+        : undefined;
     },
   });
 }
@@ -862,16 +899,30 @@ function createComponentPartComponent(
   options: {
     refs: Record<string, Element | null>;
     partElements: Record<string, Set<Element>>;
-    variants: Record<string, unknown>;
-    state: Record<string, unknown>;
-    controller: () => unknown;
-    values: () => Record<string, unknown>;
+    values: Record<string, unknown>;
+    motion: Readonly<Record<string, number | undefined>>;
     compiledVisuals?: CompiledVisuals;
     preset: () => string;
     themeName: () => string;
+    scene: PresenceScene<Element>;
+    sceneOwner: string;
   },
 ) {
-  return createCompiledVisualPartComponent(componentName, partName, elementName, options);
+  const part = createCompiledVisualPartComponent(componentName, partName, elementName, {
+    ...options,
+  }) as Component<Props> & {
+    readonly element: Element | null;
+    readonly elements: readonly Element[];
+  };
+  Object.defineProperties(part, {
+    element: {
+      get: () => options.refs[partName] ?? null,
+    },
+    elements: {
+      get: () => [...(options.partElements[partName] ?? [])],
+    },
+  });
+  return part;
 }
 
 function createCompiledVisualPartComponent(
@@ -881,16 +932,85 @@ function createCompiledVisualPartComponent(
   options: {
     refs: Record<string, Element | null>;
     partElements: Record<string, Set<Element>>;
-    variants: Record<string, unknown>;
-    state: Record<string, unknown>;
-    controller: () => unknown;
-    values: () => Record<string, unknown>;
+    values: Record<string, unknown>;
+    motion: Readonly<Record<string, number | undefined>>;
     preset: () => string;
     themeName: () => string;
     compiledVisuals?: CompiledVisuals;
+    scene: PresenceScene<Element>;
+    sceneOwner: string;
   },
 ) {
   return (props: Props = {}) => {
+    const { ref: authorRef, ...nativeProps } = props;
+    const dependencies = new Set<string>();
+    for (const preset of Object.keys(options.compiledVisuals ?? {})) {
+      for (const dependency of visualPartDependencies(
+        options.compiledVisuals ?? {},
+        preset,
+        componentName,
+        partName,
+      )) {
+        dependencies.add(dependency);
+      }
+    }
+    const dependsOn = (source: string, name?: string) =>
+      dependencies.has(name ? `${source}.${name}` : source) ||
+      [...dependencies].some((dependency) => dependency.startsWith(`${source}.`));
+    const hovered = signal(false, `${componentName}.${partName}.hovered`);
+    const pressed = signal(false, `${componentName}.${partName}.pressed`);
+    const focusVisible = signal(false, `${componentName}.${partName}.focusVisible`);
+    const focusWithin = signal(false, `${componentName}.${partName}.focusWithin`);
+    const inlineSize = signal(0, `${componentName}.${partName}.inlineSize`);
+    const blockSize = signal(0, `${componentName}.${partName}.blockSize`);
+    const environment = createVisualEnvironment(dependencies, componentName, partName);
+    const interactionContext = Object.defineProperties(
+      {},
+      {
+        hovered: { enumerable: true, get: hovered },
+        pressed: { enumerable: true, get: pressed },
+        focusVisible: { enumerable: true, get: focusVisible },
+        focusWithin: { enumerable: true, get: focusWithin },
+        selected: {
+          enumerable: true,
+          get: () =>
+            semanticBoolean(
+              resolveMaybeSignal(nativeProps["aria-selected"]) ??
+                resolveMaybeSignal(nativeProps["aria-pressed"]),
+            ),
+        },
+        disabled: {
+          enumerable: true,
+          get: () =>
+            semanticBoolean(
+              resolveMaybeSignal(nativeProps.disabled) ??
+                resolveMaybeSignal(nativeProps["aria-disabled"]),
+            ),
+        },
+        expanded: {
+          enumerable: true,
+          get: () => semanticBoolean(resolveMaybeSignal(nativeProps["aria-expanded"])),
+        },
+      },
+    ) as Readonly<Record<string, unknown>>;
+    const geometryContext = Object.defineProperties(
+      {},
+      {
+        inlineSize: { enumerable: true, get: inlineSize },
+        blockSize: { enumerable: true, get: blockSize },
+      },
+    ) as Readonly<Record<string, unknown>>;
+    const structuralChildren =
+      typeof nativeProps.children === "function" &&
+      Boolean(
+        visualPartCollection(
+          options.compiledVisuals ?? {},
+          options.preset(),
+          componentName,
+          partName,
+          options.themeName(),
+        ),
+      );
     const readAttributes = computed(() =>
       visualPartAttributes(
         options.compiledVisuals ?? {},
@@ -899,46 +1019,137 @@ function createCompiledVisualPartComponent(
         partName,
         {
           theme: options.themeName(),
-          variants: options.variants,
-          state: options.state,
-          values: options.values(),
+          values: options.values,
+          interaction: interactionContext,
+          geometry: geometryContext,
+          environment,
+          motion: options.motion,
         },
       ),
     );
     const base: Record<string, unknown> = {
+      __poggersScene: {
+        scene: options.scene,
+        owner: options.sceneOwner,
+        part: partName,
+        key: currentStructuralKey(),
+      },
       class() {
         return readAttributes().class;
       },
       style() {
         return readAttributes().style;
       },
-      "data-style-src"() {
-        return readAttributes()["data-style-src"];
+      "data-motion-lifecycle"() {
+        return visualPartPresence(
+          options.compiledVisuals ?? {},
+          options.preset(),
+          componentName,
+          partName,
+        )?.lifecycle;
+      },
+      "data-motion-layout"() {
+        return visualPartPresence(
+          options.compiledVisuals ?? {},
+          options.preset(),
+          componentName,
+          partName,
+        )?.layout;
+      },
+      __poggersStructuralChildren: structuralChildren,
+      onPointerDown(event: PointerEvent) {
+        if (dependsOn("interaction", "pressed") && !interactionDisabled(event.currentTarget)) {
+          pressed(true);
+        }
+      },
+      onPointerUp() {
+        if (dependsOn("interaction", "pressed")) pressed(false);
+      },
+      onPointerCancel() {
+        if (dependsOn("interaction", "pressed")) pressed(false);
+      },
+      onLostPointerCapture() {
+        if (dependsOn("interaction", "pressed")) pressed(false);
+      },
+      onFocus(event: FocusEvent) {
+        if (dependsOn("interaction", "focusWithin")) focusWithin(true);
+        if (dependsOn("interaction", "focusVisible")) {
+          const target = event.currentTarget;
+          focusVisible(target instanceof Element && target.matches(":focus-visible"));
+        }
+      },
+      onBlur(event: FocusEvent) {
+        const target = event.currentTarget;
+        const related = event.relatedTarget;
+        if (
+          !(target instanceof Element) ||
+          !(related instanceof Node) ||
+          !target.contains(related)
+        ) {
+          if (dependsOn("interaction", "focusWithin")) focusWithin(false);
+          if (dependsOn("interaction", "focusVisible")) focusVisible(false);
+        }
       },
       ref(element: Element) {
         options.refs[partName] = element;
-        (options.partElements[partName] ??= new Set()).add(element);
+        const elements = (options.partElements[partName] ??= new Set());
+        elements.add(element);
+        onCleanup(() => {
+          elements.delete(element);
+          if (options.refs[partName] === element) options.refs[partName] = null;
+        });
+        if (typeof HTMLElement !== "undefined" && element instanceof HTMLElement) {
+          const releaseHover = registerVisualHover(
+            element,
+            dependsOn("interaction", "hovered") ? hovered : undefined,
+          );
+          onCleanup(releaseHover);
+          if (dependsOn("geometry")) {
+            const ResizeObserverClass = element.ownerDocument.defaultView?.ResizeObserver;
+            if (ResizeObserverClass) {
+              const observer = new ResizeObserverClass(([entry]) => {
+                if (!entry) return;
+                inlineSize(entry.contentRect.width);
+                blockSize(entry.contentRect.height);
+              });
+              observer.observe(element);
+              const rectangle = element.getBoundingClientRect();
+              inlineSize(rectangle.width);
+              blockSize(rectangle.height);
+              onCleanup(() => observer.disconnect());
+            }
+          }
+          bindVirtualCollectionHost(element, () =>
+            visualPartCollection(
+              options.compiledVisuals ?? {},
+              options.preset(),
+              componentName,
+              partName,
+              options.themeName(),
+            ),
+          );
+        }
+        return typeof authorRef === "function" ? authorRef(element) : undefined;
       },
     };
-    const controllerProps = createReactiveControllerProps(options.controller);
-    return jsx(elementName, mergeProps(base, controllerProps, props));
+    if (typeof __POGGERS_HMR__ === "undefined" || __POGGERS_HMR__) {
+      base["data-style-src"] = () => readAttributes()["data-style-src"];
+    }
+    return jsx(elementName, mergeProps(base, nativeProps));
   };
 }
 
-function createReactiveControllerProps(readController: () => unknown): Record<string, unknown> {
-  const read = () => asRecord(readController());
-  const initial = asRecord(untrack(read));
-  const props: Record<string, unknown> = {};
+function semanticBoolean(value: unknown): boolean {
+  return value === true || value === "true";
+}
 
-  for (const [name, value] of Object.entries(initial)) {
-    if (typeof value === "function") {
-      props[name] = value;
-    } else {
-      props[name] = () => read()[name];
-    }
-  }
-
-  return props;
+function interactionDisabled(target: EventTarget | null): boolean {
+  if (!target || typeof target !== "object") return false;
+  const element = target as EventTarget & {
+    disabled?: boolean;
+    getAttribute?: (name: string) => string | null;
+  };
+  return element.disabled === true || element.getAttribute?.("aria-disabled") === "true";
 }
 
 function mergeProps(...sources: Array<Record<string, unknown> | Props>): Props {
@@ -997,15 +1208,57 @@ function resolveMaybeSignal(value: unknown): unknown {
   return typeof value === "function" ? (value as () => unknown)() : value;
 }
 
+function createVisualEnvironment(
+  dependencies: ReadonlySet<string>,
+  component: string,
+  part: string,
+): Readonly<Record<string, unknown>> {
+  const queries: Readonly<Record<string, string>> = {
+    reducedMotion: "(prefers-reduced-motion: reduce)",
+    moreContrast: "(prefers-contrast: more)",
+    forcedColors: "(forced-colors: active)",
+    dark: "(prefers-color-scheme: dark)",
+    hover: "(hover: hover)",
+    finePointer: "(pointer: fine)",
+    coarsePointer: "(pointer: coarse)",
+  };
+  const values: Record<string, Signal<boolean>> = {};
+  for (const [name, query] of Object.entries(queries)) {
+    if (!dependencies.has(`environment.${name}`)) continue;
+    const media = typeof matchMedia === "function" ? matchMedia(query) : undefined;
+    const value = signal(media?.matches ?? false, `${component}.${part}.environment.${name}`);
+    values[name] = value;
+    if (media) {
+      onMount(() => {
+        const change = (event: MediaQueryListEvent) => value(event.matches);
+        media.addEventListener("change", change);
+        return () => media.removeEventListener("change", change);
+      });
+    }
+  }
+  return Object.defineProperties(
+    {},
+    Object.fromEntries(
+      Object.entries(values).map(([name, value]) => [name, { enumerable: true, get: value }]),
+    ),
+  ) as Readonly<Record<string, unknown>>;
+}
+
 function normalizeRuntimeParts<Spec extends AppSpec>(
   components?: ComponentRuntimeParts<Spec>,
 ): RuntimeComponentParts {
   const result: RuntimeComponentParts = {};
-  for (const [componentName, parts] of Object.entries(components ?? {})) {
-    result[componentName] = {};
-    for (const [partName, elementName] of Object.entries(parts ?? {})) {
-      if (typeof elementName === "string") result[componentName]![partName] = elementName;
+  for (const [componentName, config] of Object.entries(components ?? {})) {
+    const runtimeConfig = config as RuntimeComponentConfig;
+    const parts: Record<string, string> = {};
+    for (const [partName, elementName] of Object.entries(runtimeConfig.parts ?? {})) {
+      if (typeof elementName === "string") parts[partName] = elementName;
     }
+    result[componentName] = {
+      parts,
+      values: runtimeConfig.values,
+      inputCallbacks: runtimeConfig.inputCallbacks,
+    };
   }
   return result;
 }
@@ -1026,6 +1279,15 @@ function firstPreset<Spec extends AppSpec>(styles: StylesDef<Spec>): string {
   return Object.keys(styles.presets)[0] ?? "default";
 }
 
+function presetSupportsTheme(
+  compiled: CompiledVisuals | undefined,
+  preset: string,
+  theme: string,
+): boolean {
+  if (theme === "default") return true;
+  return Object.hasOwn(compiled?.[preset]?.themes ?? {}, theme);
+}
+
 function updateRootPreset(preset: string) {
   if (typeof document === "undefined") return;
   const root = document.documentElement;
@@ -1040,10 +1302,6 @@ function updateRootTheme(theme: string) {
     return;
   }
   document.documentElement.dataset.theme = String(theme);
-}
-
-function capitalize(value: string): string {
-  return value.length === 0 ? value : value[0]!.toUpperCase() + value.slice(1);
 }
 
 function mergeClassValue(left: unknown, right: unknown): () => string {

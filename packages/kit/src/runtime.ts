@@ -14,10 +14,18 @@ import {
   analyzeVisualPresetSources,
   materializeVisualPreset,
 } from "./visual-compiler";
+import {
+  analyzeAppContract,
+  analyzeAppContractConventions,
+  analyzeAppDefinition,
+  persistentResourceSchemaSource,
+  transformComponentSource,
+  type CompiledAppSurface,
+} from "./component-compiler";
 import { generateVisualStylexModule } from "./visual-stylex";
 import type { AppProgram, WorkerDef, WorkerDurabilityStore } from "./worker";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -48,7 +56,7 @@ export type ServeAppOpts<Spec extends AppSpec, Deps = never> = Omit<
   "web" | "workers" | "programs"
 > & {
   api: App<Spec>;
-  ui: string | URL;
+  entrypoint: string | URL;
   styles?: string;
   styleFiles?: string[];
   plugins?: Bun.BunPlugin[];
@@ -65,7 +73,7 @@ export type ServeAppOpts<Spec extends AppSpec, Deps = never> = Omit<
 
 export function serveApp<Spec extends AppSpec, Deps = never>({
   api,
-  ui,
+  entrypoint,
   styles,
   styleFiles,
   plugins,
@@ -85,7 +93,7 @@ export function serveApp<Spec extends AppSpec, Deps = never>({
     web: {
       bundle,
       styleBundle,
-      entrypoint: ui,
+      entrypoint,
       html,
       styles,
       styleFiles,
@@ -103,10 +111,8 @@ export function serveApp<Spec extends AppSpec, Deps = never>({
 export type AppPaths = {
   appDir: string;
   sourceDir: string;
-  api: string;
-  ui: string;
+  app: string;
   types?: string;
-  embedded: boolean;
   worker?: string;
   deps?: string;
 };
@@ -192,19 +198,11 @@ const alienSignalsEntrypoint = resolve(kitSourceDir, "../node_modules/alien-sign
 
 export function resolveApp(appDir: string): AppPaths {
   const resolvedAppDir = resolve(appDir);
-  const api = firstExisting([
-    resolve(resolvedAppDir, "src/api.ts"),
-    resolve(resolvedAppDir, "src/api/index.ts"),
-    resolve(resolvedAppDir, "api.ts"),
-    resolve(resolvedAppDir, "api/index.ts"),
-  ]);
-  const ui = firstExisting([
-    resolve(resolvedAppDir, "src/app.ts"),
+  const app = firstExisting([
     resolve(resolvedAppDir, "src/app.tsx"),
-    resolve(resolvedAppDir, "app.ts"),
-    resolve(resolvedAppDir, "app.tsx"),
+    resolve(resolvedAppDir, "src/app.ts"),
   ]);
-  const sourceDir = ui ? dirname(ui) : resolve(resolvedAppDir, "src");
+  const sourceDir = resolve(resolvedAppDir, "src");
   const types = firstExisting([
     resolve(sourceDir, "types.ts"),
     resolve(resolvedAppDir, "types.ts"),
@@ -215,21 +213,15 @@ export function resolveApp(appDir: string): AppPaths {
   ]);
   const deps = firstExisting([resolve(sourceDir, "deps.ts")]);
 
-  if (!ui) {
-    throw new Error(
-      `App is missing src/app.ts, src/app.tsx, app.ts, or app.tsx in ${resolvedAppDir}.`,
-    );
+  if (!app) {
+    throw new Error(`App is missing canonical src/app.tsx in ${resolvedAppDir}.`);
   }
-
-  const embedded = !api;
 
   return {
     appDir: resolvedAppDir,
     sourceDir,
-    api: api ?? ui,
-    ui,
+    app,
     types,
-    embedded,
     worker,
     deps,
   };
@@ -239,13 +231,13 @@ export async function loadApp<Spec extends AppSpec = AppSpec>(
   appDir: string,
 ): Promise<LoadedApp<Spec>> {
   const paths = resolveApp(appDir);
-  await writeGeneratedTypeArtifacts(paths);
+  assertCanonicalApp(paths);
   const apiModule = await importBuiltAppModule(paths);
   const depsModule = paths.deps ? await import(pathToFileURL(paths.deps).href) : {};
   const api = normalizeLoadedApp<Spec>(apiModule);
 
   if (!api?.def?.resources) {
-    throw new Error(`App module must export a Poggers app from ${paths.api}.`);
+    throw new Error(`App module must export a Poggers app from ${paths.app}.`);
   }
 
   installAppMigrations(api, await loadMigrationRegistry(paths));
@@ -283,7 +275,7 @@ export async function runApp(opts: RunAppOpts): Promise<ServerHandle> {
 
   return serveApp({
     api: loaded.api,
-    ui: browser.entrypoint,
+    entrypoint: browser.entrypoint,
     html: browser.html,
     styles: browser.styles,
     styleFiles: browser.styleFiles,
@@ -309,10 +301,11 @@ export async function runApp(opts: RunAppOpts): Promise<ServerHandle> {
 
 export async function bundleApp(opts: BundleAppOpts): Promise<void> {
   const paths = resolveApp(opts.appDir);
-  await writeGeneratedTypeArtifacts(paths);
+  assertCanonicalApp(paths);
   const browser = await writeBrowserEntrypoint(paths);
   const outdir = opts.outdir ?? resolve(paths.appDir, ".poggers/build/web");
   const result = await Bun.build({
+    define: { __POGGERS_HMR__: "false" },
     entrypoints: [browser.entrypoint],
     format: "esm",
     jsx: poggersJsx,
@@ -335,9 +328,10 @@ export async function bundleApp(opts: BundleAppOpts): Promise<void> {
 
 export async function buildApp(opts: BuildAppOpts): Promise<void> {
   const paths = resolveApp(opts.appDir);
-  await writeGeneratedTypeArtifacts(paths);
+  assertCanonicalApp(paths);
   const browser = await writeBrowserEntrypoint(paths);
   const browserBuild = await Bun.build({
+    define: { __POGGERS_HMR__: "false" },
     entrypoints: [browser.entrypoint],
     format: "esm",
     jsx: poggersJsx,
@@ -358,7 +352,9 @@ export async function buildApp(opts: BuildAppOpts): Promise<void> {
 
   const buildDir = frameworkBuildDir(paths);
   const serverAppStub = await writeServerAppStubFile(paths, buildDir);
-  const serverAppSource = await writeServerAppEntrypoint(paths, buildDir, serverAppStub);
+  const serverAppSource = await writeServerAppEntrypoint(paths, buildDir, serverAppStub, {
+    stripStyles: true,
+  });
   const appEntrypoint = await writeBuiltAppModule(
     serverAppSource,
     resolve(buildDir, "app.generated.js"),
@@ -368,7 +364,7 @@ export async function buildApp(opts: BuildAppOpts): Promise<void> {
   const serverEntrypoint = resolve(buildDir, "server.generated.ts");
   await mkdir(buildDir, { recursive: true });
   await mkdir(dirname(resolve(opts.outfile)), { recursive: true });
-  await writeFile(
+  await writeGeneratedFile(
     serverEntrypoint,
     serverEntrypointSource(
       paths,
@@ -380,15 +376,9 @@ export async function buildApp(opts: BuildAppOpts): Promise<void> {
       migrationRegistry,
       opts.title,
     ),
-    "utf8",
   );
 
   await $`bun build --compile --target=bun --outfile ${resolve(opts.outfile)} ${serverEntrypoint}`;
-}
-
-export async function writeAppTypes(appDir: string): Promise<string | undefined> {
-  const paths = resolveApp(appDir);
-  return writeGeneratedTypeArtifacts(paths);
 }
 
 export async function writeMigrationSnapshot(appDir: string): Promise<MigrationSnapshotResult> {
@@ -396,7 +386,7 @@ export async function writeMigrationSnapshot(appDir: string): Promise<MigrationS
   if (!paths.types) throw new Error(`App is missing src/types.ts in ${paths.appDir}.`);
 
   const typesSource = await readFile(paths.types, "utf8");
-  const hash = structuralHash(typesSource);
+  const hash = structuralHash(typesSource, paths.types);
   const snapshotsDir = resolve(paths.sourceDir, "migrations/snapshots");
   const snapshotPath = resolve(snapshotsDir, `${hash}.ts`);
   const created = !existsSync(snapshotPath);
@@ -442,12 +432,11 @@ async function writeMigrationRegistry(paths: AppPaths, buildDir: string): Promis
   const migrations = files.map((_, index) => `migration${index}`).join(", ");
 
   await mkdir(dirname(output), { recursive: true });
-  await writeFile(
+  await writeGeneratedFile(
     output,
     `${imports}${imports ? "\n\n" : ""}export const hash = ${hash === undefined ? "undefined" : JSON.stringify(hash)};
 export const migrations = [${migrations}];
 `,
-    "utf8",
   );
 
   return output;
@@ -455,7 +444,7 @@ export const migrations = [${migrations}];
 
 async function currentStructuralHash(paths: AppPaths): Promise<string | undefined> {
   if (!paths.types) return undefined;
-  return structuralHash(await readFile(paths.types, "utf8"));
+  return structuralHash(await readFile(paths.types, "utf8"), paths.types);
 }
 
 async function migrationEdgeFiles(sourceDir: string): Promise<string[]> {
@@ -496,7 +485,7 @@ export async function createMigration(
   await mkdir(dirname(migrationPath), { recursive: true });
   await writeFile(
     migrationPath,
-    `import type { Migration } from "@poggers/app";
+    `import type { Migration } from "@poggers/kit";
 import type { App as From } from "./snapshots/${previous.hash}.ts";
 import type { App as To } from "./snapshots/${snapshot.hash}.ts";
 
@@ -519,107 +508,14 @@ export default {
   };
 }
 
-function structuralHash(source: string): string {
-  const normalized = persistentResourceSchemaSource(source)
+function structuralHash(source: string, fileName = "types.ts"): string {
+  const normalized = persistentResourceSchemaSource(source, fileName)
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .replace(/\/\/[^\n\r]*/g, "")
     .replace(/\s+/g, " ")
     .trim();
   return createHash("sha256").update(normalized).digest("hex").slice(0, 12);
 }
-
-function persistentResourceSchemaSource(source: string): string {
-  const resourcesBlock = extractPropertyBlock(source, "Resources");
-  if (!resourcesBlock) return source;
-
-  const resourceParts = readObjectMemberEntries(resourcesBlock).map(({ name, value }) => {
-    const fields = ["Key", "State", "Events"]
-      .map((field) => `${field}: ${persistentResourceField(value, field)}`)
-      .join("; ");
-    return `${name}: { ${fields} }`;
-  });
-  const resourceSource = `Resources: { ${resourceParts.join("; ")} }`;
-  const aliases = referencedTypeAliases(source, resourceSource);
-  return [resourceSource, ...aliases].join("\n");
-}
-
-function persistentResourceField(resourceBlock: string, field: string): string {
-  const block = extractPropertyBlock(resourceBlock, field);
-  if (block) return `{ ${block} }`;
-  return extractPropertyValue(resourceBlock, field) ?? "never";
-}
-
-function referencedTypeAliases(source: string, seed: string): string[] {
-  const aliases: string[] = [];
-  const seen = new Set<string>();
-  const queue = identifiersInTypeText(seed);
-
-  for (let index = 0; index < queue.length; index++) {
-    const name = queue[index]!;
-    if (seen.has(name) || builtinTypeIdentifiers.has(name)) continue;
-    seen.add(name);
-
-    const alias = extractTypeAliasSource(source, name);
-    if (!alias) continue;
-    aliases.push(alias);
-    for (const identifier of identifiersInTypeText(alias)) {
-      if (!seen.has(identifier)) queue.push(identifier);
-    }
-  }
-
-  return aliases.sort();
-}
-
-function identifiersInTypeText(source: string): string[] {
-  return [...source.matchAll(/\b[A-Z][A-Za-z0-9_$]*\b/g)].map((match) => match[0]);
-}
-
-function extractTypeAliasSource(source: string, alias: string): string | undefined {
-  const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = new RegExp(`\\b(?:export\\s+)?type\\s+${escaped}(?:\\s*<[^=]+>)?\\s*=`).exec(
-    source,
-  );
-  if (!match) return undefined;
-
-  const end = findTypeAliasEnd(source, match.index + match[0].length);
-  return source.slice(match.index, end).trim();
-}
-
-function findTypeAliasEnd(source: string, index: number): number {
-  let depth = 0;
-  while (index < source.length) {
-    const char = source[index];
-    if (char === '"' || char === "'" || char === "`") {
-      const end = readQuotedStringEnd(source, index);
-      index = end < 0 ? source.length : end + 1;
-      continue;
-    }
-    if (char === "{" || char === "(" || char === "[") depth++;
-    if (char === "}" || char === ")" || char === "]") depth = Math.max(0, depth - 1);
-    if (char === ";" && depth === 0) return index + 1;
-    index++;
-  }
-  return index;
-}
-
-const builtinTypeIdentifiers = new Set([
-  "Array",
-  "Date",
-  "Error",
-  "Exclude",
-  "Extract",
-  "Map",
-  "NonNullable",
-  "Omit",
-  "Parameters",
-  "Partial",
-  "Pick",
-  "Promise",
-  "Readonly",
-  "Record",
-  "ReturnType",
-  "Set",
-]);
 
 async function latestMigrationSnapshot(
   sourceDir: string,
@@ -652,85 +548,16 @@ function slugifyMigrationName(name: string): string {
 
 export function checkAppConventions(appDir: string): AppConventionIssue[] {
   const paths = resolveApp(appDir);
-  const issues: AppConventionIssue[] = [];
-  const appSource = readFileSync(paths.ui, "utf8");
-  const strictStyles = /\bstyles\s*:/.test(appSource);
-  if (!strictStyles) return [];
-
-  collectForbiddenGeneratedSurface(paths.ui, appSource, issues);
-  collectForbiddenAppStyling(paths.ui, appSource, issues);
-  const uiDir = resolve(paths.sourceDir, "ui");
-  for (const file of sourceFiles(uiDir)) {
-    const source = readFileSync(file, "utf8");
-    collectUiFileConventions(uiDir, file, issues);
-    collectForbiddenGeneratedSurface(file, source, issues);
-    collectForbiddenUiStyling(file, source, issues);
-    if (sourceImportsStylex(source)) {
-      issues.push({
-        file,
-        message:
-          "ui files must not import @stylexjs/stylex in strict style apps; put visual rules in app styles.",
-      });
-    }
-  }
-
-  if (paths.types) {
-    const typesSource = readFileSync(paths.types, "utf8");
-    collectForbiddenSpecSurface(paths.types, typesSource, issues);
-  }
-
-  return issues;
+  const surface = collectAppSurface(paths);
+  return [
+    ...(paths.types ? analyzeAppContractConventions(paths.types, surface) : []),
+    ...analyzeAppDefinition(paths.app, surface),
+  ];
 }
 
-function collectForbiddenGeneratedSurface(
-  file: string,
-  source: string,
-  issues: AppConventionIssue[],
-) {
-  if (/import\s*\{[^}]*\b(?:api|ui)\b[^}]*\}\s*from\s*["']@poggers\/app["']/.test(source)) {
-    issues.push({
-      file,
-      message:
-        "import direct generated functions from @poggers/app; do not import api or ui namespaces.",
-    });
-  }
-  if (/\bui\.use[A-Z]/.test(source)) {
-    issues.push({
-      file,
-      message: "render semantic UI through generated createX functions; ui.useX is not supported.",
-    });
-  }
-}
-
-function collectForbiddenSpecSurface(file: string, source: string, issues: AppConventionIssue[]) {
-  if (/\bUI\s*:/.test(source)) {
-    issues.push({
-      file,
-      message: "app specs must use top-level Components and Styles; do not define UI.",
-    });
-  }
-  if (/\bSlots\s*:/.test(source)) {
-    issues.push({
-      file,
-      message: "component specs must use PascalCase Parts; do not define Slots.",
-    });
-  }
-  const componentsBlock = extractPropertyBlock(source, "Components");
-  if (!componentsBlock) return;
-
-  const components = readObjectMembers(componentsBlock);
-  for (const [componentName, componentBlock] of Object.entries(components)) {
-    const partsBlock = extractPropertyBlock(componentBlock, "Parts");
-    if (!partsBlock) continue;
-    for (const partName of Object.keys(readStringMembers(partsBlock))) {
-      if (!/^[A-Z]/.test(partName)) {
-        issues.push({
-          file,
-          message: `component ${componentName} part ${partName} must be PascalCase.`,
-        });
-      }
-    }
-  }
+function assertCanonicalApp(paths: AppPaths) {
+  if (paths.app === resolve(paths.sourceDir, "app.tsx")) return;
+  throw new Error(`Poggers applications must use ${resolve(paths.sourceDir, "app.tsx")}.`);
 }
 
 async function loadWorker<Spec extends AppSpec>(
@@ -771,35 +598,12 @@ async function loadProgram<Spec extends AppSpec, Env extends EnvironmentName<Spe
   if (!program) return undefined;
 
   const envName = String(env);
-  const capitalizedEnv = capitalize(envName);
   const depsDefault = depsModule.default;
   const depsMounts = isRecord(depsDefault) ? depsDefault : {};
   const defaultDepsMount =
     depsDefault !== undefined && !(envName in depsMounts) ? depsDefault : undefined;
-  const depsMount =
-    api.def.deps?.[env] ??
-    depsMounts[envName] ??
-    defaultDepsMount ??
-    apiModule[`create${capitalizedEnv}Deps`] ??
-    apiModule.createProgramDeps ??
-    depsModule[`create${capitalizedEnv}Deps`] ??
-    depsModule.createProgramDeps;
-  const legacyDepsMount =
-    `${envName}Deps` in apiModule
-      ? apiModule[`${envName}Deps`]
-      : `${envName}Deps` in depsModule
-        ? depsModule[`${envName}Deps`]
-        : envName in depsMounts
-          ? depsMounts[envName]
-          : (defaultDepsMount ??
-            ("programDeps" in apiModule
-              ? apiModule.programDeps
-              : "programDeps" in depsModule
-                ? depsModule.programDeps
-                : {}));
-  const deps = await resolveDependencyMount<EnvironmentDeps<Spec, Env>>(
-    depsMount ?? legacyDepsMount,
-  );
+  const depsMount = api.def.deps?.[env] ?? depsMounts[envName] ?? defaultDepsMount;
+  const deps = await resolveDependencyMount<EnvironmentDeps<Spec, Env>>(depsMount);
 
   return {
     env,
@@ -846,7 +650,7 @@ function dependencyModeFromEnv(): string | undefined {
       process?: { env?: Record<string, string | undefined> };
     }
   ).process?.env;
-  return env?.POGGERS_DEPS ?? env?.POGGERS_DEPS_MODE ?? env?.POGGERS_DEPENDENCY_MODE;
+  return env?.POGGERS_DEPS;
 }
 
 function isDependencyConfig(value: unknown): value is {
@@ -881,20 +685,19 @@ function selectProgramEnv<Spec extends AppSpec>(api: App<Spec>): EnvironmentName
 }
 
 function firstExisting(paths: string[]): string | undefined {
-  return paths.find((path) => existsSync(path));
+  return paths.find((path) => {
+    try {
+      return statSync(path).isFile();
+    } catch {
+      return false;
+    }
+  });
 }
 
 type StylexBuildOptions = {
   dev: boolean;
   cssOutput: string;
 };
-
-function sourceImportsStylex(source: string): boolean {
-  return (
-    /from\s+["']@stylexjs\/stylex["']/.test(source) ||
-    /import\s*\(\s*["']@stylexjs\/stylex["']\s*\)/.test(source)
-  );
-}
 
 function stylexCssOutput(buildDir: string): string {
   return resolve(buildDir, "stylex.generated.css");
@@ -904,6 +707,7 @@ async function createStylexBuildPlugins(options: StylexBuildOptions): Promise<Bu
   const { createStylexBunPlugin } = await import("@stylexjs/unplugin/bun");
   const pluginOptions = {
     dev: options.dev,
+    enableMediaQueryOrder: false,
     runtimeInjection: false,
     useCSSLayers: true,
     bunDevCssOutput: options.cssOutput,
@@ -926,17 +730,15 @@ async function writeBrowserEntrypoint(
     options.buildDir ?? (options.dev ? frameworkDevDir(paths) : frameworkBuildDir(paths));
   const entrypoint = resolve(buildDir, "browser.entry.tsx");
   await mkdir(buildDir, { recursive: true });
-  await writePoggersAppTypes(paths);
   const visualModule = await writeVisualStylexModule(paths, buildDir);
   const compiledStyles = await compileBrowserStyles(paths, buildDir, Boolean(visualModule));
   const stylexStyles = visualModule ? stylexCssOutput(buildDir) : undefined;
-  const appPlugins = paths.embedded
-    ? [
-        createPoggersKitSourcePlugin(),
-        createPoggersAppAliasesPlugin(paths),
-        createPoggersAppPlugin(paths, visualModule),
-      ]
-    : [createPoggersKitSourcePlugin(), createPoggersAppAliasesPlugin(paths)];
+  const appPlugins = [
+    createPoggersKitSourcePlugin(),
+    createComponentTransformPlugin(paths),
+    createPoggersAppAliasesPlugin(paths),
+    createPoggersAppPlugin(paths, visualModule),
+  ];
   const plugins = [
     ...appPlugins,
     ...(visualModule
@@ -949,18 +751,12 @@ async function writeBrowserEntrypoint(
   const styleImport = compiledStyles
     ? `import ${JSON.stringify(importSpecifier(entrypoint, compiledStyles))};\n`
     : "";
-  const source = paths.embedded
-    ? nativeBrowserEntrySource(styleImport, {
-        rootImport: `import { Root, initialize as initializePoggersApp } from "@poggers/app";`,
-        setup: "await initializePoggersApp();",
-        rootExpression: "Root({})",
-        dev: Boolean(options.dev),
-      })
-    : nativeBrowserEntrySource(styleImport, {
-        rootImport: `import Root from ${JSON.stringify(importSpecifier(entrypoint, paths.ui))};`,
-        rootExpression: "Root({})",
-        dev: Boolean(options.dev),
-      });
+  const source = nativeBrowserEntrySource(styleImport, {
+    rootImport: `import { Root, initialize as initializePoggersApp } from "@poggers/app";`,
+    setup: "await initializePoggersApp();",
+    rootExpression: "Root({})",
+    dev: Boolean(options.dev),
+  });
   await writeFile(entrypoint, source, "utf8");
   return {
     entrypoint,
@@ -977,19 +773,23 @@ async function writeChangedDevArtifacts(
   changedPath: string,
   buildDir: string,
 ): Promise<void> {
+  try {
+    Object.assign(paths, resolveApp(paths.appDir));
+  } catch {
+    // Atomic saves can briefly remove the canonical source. The following
+    // filesystem event will refresh the paths once the replacement exists.
+    return;
+  }
   const changed = resolve(changedPath);
   if (shouldRebuildBrowserStyles(paths, changed)) {
     const visualModule = await writeVisualStylexModule(paths, buildDir);
     await compileBrowserStyles(paths, buildDir, Boolean(visualModule));
   }
-  if (changed === resolve(paths.api) || (paths.types && changed === resolve(paths.types))) {
-    await writeGeneratedTypeArtifacts(paths);
-  }
 }
 
 function shouldRebuildBrowserStyles(paths: AppPaths, changed: string): boolean {
   if (!isSourceReloadFile(paths, changed)) return false;
-  return paths.embedded;
+  return true;
 }
 
 function isSourceReloadFile(paths: AppPaths, changed: string): boolean {
@@ -1009,7 +809,6 @@ async function compileBrowserStyles(
 
 export async function validateAppStyles(appDir: string): Promise<void> {
   const paths = resolveApp(appDir);
-  await writePoggersAppTypes(paths);
   const buildDir = frameworkDevDir(paths);
   const visualModule = await writeVisualStylexModule(paths, buildDir);
   await compileBrowserStyles(paths, buildDir, Boolean(visualModule));
@@ -1021,17 +820,12 @@ function nativeBrowserEntrySource(
     rootImport: string;
     setup?: string;
     rootExpression: string;
-    renderImported?: boolean;
     dev: boolean;
   },
 ): string {
-  const renderImport = options.renderImported
-    ? options.dev
-      ? `import type { HotRenderState } from "@poggers/kit/ui";\n`
-      : ""
-    : options.dev
-      ? `import { render, type HotRenderState } from "@poggers/kit/ui";\n`
-      : `import { render } from "@poggers/kit/ui";\n`;
+  const renderImport = options.dev
+    ? `import { render, type HotRenderState } from "@poggers/kit/internal/ui";\n`
+    : `import { render } from "@poggers/kit/internal/ui";\n`;
   const renderBlock = options.dev
     ? `type HotData = { cleanup?: () => void; hotState?: HotRenderState };
 const hotGlobal = globalThis as typeof globalThis & { __poggersHotData?: HotData };
@@ -1082,7 +876,6 @@ async function writeVisualStylexModule(
   paths: AppPaths,
   buildDir: string,
 ): Promise<string | undefined> {
-  if (!paths.embedded) return undefined;
   const apiModule = await importBuiltAppModule(paths);
   const api = normalizeLoadedApp(apiModule);
   const styles = recordValue(api?.def?.styles);
@@ -1091,13 +884,13 @@ async function writeVisualStylexModule(
 
   if (!paths.types) throw new Error("Poggers visual apps require src/types.ts.");
   const contract = analyzeVisualContract(paths.types);
-  const sourceLocations = analyzeVisualPresetSources(paths.api, paths.sourceDir);
+  const sourceLocations = analyzeVisualPresetSources(paths.app, paths.sourceDir);
   const visualEntries = Object.entries(presets).filter(([, preset]) =>
     looksLikeVisualPreset(preset),
   );
   if (!visualEntries.length) return undefined;
   if (visualEntries.length !== Object.keys(presets).length) {
-    throw new Error("Every Poggers preset must use the closed visual preset format.");
+    throw new Error("Every Poggers preset must be a preset factory.");
   }
 
   const materialized = visualEntries.map(([name, preset]) => {
@@ -1105,7 +898,7 @@ async function writeVisualStylexModule(
     if (!declaration)
       throw new Error(`Visual preset ${JSON.stringify(name)} is missing from App.Styles.`);
     try {
-      return materializeVisualPreset(name, preset, contract.surface);
+      return materializeVisualPreset(name, preset, contract.surface, declaration);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const location = sourceLocations[name] ?? declaration.location;
@@ -1115,7 +908,24 @@ async function writeVisualStylexModule(
   const output = resolve(buildDir, "visual.generated.stylex.ts");
   let generated: string;
   try {
-    generated = generateVisualStylexModule(materialized);
+    generated = `${generateVisualStylexModule(materialized)}
+export const compiledStyleDefinition = ${JSON.stringify({
+      defaultPreset:
+        typeof styles.defaultPreset === "string" ? styles.defaultPreset : materialized[0]?.name,
+      presets: Object.fromEntries(
+        materialized.map((preset) => [
+          preset.name,
+          {
+            themes: Object.fromEntries(
+              ["default", ...Object.keys(preset.themes).filter((theme) => theme !== "default")].map(
+                (theme) => [theme, {}],
+              ),
+            ),
+          },
+        ]),
+      ),
+    })};
+`;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const preset = visualEntries.find(([name]) => message.includes(name))?.[0];
@@ -1129,26 +939,7 @@ async function writeVisualStylexModule(
 }
 
 function looksLikeVisualPreset(value: unknown): boolean {
-  const preset = recordValue(value);
-  if (typeof preset.components !== "function" || !preset.tokens) return false;
-  const tokenRefs = Object.fromEntries(
-    Object.entries(recordValue(preset.tokens)).map(([group, definitions]) => [
-      group,
-      Object.fromEntries(
-        Object.keys(recordValue(definitions)).map((name) => [
-          name,
-          { $visual: "token", group, name },
-        ]),
-      ),
-    ]),
-  );
-  try {
-    const components = recordValue(preset.components({ tokens: tokenRefs }));
-    const values = Object.values(components);
-    return values.length > 0 && values.every((component) => typeof component === "function");
-  } catch {
-    return false;
-  }
+  return typeof value === "function";
 }
 
 async function compileVisualReset(buildDir: string): Promise<string> {
@@ -1157,29 +948,99 @@ async function compileVisualReset(buildDir: string): Promise<string> {
   return output;
 }
 
-const visualResetCss = `@layer reset {
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; min-inline-size: 0; }
-  html { min-block-size: 100%; -webkit-text-size-adjust: 100%; }
+const visualResetCss = `@layer reset, accessibility, motion;
+
+@layer reset {
+  *, *::before, *::after, ::backdrop, ::file-selector-button {
+    box-sizing: border-box;
+    min-inline-size: 0;
+    margin: 0;
+    padding: 0;
+    border: 0 solid;
+  }
+
+  html {
+    min-block-size: 100%;
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+    tab-size: 4;
+    -webkit-tap-highlight-color: transparent;
+  }
+
   body, #root { min-block-size: 100%; }
-  #root { container: app / inline-size; }
-  body { line-height: 1; text-rendering: optimizeSpeed; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
-  a { color: inherit; text-decoration: none; }
-  ol, ul { list-style: none; }
-  h1, h2, h3, h4, h5, h6 { font: inherit; }
-  button, input, textarea, select, option { appearance: none; border: 0; border-radius: 0; background: transparent; color: inherit; font: inherit; }
-  button, select { cursor: pointer; }
-  button:disabled, input:disabled, textarea:disabled, select:disabled { cursor: not-allowed; }
-  button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, a:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
-  textarea { resize: vertical; }
-  img, picture, video, canvas, svg { display: block; max-inline-size: 100%; block-size: auto; }
-  table { border-collapse: collapse; border-spacing: 0; }
+  #root { container: app / inline-size; isolation: isolate; }
+  body { line-height: 1; }
+
+  h1, h2, h3, h4, h5, h6 { font: inherit; text-wrap: balance; }
+  p { text-wrap: pretty; }
   p, h1, h2, h3, h4, h5, h6 { overflow-wrap: break-word; }
-  [hidden] { display: none !important; }
+  b, strong { font-weight: bolder; }
+  small { font-size: 80%; }
+  sub, sup { position: relative; vertical-align: baseline; font-size: 75%; line-height: 0; }
+  sub { inset-block-end: -0.25em; }
+  sup { inset-block-start: -0.5em; }
+
+  a { color: inherit; text-decoration: inherit; }
+  ol, ul, menu { list-style: none; }
+  blockquote, dl, dd, figure { margin: 0; }
+  hr { block-size: 0; color: inherit; border-block-start-width: 1px; }
+  abbr:where([title]) { text-decoration: underline dotted; }
+
+  button, input, optgroup, select, textarea, ::file-selector-button {
+    appearance: none;
+    border-radius: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    font-feature-settings: inherit;
+    font-variation-settings: inherit;
+    letter-spacing: inherit;
+    opacity: 1;
+  }
+  button, select, summary, ::file-selector-button { cursor: inherit; }
+  textarea { resize: vertical; }
+  ::placeholder { color: currentColor; opacity: 0.54; }
+  ::-webkit-search-decoration, ::-webkit-search-cancel-button { appearance: none; }
+  ::-webkit-inner-spin-button, ::-webkit-outer-spin-button { block-size: auto; }
+  ::-webkit-date-and-time-value { min-block-size: 1lh; text-align: inherit; }
+  summary { display: list-item; }
+  fieldset { min-inline-size: 0; }
+  legend { padding: 0; }
+
+  dialog, [popover] {
+    max-inline-size: none;
+    max-block-size: none;
+    color: inherit;
+    background: transparent;
+  }
+  dialog { position: static; inset: auto; inline-size: auto; block-size: auto; }
+  dialog::backdrop, [popover]::backdrop { background: transparent; }
+  dialog[inert], dialog[inert]::backdrop { pointer-events: none; }
+  dialog:not([open]), [popover]:not(:popover-open), [hidden] { display: none !important; }
   [popover] { inset: auto; }
-  [popover]:not(:popover-open) { display: none !important; }
+
+  img, picture, video, canvas, svg, iframe, embed, object {
+    display: block;
+    max-inline-size: 100%;
+  }
+  img, picture, video, canvas { block-size: auto; }
+  audio:not([controls]) { display: none; }
+  svg { overflow: visible; }
+  table { border-collapse: collapse; border-color: inherit; border-spacing: 0; text-indent: 0; }
+}
+
+@layer accessibility {
+  button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, summary:focus-visible, a:focus-visible, [tabindex]:focus-visible {
+    outline: 2px solid currentColor;
+    outline-offset: 2px;
+  }
+  :disabled { cursor: not-allowed; }
 }
 
 @layer motion {
+  @media (prefers-reduced-motion: no-preference) {
+    html { interpolate-size: allow-keywords; }
+  }
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { animation-duration: 1ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; transition-duration: 0ms !important; }
   }
@@ -1318,7 +1179,7 @@ function createPoggersAppAliasesPlugin(paths: AppPaths): Bun.BunPlugin {
   return {
     name: "poggers-app-aliases",
     setup(build) {
-      build.onResolve({ filter: /^(?:app|deps|types|ui\/.*|src\/.*)$/ }, (args) => {
+      build.onResolve({ filter: /^(?:app|deps|types|src\/.*)$/ }, (args) => {
         const target = resolveAppAlias(paths, args.path);
         return target ? { path: target } : undefined;
       });
@@ -1326,20 +1187,43 @@ function createPoggersAppAliasesPlugin(paths: AppPaths): Bun.BunPlugin {
   };
 }
 
+function createComponentTransformPlugin(paths: AppPaths): Bun.BunPlugin {
+  return {
+    name: "poggers-component-views",
+    setup(build) {
+      build.onLoad({ filter: /\.[cm]?tsx$/ }, async (args) => {
+        if (resolve(args.path) !== resolve(paths.app)) return;
+        const source = await readFile(args.path, "utf8");
+        return {
+          contents: transformComponentSource(source, args.path, { stripStyles: true }),
+          loader: "tsx",
+        };
+      });
+    },
+  };
+}
+
 function resolveAppAlias(paths: AppPaths, specifier: string): string | undefined {
-  if (specifier === "app") return paths.api;
+  if (specifier === "app") return paths.app;
   if (specifier === "deps") return paths.deps;
   if (specifier === "types") return paths.types;
-  if (specifier.startsWith("ui/")) {
-    return resolveSourceModule(resolve(paths.sourceDir, specifier));
-  }
   if (specifier.startsWith("src/")) {
     return resolveSourceModule(resolve(paths.sourceDir, specifier.slice("src/".length)));
   }
 }
 
 function resolveSourceModule(path: string): string | undefined {
-  return firstExisting([path, `${path}.ts`, `${path}.tsx`, `${path}.mts`, `${path}.cts`]);
+  return firstExisting([
+    path,
+    `${path}.ts`,
+    `${path}.tsx`,
+    `${path}.mts`,
+    `${path}.cts`,
+    resolve(path, "index.ts"),
+    resolve(path, "index.tsx"),
+    resolve(path, "index.mts"),
+    resolve(path, "index.cts"),
+  ]);
 }
 
 function createPoggersKitSourcePlugin(): Bun.BunPlugin {
@@ -1358,6 +1242,8 @@ function createPoggersKitSourcePlugin(): Bun.BunPlugin {
 function resolvePoggersKitSource(path: string): string {
   const subpath = path.slice("@poggers/kit".length).replace(/^\//, "");
   if (subpath === "style") return resolve(kitSourceDir, "preset.ts");
+  if (subpath === "internal/app") return resolve(kitSourceDir, "app.ts");
+  if (subpath === "internal/ui") return resolve(kitSourceDir, "ui.ts");
   if (subpath === "internal-style") return resolve(kitSourceDir, "component-runtime.ts");
   return subpath ? resolve(kitSourceDir, `${subpath}.ts`) : resolve(kitSourceDir, "index.ts");
 }
@@ -1394,13 +1280,14 @@ async function writeServerAppEntrypoint(
   paths: AppPaths,
   buildDir: string,
   stubPath: string,
+  options: { stripStyles?: boolean } = {},
 ): Promise<string> {
-  const output = resolve(buildDir, "app.source.generated.ts");
-  const source = rewriteServerAppImports(
-    readFileSync(paths.api, "utf8"),
-    dirname(paths.api),
-    stubPath,
-  );
+  const output = resolve(buildDir, "app.source.generated.tsx");
+  const appSource = readFileSync(paths.app, "utf8");
+  const transformedSource = paths.app.endsWith("x")
+    ? transformComponentSource(appSource, paths.app, options)
+    : appSource;
+  const source = rewriteServerAppImports(transformedSource, dirname(paths.app), stubPath);
   await mkdir(dirname(output), { recursive: true });
   await writeFile(output, source, "utf8");
   return output;
@@ -1416,8 +1303,8 @@ function rewriteServerAppImports(source: string, appSourceDir: string, stubPath:
 
 function poggersAppModuleSource(paths: AppPaths, visualModule?: string): string {
   const surface = collectAppSurface(paths);
-  const stylesLoad = "styles = app.def.styles ?? { presets: { default: {} } };";
-  const componentParts = JSON.stringify(componentPartsRecord(surface));
+  const stylesLoad = "styles = compiledStyleDefinition;";
+  const componentParts = JSON.stringify(componentRuntimeConfigRecord(surface));
   const resourceExports = surface.resources
     .map(({ name: resource }) => {
       const name = `use${capitalize(resource)}`;
@@ -1426,21 +1313,13 @@ function poggersAppModuleSource(paths: AppPaths, visualModule?: string): string 
 }`;
     })
     .join("\n\n");
-  const componentExports = Object.values(surface.components)
-    .map(({ name: component }) => {
-      const name = `create${capitalize(component)}`;
-      return `export function ${name}(input) {
-  return getHooks().${name}(input);
-}`;
-    })
-    .join("\n\n");
 
   const visualImport = visualModule
-    ? `import { compiledVisuals } from ${JSON.stringify(visualModule)};`
-    : "const compiledVisuals = undefined;";
-  return `import { defineApp } from "@poggers/kit";
+    ? `import { compiledStyleDefinition, compiledVisuals } from ${JSON.stringify(visualModule)};`
+    : "const compiledVisuals = undefined; const compiledStyleDefinition = { presets: { default: { themes: { default: {} } } } };";
+  return `import { defineApp } from "@poggers/kit/internal/app";
 import { createHooks } from "@poggers/kit/internal-style";
-import { createBrowserConnectOptions } from "@poggers/kit/ui";
+import { createBrowserConnectOptions } from "@poggers/kit/internal/ui";
 ${visualImport}
 
 const components = ${componentParts};
@@ -1453,7 +1332,7 @@ export async function initialize() {
   if (app && styles) return;
   if (!initializePromise) {
     initializePromise = (async () => {
-      const appModule = await import(${JSON.stringify(paths.api)});
+      const appModule = await import(${JSON.stringify(paths.app)});
       const rawApp = appModule.default ?? appModule.app ?? appModule;
       app = rawApp?.def?.resources ? rawApp : defineApp(rawApp);
       ${stylesLoad}
@@ -1476,8 +1355,6 @@ function getHooks() {
 
 ${resourceExports}
 
-${componentExports}
-
 export const nav = new Proxy({}, {
   get(_target, prop) {
     return getHooks().nav[prop];
@@ -1488,20 +1365,12 @@ export function useScreen() {
   return getHooks().useScreen();
 }
 
-export function usePreset() {
-  return getHooks().usePreset();
+export function useAppearance() {
+  return getHooks().useAppearance();
 }
 
-export function setPreset(preset) {
-  getHooks().setPreset(preset);
-}
-
-export function useThemeName() {
-  return getHooks().useThemeName();
-}
-
-export function setTheme(theme) {
-  getHooks().setTheme(theme);
+export function setAppearance(appearance) {
+  getHooks().setAppearance(appearance);
 }
 
 export function start(connect) {
@@ -1511,9 +1380,7 @@ export function start(connect) {
 export function Root(props = {}) {
   start(props.connect);
   requireInitialized();
-  const root = app.def.root ?? app.def.ui;
-  if (!root) throw new Error("App definition does not include a root function.");
-  return root(getHooks());
+  return getHooks().renderRoot();
 }
 
 export default Root;
@@ -1522,12 +1389,8 @@ export default Root;
 
 function poggersServerAppStubSource(paths: AppPaths): string {
   const surface = collectAppSurface(paths);
-  const unavailableExports = [
-    ...surface.resources.map(({ name: resource }) => `use${capitalize(resource)}`),
-    ...Object.values(surface.components).map(
-      ({ name: component }) => `create${capitalize(component)}`,
-    ),
-  ]
+  const unavailableExports = surface.resources
+    .map(({ name: resource }) => `use${capitalize(resource)}`)
     .map(
       (name) => `export function ${name}() {
   throwUnavailable(${JSON.stringify(name)});
@@ -1548,10 +1411,8 @@ export const nav = new Proxy({}, {
 });
 
 export function useScreen() { throwUnavailable("useScreen"); }
-export function usePreset() { throwUnavailable("usePreset"); }
-export function setPreset() { throwUnavailable("setPreset"); }
-export function useThemeName() { throwUnavailable("useThemeName"); }
-export function setTheme() { throwUnavailable("setTheme"); }
+export function useAppearance() { throwUnavailable("useAppearance"); }
+export function setAppearance() { throwUnavailable("setAppearance"); }
 export function start() {}
 export function Root() {
   return null;
@@ -1560,93 +1421,10 @@ export default Root;
 `;
 }
 
-type AppSurfaceResource = {
-  name: string;
-  events: string[];
-  views: string[];
-  commands: AppSurfaceCommand[];
-  doc?: string;
-};
+type AppSurface = CompiledAppSurface;
 
-type AppSurfaceCommand = {
-  name: string;
-  hasArgs: boolean;
-  hasError: boolean;
-  eventName?: string;
-};
-
-type AppSurfaceAction = {
-  name: string;
-  handlerType: string;
-};
-
-type AppSurfaceNavigation = {
-  name: string;
-  hasParams: boolean;
-  paramsType: string;
-};
-
-type AppSurfaceEnvironment = {
-  name: string;
-  depsType: string;
-};
-
-type AppSurfaceComponent = {
-  name: string;
-  parts: Record<string, string>;
-  variants: AppSurfaceVariant[];
-  styleValues: AppSurfaceStyleValue[];
-  hasInput: boolean;
-  hasState: boolean;
-  hasDerived: boolean;
-  hasActions: boolean;
-  derived: string[];
-  actions: AppSurfaceAction[];
-  needsInput: boolean;
-  doc?: string;
-};
-
-type AppSurfaceVariant = {
-  name: string;
-  values: string[];
-};
-
-type AppSurfaceStyleValue = {
-  name: string;
-  kind: string;
-};
-
-type AppSurfaceStyleToken = {
-  group: string;
-  name: string;
-  kind: string;
-};
-
-type AppSurfaceStyleContainer = {
-  name: string;
-  min?: string;
-  max?: string;
-};
-
-type AppSurfaceStylePreset = {
-  name: string;
-  tokens: AppSurfaceStyleToken[];
-  themes: string[];
-  containers: AppSurfaceStyleContainer[];
-  visual: boolean;
-};
-
-type AppSurface = {
-  resources: AppSurfaceResource[];
-  environments: AppSurfaceEnvironment[];
-  components: Record<string, AppSurfaceComponent>;
-  navigation: AppSurfaceNavigation[];
-  presetType?: string;
-  stylePresets: AppSurfaceStylePreset[];
-};
-
-function collectAppSurface(paths: AppPaths): AppSurface {
-  const fallback: AppSurface = {
+function collectAppSurface(paths: AppPaths): CompiledAppSurface {
+  const fallback: CompiledAppSurface = {
     resources: [],
     environments: [],
     components: {},
@@ -1655,192 +1433,23 @@ function collectAppSurface(paths: AppPaths): AppSurface {
   };
   if (!paths.types || !existsSync(paths.types)) return fallback;
 
-  const source = readFileSync(paths.types, "utf8");
-  const resourcesBlock = extractPropertyBlock(source, "Resources");
-  const environmentsBlock = extractPropertyBlock(source, "Environments");
-  const depsType = extractPropertyValue(source, "Deps");
-  const componentsBlock = extractPropertyBlock(source, "Components");
-  const navigationBlock = extractPropertyBlock(source, "Navigation");
-  const stylesBlock = extractPropertyBlock(source, "Styles");
-  const presetsBlock = stylesBlock ? extractPropertyBlock(stylesBlock, "Presets") : undefined;
-  const resources = resourcesBlock
-    ? readObjectMemberEntries(resourcesBlock).map(({ name, value, doc }) => {
-        const viewsBlock = resolveTypePropertyBlock(source, value, "Views");
-        const eventsBlock = resolveTypePropertyBlock(source, value, "Events");
-        const commandsBlock = resolveTypePropertyBlock(source, value, "Commands");
-        const commands = commandsBlock
-          ? readTypeMemberEntries(commandsBlock).map((command) => {
-              const eventName = stringLiteralValue(extractPropertyValue(command.value, "event"));
-              return {
-                name: command.name,
-                hasArgs: Boolean(extractPropertyValue(command.value, "args")),
-                hasError: Boolean(extractPropertyValue(command.value, "error")),
-                eventName,
-              };
-            })
-          : [];
-        return {
-          name,
-          events: eventsBlock ? readTypeMemberNames(eventsBlock) : [],
-          views: viewsBlock ? readTypeMemberNames(viewsBlock) : [],
-          commands,
-          doc,
-        };
-      })
-    : [];
-  const components: Record<string, AppSurfaceComponent> = {};
-
-  if (componentsBlock) {
-    const componentMembers = readObjectMemberEntries(componentsBlock);
-    for (const { name: componentName, value: componentBlock, doc } of componentMembers) {
-      const partsBlock = extractPropertyBlock(componentBlock, "Parts");
-      const variantsBlock = extractPropertyBlock(componentBlock, "Variants");
-      const variants = variantsBlock ? readStyleVariants(source, variantsBlock) : [];
-      const styleValuesBlock = extractPropertyBlock(componentBlock, "StyleValues");
-      const styleValues = styleValuesBlock
-        ? readComponentStyleValues(styleValuesBlock, componentName)
-        : [];
-      const derivedBlock = extractPropertyBlock(componentBlock, "Derived");
-      const actionsBlock = extractPropertyBlock(componentBlock, "Actions");
-      const actionEntries = actionsBlock ? readTypeMemberEntries(actionsBlock) : [];
-      if (!partsBlock) continue;
-      const hasInput = Boolean(extractPropertyBlock(componentBlock, "Input"));
-      const hasState = Boolean(extractPropertyBlock(componentBlock, "State"));
-      const hasDerived = Boolean(derivedBlock);
-      const hasActions = Boolean(actionsBlock);
-      components[componentName] = {
-        name: componentName,
-        parts: readStringMembers(partsBlock),
-        variants,
-        styleValues,
-        hasInput,
-        hasState,
-        hasDerived,
-        hasActions,
-        derived: derivedBlock ? readTypeMemberNames(derivedBlock) : [],
-        actions: actionEntries.map((action) => ({
-          name: action.name,
-          handlerType: actionHandlerType(action.value),
-        })),
-        needsInput: hasInput || variants.length > 0,
-        doc,
-      };
-    }
-  }
-
-  return {
-    resources,
-    environments: environmentsBlock
-      ? readObjectMemberEntries(environmentsBlock).map(({ name }) => ({
-          name,
-          depsType: `AppSpec["Environments"][${JSON.stringify(name)}] extends { Deps: infer Deps } ? Deps : EmptyObject`,
-        }))
-      : depsType
-        ? [
-            {
-              name: "server",
-              depsType: `AppSpec extends { Deps: infer Deps } ? Deps : EmptyObject`,
-            },
-          ]
-        : [],
-    components,
-    navigation: navigationBlock
-      ? readObjectMemberEntries(navigationBlock).map(({ name, value }) => ({
-          name,
-          hasParams: readTypeMemberEntries(value).length > 0,
-          paramsType: `AppSpec["Navigation"][${JSON.stringify(name)}]`,
-        }))
-      : [{ name: "home", hasParams: false, paramsType: "EmptyObject" }],
-    presetType: stylePresetType(stylesBlock, presetsBlock),
-    stylePresets: presetsBlock ? readStylePresets(source, presetsBlock) : [],
-  };
-}
-
-function stylePresetType(
-  stylesBlock: string | undefined,
-  presetsBlock: string | undefined,
-): string | undefined {
-  if (presetsBlock) {
-    const names = readObjectMemberEntries(presetsBlock).map((preset) =>
-      JSON.stringify(preset.name),
-    );
-    return names.length ? names.join(" | ") : undefined;
-  }
-  return stylesBlock ? extractPropertyValue(stylesBlock, "Presets") : undefined;
-}
-
-function styleThemeNameType(surface: AppSurface): string {
-  const themes = new Set<string>(["default"]);
-  for (const preset of surface.stylePresets) {
-    for (const theme of preset.themes) themes.add(theme);
-  }
-  return [...themes].map((theme) => JSON.stringify(theme)).join(" | ");
-}
-
-function readStyleVariants(source: string, block: string): AppSurfaceVariant[] {
-  return readTypeMemberEntries(block).map((variant) => ({
-    name: variant.name,
-    values: stringLiteralsFromType(source, variant.value),
-  }));
-}
-
-function readComponentStyleValues(block: string, componentName: string): AppSurfaceStyleValue[] {
-  return readTypeMemberEntries(block).map((value) => ({
-    name: value.name,
-    kind: readKnownStyleValueKind(
-      stringLiteralValue(value.value) ?? value.value.trim(),
-      `Components.${componentName}.StyleValues.${value.name}`,
-    ),
-  }));
-}
-
-function readStylePresets(source: string, block: string): AppSurfaceStylePreset[] {
-  return readObjectMemberEntries(block).map(({ name, value }) => {
-    const tokensBlock = resolveTypePropertyBlock(source, value, "Tokens");
-    const themesValue = extractPropertyValue(value, "Themes");
-    const containersBlock = resolveTypePropertyBlock(source, value, "Containers");
-    return {
-      name,
-      tokens: tokensBlock ? readStyleTokens(tokensBlock, name) : [],
-      themes: themesValue ? stringLiteralsFromUnion(themesValue) : [],
-      containers: containersBlock ? readStyleContainers(containersBlock) : [],
-      visual: tokensBlock ? visualTokenContract(tokensBlock) : false,
-    };
-  });
-}
-
-function readStyleTokens(block: string, presetName: string): AppSurfaceStyleToken[] {
-  const tokens: AppSurfaceStyleToken[] = [];
-  const legacyGroups = readObjectMemberEntries(block);
-  if (!legacyGroups.length) {
-    for (const group of readTypeMemberEntries(block)) {
-      for (const name of stringLiteralsFromUnion(group.value)) {
-        tokens.push({ group: group.name, name, kind: group.name });
+  const surface: CompiledAppSurface = analyzeAppContract(paths.types);
+  for (const component of Object.values(surface.components)) {
+    for (const value of component.values) {
+      if (value.kind) {
+        readKnownStyleValueKind(value.kind, `Components.${component.name}.Values.${value.name}`);
       }
     }
-    return tokens;
   }
-  for (const group of legacyGroups) {
-    for (const token of readTypeMemberEntries(group.value)) {
-      const kind = readKnownTokenKind(
-        stringLiteralValue(token.value) ?? token.value.trim(),
-        `Styles.Presets.${presetName}.Tokens.${group.name}.${token.name}`,
+  for (const preset of surface.stylePresets) {
+    for (const token of preset.tokens) {
+      readKnownTokenKind(
+        token.kind,
+        `Styles.Presets.${preset.name}.Tokens.${token.group}.${token.name}`,
       );
-      tokens.push({ group: group.name, name: token.name, kind });
     }
   }
-  return tokens;
-}
-
-function visualTokenContract(block: string): boolean {
-  const groups = readTypeMemberEntries(block);
-  return (
-    groups.length > 0 &&
-    groups.every(
-      (group) =>
-        !group.value.trimStart().startsWith("{") && stringLiteralsFromUnion(group.value).length > 0,
-    )
-  );
+  return surface;
 }
 
 const knownStyleValueKinds = new Set([
@@ -1848,6 +1457,8 @@ const knownStyleValueKinds = new Set([
   "progress",
   "opacity",
   "ratio",
+  "angle",
+  "time",
   "zIndex",
   "length",
   "space",
@@ -1861,6 +1472,7 @@ const knownTokenKinds = new Set([
   "duration",
   "easing",
   "font",
+  "gradient",
   "length",
   "motion",
   "opacity",
@@ -1872,6 +1484,7 @@ const knownTokenKinds = new Set([
   "space",
   "stroke",
   "type",
+  "z",
   "zIndex",
 ]);
 
@@ -1885,1237 +1498,30 @@ function readKnownTokenKind(kind: string, path: string): string {
   throw new Error(`Unknown Poggers token kind "${kind}" at ${path}.`);
 }
 
-function readStyleContainers(block: string): AppSurfaceStyleContainer[] {
-  return readObjectMemberEntries(block).map(({ name, value }) => ({
-    name,
-    min: stringLiteralValue(extractPropertyValue(value, "min")),
-    max: stringLiteralValue(extractPropertyValue(value, "max")),
-  }));
-}
-
-function stringLiteralsFromUnion(value: string): string[] {
-  return [...value.matchAll(/["']([^"']+)["']/g)].map((match) => match[1]!).filter(Boolean);
-}
-
-function stringLiteralsFromType(source: string, value: string): string[] {
-  const direct = stringLiteralsFromUnion(value);
-  if (direct.length) return direct;
-
-  const alias = /^([A-Za-z_$][\w$]*)$/.exec(value.trim());
-  if (!alias) return [];
-
-  const aliasValue = extractTypeAliasValue(source, alias[1]!);
-  return aliasValue ? stringLiteralsFromUnion(aliasValue) : [];
-}
-
-function componentPartsRecord(surface: AppSurface): Record<string, Record<string, string>> {
-  const components: Record<string, Record<string, string>> = {};
+function componentRuntimeConfigRecord(surface: AppSurface): Record<
+  string,
+  {
+    parts: Record<string, string>;
+    values?: string[];
+    inputCallbacks?: string[];
+  }
+> {
+  const components: Record<
+    string,
+    {
+      parts: Record<string, string>;
+      values?: string[];
+      inputCallbacks?: string[];
+    }
+  > = {};
   for (const component of Object.values(surface.components)) {
-    components[component.name] = component.parts;
+    components[component.name] = {
+      parts: component.parts,
+      values: component.valueNames,
+      inputCallbacks: component.inputCallbacks,
+    };
   }
   return components;
-}
-
-function extractPropertyBlock(source: string, property: string): string | undefined {
-  const match = new RegExp(`\\b${property}\\s*:`).exec(source);
-  if (!match) return undefined;
-  const openIndex = source.indexOf("{", match.index + match[0].length);
-  if (openIndex < 0) return undefined;
-  const closeIndex = findMatchingBrace(source, openIndex);
-  return closeIndex < 0 ? undefined : source.slice(openIndex + 1, closeIndex);
-}
-
-function resolveTypePropertyBlock(
-  source: string,
-  ownerBlock: string,
-  property: string,
-): string | undefined {
-  const inline = extractPropertyBlock(ownerBlock, property);
-  if (inline) return inline;
-
-  const value = extractPropertyValue(ownerBlock, property);
-  const alias = /^([A-Za-z_$][\w$]*)$/.exec(value ?? "");
-  return alias ? extractTypeAliasBlock(source, alias[1]!) : undefined;
-}
-
-function extractTypeAliasBlock(source: string, alias: string): string | undefined {
-  const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = new RegExp(`\\b(?:export\\s+)?type\\s+${escaped}\\s*=`).exec(source);
-  if (!match) return undefined;
-  const openIndex = source.indexOf("{", match.index + match[0].length);
-  if (openIndex < 0) return undefined;
-  const closeIndex = findMatchingBrace(source, openIndex);
-  return closeIndex < 0 ? undefined : source.slice(openIndex + 1, closeIndex);
-}
-
-function extractTypeAliasValue(source: string, alias: string): string | undefined {
-  const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = new RegExp(`\\b(?:export\\s+)?type\\s+${escaped}\\s*=`).exec(source);
-  if (!match) return undefined;
-
-  const valueStart = skipTrivia(source, match.index + match[0].length);
-  const valueEnd = trimMemberValueEnd(source, skipMemberValue(source, valueStart));
-  return source.slice(valueStart, valueEnd).trim();
-}
-
-function readObjectMembers(block: string): Record<string, string> {
-  const result: Record<string, string> = {};
-  for (const { name, value } of readObjectMemberEntries(block)) {
-    result[name] = value;
-  }
-  return result;
-}
-
-function readObjectMemberEntries(
-  block: string,
-): Array<{ name: string; value: string; doc?: string }> {
-  const result: Array<{ name: string; value: string; doc?: string }> = [];
-  let index = 0;
-
-  while (index < block.length) {
-    const trivia = skipTriviaWithJsDoc(block, index);
-    index = trivia.index;
-    const key = readMemberKey(block, index);
-    if (!key) {
-      index++;
-      continue;
-    }
-
-    index = skipTrivia(block, key.end);
-    if (block[index] !== ":") {
-      index++;
-      continue;
-    }
-
-    index = skipTrivia(block, index + 1);
-    if (block[index] !== "{") {
-      index = skipMemberValue(block, index);
-      continue;
-    }
-
-    const closeIndex = findMatchingBrace(block, index);
-    if (closeIndex < 0) break;
-    result.push({
-      name: key.name,
-      value: block.slice(index + 1, closeIndex),
-      doc: trivia.doc,
-    });
-    index = closeIndex + 1;
-  }
-
-  return result;
-}
-
-function readTypeMemberEntries(
-  block: string,
-): Array<{ name: string; value: string; doc?: string }> {
-  const result: Array<{ name: string; value: string; doc?: string }> = [];
-  let index = 0;
-
-  while (index < block.length) {
-    const trivia = skipTriviaWithJsDoc(block, index);
-    index = trivia.index;
-    const key = readMemberKey(block, index);
-    if (!key) {
-      index++;
-      continue;
-    }
-
-    index = skipTrivia(block, key.end);
-    const separator = block[index];
-    if (separator === ":") {
-      const valueStart = skipTrivia(block, index + 1);
-      const valueEnd = trimMemberValueEnd(block, skipMemberValue(block, valueStart));
-      result.push({
-        name: key.name,
-        value: block.slice(valueStart, valueEnd).trim(),
-        doc: trivia.doc,
-      });
-      index = valueEnd + 1;
-      continue;
-    }
-
-    if (separator === "(") {
-      const valueEnd = trimMemberValueEnd(block, skipMemberValue(block, index));
-      result.push({
-        name: key.name,
-        value: block.slice(index, valueEnd).trim(),
-        doc: trivia.doc,
-      });
-      index = valueEnd + 1;
-      continue;
-    }
-
-    index++;
-  }
-
-  return result;
-}
-
-function readTypeMemberNames(block: string): string[] {
-  return readTypeMemberEntries(block).map((member) => member.name);
-}
-
-function actionHandlerType(value: string): string {
-  const trimmed = value.trim();
-  if (trimmed.startsWith("(")) {
-    const closeIndex = findMatchingParen(trimmed, 0);
-    if (closeIndex >= 0) {
-      return `(${trimmed.slice(1, closeIndex).trim()}) => void`;
-    }
-  }
-
-  const arrowIndex = trimmed.indexOf("=>");
-  if (arrowIndex >= 0) {
-    const params = trimmed.slice(0, arrowIndex).trim();
-    return `${params} => void`;
-  }
-
-  if (trimmed.startsWith("[")) return `(...args: ${trimmed}) => void`;
-  return "() => void";
-}
-
-function stringLiteralValue(value: string | undefined): string | undefined {
-  const trimmed = value?.trim();
-  if (!trimmed) return undefined;
-  const quote = trimmed[0];
-  if (quote !== '"' && quote !== "'") return undefined;
-  const end = readQuotedStringEnd(trimmed, 0);
-  return end > 0 ? trimmed.slice(1, end) : undefined;
-}
-
-function readStringMembers(block: string): Record<string, string> {
-  const result: Record<string, string> = {};
-  let index = 0;
-
-  while (index < block.length) {
-    index = skipTrivia(block, index);
-    const key = readMemberKey(block, index);
-    if (!key) {
-      index++;
-      continue;
-    }
-
-    index = skipTrivia(block, key.end);
-    if (block[index] !== ":") {
-      index++;
-      continue;
-    }
-
-    index = skipTrivia(block, index + 1);
-    const quote = block[index];
-    if (quote !== '"' && quote !== "'") {
-      index = skipMemberValue(block, index);
-      continue;
-    }
-
-    const end = readQuotedStringEnd(block, index);
-    if (end < 0) break;
-    result[key.name] = block.slice(index + 1, end);
-    index = end + 1;
-  }
-
-  return result;
-}
-
-function extractPropertyValue(source: string, property: string): string | undefined {
-  const match = new RegExp(`\\b${property}\\s*:`).exec(source);
-  if (!match) return undefined;
-  const valueStart = skipTrivia(source, match.index + match[0].length);
-  const valueEnd = trimMemberValueEnd(source, skipMemberValue(source, valueStart));
-  return source.slice(valueStart, valueEnd).trim();
-}
-
-function trimMemberValueEnd(source: string, index: number): number {
-  while (index > 0 && /[\s,;]/.test(source[index - 1] ?? "")) index--;
-  return index;
-}
-
-function findMatchingParen(source: string, openIndex: number): number {
-  let depth = 0;
-  for (let index = openIndex; index < source.length; index++) {
-    const char = source[index];
-    if (char === '"' || char === "'" || char === "`") {
-      const end = readQuotedStringEnd(source, index);
-      index = end < 0 ? source.length : end;
-      continue;
-    }
-    if (char === "(") depth++;
-    if (char === ")") {
-      depth--;
-      if (depth === 0) return index;
-    }
-  }
-  return -1;
-}
-
-function readMemberKey(source: string, index: number): { name: string; end: number } | undefined {
-  const quote = source[index];
-  if (quote === '"' || quote === "'") {
-    const end = readQuotedStringEnd(source, index);
-    if (end < 0) return undefined;
-    return { name: source.slice(index + 1, end), end: end + 1 };
-  }
-
-  const match = /^[A-Za-z_$][\w$]*/.exec(source.slice(index));
-  if (!match) return undefined;
-  return { name: match[0], end: index + match[0].length };
-}
-
-function skipMemberValue(source: string, index: number): number {
-  let depth = 0;
-  while (index < source.length) {
-    const char = source[index];
-    if (char === '"' || char === "'" || char === "`") {
-      const end = readQuotedStringEnd(source, index);
-      index = end < 0 ? source.length : end + 1;
-      continue;
-    }
-    if (char === "{" || char === "(" || char === "[") depth++;
-    if (char === "}" || char === ")" || char === "]") {
-      if (depth === 0) return index;
-      depth--;
-    }
-    if ((char === ";" || char === ",") && depth === 0) return index + 1;
-    index++;
-  }
-  return index;
-}
-
-function findMatchingBrace(source: string, openIndex: number): number {
-  let depth = 0;
-  for (let index = openIndex; index < source.length; index++) {
-    const char = source[index];
-    if (char === '"' || char === "'" || char === "`") {
-      const end = readQuotedStringEnd(source, index);
-      index = end < 0 ? source.length : end;
-      continue;
-    }
-    if (char === "{") depth++;
-    if (char === "}") {
-      depth--;
-      if (depth === 0) return index;
-    }
-  }
-  return -1;
-}
-
-function readQuotedStringEnd(source: string, start: number): number {
-  const quote = source[start];
-  for (let index = start + 1; index < source.length; index++) {
-    const char = source[index];
-    if (char === "\\") {
-      index++;
-      continue;
-    }
-    if (char === quote) return index;
-  }
-  return -1;
-}
-
-function skipTrivia(source: string, index: number): number {
-  while (index < source.length) {
-    const char = source[index];
-    if (char === undefined) return index;
-    if (/\s/.test(char)) {
-      index++;
-      continue;
-    }
-    if (source.startsWith("//", index)) {
-      const end = source.indexOf("\n", index + 2);
-      index = end < 0 ? source.length : end + 1;
-      continue;
-    }
-    if (source.startsWith("/*", index)) {
-      const end = source.indexOf("*/", index + 2);
-      index = end < 0 ? source.length : end + 2;
-      continue;
-    }
-    break;
-  }
-  return index;
-}
-
-function skipTriviaWithJsDoc(source: string, index: number): { index: number; doc?: string } {
-  let doc: string | undefined;
-
-  while (index < source.length) {
-    const char = source[index];
-    if (char === undefined) return { index, doc };
-    if (/\s/.test(char)) {
-      index++;
-      continue;
-    }
-    if (source.startsWith("/**", index)) {
-      const end = source.indexOf("*/", index + 3);
-      if (end < 0) return { index: source.length, doc };
-      doc = source.slice(index, end + 2);
-      index = end + 2;
-      continue;
-    }
-    if (source.startsWith("//", index)) {
-      const end = source.indexOf("\n", index + 2);
-      index = end < 0 ? source.length : end + 1;
-      continue;
-    }
-    if (source.startsWith("/*", index)) {
-      const end = source.indexOf("*/", index + 2);
-      index = end < 0 ? source.length : end + 2;
-      continue;
-    }
-    break;
-  }
-
-  return { index, doc };
-}
-
-function jsDoc(doc: string | undefined, fallback: string): string {
-  const source = doc?.trim();
-  if (source?.startsWith("/**")) return source;
-  return `/** ${fallback} */`;
-}
-
-function resourceTypeDefinitions(resource: AppSurfaceResource): string {
-  const resourceName = JSON.stringify(resource.name);
-  const typeName = pascalIdentifier(resource.name);
-  const viewFields = resource.views.map(
-    (view) => `  readonly ${propertyKey(view)}: ${typeName}ResourceViews[${JSON.stringify(view)}];`,
-  );
-  const commandFields = resource.commands.map((command) => {
-    const commandName = JSON.stringify(command.name);
-    const commandType = `${typeName}ResourceCommands[${commandName}]`;
-    const args = command.hasArgs ? `${commandType}["args"]` : "[]";
-    const error = command.hasError ? `${commandType}["error"]` : "never";
-    return `  ${propertyKey(command.name)}(
-    ...args: ${args}
-  ): CommandReceipt<${error}>;`;
-  });
-  return `${jsDoc(resource.doc, `Access the ${resource.name} resource.`)}
-type ${typeName}ResourceSpec = AppSpec["Resources"][${resourceName}];
-type ${typeName}ResourceViews = ${typeName}ResourceSpec["Views"];
-type ${typeName}ResourceCommands = ${typeName}ResourceSpec["Commands"];
-export type ${typeName}ResourceKey = ${typeName}ResourceSpec["Key"];
-export type ${typeName}Resource = {
-${[...viewFields, ...commandFields, "  readonly sync: SyncMeta;"].join("\n")}
-};
-export function use${capitalize(resource.name)}(key: ${typeName}ResourceKey): ${typeName}Resource;`;
-}
-
-function navigationTypes(surface: AppSurface): string {
-  const screens =
-    surface.navigation.length === 1
-      ? `{ readonly name: ${JSON.stringify(surface.navigation[0]!.name)}; readonly params: ${surface.navigation[0]!.paramsType} }`
-      : surface.navigation
-          .map(
-            (screen) =>
-              `  | { readonly name: ${JSON.stringify(screen.name)}; readonly params: ${screen.paramsType} }`,
-          )
-          .join("\n");
-  const navFields = surface.navigation.map((screen) => {
-    const params = screen.hasParams
-      ? `params: ${screen.paramsType}`
-      : `params?: ${screen.paramsType}`;
-    return `  ${propertyKey(screen.name)}(${params}): void;`;
-  });
-  const screenType =
-    surface.navigation.length === 1
-      ? `export type AppScreen = ${screens};`
-      : `export type AppScreen =\n${screens};`;
-  return `${screenType}
-export type AppNavigation = {
-${navFields.join("\n")}
-};`;
-}
-
-function componentTypeDefinitions(component: AppSurfaceComponent): string {
-  const componentName = JSON.stringify(component.name);
-  const typeName = pascalIdentifier(component.name);
-  const specType = `AppSpec["Components"][${componentName}]`;
-  const partNames = Object.keys(component.parts);
-  const inputType = component.hasInput ? `${specType}["Input"]` : "EmptyObject";
-  const variantsType = component.variants.length ? `${specType}["Variants"]` : "EmptyObject";
-  const stateType = component.hasState ? `${specType}["State"]` : "EmptyObject";
-  const derivedType = component.hasDerived ? `${specType}["Derived"]` : "EmptyObject";
-  const actionsType = component.hasActions ? `${specType}["Actions"]` : "EmptyObject";
-  const styleValuesType = component.styleValues.length
-    ? `ComponentStyleValues<${specType}["StyleValues"]>`
-    : "EmptyObject";
-  const actionFields = component.actions.map(
-    (action) => `  readonly ${propertyKey(action.name)}: ${action.handlerType};`,
-  );
-  const actionInstanceFields = component.actions.map(
-    (action) =>
-      `  readonly ${propertyKey(action.name)}: ${typeName}ActionHandlers[${JSON.stringify(action.name)}];`,
-  );
-  const derivedFields = component.derived.map(
-    (derived) =>
-      `  readonly ${propertyKey(derived)}: ${typeName}Derived[${JSON.stringify(derived)}];`,
-  );
-  const refFields = partNames.map((part) => `  readonly ${propertyKey(part)}?: Element | null;`);
-  const partFields = Object.entries(component.parts).map(
-    ([partName, elementName]) =>
-      `  readonly ${propertyKey(partName)}: (props?: ${partPropsType(elementName)}) => Child;`,
-  );
-  const optionFields = [
-    component.hasInput ? `  input: ${typeName}Input;` : `  input?: ${typeName}Input;`,
-    component.variants.length
-      ? `  variants: ${typeName}Variants;`
-      : `  variants?: ${typeName}Variants;`,
-  ];
-  const actionHandlerBlock = actionFields.length
-    ? `type ${typeName}ActionHandlers = {
-${actionFields.join("\n")}
-};`
-    : `type ${typeName}ActionHandlers = {};`;
-  return `${jsDoc(component.doc, `Create a ${component.name} component instance.`)}
-type ${typeName}Input = ${inputType};
-type ${typeName}Variants = ${variantsType};
-type ${typeName}State = ${stateType};
-type ${typeName}Derived = ${derivedType};
-type ${typeName}Actions = ${actionsType};
-type ${typeName}StyleValues = ${styleValuesType};
-${actionHandlerBlock}
-type ${typeName}Refs = {
-${refFields.join("\n")}
-};
-type ${typeName}DerivedContext = {
-  readonly preset: AppPreset;
-  readonly setPreset: (preset: AppPreset) => void;
-  readonly theme: AppThemeName;
-  readonly setTheme: (theme: AppThemeName) => void;
-  readonly variants: ${typeName}Variants;
-  readonly input: ${typeName}Input;
-  readonly state: ${typeName}State;
-  readonly refs: ${typeName}Refs;
-};
-type ${typeName}Context = ${typeName}DerivedContext & {
-  readonly derived: ${typeName}Derived;
-};
-type ${typeName}ActionFactory = (ctx: ${typeName}Context) => ${typeName}ActionHandlers;
-type ${typeName}DerivedFactory = (ctx: ${typeName}DerivedContext) => ${typeName}Derived;
-export type ${typeName}Options = {
-${optionFields.join("\n")}
-};
-export type ${typeName}Instance = {
-  readonly input: ${typeName}Input;
-  readonly variants: ${typeName}Variants;
-  readonly state: ${typeName}State;
-  readonly derived: ${typeName}Derived;
-  readonly actions: ${typeName}ActionHandlers;
-  readonly values: ${typeName}StyleValues;
-  readonly refs: ${typeName}Refs;
-${[...derivedFields, ...actionInstanceFields, ...partFields].join("\n")}
-};
-export function create${capitalize(component.name)}(${component.needsInput ? "input" : "input?"}: ${typeName}Options): ${typeName}Instance;`;
-}
-
-function appDefinitionTypes(surface: AppSurface): string {
-  const resourceDefinitions = surface.resources.map(resourceDefinitionTypes).join("\n\n");
-  const environmentDefinitions = environmentDefinitionTypes(surface);
-  const programDefinitions = programDefinitionTypes(surface);
-  const componentDefinitions = Object.values(surface.components)
-    .map(componentDefinitionTypes)
-    .join("\n\n");
-  const definitionSections = [
-    resourceDefinitions,
-    environmentDefinitions,
-    migrationDefinitionTypes(),
-    programDefinitions,
-    componentDefinitions,
-  ]
-    .filter(Boolean)
-    .join("\n\n");
-  const appDefinitionFields = [
-    navigationDefinitionField(surface),
-    depsDefinitionField(surface),
-    programsDefinitionField(surface),
-    componentsDefinitionField(surface),
-  ].join("");
-  return `type AppDefinitionSpecMarker<Spec> = {
-  readonly __poggersAppSpec?: Spec;
-};
-type AppActor = AppSpec extends { Actor: infer Actor extends { id: string } }
-  ? Actor
-  : { id: string };
-type SessionData<Actor, Presence> = {
-  readonly id: string;
-  readonly actor: Actor;
-  readonly presence: Presence;
-};
-type ResourcePresence<Resource> = Resource extends { Presence: infer Presence }
-  ? Presence
-  : EmptyObject;
-type CommandArgs<Command> = Command extends { args: infer Args extends any[] }
-  ? Args
-  : Command extends any[]
-    ? Command
-    : [];
-type CommandError<Command> = Command extends { error: infer Error } ? Error : never;
-type CommandErrorFn<Command> =
-  CommandError<Command> extends string
-    ? (code: CommandError<Command>) => void
-    : CommandError<Command> extends [infer Code extends string, infer Data]
-      ? (code: Code, data: Data) => void
-      : never;
-type AppMetadata = {
-  name?: string;
-};
-type PwaIconDef =
-  | string
-  | {
-      src: string;
-      sizes?: string;
-      type?: string;
-      purpose?: string;
-    };
-type PwaDef = {
-  name: string;
-  shortName?: string;
-  description?: string;
-  themeColor: string;
-  backgroundColor: string;
-  display?: "standalone" | "fullscreen" | "minimal-ui" | "browser";
-  orientation?: string;
-  startUrl?: string;
-  scope?: string;
-  icons?: {
-    any?: PwaIconDef | PwaIconDef[];
-    maskable?: PwaIconDef | PwaIconDef[];
-  };
-};
-type AppUIContext = {
-${surface.resources.map((resource) => `  use${capitalize(resource.name)}(key: ${pascalIdentifier(resource.name)}ResourceKey): ${pascalIdentifier(resource.name)}Resource;`).join("\n")}
-  readonly screen: Signal<AppScreen>;
-  readonly nav: AppNavigation;
-};
-type AppRoot = (ctx: AppUIContext) => unknown;
-
-${definitionSections}
-
-export type AppDefinition<Spec extends AppSpec = AppSpec> = AppDefinitionSpecMarker<Spec> & {
-  version: number;
-  app?: AppMetadata;
-  pwa?: PwaDef;
-${appDefinitionFields}
-  styles?: StyleDefinition;
-  root?: AppRoot;
-  ui?: (ctx: AppUIContext) => unknown;
-  resources: {
-${surface.resources.map((resource) => `    ${propertyKey(resource.name)}: ${pascalIdentifier(resource.name)}ResourceDefinition;`).join("\n")}
-  };
-};`;
-}
-
-function migrationDefinitionTypes(): string {
-  return `type MigrationSpec = { Resources: Record<string, any> };
-type MigrationResourceName<Spec extends MigrationSpec> = Extract<keyof Spec["Resources"], string>;
-type MigrationResourceState<
-  Spec extends MigrationSpec,
-  Resource extends MigrationResourceName<Spec>,
-> = Spec["Resources"][Resource] extends { State: infer State } ? State : never;
-type MigrationResourceEvents<
-  Spec extends MigrationSpec,
-  Resource extends MigrationResourceName<Spec>,
-> = Spec["Resources"][Resource] extends { Events: infer Events extends Record<string, any> }
-  ? Events
-  : Record<string, never>;
-export type ResourceState<
-  Spec extends MigrationSpec,
-  Resource extends MigrationResourceName<Spec>,
-> = MigrationResourceState<Spec, Resource>;
-export type ResourceEventName<
-  Spec extends MigrationSpec,
-  Resource extends MigrationResourceName<Spec>,
-> = Extract<keyof MigrationResourceEvents<Spec, Resource>, string>;
-export type ResourceEventPayload<
-  Spec extends MigrationSpec,
-  Resource extends MigrationResourceName<Spec>,
-  Event extends ResourceEventName<Spec, Resource>,
-> = MigrationResourceEvents<Spec, Resource>[Event];
-export type MigratedEvent<
-  Spec extends MigrationSpec,
-  Resource extends MigrationResourceName<Spec>,
-> = {
-  [Event in ResourceEventName<Spec, Resource>]: {
-    name: Event;
-    payload: ResourceEventPayload<Spec, Resource, Event>;
-  };
-}[ResourceEventName<Spec, Resource>];
-export type Migration<From extends MigrationSpec, To extends MigrationSpec> = {
-  readonly draft?: false;
-  readonly from: string;
-  readonly to: string;
-  readonly migrate: {
-    [Resource in Extract<MigrationResourceName<From>, MigrationResourceName<To>>]?: {
-      state?: (state: ResourceState<From, Resource>) => ResourceState<To, Resource>;
-      event?: <Event extends ResourceEventName<From, Resource>>(
-        name: Event,
-        payload: ResourceEventPayload<From, Resource, Event>,
-      ) => MigratedEvent<To, Resource>;
-    };
-  };
-};`;
-}
-
-function environmentDefinitionTypes(surface: AppSurface): string {
-  const helpers = `type DependencyProvider<Value> = Value | (() => Value | Promise<Value>);
-export type DependencyProviderSet<Value> = {
-  production: DependencyProvider<Value>;
-  mock?: DependencyProvider<Value>;
-} & Record<string, DependencyProvider<Value> | undefined>;
-export type DependencyEntry<Value> = DependencyProviderSet<Value> | DependencyProvider<Value>;
-export type DependencyConfig<Deps> = {
-  mode?: string | (() => string | Promise<string>);
-  deps?: {
-    [Name in keyof Deps]: DependencyEntry<Deps[Name]>;
-  };
-} & {
-  [Name in keyof Deps]?: DependencyEntry<Deps[Name]>;
-};
-export type DependencyMount<Deps> = (() => Deps | Promise<Deps>) | Deps | DependencyConfig<Deps>;`;
-  if (surface.environments.length === 0)
-    return `${helpers}
-export type DependencyMounts = EmptyObject;`;
-  const aliases = surface.environments
-    .map((env) => `export type ${pascalIdentifier(env.name)}Deps = ${environmentDepsType(env)};`)
-    .join("\n");
-  const appDependencies =
-    surface.environments.length === 1
-      ? `export type AppDependencies = ${pascalIdentifier(surface.environments[0]!.name)}Deps;
-export type DependencyDefinition = DependencyConfig<AppDependencies>;`
-      : "";
-  return `${helpers}
-${aliases}
-${appDependencies}
-export type DependencyMounts = {
-${surface.environments
-  .map((env) => `  ${propertyKey(env.name)}?: DependencyMount<${pascalIdentifier(env.name)}Deps>;`)
-  .join("\n")}
-};`;
-}
-
-function environmentDepsType(env: AppSurfaceEnvironment): string {
-  return env.depsType;
-}
-
-function styleDefinitionTypes(surface: AppSurface): string {
-  if (surface.stylePresets.some((preset) => !preset.visual)) {
-    throw new Error("Only v2 visual presets are supported in App.Styles.");
-  }
-  return `export type StyleDefinition = {
-  defaultPreset?: AppPreset;
-  presets: { [Preset in AppPreset]: VisualPreset<AppSpec, Preset> };
-};`;
-}
-
-function navigationDefinitionField(surface: AppSurface): string {
-  if (surface.navigation.length === 0) return "";
-  return `  navigation?: {\n${surface.navigation
-    .map((screen) => `    ${propertyKey(screen.name)}: string;`)
-    .join("\n")}\n  };\n`;
-}
-
-function depsDefinitionField(surface: AppSurface): string {
-  if (surface.environments.length === 0) return "";
-  return `  deps?: {\n${surface.environments
-    .map(
-      (env) => `    ${propertyKey(env.name)}?: DependencyMount<${pascalIdentifier(env.name)}Deps>;`,
-    )
-    .join("\n")}\n  };\n`;
-}
-
-function programsDefinitionField(surface: AppSurface): string {
-  if (surface.environments.length === 0) return "";
-  return `  programs?: {\n${surface.environments
-    .map(
-      (env) =>
-        `    ${propertyKey(env.name)}?: (ctx: ${pascalIdentifier(env.name)}ProgramContext, deps: ${pascalIdentifier(env.name)}Deps) => void | Promise<void>;`,
-    )
-    .join("\n")}\n  };\n`;
-}
-
-function componentsDefinitionField(surface: AppSurface): string {
-  const components = Object.values(surface.components);
-  if (components.length === 0) return "";
-  return `  components?: {\n${components
-    .map(
-      (component) =>
-        `    ${propertyKey(component.name)}?:
-      | ((ctx: ${pascalIdentifier(component.name)}ControllerContext) => ${pascalIdentifier(component.name)}ControllerResult)
-      | ${pascalIdentifier(component.name)}Definition;`,
-    )
-    .join("\n")}\n  };\n`;
-}
-
-function resourceDefinitionTypes(resource: AppSurfaceResource): string {
-  const typeName = pascalIdentifier(resource.name);
-  const eventFields = resource.events.map(
-    (event) =>
-      `    ${propertyKey(event)}(args: ${typeName}EventArgs<${JSON.stringify(event)}>): void;`,
-  );
-  const viewFields = resource.views.map(
-    (view) =>
-      `    ${propertyKey(view)}(args: ${typeName}ViewArgs): ${typeName}ResourceViews[${JSON.stringify(view)}];`,
-  );
-  const commandFields = resource.commands.map((command) => {
-    const commandName = JSON.stringify(command.name);
-    return `    ${propertyKey(command.name)}(
-      ctx: ${typeName}CommandContext<${commandName}>,
-      ...args: CommandArgs<${typeName}ResourceCommands[${commandName}]>
-    ): void;`;
-  });
-  const eventMap = resource.commands
-    .filter((command) => command.eventName)
-    .map((command) => `  ${propertyKey(command.name)}: ${JSON.stringify(command.eventName)};`)
-    .join("\n");
-  const commandEvents = eventMap
-    ? `type ${typeName}CommandEvents = {
-${eventMap}
-};`
-    : `type ${typeName}CommandEvents = {};`;
-  const eventsDefinition = eventFields.length
-    ? `events: {
-${eventFields.join("\n")}
-  };`
-    : "events: {};";
-  return `type ${typeName}ResourceEvents = ${typeName}ResourceSpec["Events"];
-type ${typeName}ResourcePresence = ResourcePresence<${typeName}ResourceSpec>;
-type ${typeName}EventArgs<Event extends keyof ${typeName}ResourceEvents> = {
-  readonly state: ${typeName}ResourceSpec["State"];
-  readonly payload: ${typeName}ResourceEvents[Event];
-  readonly actor: AppActor;
-  readonly at: number;
-  readonly seq: number;
-};
-type ${typeName}ViewArgs = {
-  readonly state: ${typeName}ResourceSpec["State"];
-  readonly actor: AppActor | null;
-  readonly sessions: SessionData<AppActor, ${typeName}ResourcePresence>[];
-  readonly key: ${typeName}ResourceKey;
-};
-${commandEvents}
-type ${typeName}CommandEvent<Command extends keyof ${typeName}ResourceCommands> =
-  Command extends keyof ${typeName}CommandEvents
-    ? ${typeName}CommandEvents[Command] extends keyof ${typeName}ResourceEvents
-      ? {
-          [Event in ${typeName}CommandEvents[Command]]: (payload: ${typeName}ResourceEvents[Event]) => void;
-        }
-      : EmptyObject
-    : EmptyObject;
-type ${typeName}CommandContext<Command extends keyof ${typeName}ResourceCommands> = {
-  readonly state: ${typeName}ResourceSpec["State"];
-  readonly actor: AppActor;
-  readonly key: ${typeName}ResourceKey;
-  event: ${typeName}CommandEvent<Command>;
-  setPresence(patch: Partial<${typeName}ResourcePresence>): void;
-  error: CommandErrorFn<${typeName}ResourceCommands[Command]>;
-  id(): string;
-  now(): number;
-};
-type ${typeName}ResourceDefinition = {
-  state: ${typeName}ResourceSpec["State"];
-  presence?: ${typeName}ResourcePresence;
-  ${eventsDefinition}
-  views?: {
-${viewFields.join("\n")}
-  };
-  commands?: {
-${commandFields.join("\n")}
-  };
-};`;
-}
-
-function programDefinitionTypes(surface: AppSurface): string {
-  if (surface.environments.length === 0) return "";
-  const resourceProgramTypes = surface.resources.map(programResourceType).join("\n\n");
-  const eventItems = surface.resources.flatMap((resource) =>
-    resource.events.map((event) => programEventItemType(surface, resource, event)),
-  );
-  const contexts = surface.environments
-    .map((env) => {
-      const eventOverloads = eventItems.length
-        ? eventItems
-            .map(
-              (item) =>
-                `  events(
-    name: ${JSON.stringify(item.name)},
-    options: { id: string; signal?: AbortSignal },
-  ): AsyncIterable<${item.typeName}>;`,
-            )
-            .join("\n")
-        : "  events(name: never, options: { id: string; signal?: AbortSignal }): AsyncIterable<never>;";
-      return `type ${pascalIdentifier(env.name)}ProgramContext = {
-  readonly signal: AbortSignal;
-${eventOverloads}
-${surface.resources.map((resource) => `  use${capitalize(resource.name)}(key: ${pascalIdentifier(resource.name)}ResourceKey): ${pascalIdentifier(resource.name)}ProgramResource;`).join("\n")}
-};`;
-    })
-    .join("\n\n");
-  return `${resourceProgramTypes}
-
-${eventItems.map((item) => item.definition).join("\n\n")}
-
-${contexts}`;
-}
-
-function programResourceType(resource: AppSurfaceResource): string {
-  const typeName = pascalIdentifier(resource.name);
-  const viewFields = resource.views.map(
-    (view) => `  readonly ${propertyKey(view)}: ${typeName}ResourceViews[${JSON.stringify(view)}];`,
-  );
-  const commandFields = resource.commands.map((command) => {
-    const commandName = JSON.stringify(command.name);
-    const commandType = `${typeName}ResourceCommands[${commandName}]`;
-    const args = command.hasArgs ? `${commandType}["args"]` : "[]";
-    const error = command.hasError ? `${commandType}["error"]` : "never";
-    return `  ${propertyKey(command.name)}(
-    ...args: ${args}
-  ): CommandReceipt<${error}>;`;
-  });
-  return `type ${typeName}ProgramResource = {
-${[...viewFields, ...commandFields, `  readonly view: ${typeName}ResourceViews;`].join("\n")}
-};`;
-}
-
-function programEventItemType(
-  surface: AppSurface,
-  resource: AppSurfaceResource,
-  event: string,
-): { name: string; typeName: string; definition: string } {
-  const typeName = `${pascalIdentifier(resource.name)}${pascalIdentifier(event)}ProgramEventItem`;
-  const eventName = `${resource.name}.${event}`;
-  const resourceType = pascalIdentifier(resource.name);
-  const resourceFields = surface.resources.map((current) =>
-    current.name === resource.name
-      ? `  readonly ${propertyKey(current.name)}: ${pascalIdentifier(current.name)}ProgramResource;`
-      : "",
-  );
-  return {
-    name: eventName,
-    typeName,
-    definition: `type ${typeName} = {
-  readonly event: {
-    readonly id: string;
-    readonly seq: number;
-    readonly at: number;
-    readonly version: number;
-    readonly actor: AppActor;
-    readonly resource: ${JSON.stringify(resource.name)};
-    readonly key: ${resourceType}ResourceKey;
-    readonly name: ${JSON.stringify(event)};
-    readonly payload: ${resourceType}ResourceEvents[${JSON.stringify(event)}];
-  };
-  readonly resource: ${JSON.stringify(resource.name)};
-  readonly key: ${resourceType}ResourceKey;
-  readonly view: ${resourceType}ResourceViews;
-${resourceFields.filter(Boolean).join("\n")}
-};`,
-  };
-}
-
-function componentDefinitionTypes(component: AppSurfaceComponent): string {
-  const typeName = pascalIdentifier(component.name);
-  const partFields = Object.entries(component.parts).map(
-    ([partName, elementName]) =>
-      `  ${propertyKey(partName)}?: Partial<${partPropsType(elementName)}>;`,
-  );
-  const stateField = component.hasState
-    ? `  state: ${typeName}State | ((ctx: ${typeName}StateContext) => ${typeName}State);`
-    : `  state?: ${typeName}State | ((ctx: ${typeName}StateContext) => ${typeName}State);`;
-  const derivedField = component.hasDerived
-    ? `  derived: ${typeName}DerivedFactory;`
-    : `  derived?: ${typeName}DerivedFactory;`;
-  const actionsField = component.hasActions
-    ? `  actions: ${typeName}ActionFactory;`
-    : `  actions?: ${typeName}ActionFactory;`;
-  return `type ${typeName}ControllerContext = ${typeName}Context & {
-  readonly actions: ${typeName}ActionHandlers;
-};
-type ${typeName}ControllerResult = {
-  values?: Partial<${typeName}StyleValues>;
-} & Partial<{
-${partFields.join("\n")}
-}>;
-type ${typeName}StateContext = {
-  readonly input: ${typeName}Input;
-  readonly variants: ${typeName}Variants;
-};
-type ${typeName}Definition = {
-${stateField}
-${derivedField}
-${actionsField}
-  bind?(ctx: ${typeName}ControllerContext): ${typeName}ControllerResult;
-  setup?(ctx: ${typeName}ControllerContext): void | (() => void);
-};`;
-}
-
-function appPartPropsPrelude(): string {
-  return `type PartValue<T> = T | null | undefined;
-type PartEvent<T extends EventTarget, E extends Event> = {
-  bivarianceHack(event: E & { readonly currentTarget: T }): void;
-}["bivarianceHack"];
-type PartDataAttributes = {
-  [Key in \`data-\${string}\`]?: PartValue<string | number | boolean>;
-};
-type PartAriaAttributes = {
-  [Key in \`aria-\${string}\`]?: PartValue<string | number | boolean>;
-};
-type PartPopoverValue = "auto" | "hint" | "manual" | boolean;
-type PartPopoverTargetAction = "hide" | "show" | "toggle";
-type PartPopoverToggleEvent = Event & {
-  readonly newState: "closed" | "open";
-  readonly oldState: "closed" | "open";
-};
-type PartPopoverTargetProps = {
-  popovertarget?: PartValue<string>;
-  popovertargetaction?: PartValue<PartPopoverTargetAction>;
-  popoverTarget?: PartValue<string>;
-  popoverTargetAction?: PartValue<PartPopoverTargetAction>;
-};
-type PartCommonProps<T extends Element> = PartDataAttributes &
-  PartAriaAttributes & {
-    id?: PartValue<string>;
-    hidden?: PartValue<boolean | "hidden" | "until-found">;
-    popover?: PartValue<PartPopoverValue>;
-    role?: PartValue<string>;
-    tabIndex?: PartValue<number>;
-    tabindex?: PartValue<number>;
-    title?: PartValue<string>;
-    children?: Child;
-    ref?: (element: T) => void;
-    onBeforeToggle?: PartEvent<T, PartPopoverToggleEvent>;
-    onBlur?: PartEvent<T, FocusEvent>;
-    onCancel?: PartEvent<T, Event>;
-    onChange?: PartEvent<T, Event>;
-    onClick?: PartEvent<T, MouseEvent>;
-    onClose?: PartEvent<T, Event>;
-    onFocus?: PartEvent<T, FocusEvent>;
-    onInput?: PartEvent<T, InputEvent>;
-    onKeyDown?: PartEvent<T, KeyboardEvent>;
-    onKeyUp?: PartEvent<T, KeyboardEvent>;
-    onMouseDown?: PartEvent<T, MouseEvent>;
-    onMouseUp?: PartEvent<T, MouseEvent>;
-    onGotPointerCapture?: PartEvent<T, PointerEvent>;
-    onLostPointerCapture?: PartEvent<T, PointerEvent>;
-    onPointerCancel?: PartEvent<T, PointerEvent>;
-    onPointerDown?: PartEvent<T, PointerEvent>;
-    onPointerEnter?: PartEvent<T, PointerEvent>;
-    onPointerLeave?: PartEvent<T, PointerEvent>;
-    onPointerMove?: PartEvent<T, PointerEvent>;
-    onPointerOut?: PartEvent<T, PointerEvent>;
-    onPointerOver?: PartEvent<T, PointerEvent>;
-    onPointerUp?: PartEvent<T, PointerEvent>;
-    onSubmit?: PartEvent<T, SubmitEvent>;
-    onToggle?: PartEvent<T, PartPopoverToggleEvent>;
-  };
-type PartHtmlProps = PartCommonProps<HTMLElement>;
-type PartDialogProps = PartCommonProps<HTMLDialogElement> & {
-  dialogOpen?: PartValue<boolean>;
-};
-type PartButtonProps = PartCommonProps<HTMLButtonElement> & PartPopoverTargetProps & {
-  disabled?: PartValue<boolean>;
-  name?: PartValue<string>;
-  type?: PartValue<"button" | "submit" | "reset">;
-  value?: PartValue<string | number>;
-};
-type PartInputProps = PartCommonProps<HTMLInputElement> & PartPopoverTargetProps & {
-  checked?: PartValue<boolean>;
-  disabled?: PartValue<boolean>;
-  max?: PartValue<number>;
-  min?: PartValue<number>;
-  name?: PartValue<string>;
-  placeholder?: PartValue<string>;
-  step?: PartValue<number>;
-  type?: PartValue<string>;
-  value?: PartValue<string | number | readonly string[]>;
-};
-type PartTextareaProps = PartCommonProps<HTMLTextAreaElement> & {
-  disabled?: PartValue<boolean>;
-  name?: PartValue<string>;
-  placeholder?: PartValue<string>;
-  rows?: PartValue<number>;
-  value?: PartValue<string | number>;
-};
-type PartSelectProps = PartCommonProps<HTMLSelectElement> & {
-  disabled?: PartValue<boolean>;
-  multiple?: PartValue<boolean>;
-  name?: PartValue<string>;
-  value?: PartValue<string | number | readonly string[]>;
-};
-type PartAnchorProps = PartCommonProps<HTMLAnchorElement> & {
-  href?: PartValue<string>;
-  rel?: PartValue<string>;
-  target?: PartValue<string>;
-};
-type PartImageProps = PartCommonProps<HTMLImageElement> & {
-  alt?: PartValue<string>;
-  height?: PartValue<string | number>;
-  loading?: PartValue<"eager" | "lazy">;
-  src?: PartValue<string>;
-  width?: PartValue<string | number>;
-};
-type PartFormProps = PartCommonProps<HTMLFormElement> & {
-  action?: PartValue<string>;
-  method?: PartValue<"dialog" | "get" | "post">;
-};
-type PartSvgProps = PartCommonProps<SVGElement> & {
-  d?: PartValue<string>;
-  fill?: PartValue<string>;
-  height?: PartValue<string | number>;
-  stroke?: PartValue<string>;
-  strokeWidth?: PartValue<string | number>;
-  viewBox?: PartValue<string>;
-  width?: PartValue<string | number>;
-};`;
-}
-
-function partPropsType(elementName: string): string {
-  switch (elementName) {
-    case "dialog":
-      return "PartDialogProps";
-    case "button":
-      return "PartButtonProps";
-    case "input":
-      return "PartInputProps";
-    case "textarea":
-      return "PartTextareaProps";
-    case "select":
-      return "PartSelectProps";
-    case "a":
-      return "PartAnchorProps";
-    case "img":
-      return "PartImageProps";
-    case "form":
-      return "PartFormProps";
-    case "svg":
-    case "path":
-    case "circle":
-    case "rect":
-    case "line":
-    case "polyline":
-    case "polygon":
-    case "g":
-      return "PartSvgProps";
-    default:
-      return "PartHtmlProps";
-  }
-}
-
-function propertyKey(name: string): string {
-  return /^[A-Za-z_$][\w$]*$/.test(name) ? name : JSON.stringify(name);
-}
-
-async function writeGeneratedTypeArtifacts(paths: AppPaths): Promise<string | undefined> {
-  return writePoggersAppTypes(paths);
-}
-
-async function writePoggersAppTypes(paths: AppPaths): Promise<string | undefined> {
-  if (!paths.types) return undefined;
-
-  const surface = collectAppSurface(paths);
-  const output = resolve(paths.appDir, ".poggers/types/app.d.ts");
-  const typesDir = dirname(output);
-  const appSpecImport = importSpecifier(output, paths.types);
-  await mkdir(typesDir, { recursive: true });
-  const resourceExports = surface.resources.map(resourceTypeDefinitions).join("\n\n");
-  const navigationExports = navigationTypes(surface);
-  const componentExports = Object.values(surface.components)
-    .map(componentTypeDefinitions)
-    .join("\n\n");
-  const appDefinition = appDefinitionTypes(surface);
-  const styleDefinition = styleDefinitionTypes(surface);
-  const appSchemaHash = structuralHash(readFileSync(paths.types, "utf8"));
-  const appPreset = surface.presetType ?? '"default"';
-  const appThemeName = styleThemeNameType(surface);
-  const componentStyleValueTypes = Object.values(surface.components).some(
-    (component) => component.styleValues.length > 0,
-  )
-    ? `type ComponentStyleValueKind =
-  | "number"
-  | "progress"
-  | "opacity"
-  | "ratio"
-  | "zIndex"
-  | "length"
-  | "space"
-  | "size"
-  | "radius";
-type ComponentStyleValueFor<Kind extends string> = Kind extends
-  | "number"
-  | "progress"
-  | "opacity"
-  | "ratio"
-  | "zIndex"
-  ? number
-  : Kind extends "length" | "space" | "size" | "radius"
-    ? number
-    : never;
-type ComponentStyleValues<Values extends Record<string, string>> = {
-  readonly [Value in keyof Values]: ComponentStyleValueFor<Values[Value] & string>;
-};`
-    : "";
-  await writeFile(
-    output,
-    `import type { Preset as VisualPreset } from "@poggers/kit/style";
-import type { App as AppSpec } from ${JSON.stringify(appSpecImport)};
-
-export const appSchemaHash: ${JSON.stringify(appSchemaHash)};
-
-type EmptyObject = Record<never, never>;
-type Signal<T> = {
-  (): T;
-  (value: T): void;
-};
-type Child = Node | string | number | boolean | null | undefined | Child[] | (() => Child);
-${componentStyleValueTypes}
-type CommandReceipt<E = never> = Promise<
-  { ok: true; cursor?: number } | { ok: false; error: E; data?: unknown }
->;
-type SyncMeta = {
-  cursor: number;
-  syncing: boolean;
-  stale: boolean;
-  error: string | null;
-};
-type AppPreset = ${appPreset};
-export type StartConnect = unknown;
-type RootProps = { connect?: StartConnect };
-type AppThemeName = ${appThemeName};
-${appPartPropsPrelude()}
-
-${navigationExports}
-
-${resourceExports}
-
-${componentExports}
-
-${appDefinition}
-
-${styleDefinition}
-
-export const nav: AppNavigation;
-
-export function useScreen(): AppScreen;
-
-export function usePreset(): AppPreset;
-
-export function setPreset(preset: AppPreset): void;
-
-export function useThemeName(): AppThemeName;
-
-export function setTheme(theme: AppThemeName): void;
-
-export function initialize(): Promise<void>;
-
-export function start(connect?: StartConnect): void;
-
-export function Root(props?: RootProps): Child;
-
-export default Root;
-`,
-    "utf8",
-  );
-  return output;
 }
 
 async function appendStyleFilesToBuildOutput(
@@ -3137,66 +1543,6 @@ async function appendStyleFilesToBuildOutput(
 
   await mkdir(dirname(fallbackOutput), { recursive: true });
   await writeFile(fallbackOutput, extraCss, "utf8");
-}
-
-function collectForbiddenAppStyling(file: string, source: string, issues: AppConventionIssue[]) {
-  if (/\bclassName\s*=|\bclass\s*=/.test(source)) {
-    issues.push({
-      file,
-      message: "app.ts must not use class/className; define visual rules in presets.",
-    });
-  }
-  if (/\bstyle\s*=/.test(source)) {
-    issues.push({
-      file,
-      message: "app.ts must not use inline style; define visual rules in presets.",
-    });
-  }
-}
-
-function collectForbiddenUiStyling(file: string, source: string, issues: AppConventionIssue[]) {
-  if (/\bclassName\s*=|\bclass\s*=/.test(source)) {
-    issues.push({
-      file,
-      message: "ui files must not use class/className; render generated component parts.",
-    });
-  }
-  if (/\bstyle\s*=/.test(source)) {
-    issues.push({
-      file,
-      message: "ui files must not use inline style; define visual rules in presets.",
-    });
-  }
-}
-
-function collectUiFileConventions(uiDir: string, file: string, issues: AppConventionIssue[]) {
-  const name = basename(file).replace(/\.[cm]?tsx?$/, "");
-  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name)) {
-    issues.push({ file, message: "ui file names must be kebab-case." });
-  }
-
-  const uiPath = relative(uiDir, file);
-  if (uiPath.includes("/") || uiPath.includes("\\")) {
-    issues.push({
-      file,
-      message: "ui files must live directly in src/ui; do not nest ui folders.",
-    });
-  }
-}
-
-function sourceFiles(dir: string): string[] {
-  if (!existsSync(dir)) return [];
-  const files: string[] = [];
-  for (const entry of readdirSync(dir)) {
-    const path = resolve(dir, entry);
-    const info = statSync(path);
-    if (info.isDirectory()) {
-      files.push(...sourceFiles(path));
-      continue;
-    }
-    if (/\.[cm]?tsx?$/.test(path)) files.push(path);
-  }
-  return files;
 }
 
 function serverEntrypointSource(
@@ -3242,7 +1588,7 @@ const workerConfig = worker
     : "const migrationRegistry = { hash: undefined, migrations: [] };\n";
 
   return `import * as apiModule from ${JSON.stringify(importSpecifier(serverEntrypoint, appEntrypoint))};
-import { defineApp } from "@poggers/kit";
+import { defineApp } from "@poggers/kit/internal/app";
 import { installAppMigrations, resolveDependencyMount, serveApp } from "@poggers/kit/app";
 ${workerImport}${depsImport}${migrationImport}${workerSetup}${depsSetup}
 const apiExports = apiModule as Record<string, any>;
@@ -3273,7 +1619,7 @@ const programConfig = program && programEnv
 
 const handle = serveApp({
   api,
-  ui: new URL(${JSON.stringify(importSpecifier(serverEntrypoint, browserEntry))}, import.meta.url),
+  entrypoint: new URL(${JSON.stringify(importSpecifier(serverEntrypoint, browserEntry))}, import.meta.url),
   title: ${title === undefined ? "undefined" : JSON.stringify(title)},
   bundle: ${JSON.stringify(browserBundle)},
   styleBundle: ${JSON.stringify(browserStyle)},
@@ -3354,10 +1700,4 @@ function titleFromDir(appDir: string): string {
 
 function capitalize(value: string): string {
   return value.length === 0 ? value : value[0]!.toUpperCase() + value.slice(1);
-}
-
-function pascalIdentifier(value: string): string {
-  const parts = value.match(/[A-Za-z0-9]+/g) ?? ["Value"];
-  const name = parts.map(capitalize).join("");
-  return /^[A-Za-z_$]/.test(name) ? name : `Value${name}`;
 }

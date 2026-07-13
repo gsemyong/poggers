@@ -7,7 +7,6 @@ import {
   resolveApp,
   runApp,
   validateAppStyles,
-  writeAppTypes,
   writeMigrationSnapshot,
 } from "./runtime";
 import { existsSync } from "node:fs";
@@ -61,8 +60,9 @@ async function main(argv = Bun.argv.slice(2)) {
     return;
   }
 
-  if (parsed.command === "sync") {
-    await writeAppTypes(parsed.appDir);
+  if (parsed.command === "lsp") {
+    const code = await runLsp(parsed.appDir);
+    if (code !== 0) process.exitCode = code;
     return;
   }
 
@@ -139,7 +139,7 @@ async function main(argv = Bun.argv.slice(2)) {
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
-  const commands = new Set(["dev", "bundle", "build", "sync", "typecheck", "check", "migrations"]);
+  const commands = new Set(["dev", "bundle", "build", "lsp", "typecheck", "check", "migrations"]);
   const first = argv[0];
   const command = first && commands.has(first) ? first : "dev";
   if (command === "migrations") {
@@ -207,17 +207,35 @@ function readString(value: string | true | undefined): string | undefined {
 }
 
 async function typecheckApp(appDir: string): Promise<number> {
-  try {
-    await writeAppTypes(appDir);
-  } catch (error) {
-    console.error(error instanceof Error ? error.message : String(error));
+  const issues = checkAppConventions(appDir);
+  if (issues.length > 0) {
+    for (const issue of issues) console.error(`${issue.file}: ${issue.message}`);
     return 1;
   }
-
   const appCode = await runTsc(appDir, ["--noEmit"]);
   if (appCode !== 0) return appCode;
 
   return typecheckMigrations(appDir);
+}
+
+async function runLsp(appDir: string): Promise<number> {
+  const paths = resolveApp(appDir);
+  const server = Bun.spawn([resolveBin(paths.appDir, "tsc"), "--lsp", "--stdio"], {
+    cwd: paths.appDir,
+    stdin: "inherit",
+    stdout: "inherit",
+    stderr: "inherit",
+  });
+  const stop = () => server.kill();
+  process.on("SIGINT", stop);
+  process.on("SIGTERM", stop);
+
+  try {
+    return await server.exited;
+  } finally {
+    process.off("SIGINT", stop);
+    process.off("SIGTERM", stop);
+  }
 }
 
 async function typecheckMigrations(appDir: string): Promise<number> {
@@ -250,12 +268,10 @@ async function typecheckMigrations(appDir: string): Promise<number> {
           noUncheckedIndexedAccess: true,
           noImplicitOverride: true,
           paths: {
-            "@poggers/app": [resolve(paths.appDir, ".poggers/types/app.d.ts")],
-            app: [resolve(paths.sourceDir, "app.ts")],
+            app: [resolve(paths.sourceDir, "app.tsx")],
             deps: [resolve(paths.sourceDir, "deps.ts")],
             types: [resolve(paths.sourceDir, "types.ts")],
             "src/*": [resolve(paths.sourceDir, "*")],
-            "ui/*": [resolve(paths.sourceDir, "ui/*")],
           },
         },
         files: migrationFiles,
@@ -306,7 +322,7 @@ function printUsage() {
   poggers dev <app-dir> [--port 3000] [--title "My App"]
   poggers bundle <app-dir> [--outdir .poggers/build/web] [--minify false]
   poggers build <app-dir> --outfile dist/my-app [--title "My App"]
-  poggers sync <app-dir>
+  poggers lsp <app-dir>
   poggers typecheck <app-dir>
   poggers migrations snapshot <app-dir>
   poggers migrations create <name> <app-dir>

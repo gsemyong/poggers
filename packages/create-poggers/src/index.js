@@ -74,12 +74,10 @@ function files({ appName, kitVersion }) {
         private: true,
         type: "module",
         scripts: {
-          postinstall: "poggers sync",
           dev: "poggers dev",
           build: "poggers build --outfile dist/app",
           start: "./dist/app",
           lint: "poggers check",
-          check: "bun run typecheck && bun run lint",
           typecheck: "poggers typecheck",
         },
         dependencies: { "@poggers/kit": kitVersion },
@@ -90,7 +88,9 @@ function files({ appName, kitVersion }) {
     )}\n`,
     "tsconfig.json": `${JSON.stringify({ extends: "@poggers/kit/tsconfig" }, null, 2)}\n`,
     ".gitignore": `node_modules\n.poggers\ndist\n.DS_Store\n`,
-    "src/types.ts": `export type CounterState = { count: number };
+    "src/types.ts": `import type { Child } from "@poggers/kit/ui";
+
+export type CounterState = { count: number };
 
 export type CounterEvents = {
   incremented: { by: number };
@@ -125,14 +125,16 @@ export type App = {
       Parts: { Root: "header"; Eyebrow: "p"; Title: "h1"; Summary: "p" };
     };
     Button: {
-      Input: { label: string; disabled: boolean; activate(): void };
-      Variants: { tone: "neutral" | "primary" };
-      Actions: { activate(): void };
+      Input: { label: string; disabled: boolean; tone: "neutral" | "primary"; activate(): void };
+      Values: { tone: "neutral" | "primary" };
+      States: "active";
+      Events: { activate(): void };
       Parts: { Root: "button"; Label: "span" };
     };
     CounterPanel: {
       Input: { value: string };
-      Derived: { value: string };
+      Values: { value: string };
+      Slots: { actions: Child };
       Parts: { Root: "section"; Copy: "div"; Meta: "p"; Value: "h2"; Actions: "div" };
     };
   };
@@ -142,23 +144,22 @@ export type App = {
         Tokens: {
           color: "canvas" | "panel" | "panelMuted" | "text" | "muted" | "border" | "accent" | "onAccent" | "focus";
           space: "sm" | "md" | "lg" | "xl";
-          size: "content";
+          size: "compact" | "content";
           radius: "sm" | "md";
           shadow: "panel";
           font: "body";
-          motion: "quick" | "settle";
+          motion: "quick";
         };
         Themes: "default";
-        Containers: "compact";
       };
     };
   };
 };
 `,
-    "src/app.ts": `import type { AppDefinition } from "@poggers/app";
+    "src/app.tsx": `import type { AppDef as AppDefinition } from "@poggers/kit";
+import { createPress } from "@poggers/kit/web";
 import { systemPreset } from "src/presets";
-import type { App } from "types";
-import { Root } from "ui/root";
+import type { App } from "src/types";
 
 export default {
   version: 1,
@@ -185,35 +186,74 @@ export default {
     },
   },
   components: {
-    Button: {
-      actions({ input }) {
-        return { activate: input.activate };
+    AppShell: {
+      render({ components: { Header, CounterPanel, Button }, resources, parts: { Root, Content } }) {
+        const counter = resources.counter({ id: "main" });
+        return (
+          <Root>
+            <Content>
+              <Header />
+              <CounterPanel value={String(counter.count)} actions={<>
+                <Button label="Reset" disabled={false} tone="neutral" activate={() => { void counter.reset(); }} />
+                <Button label="Add one" disabled={false} tone="primary" activate={() => { void counter.increment(); }} />
+              </>} />
+            </Content>
+          </Root>
+        );
       },
-      bind({ input, actions }) {
-        return {
-          Root: { type: "button", disabled: input.disabled, onClick: actions.activate },
-          Label: { children: input.label },
-        };
+    },
+    Header: {
+      render({ parts: { Root, Eyebrow, Title, Summary } }) {
+        return (
+          <Root>
+            <Eyebrow>Poggers app</Eyebrow>
+            <Title>${displayName}</Title>
+            <Summary>
+              Typed application behavior and a compiled visual preset, with no backend styling API
+              in application code.
+            </Summary>
+          </Root>
+        );
+      },
+    },
+    Button: {
+      derive({ input }) {
+        return { tone: input.tone };
+      },
+      initial: "active",
+      states: {
+          active: {
+            on: {
+              activate: { perform: ({ input }) => input.activate() },
+            },
+          },
+      },
+      render({ input, events, parts: { Root, Label } }) {
+        return <Root type="button" disabled={input.disabled} {...createPress(events.activate)}>
+          <Label>{input.label}</Label>
+        </Root>;
       },
     },
     CounterPanel: {
-      derived({ input }) {
-        return { get value() { return input.value; } };
+      derive({ input }) {
+        return { value: input.value };
       },
-      bind({ derived }) {
-        return { Value: { children: derived.value } };
+      render({ values, slots, parts: { Root, Copy, Meta, Value, Actions } }) {
+        return <Root>
+          <Copy><Meta>Counter</Meta><Value>{values.value}</Value></Copy>
+          <Actions>{slots.actions}</Actions>
+        </Root>;
       },
     },
   },
   styles: { defaultPreset: "system", presets: { system: systemPreset } },
-  root: Root,
+  root: "AppShell",
 } satisfies AppDefinition<App>;
 `,
-    "src/presets.ts": `import type { Preset } from "@poggers/kit/style";
-import type { App } from "types";
+    "src/presets.ts": `import type { Preset, PresetTokens } from "@poggers/kit/style";
+import type { App } from "src/types";
 
-export const systemPreset = {
-  tokens: {
+const theme = {
     color: {
       canvas: { l: 0.98, c: 0.004, h: 255 },
       panel: { l: 1, c: 0, h: 0 },
@@ -225,9 +265,15 @@ export const systemPreset = {
       onAccent: { l: 0.99, c: 0.002, h: 255 },
       focus: { l: 0.62, c: 0.14, h: 250 },
     },
-    space: { sm: 10, md: 16, lg: 24, xl: 36 },
-    size: { content: 720 },
-    radius: { sm: 8, md: 12 },
+    space: {
+      sm: { kind: "space", value: 10 }, md: { kind: "space", value: 16 },
+      lg: { kind: "space", value: 24 }, xl: { kind: "space", value: 36 },
+    },
+    size: {
+      compact: { kind: "size", value: 460 },
+      content: { kind: "size", value: 720 },
+    },
+    radius: { sm: { kind: "radius", value: 8 }, md: { kind: "radius", value: 12 } },
     shadow: {
       panel: { y: 24, blur: 80, spread: -36, color: { l: 0.2, c: 0.02, h: 255, alpha: 0.28 } },
     },
@@ -236,130 +282,107 @@ export const systemPreset = {
     },
     motion: {
       quick: { duration: 140, easing: "decelerate" },
-      settle: { spring: { duration: 420, bounce: 0.04 } },
     },
-  },
-  themes: { default: {} },
-  containers: { compact: { inlineBelow: 460 } },
-  components: ({ tokens }) => ({
-    AppShell: () => ({
-      Root: {
-        layout: { kind: "grid", align: "center", distribute: "center" },
-        frame: { inline: "fill", block: { min: { viewport: { axis: "block", percent: 1 } } } },
-        padding: { block: tokens.space.xl, inline: tokens.space.lg },
-        surface: { fill: tokens.color.canvas, text: tokens.color.text },
-        text: { font: tokens.font.body },
-      },
-      Content: {
-        layout: { kind: "stack", gap: tokens.space.lg },
-        frame: { inline: { max: tokens.size.content } },
-        motion: {
-          enter: {
-            from: { effect: { opacity: 0 }, transform: { block: 8 } },
-            using: tokens.motion.settle,
+} satisfies PresetTokens<App, "system">;
+
+export const systemPreset = (({ tokens, createRecipe }) => {
+  const buttonTone = createRecipe({
+    variants: {
+      tone: {
+        neutral: {},
+        primary: {
+          paint: {
+            fill: tokens.color.accent,
+            stroke: { color: tokens.color.accent },
           },
+          typography: { color: tokens.color.onAccent },
         },
       },
-    }),
-    Header: () => ({
-      Root: { layout: { kind: "stack", gap: tokens.space.sm } },
+    },
+  });
+
+  return { theme, components: {
+    AppShell() {
+      return { Root: {
+        layout: {
+          grid: {
+            columns: [{ minmax: [0, tokens.size.content] }],
+            align: "center",
+            distribute: "center",
+          },
+          size: { inline: "fill", block: { min: { viewport: { axis: "block", percent: 1 } } } },
+          padding: { block: tokens.space.xl, inline: tokens.space.lg },
+        },
+        paint: { fill: tokens.color.canvas },
+        typography: { color: tokens.color.text, font: tokens.font.body },
+      },
+      Content: {
+        layout: { flow: { axis: "block", gap: tokens.space.lg }, size: { inline: "fill" } },
+      } };
+    },
+    Header() {
+      return { Root: { layout: { flow: { axis: "block", gap: tokens.space.sm } } },
       Eyebrow: {
-        margin: 0,
-        surface: { text: tokens.color.muted },
-        text: { size: 12, weight: 700, line: 1, transform: "uppercase" },
+        layout: { margin: 0 },
+        typography: { color: tokens.color.muted, size: 12, weight: 700, line: 1, transform: "uppercase" },
       },
-      Title: { margin: 0, text: { size: 32, weight: 720, line: 1.05 } },
+      Title: { layout: { margin: 0 }, typography: { size: 32, weight: 720, line: 1.05 } },
       Summary: {
-        frame: { inline: { max: 520 } },
-        margin: 0,
-        surface: { text: tokens.color.muted },
-        text: { size: 15, line: 1.5, wrap: "pretty" },
-      },
-    }),
-    Button: () => ({
-      Root: {
-        layout: { kind: "row", align: "center", distribute: "center" },
-        frame: { block: 42 },
-        padding: { inline: tokens.space.md },
-        surface: { fill: tokens.color.panelMuted, text: tokens.color.text },
-        stroke: { width: 1, line: "solid", color: tokens.color.border },
-        shape: { radius: tokens.radius.sm },
-        text: { size: 14, weight: 650, line: 1 },
-        interaction: {
+        layout: { size: { inline: { max: 520 } }, margin: 0 },
+        typography: { color: tokens.color.muted, size: 15, line: 1.5, wrap: "pretty" },
+      } };
+    },
+    Button({ values, interaction }) {
+      return { Root: [{
+        layout: {
+          flow: { axis: "inline", align: "center", distribute: "center" },
+          size: { block: 42 },
+          padding: { inline: tokens.space.md },
+        },
+        paint: {
+          fill: tokens.color.panelMuted,
+          stroke: { width: 1, line: "solid", color: tokens.color.border },
           cursor: "pointer",
           focusRing: { color: tokens.color.focus, width: 3, offset: 2 },
         },
-        when: [
-          { variant: { tone: "primary" }, apply: { surface: { fill: tokens.color.accent, text: tokens.color.onAccent }, stroke: { color: tokens.color.accent } } },
-          { native: "hover", apply: { effect: { opacity: 0.84 } } },
-          { native: "active", apply: { transform: { scale: 0.98 } } },
-          { native: "disabled", apply: { effect: { opacity: 0.5 }, interaction: { cursor: "default" } } },
-        ],
-        motion: { change: { effect: tokens.motion.quick, transform: tokens.motion.quick } },
+        shape: { radius: tokens.radius.sm },
+        typography: { color: tokens.color.text, size: 14, weight: 650, line: 1 },
+        motion: { transition: { opacity: tokens.motion.quick, transform: tokens.motion.quick } },
       },
-      Label: { text: { wrap: "nowrap" } },
-    }),
-    CounterPanel: () => ({
-      Root: {
-        layout: { kind: "grid", columns: [{ minmax: [0, { fraction: 1 }] }, "content"], align: "center" },
-        padding: tokens.space.lg,
-        surface: { fill: tokens.color.panel },
-        stroke: { width: 1, line: "solid", color: tokens.color.border },
+      buttonTone({ tone: values.tone }),
+      { when: interaction.hovered, paint: { opacity: 0.84 } },
+      { when: interaction.pressed, motion: { scale: 0.98 } },
+      { when: interaction.disabled, paint: { opacity: 0.5, cursor: "default" } },
+      ],
+      Label: { typography: { wrap: "nowrap" } },
+      };
+    },
+    CounterPanel({ geometry }) {
+      return { Root: [{
+        layout: {
+          grid: { columns: [{ minmax: [0, { fraction: 1 }] }, "content"], align: "center" },
+          padding: tokens.space.lg,
+        },
+        paint: {
+          fill: tokens.color.panel,
+          stroke: { width: 1, line: "solid", color: tokens.color.border },
+          shadow: tokens.shadow.panel,
+        },
         shape: { radius: tokens.radius.md },
-        effect: { shadow: tokens.shadow.panel },
-        when: [{ container: "compact", apply: { layout: { kind: "stack", gap: tokens.space.lg, align: "stretch" } } }],
       },
-      Copy: { layout: { kind: "stack", gap: tokens.space.sm } },
-      Meta: { margin: 0, surface: { text: tokens.color.muted }, text: { size: 13, weight: 620, line: 1.2 } },
-      Value: { margin: 0, text: { size: 44, weight: 720, line: 1 } },
-      Actions: { layout: { kind: "row", align: "center", gap: tokens.space.sm } },
-    }),
-  }),
-} satisfies Preset<App, "system">;
-`,
-    "src/ui/root.tsx": `import { createAppShell, createButton, createCounterPanel, createHeader, useCounter } from "@poggers/app";
-
-export function Root() {
-  const counter = useCounter({ id: "main" });
-  const Shell = createAppShell();
-  const Header = createHeader();
-  const Panel = createCounterPanel({
-    input: { get value() { return String(counter.count); } },
-  });
-  const Reset = createButton({
-    input: { label: "Reset", disabled: false, activate() { void counter.reset(); } },
-    variants: { tone: "neutral" },
-  });
-  const Increment = createButton({
-    input: { label: "Add one", disabled: false, activate() { void counter.increment(); } },
-    variants: { tone: "primary" },
-  });
-
-  return () => (
-    <Shell.Root>
-      <Shell.Content>
-        <Header.Root>
-          <Header.Eyebrow>Poggers app</Header.Eyebrow>
-          <Header.Title>${displayName}</Header.Title>
-          <Header.Summary>Typed application behavior and a compiled visual preset, with no backend styling API in application code.</Header.Summary>
-        </Header.Root>
-        <Panel.Root>
-          <Panel.Copy>
-            <Panel.Meta>Counter</Panel.Meta>
-            <Panel.Value />
-          </Panel.Copy>
-          <Panel.Actions>
-            <Reset.Root><Reset.Label /></Reset.Root>
-            <Increment.Root><Increment.Label /></Increment.Root>
-          </Panel.Actions>
-        </Panel.Root>
-      </Shell.Content>
-    </Shell.Root>
-  );
-}
+      { when: geometry.inlineSize.isBelow(tokens.size.compact), layout: { flow: { axis: "block", gap: tokens.space.lg, align: "stretch" } } },
+      ],
+      Copy: { layout: { flow: { axis: "block", gap: tokens.space.sm } } },
+      Meta: { layout: { margin: 0 }, typography: { color: tokens.color.muted, size: 13, weight: 620, line: 1.2 } },
+      Value: { layout: { margin: 0 }, typography: { size: 44, weight: 720, line: 1 } },
+      Actions: { layout: { flow: { axis: "inline", align: "center", gap: tokens.space.sm } } },
+      };
+    },
+  } };
+}) satisfies Preset<App, "system">;
 `,
     "src/deps.ts": `import type { DependencyConfig } from "@poggers/kit/deps";
-import type { ServerDeps } from "types";
+import type { ServerDeps } from "src/types";
 
 export default { clock: { now: Date.now } } satisfies DependencyConfig<ServerDeps>;
 `,
