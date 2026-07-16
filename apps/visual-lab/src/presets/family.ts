@@ -1,5 +1,5 @@
-import type { Preset, Tokens } from "@poggers/kit/style";
-import type { App } from "src/types";
+import type { Preset, Tokens } from "@poggers/kit/preset";
+import type { App } from "src/app";
 const theme = {
   color: {
     canvas: { l: 0.97, c: 0.003, h: 250 },
@@ -46,9 +46,7 @@ const theme = {
     round: { kind: "radius", value: 999 },
   },
   font: {
-    body: {
-      families: ["Open Runde", "Inter", "ui-rounded", "system-ui", "sans-serif"],
-    },
+    body: { fallback: ["ui-rounded", "system-ui", "sans-serif"] },
   },
   motion: {
     sheet: { spring: { damping: 48, mass: 1, stiffness: 700 } },
@@ -93,15 +91,41 @@ export const familyPreset = (({ tokens, createRecipe, createMotion, interpolate 
   return {
     theme,
     components: {
-      Drawer({ values, writableValues, events, parts, interaction, geometry }) {
-        const open = values.opened;
-        const dragging = values.dragging;
+      PresetSwitch({ interaction }) {
+        return {
+          Root: [
+            {
+              layout: {
+                position: {
+                  kind: "fixed",
+                  inset: {
+                    blockStart: tokens.space.sixteen,
+                    inlineEnd: tokens.space.sixteen,
+                  },
+                },
+                size: { block: 36 },
+                padding: { inline: tokens.space.sixteen },
+              },
+              shape: { radius: tokens.radius.round },
+              paint: {
+                fill: tokens.color.panel,
+                stroke: { width: 1, line: "solid", color: tokens.color.triggerLine },
+              },
+              typography: { color: tokens.color.text, size: 13, weight: 500, line: 1 },
+            },
+            createControl({ hovered: interaction.hovered, pressed: interaction.pressed }),
+          ],
+        };
+      },
+      Drawer({ state, actions, parts, interaction, geometry }) {
+        const open = state.opened;
+        const dragging = state.dragging;
         const compact = geometry.inlineSize.isBelow(tokens.size.phone);
-        const dragOffset = dragging.choose(values.dragOffset, 0);
+        const dragOffset = dragging.choose(state.dragOffset, 0);
         const surfaceOffset = open.choose(dragOffset, 700);
         const sheet = createMotion({
           target: surfaceOffset,
-          velocity: values.dragVelocity,
+          velocity: state.dragVelocity,
           transition: dragging.choose(
             "instant",
             compact.choose(tokens.motion.sheet, tokens.motion.dialog),
@@ -131,19 +155,19 @@ export const familyPreset = (({ tokens, createRecipe, createMotion, interpolate 
               trigger: parts.Handle,
               axis: "block",
               enabled: compact.and(open),
-              bounds: { block: [0, values.sheetHeight] },
+              bounds: { block: [0, state.sheetHeight] },
               threshold: dragThreshold,
               maxVelocity,
               resistance: dragResistance,
               cursor: { idle: "grab", active: "grabbing" },
               output: {
-                block: writableValues.dragOffset,
-                velocityBlock: writableValues.dragVelocity,
-                progressBlock: writableValues.dragProgress,
+                block: state.dragOffset,
+                velocityBlock: state.dragVelocity,
+                progressBlock: state.dragProgress,
               },
-              start: events.startDragging,
-              release: events.releaseDragging,
-              cancel: events.cancelDragging,
+              start: actions.startDragging,
+              release: actions.releaseDragging,
+              cancel: actions.cancelDragging,
             },
           ],
           Root: {
@@ -173,28 +197,6 @@ export const familyPreset = (({ tokens, createRecipe, createMotion, interpolate 
             paint: { fill: tokens.color.canvas },
             motion: { scale: pageScale, reduceMotion: "instant" },
           },
-          PresetSwitch: [
-            {
-              layout: {
-                position: {
-                  kind: "fixed",
-                  inset: {
-                    blockStart: tokens.space.sixteen,
-                    inlineEnd: tokens.space.sixteen,
-                  },
-                },
-                size: { block: 36 },
-                padding: { inline: tokens.space.sixteen },
-              },
-              shape: { radius: tokens.radius.round },
-              paint: {
-                fill: tokens.color.panel,
-                stroke: { width: 1, line: "solid", color: tokens.color.triggerLine },
-              },
-              typography: { color: tokens.color.text, size: 13, weight: 500, line: 1 },
-            },
-            control,
-          ],
           Trigger: [
             {
               shape: { radius: tokens.radius.round },

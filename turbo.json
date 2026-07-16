@@ -5,23 +5,17 @@
       "dependsOn": ["^build"],
       "outputs": ["dist/**", ".poggers/build/**"]
     },
-    "check": {
-      "dependsOn": ["typecheck", "lint", "test"],
-      "outputs": []
-    },
     "dev": {
+      "dependsOn": ["^build"],
       "cache": false,
       "persistent": true
     },
-    "lint": {
-      "outputs": []
-    },
     "test": {
-      "dependsOn": ["^build"],
+      "dependsOn": ["build", "^build"],
       "outputs": []
     },
     "typecheck": {
-      "dependsOn": ["^typecheck"],
+      "dependsOn": ["^build", "^typecheck"],
       "outputs": []
     }
   }

@@ -1,151 +1,315 @@
 import type { AppDef as AppDefinition } from "@poggers/kit";
-import { Show } from "@poggers/kit/ui";
-import { createPress, mountDialog } from "@poggers/kit/web";
-import { familyIcons } from "src/family-icons";
-import { familyPreset, studioPreset } from "src/presets";
-import type { App } from "src/types";
+import {
+  Show,
+  createPress,
+  type DragRelease,
+  mountDialog,
+  type VisualValue,
+  type Writable,
+} from "@poggers/kit/ui";
+import { familyPreset } from "src/presets/family";
+import { studioPreset } from "src/presets/studio";
+
+const svg = (markup: string) => `data:image/svg+xml,${encodeURIComponent(markup)}`;
+
+const familyIcons = {
+  close: svg(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M10.4854 2 2 10.4853M10.4854 10.4844 2 1.9991" stroke="#999" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+  ),
+  lock: svg(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="21" viewBox="0 0 20 21" fill="none"><path d="M6 9V6a4 4 0 0 1 8 0v3" stroke="#8f8f8f" stroke-width="2.333"/><path d="M6.684 9h6.632V7H6.684V9ZM16 11.684v4.632h2v-4.632h-2ZM13.316 19H6.684v2h6.632v-2ZM4 16.316v-4.632H2v4.632h2ZM6.684 19A2.684 2.684 0 0 1 4 16.316H2A4.684 4.684 0 0 0 6.684 21v-2ZM16 16.316A2.684 2.684 0 0 1 13.316 19v2A4.684 4.684 0 0 0 18 16.316h-2ZM13.316 9A2.684 2.684 0 0 1 16 11.684h2A4.684 4.684 0 0 0 13.316 7v2ZM6.684 7A4.684 4.684 0 0 0 2 11.684h2A2.684 2.684 0 0 1 6.684 9V7Z" fill="#8f8f8f"/></svg>`,
+  ),
+  phrase: svg(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="20" viewBox="0 0 24 20" fill="none"><path d="M2.862 14.805A136 136 0 0 1 2.75 10c0-1.438.054-3.261.112-4.805A2.434 2.434 0 0 1 5.191 2.886 215 215 0 0 1 12 2.75c2.06 0 4.742.07 6.81.136a2.434 2.434 0 0 1 2.328 2.309c.058 1.544.112 3.367.112 4.805s-.054 3.261-.112 4.805a2.434 2.434 0 0 1-2.329 2.309A215 215 0 0 1 12 17.25c-2.06 0-4.742-.07-6.809-.136a2.434 2.434 0 0 1-2.329-2.309Z" stroke="#8f8f8f" stroke-width="2"/><path d="M5.5 5.122h5.85v1.95H5.5zm0 3.901h5.85v1.95H5.5zm0 3.902h5.85v1.95H5.5zm7.151-7.803h5.85v1.95h-5.85zm0 3.901h5.85v1.95h-5.85zm0 3.902h5.85v1.95h-5.85z" fill="#8f8f8f"/></svg>`,
+  ),
+  warning: svg(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="21" height="20" viewBox="0 0 21 20" fill="none"><path d="m11.632 11.251.251-3.754a1.053 1.053 0 0 0-2.1 0l.25 3.754a.802.802 0 0 0 1.599 0Z" fill="#ff3f3f"/><circle cx="10.833" cy="14.062" r=".938" fill="#ff3f3f"/><path d="M8.711 3.096a2.56 2.56 0 0 1 4.244 0c1.204 1.783 2.669 4.003 3.69 5.716.961 1.61 2.032 3.614 2.908 5.306.863 1.667-.292 3.638-2.168 3.715-2.069.085-4.577.166-6.552.166-1.976 0-4.484-.081-6.553-.166-1.876-.077-3.03-2.048-2.168-3.715.876-1.692 1.948-3.696 2.908-5.306 1.022-1.713 2.487-3.933 3.691-5.716Z" stroke="#ff3f3f" stroke-width="2"/></svg>`,
+  ),
+  recovery: svg(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48" fill="none"><path d="M16.452 37c-1.424-.023-2.86-.051-4.234-.082-3.048-.067-4.573-.101-5.802-.729a6 6 0 0 1-2.627-2.623c-.63-1.229-.666-2.729-.737-5.728A162 162 0 0 1 3 24.026c0-1.163.021-2.479.052-3.812.071-3 .107-4.5.737-5.728a6 6 0 0 1 2.627-2.623c1.23-.628 2.754-.662 5.802-.73C15.484 11.061 19.105 11 22.057 11c3.636 0 8.288.092 12.04.185.957.024 1.435.036 1.873.112a6 6 0 0 1 4.908 4.876c.078.438.093.905.122 1.84v.579M10 24h9m-9 6h6" stroke="#999" stroke-width="2.75" stroke-linecap="round"/><path d="M36.861 32.124a3.9 3.9 0 0 1-3.914 3.88 3.9 3.9 0 0 1-3.913-3.88 3.9 3.9 0 0 1 3.913-3.88 3.9 3.9 0 0 1 3.914 3.88Z" stroke="#999" stroke-width="2.75" stroke-linecap="round" stroke-linejoin="round"/><path d="M21.009 33.464a3.3 3.3 0 0 1 0-2.68c2.024-4.543 6.608-7.713 11.939-7.713s9.915 3.17 11.939 7.713a3.3 3.3 0 0 1 0 2.68c-2.024 4.543-6.608 7.713-11.939 7.713s-9.915-3.17-11.939-7.713Z" stroke="#999" stroke-width="2.75" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+  ),
+  danger: svg(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48" fill="none"><circle cx="22" cy="24" r="19" stroke="#ff3f3f" stroke-width="2.75"/><path d="m23.55 26.501.383-11.502a1.934 1.934 0 0 0-3.866 0l.383 11.502a1.55 1.55 0 0 0 3.1 0Z" fill="#ff3f3f"/><circle cx="21.987" cy="33.299" r="1.987" fill="#ff3f3f"/></svg>`,
+  ),
+  shield: svg(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M3.087 6.412a.946.946 0 0 1 .899-.819c2.805-.205 5.021-1.29 7.075-2.994a1.08 1.08 0 0 1 1.378 0c2.053 1.704 4.269 2.79 7.075 2.994a.946.946 0 0 1 .899.819c.057.523.087 1.054.087 1.592 0 5.946-3.032 11.04-8.078 13.178a1.73 1.73 0 0 1-1.345 0C6.031 19.044 3 13.95 3 8.004c0-.538.029-1.069.087-1.592Z" stroke="#a5a5a5" stroke-width="2"/><path d="m8.491 11.73 2.337 2.306 4.674-4.613" stroke="#a5a5a5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+  ),
+  pass: svg(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"><rect x="1.75" y="3.75" width="20.5" height="16.5" rx="3.4" stroke="#a5a5a5" stroke-width="2"/><path d="M5.5 7.122h5.85v1.95H5.5zm0 3.901h5.85v1.95H5.5zm0 3.902h5.85v1.95H5.5zm7.15-7.803h5.85v1.95h-5.85zm0 3.901h5.85v1.95h-5.85zm0 3.902h5.85v1.95h-5.85z" fill="#a5a5a5"/></svg>`,
+  ),
+  banned: svg(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="#a5a5a5" stroke-width="2.2"/><path d="m5.636 5.636 12.728 12.728" stroke="#a5a5a5" stroke-width="2.2"/></svg>`,
+  ),
+  faceId: svg(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="19" viewBox="0 0 20 19" fill="none"><path d="M1.664 6.444c-.659 0-1.03-.371-1.03-1.048V3.16C.634 1.12 1.729.043 3.779.043h2.236c.677 0 1.048.362 1.048 1.03s-.371 1.039-1.048 1.039h-2.06c-.816 0-1.252.408-1.252 1.262v2.022c0 .677-.362 1.048-1.039 1.048Zm16.486 0c-.668 0-1.039-.371-1.039-1.048V3.374c0-.854-.445-1.262-1.253-1.262H13.8c-.678 0-1.049-.371-1.049-1.039S13.121.043 13.8.043h2.235c2.06 0 3.145 1.085 3.145 3.117v2.236c0 .677-.362 1.048-1.03 1.048ZM9.17 10.87c-.492 0-.798-.26-.798-.696 0-.371.287-.65.668-.65h.26c.074 0 .12-.046.12-.13V6.472c0-.399.27-.668.677-.668.4 0 .659.269.659.668v2.895c0 .965-.529 1.503-1.503 1.503H9.17Zm-2.71-2.171c-.464 0-.807-.334-.807-.807V6.63c0-.473.343-.816.807-.816.473 0 .807.343.807.816v1.262c0 .473-.334.807-.807.807Zm6.875 0c-.473 0-.817-.334-.817-.807V6.63c0-.473.344-.816.817-.816.464 0 .797.343.797.816v1.262c0 .473-.333.807-.797.807Zm-3.47 5.186c-1.178 0-2.356-.464-3.09-1.308a.75.75 0 0 1-.185-.482c0-.381.288-.669.668-.669.232 0 .371.112.538.27.52.528 1.308.862 2.069.862.789 0 1.577-.352 2.069-.853.185-.205.325-.279.52-.279.38 0 .677.288.677.669 0 .204-.065.37-.186.491-.816.817-1.957 1.28-3.08 1.28ZM3.779 18.589c-2.05 0-3.145-1.086-3.145-3.117v-2.246c0-.668.362-1.039 1.03-1.039s1.039.371 1.039 1.039v2.032c0 .853.436 1.261 1.252 1.261h2.06c.677 0 1.048.371 1.048 1.03 0 .668-.371 1.04-1.048 1.04H3.779Zm10.02 0c-.678 0-1.049-.372-1.049-1.04 0-.659.371-1.03 1.049-1.03h2.059c.808 0 1.253-.408 1.253-1.261v-2.032c0-.668.37-1.039 1.039-1.039.658 0 1.03.371 1.03 1.039v2.246c0 2.031-1.086 3.117-3.145 3.117H13.8Z" fill="#fff"/></svg>`,
+  ),
+} as const;
+
+export type App = {
+  Resources: {};
+  Components: {
+    PresetSwitch: {
+      State: { preset: "family" | "studio"; label: "Family" | "Studio" };
+      Phases: "active" | "switching";
+      Tasks: {
+        switch: { Input: "family" | "studio"; Output: void; Error: never };
+      };
+      Actions: { toggle(): void };
+      Parts: { Root: "button" };
+    };
+    Drawer: {
+      Context: { sheetHeight: number };
+      Phases:
+        | "closed"
+        | "open"
+        | "open.view"
+        | "open.view.default"
+        | "open.view.key"
+        | "open.view.phrase"
+        | "open.view.remove"
+        | "open.gesture"
+        | "open.gesture.idle"
+        | "open.gesture.dragging"
+        | "closing"
+        | "closing.default"
+        | "closing.key"
+        | "closing.phrase"
+        | "closing.remove";
+      State: {
+        opened: boolean;
+        dragging: boolean;
+        dialog: false | "modal" | "nonmodal";
+        defaultVisible: boolean;
+        keyVisible: boolean;
+        phraseVisible: boolean;
+        removeVisible: boolean;
+        dragOffset: Writable<VisualValue<"length">>;
+        dragVelocity: Writable<number>;
+        dragProgress: Writable<VisualValue<"progress">>;
+        sheetHeight: VisualValue<"size">;
+      };
+      Actions: {
+        open(): void;
+        close(): void;
+        toggle(): void;
+        back(): void;
+        showKey(): void;
+        showPhrase(): void;
+        showRemove(): void;
+        startDragging(): void;
+        releaseDragging(release: DragRelease): void;
+        cancelDragging(): void;
+        measure(height: number): void;
+      };
+      Parameters: {
+        dismissDistance: number;
+        dismissVelocity: number;
+      };
+      Parts: {
+        Root: "main";
+        Page: "section";
+        Trigger: "button";
+        Panel: "dialog";
+        Backdrop: "div";
+        Surface: "section";
+        Handle: "div";
+        HandleBar: "div";
+        Close: "button";
+        CloseIcon: "img";
+        Viewport: "div";
+        DefaultView: "section";
+        DefaultHeader: "header";
+        DefaultTitle: "h2";
+        OptionList: "div";
+        OptionButton: "button";
+        DangerOption: "button";
+        OptionIcon: "img";
+        DetailView: "section";
+        DetailBody: "div";
+        ViewHeader: "header";
+        ViewIcon: "img";
+        ViewTitle: "h2";
+        ViewDescription: "p";
+        AdviceList: "ul";
+        AdviceItem: "li";
+        AdviceIcon: "img";
+        Actions: "div";
+        DangerActions: "div";
+        SecondaryButton: "button";
+        PrimaryButton: "button";
+        DangerButton: "button";
+        PrimaryIcon: "img";
+      };
+    };
+  };
+  Styles: { Presets: "family" | "studio" };
+};
 
 export default {
   version: 1,
   app: { name: "Family Drawer" },
-  resources: {},
   components: {
-    Drawer: {
-      values: {
-        dragOffset: 0,
-        dragVelocity: 0,
-        dragProgress: 0,
-        sheetHeight: 1,
-      },
-      initial: "closed",
-      on: {
-        togglePreset: {
-          perform({ appearance, setAppearance }) {
+    PresetSwitch: {
+      state: ({ appearance }) => ({
+        preset: appearance.preset,
+        label: appearance.preset === "family" ? "Studio" : "Family",
+      }),
+      machine: {
+        initial: "active",
+        phases: {
+          active: { on: { toggle: "switching" } },
+          switching: {
+            task: { run: "switch", input: ({ state }) => state.preset, done: "active" },
+          },
+        },
+        tasks: {
+          switch({ setAppearance, value }) {
             setAppearance({
-              preset: appearance.preset === "family" ? "studio" : "family",
+              preset: value === "family" ? "studio" : "family",
               theme: "default",
             });
           },
         },
       },
-      states: {
-        closed: { on: { open: "open", toggle: "open" } },
-        open: {
-          type: "parallel",
-          states: {
-            view: {
-              initial: "open.view.default",
-              states: {
-                default: {
-                  on: {
-                    showKey: "open.view.key",
-                    showPhrase: "open.view.phrase",
-                    showRemove: "open.view.remove",
-                    close: "closing.default",
-                    toggle: "closing.default",
-                    releaseDragging: [
-                      {
-                        allow: ({ parameters }, release) =>
-                          release.progress >= parameters.dismissDistance ||
-                          release.velocity >= parameters.dismissVelocity,
-                        target: "closing.default",
-                      },
-                      {},
-                    ],
+      view({ state, actions, parts: { Root } }) {
+        return (
+          <Root type="button" {...createPress(actions.toggle)}>
+            {state.label}
+          </Root>
+        );
+      },
+    },
+    Drawer: {
+      machine: {
+        context: { sheetHeight: 1 },
+        initial: "closed",
+        on: {
+          measure: {
+            update: (_scope, height) => ({ sheetHeight: Math.max(1, height) }),
+          },
+        },
+        phases: {
+          closed: { on: { open: "open", toggle: "open" } },
+          open: {
+            type: "parallel",
+            phases: {
+              view: {
+                initial: "open.view.default",
+                phases: {
+                  default: {
+                    on: {
+                      showKey: "open.view.key",
+                      showPhrase: "open.view.phrase",
+                      showRemove: "open.view.remove",
+                      close: "closing.default",
+                      toggle: "closing.default",
+                      releaseDragging: [
+                        {
+                          allow: ({ parameters }, release) =>
+                            release.progress >= parameters.dismissDistance ||
+                            release.velocity >= parameters.dismissVelocity,
+                          target: "closing.default",
+                        },
+                        {},
+                      ],
+                    },
                   },
-                },
-                key: {
-                  on: {
-                    back: "open.view.default",
-                    close: "closing.key",
-                    toggle: "closing.key",
-                    releaseDragging: [
-                      {
-                        allow: ({ parameters }, release) =>
-                          release.progress >= parameters.dismissDistance ||
-                          release.velocity >= parameters.dismissVelocity,
-                        target: "closing.key",
-                      },
-                      {},
-                    ],
+                  key: {
+                    on: {
+                      back: "open.view.default",
+                      close: "closing.key",
+                      toggle: "closing.key",
+                      releaseDragging: [
+                        {
+                          allow: ({ parameters }, release) =>
+                            release.progress >= parameters.dismissDistance ||
+                            release.velocity >= parameters.dismissVelocity,
+                          target: "closing.key",
+                        },
+                        {},
+                      ],
+                    },
                   },
-                },
-                phrase: {
-                  on: {
-                    back: "open.view.default",
-                    close: "closing.phrase",
-                    toggle: "closing.phrase",
-                    releaseDragging: [
-                      {
-                        allow: ({ parameters }, release) =>
-                          release.progress >= parameters.dismissDistance ||
-                          release.velocity >= parameters.dismissVelocity,
-                        target: "closing.phrase",
-                      },
-                      {},
-                    ],
+                  phrase: {
+                    on: {
+                      back: "open.view.default",
+                      close: "closing.phrase",
+                      toggle: "closing.phrase",
+                      releaseDragging: [
+                        {
+                          allow: ({ parameters }, release) =>
+                            release.progress >= parameters.dismissDistance ||
+                            release.velocity >= parameters.dismissVelocity,
+                          target: "closing.phrase",
+                        },
+                        {},
+                      ],
+                    },
                   },
-                },
-                remove: {
-                  on: {
-                    back: "open.view.default",
-                    close: "closing.remove",
-                    toggle: "closing.remove",
-                    releaseDragging: [
-                      {
-                        allow: ({ parameters }, release) =>
-                          release.progress >= parameters.dismissDistance ||
-                          release.velocity >= parameters.dismissVelocity,
-                        target: "closing.remove",
-                      },
-                      {},
-                    ],
+                  remove: {
+                    on: {
+                      back: "open.view.default",
+                      close: "closing.remove",
+                      toggle: "closing.remove",
+                      releaseDragging: [
+                        {
+                          allow: ({ parameters }, release) =>
+                            release.progress >= parameters.dismissDistance ||
+                            release.velocity >= parameters.dismissVelocity,
+                          target: "closing.remove",
+                        },
+                        {},
+                      ],
+                    },
                   },
                 },
               },
-            },
-            gesture: {
-              initial: "open.gesture.idle",
-              states: {
-                idle: { on: { startDragging: "open.gesture.dragging" } },
-                dragging: {
-                  on: {
-                    releaseDragging: "open.gesture.idle",
-                    cancelDragging: "open.gesture.idle",
+              gesture: {
+                initial: "open.gesture.idle",
+                phases: {
+                  idle: { on: { startDragging: "open.gesture.dragging" } },
+                  dragging: {
+                    on: {
+                      releaseDragging: "open.gesture.idle",
+                      cancelDragging: "open.gesture.idle",
+                    },
                   },
                 },
               },
             },
           },
-        },
-        closing: {
-          initial: "closing.default",
-          settle: { phase: "exit", done: "closed", cancelled: "open" },
-          on: { open: "open", toggle: "open" },
-          states: { default: {}, key: {}, phrase: {}, remove: {} },
+          closing: {
+            initial: "closing.default",
+            settle: { phase: "exit", done: "closed", cancelled: "open" },
+            on: { open: "open", toggle: "open" },
+            phases: { default: {}, key: {}, phrase: {}, remove: {} },
+          },
         },
       },
-      derive({ state, appearance }) {
-        const defaultVisible =
-          state.matches("open.view.default") || state.matches("closing.default");
+      state({ context, active }) {
+        const includes = (phase: (typeof active)[number]) => active.includes(phase);
+        const defaultVisible = includes("open.view.default") || includes("closing.default");
         return {
-          opened: state.matches("open"),
-          dragging: state.matches("open.gesture.dragging"),
-          dialog: state.matches("closed") ? false : state.matches("closing") ? "nonmodal" : "modal",
-          presetSwitchLabel: appearance.preset === "family" ? "Studio" : "Family",
+          opened: includes("open"),
+          dragging: includes("open.gesture.dragging"),
+          dialog: includes("closed") ? false : includes("closing") ? "nonmodal" : "modal",
           defaultVisible,
-          keyVisible: state.matches("open.view.key") || state.matches("closing.key"),
-          phraseVisible: state.matches("open.view.phrase") || state.matches("closing.phrase"),
-          removeVisible: state.matches("open.view.remove") || state.matches("closing.remove"),
+          keyVisible: includes("open.view.key") || includes("closing.key"),
+          phraseVisible: includes("open.view.phrase") || includes("closing.phrase"),
+          removeVisible: includes("open.view.remove") || includes("closing.remove"),
+          dragOffset: 0,
+          dragVelocity: 0,
+          dragProgress: 0,
+          sheetHeight: context.sheetHeight,
         };
       },
-      render({
-        values,
-        events,
+      view({
+        state,
+        actions,
+        components: { PresetSwitch },
         parts: {
           Root,
           Page,
-          PresetSwitch,
           Trigger,
           Panel,
           Backdrop,
@@ -181,7 +345,7 @@ export default {
       }) {
         const measureSurface = (surface: HTMLElement) => {
           const measure = () => {
-            values.sheetHeight = Math.max(1, surface.getBoundingClientRect().height);
+            actions.measure(surface.getBoundingClientRect().height);
           };
           const observer = new ResizeObserver(measure);
           observer.observe(surface);
@@ -192,30 +356,28 @@ export default {
         return (
           <Root>
             <Page>
-              <PresetSwitch type="button" {...createPress(events.togglePreset)}>
-                {values.presetSwitchLabel}
-              </PresetSwitch>
+              <PresetSwitch />
               <Trigger
                 type="button"
                 aria-controls="family-drawer"
                 aria-haspopup="dialog"
-                aria-expanded={values.dialog === "modal"}
-                {...createPress(events.open)}
+                aria-expanded={state.dialog === "modal"}
+                {...createPress(actions.open)}
               >
                 Try it out
               </Trigger>
             </Page>
 
             <Panel
-              ref={(dialog) => mountDialog(dialog, () => values.dialog)}
+              ref={(dialog) => mountDialog(dialog, () => state.dialog)}
               id="family-drawer"
               aria-label="Wallet options"
               onCancel={(event) => {
                 event.preventDefault();
-                events.close();
+                actions.close();
               }}
             >
-              <Backdrop aria-hidden onPointerDown={events.close} />
+              <Backdrop aria-hidden onPointerDown={actions.close} />
               <Surface ref={measureSurface}>
                 <Handle aria-hidden>
                   <HandleBar />
@@ -224,27 +386,27 @@ export default {
                   autofocus
                   type="button"
                   aria-label="Close drawer"
-                  {...createPress(events.close)}
+                  {...createPress(actions.close)}
                 >
                   <CloseIcon src={familyIcons.close} alt="" aria-hidden />
                 </Close>
 
                 <Viewport>
-                  <Show when={values.defaultVisible}>
+                  <Show when={state.defaultVisible}>
                     <DefaultView>
                       <DefaultHeader>
                         <DefaultTitle>Options</DefaultTitle>
                       </DefaultHeader>
                       <OptionList>
-                        <OptionButton type="button" {...createPress(events.showKey)}>
+                        <OptionButton type="button" {...createPress(actions.showKey)}>
                           <OptionIcon src={familyIcons.lock} alt="" aria-hidden />
                           View Private Key
                         </OptionButton>
-                        <OptionButton type="button" {...createPress(events.showPhrase)}>
+                        <OptionButton type="button" {...createPress(actions.showPhrase)}>
                           <OptionIcon src={familyIcons.phrase} alt="" aria-hidden />
                           View Recovery Phase
                         </OptionButton>
-                        <DangerOption type="button" {...createPress(events.showRemove)}>
+                        <DangerOption type="button" {...createPress(actions.showRemove)}>
                           <OptionIcon src={familyIcons.warning} alt="" aria-hidden />
                           Remove Wallet
                         </DangerOption>
@@ -252,7 +414,7 @@ export default {
                     </DefaultView>
                   </Show>
 
-                  <Show when={values.keyVisible}>
+                  <Show when={state.keyVisible}>
                     <DetailView>
                       <DetailBody>
                         <ViewHeader>
@@ -279,10 +441,10 @@ export default {
                         </AdviceList>
                       </DetailBody>
                       <Actions>
-                        <SecondaryButton type="button" {...createPress(events.back)}>
+                        <SecondaryButton type="button" {...createPress(actions.back)}>
                           Cancel
                         </SecondaryButton>
-                        <PrimaryButton type="button" {...createPress(events.back)}>
+                        <PrimaryButton type="button" {...createPress(actions.back)}>
                           <PrimaryIcon src={familyIcons.faceId} alt="" aria-hidden />
                           Reveal
                         </PrimaryButton>
@@ -290,7 +452,7 @@ export default {
                     </DetailView>
                   </Show>
 
-                  <Show when={values.phraseVisible}>
+                  <Show when={state.phraseVisible}>
                     <DetailView>
                       <DetailBody>
                         <ViewHeader>
@@ -317,10 +479,10 @@ export default {
                         </AdviceList>
                       </DetailBody>
                       <Actions>
-                        <SecondaryButton type="button" {...createPress(events.back)}>
+                        <SecondaryButton type="button" {...createPress(actions.back)}>
                           Cancel
                         </SecondaryButton>
-                        <PrimaryButton type="button" {...createPress(events.back)}>
+                        <PrimaryButton type="button" {...createPress(actions.back)}>
                           <PrimaryIcon src={familyIcons.faceId} alt="" aria-hidden />
                           Reveal
                         </PrimaryButton>
@@ -328,7 +490,7 @@ export default {
                     </DetailView>
                   </Show>
 
-                  <Show when={values.removeVisible}>
+                  <Show when={state.removeVisible}>
                     <DetailView>
                       <DetailBody>
                         <ViewHeader>
@@ -342,10 +504,10 @@ export default {
                         </ViewHeader>
                       </DetailBody>
                       <DangerActions>
-                        <SecondaryButton type="button" {...createPress(events.back)}>
+                        <SecondaryButton type="button" {...createPress(actions.back)}>
                           Cancel
                         </SecondaryButton>
-                        <DangerButton type="button" {...createPress(events.back)}>
+                        <DangerButton type="button" {...createPress(actions.back)}>
                           Continue
                         </DangerButton>
                       </DangerActions>

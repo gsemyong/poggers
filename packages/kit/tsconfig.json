@@ -1,27 +1,5 @@
 {
-  "compilerOptions": {
-    "lib": ["ES2022", "DOM"],
-    "target": "ESNext",
-    "module": "Preserve",
-    "moduleDetection": "force",
-    "jsx": "react-jsx",
-    "jsxImportSource": "@poggers/kit",
-    "allowJs": true,
-    "allowImportingTsExtensions": true,
-    "types": ["bun"],
-    "moduleResolution": "bundler",
-    "verbatimModuleSyntax": true,
-    "noEmit": true,
-    "strict": true,
-    "skipLibCheck": true,
-    "noFallthroughCasesInSwitch": true,
-    "noUncheckedIndexedAccess": true,
-    "noImplicitOverride": true
-  },
-  "include": [
-    "${configDir}/src/**/*.ts",
-    "${configDir}/src/**/*.tsx",
-    "${configDir}/tests/**/*.ts",
-    "${configDir}/tests/**/*.tsx"
-  ]
+  "extends": "./tsconfig.app.json",
+  "compilerOptions": { "customConditions": ["poggers-source"] },
+  "include": ["src/**/*.ts", "src/**/*.tsx", "scripts/**/*.ts"]
 }

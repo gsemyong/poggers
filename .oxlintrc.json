@@ -1,10 +1,83 @@
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["typescript", "unicorn", "oxc"],
+  "plugins": ["import", "typescript", "unicorn", "oxc"],
   "categories": {
     "correctness": "error"
   },
-  "rules": {},
+  "ignorePatterns": ["**/.poggers/**", "**/.turbo/**", "**/dist/**", "coverage/**"],
+  "rules": {
+    "import/no-cycle": "error",
+    "no-duplicate-imports": "error",
+    "typescript/consistent-type-imports": "error",
+    "typescript/no-explicit-any": "error",
+    "unicorn/filename-case": "error"
+  },
+  "overrides": [
+    {
+      "files": ["packages/kit/src/**/*.{ts,tsx}", "packages/kit/scripts/**/*.ts"],
+      "rules": {
+        "import/no-cycle": ["error", { "ignoreTypes": false }]
+      }
+    },
+    {
+      "files": ["packages/kit/src/kernel/**/*.{ts,tsx}"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              "#host/*",
+              "#substrate/*",
+              "#testing/*",
+              "#tooling/*",
+              "#ui/*",
+              "!#ui/web/jsx-types"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["packages/kit/src/substrate/**/*.{ts,tsx}"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          { "patterns": ["#host/*", "#testing/*", "#tooling/*", "#ui/*"] }
+        ]
+      }
+    },
+    {
+      "files": ["packages/kit/src/ui/**/*.{ts,tsx}"],
+      "rules": {
+        "no-restricted-imports": ["error", { "patterns": ["#host/*", "#testing/*", "#tooling/*"] }]
+      }
+    },
+    {
+      "files": ["packages/kit/src/host/**/*.{ts,tsx}"],
+      "rules": {
+        "no-restricted-imports": ["error", { "patterns": ["#testing/*", "#tooling/*"] }]
+      }
+    },
+    {
+      "files": ["packages/kit/src/testing/**/*.{ts,tsx}"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          { "patterns": ["#host/*", "#testing/*", "#tooling/*", "#ui/*"] }
+        ]
+      }
+    },
+    {
+      "files": ["packages/kit/src/**/*.spec.{ts,tsx}", "packages/kit/src/**/*.typecheck.{ts,tsx}"],
+      "rules": {
+        "no-restricted-imports": "off"
+      }
+    }
+  ],
+  "options": {
+    "reportUnusedDisableDirectives": "error",
+    "denyWarnings": true
+  },
   "env": {
     "builtin": true
   }

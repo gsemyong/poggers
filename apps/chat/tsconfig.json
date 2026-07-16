@@ -1,3 +1,1 @@
-{
-  "extends": "@poggers/kit/tsconfig"
-}
+{ "extends": "@poggers/kit/tsconfig" }

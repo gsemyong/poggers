@@ -6,32 +6,17 @@
     "moduleDetection": "force",
     "jsx": "react-jsx",
     "jsxImportSource": "@poggers/kit",
-    "allowJs": true,
     "allowImportingTsExtensions": true,
-    "types": ["@poggers/kit/globals"],
+    "types": ["bun"],
     "moduleResolution": "bundler",
+    "paths": { "src/*": ["${configDir}/src/*"] },
     "verbatimModuleSyntax": true,
     "noEmit": true,
     "strict": true,
     "skipLibCheck": true,
     "noFallthroughCasesInSwitch": true,
     "noUncheckedIndexedAccess": true,
-    "noImplicitOverride": true,
-    "paths": {
-      "src/*": ["${configDir}/src/*"],
-      "ai": [
-        "${configDir}/../../packages/kit/types/vendor/ai.d.ts",
-        "${configDir}/node_modules/@poggers/kit/types/vendor/ai.d.ts",
-        "${configDir}/../node_modules/@poggers/kit/types/vendor/ai.d.ts",
-        "${configDir}/../../node_modules/@poggers/kit/types/vendor/ai.d.ts"
-      ],
-      "zod/v4-mini": [
-        "${configDir}/../../packages/kit/types/vendor/zod-v4-mini.d.ts",
-        "${configDir}/node_modules/@poggers/kit/types/vendor/zod-v4-mini.d.ts",
-        "${configDir}/../node_modules/@poggers/kit/types/vendor/zod-v4-mini.d.ts",
-        "${configDir}/../../node_modules/@poggers/kit/types/vendor/zod-v4-mini.d.ts"
-      ]
-    }
+    "noImplicitOverride": true
   },
   "include": [
     "${configDir}/src/**/*.ts",

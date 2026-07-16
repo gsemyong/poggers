@@ -1,86 +1,110 @@
 {
   "name": "@poggers/kit",
   "version": "0.0.0",
-  "description": "A tiny event-sourced full-stack kit for building applications.",
+  "description": "A batteries-included TypeScript framework for local-first applications.",
   "bin": {
-    "poggers": "./src/cli.ts"
+    "poggers": "./src/tooling/cli.ts"
   },
   "files": [
     "src",
-    "types",
-    "tsconfig.app.json",
-    "tsconfig.json"
+    "!src/**/*.spec.ts",
+    "!src/**/*.spec.tsx",
+    "!src/**/*.typecheck.ts",
+    "!src/**/*.typecheck.tsx",
+    "dist",
+    "tsconfig.app.json"
   ],
   "type": "module",
-  "types": "./types/index.d.ts",
+  "types": "./dist/src/index.d.ts",
+  "imports": {
+    "#features/*": {
+      "poggers-source": "./src/features/*.ts",
+      "types": "./dist/src/features/*.d.ts",
+      "bun": "./src/features/*.ts",
+      "default": "./dist/src/features/*.js"
+    },
+    "#host/*": {
+      "poggers-source": "./src/host/*.ts",
+      "types": "./dist/src/host/*.d.ts",
+      "bun": "./src/host/*.ts",
+      "default": "./dist/src/host/*.js"
+    },
+    "#kernel/*": {
+      "poggers-source": "./src/kernel/*.ts",
+      "types": "./dist/src/kernel/*.d.ts",
+      "bun": "./src/kernel/*.ts",
+      "default": "./dist/src/kernel/*.js"
+    },
+    "#substrate/*": {
+      "poggers-source": "./src/substrate/*.ts",
+      "types": "./dist/src/substrate/*.d.ts",
+      "bun": "./src/substrate/*.ts",
+      "default": "./dist/src/substrate/*.js"
+    },
+    "#testing/*": {
+      "poggers-source": "./src/testing/*.ts",
+      "types": "./dist/src/testing/*.d.ts",
+      "bun": "./src/testing/*.ts",
+      "default": "./dist/src/testing/*.js"
+    },
+    "#tooling/*": {
+      "poggers-source": "./src/tooling/*.ts",
+      "types": "./dist/src/tooling/*.d.ts",
+      "bun": "./src/tooling/*.ts",
+      "default": "./dist/src/tooling/*.js"
+    },
+    "#ui/*": {
+      "poggers-source": "./src/ui/*.ts",
+      "types": "./dist/src/ui/*.d.ts",
+      "bun": "./src/ui/*.ts",
+      "default": "./dist/src/ui/*.js"
+    }
+  },
   "exports": {
     ".": {
-      "types": "./types/index.d.ts",
-      "default": "./src/index.ts"
+      "poggers-source": "./src/index.ts",
+      "types": "./dist/src/index.d.ts",
+      "default": "./dist/src/index.js"
     },
     "./jsx-dev-runtime": {
-      "types": "./types/jsx-dev-runtime.d.ts",
-      "default": "./src/jsx-dev-runtime.ts"
+      "poggers-source": "./src/ui/web/jsx-dev-runtime.ts",
+      "types": "./dist/src/ui/web/jsx-dev-runtime.d.ts",
+      "default": "./dist/src/ui/web/jsx-dev-runtime.js"
     },
     "./jsx-runtime": {
-      "types": "./types/jsx-runtime.d.ts",
-      "default": "./src/jsx-runtime.ts"
-    },
-    "./program": {
-      "types": "./types/program.d.ts",
-      "default": "./src/program.ts"
-    },
-    "./storage": {
-      "types": "./types/storage.d.ts",
-      "default": "./src/storage.ts"
+      "poggers-source": "./src/ui/web/jsx-runtime.ts",
+      "types": "./dist/src/ui/web/jsx-runtime.d.ts",
+      "default": "./dist/src/ui/web/jsx-runtime.js"
     },
     "./ui": {
-      "types": "./types/ui-public.d.ts",
-      "default": "./src/ui-public.ts"
+      "poggers-source": "./src/ui/index.ts",
+      "types": "./dist/src/ui/index.d.ts",
+      "default": "./dist/src/ui/index.js"
     },
-    "./web": {
-      "types": "./types/web.d.ts",
-      "default": "./src/web.ts"
-    },
-    "./internal/ui": {
-      "types": "./types/ui.d.ts",
-      "default": "./src/ui.ts"
-    },
-    "./internal/app": {
-      "types": "./types/app.d.ts",
-      "default": "./src/app.ts"
-    },
-    "./style": {
-      "types": "./types/preset.d.ts",
-      "default": "./src/preset.ts"
-    },
-    "./worker": {
-      "types": "./types/worker.d.ts",
-      "default": "./src/worker.ts"
+    "./preset": {
+      "poggers-source": "./src/ui/preset.ts",
+      "types": "./dist/src/ui/preset.d.ts",
+      "default": "./dist/src/ui/preset.js"
     },
     "./testing": {
-      "types": "./types/testing.d.ts",
-      "default": "./src/testing.ts"
+      "poggers-source": "./src/testing/application.ts",
+      "types": "./dist/src/testing/application.d.ts",
+      "default": "./dist/src/testing/application.js"
     },
-    "./app": {
-      "types": "./types/runtime.d.ts",
-      "default": "./src/runtime.ts"
+    "./testing/substrate": {
+      "poggers-source": "./src/testing/substrate.ts",
+      "types": "./dist/src/testing/substrate.d.ts",
+      "default": "./dist/src/testing/substrate.js"
     },
-    "./bun": {
-      "types": "./types/bun.d.ts",
-      "default": "./types/bun.d.ts"
+    "./host/browser": {
+      "poggers-source": "./src/host/browser.ts",
+      "types": "./dist/src/host/browser.d.ts",
+      "default": "./dist/src/host/browser.js"
     },
-    "./env": {
-      "types": "./types/env.d.ts",
-      "default": "./src/env.ts"
-    },
-    "./globals": {
-      "types": "./types/globals.d.ts",
-      "default": "./types/globals.d.ts"
-    },
-    "./deps": {
-      "types": "./types/deps.d.ts",
-      "default": "./src/deps.ts"
+    "./host/server": {
+      "poggers-source": "./src/host/server.ts",
+      "types": "./dist/src/host/server.d.ts",
+      "default": "./dist/src/host/server.js"
     },
     "./tsconfig": "./tsconfig.app.json"
   },
@@ -88,12 +112,13 @@
     "access": "public"
   },
   "scripts": {
+    "build": "bun scripts/build.ts",
     "typecheck": "tsc --noEmit",
-    "lint": "oxlint src tests",
-    "test": "bun test tests",
-    "check": "bun run typecheck && bun run lint && bun run test"
+    "lint": "oxlint src scripts",
+    "test": "bun test src"
   },
   "dependencies": {
+    "@marcbachmann/cel-js": "8.0.0",
     "@stylexjs/stylex": "^0.19.0",
     "@stylexjs/unplugin": "^0.19.0",
     "@tanstack/virtual-core": "^3.17.3",
@@ -101,6 +126,7 @@
     "@typescript/typescript6": "^6.0.2",
     "alien-signals": "^3.2.1",
     "animejs": "^4.5.0",
+    "croner": "10.0.1",
     "typescript": "^7.0.2",
     "unplugin": "^2.3.11",
     "xstate": "5.32.4"

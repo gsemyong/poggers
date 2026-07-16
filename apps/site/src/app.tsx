@@ -1,8 +1,83 @@
 import type { AppDef as AppDefinition, AppScreen } from "@poggers/kit";
-import { For } from "@poggers/kit/ui";
-import { createPress } from "@poggers/kit/web";
-import { docsPreset } from "src/presets";
-import type { App, Page } from "src/types";
+import { For, createPress } from "@poggers/kit/ui";
+import { docsPreset } from "src/presets/docs";
+
+export type Section = { heading: string; body: string };
+
+export type NavItem = { slug: string; title: string };
+
+export type Page = {
+  slug: string;
+  title: string;
+  summary: string;
+  sections: Section[];
+};
+
+export type SiteState = { pages: Page[] };
+export type SiteViews = {
+  page: Page;
+  nav: NavItem[];
+};
+export type SiteCommands = { recordVisit: { Input: {}; Error: never } };
+
+export type App = {
+  Resources: {
+    page: {
+      Key: { slug: string };
+      State: SiteState;
+      Events: {};
+      Views: SiteViews;
+      Commands: SiteCommands;
+    };
+  };
+  Navigation: {
+    home: {};
+    page: { slug: string };
+  };
+  API: {
+    page(slug: string): SiteViews;
+  };
+  Components: {
+    SiteShell: {
+      State: SiteViews & { slug: string };
+      Parts: {
+        Root: "main";
+        Sidebar: "aside";
+        Brand: "div";
+        Nav: "nav";
+        Content: "div";
+      };
+    };
+    NavButton: {
+      Input: { active: boolean; label: string; slug: string };
+      State: { active: boolean; label: string; slug: string };
+      Phases: "active" | "navigating";
+      Tasks: { navigate: { Input: string; Output: void; Error: never } };
+      Actions: { navigate(): void };
+      Parts: { Root: "button"; Label: "span" };
+    };
+    PageHero: {
+      Input: { page: Page };
+      State: { title: string; summary: string; sections: Section[] };
+      Parts: {
+        Root: "section";
+        Mark: "div";
+        Eyebrow: "p";
+        Title: "h1";
+        Summary: "p";
+        Sections: "div";
+      };
+    };
+    SectionCard: {
+      Input: Section;
+      State: Section;
+      Parts: { Root: "article"; Title: "h2"; Body: "p" };
+    };
+  };
+  Styles: {
+    Presets: "docs";
+  };
+};
 
 const pages: Page[] = [
   {
@@ -135,31 +210,31 @@ export default {
       commands: { recordVisit() {} },
     },
   },
+  api: ({ resources }) => ({ page: (slug) => resources.page({ slug }) }),
   components: {
     SiteShell: {
-      render({
+      state({ api, screen }) {
+        const slug = screenSlug(screen);
+        const page = api.page(slug);
+        return { slug, page: page.page, nav: page.nav };
+      },
+      view({
         components: { NavButton, PageHero },
-        navigation,
-        resources,
-        screen,
+        state,
         parts: { Root, Sidebar, Brand, Nav, Content },
       }) {
-        const page = resources.page({ slug: screenSlug(screen) });
         return (
           <Root>
             <Sidebar>
               <Brand>Poggers Kit</Brand>
               <Nav>
-                <For each={page.nav} by="slug">
+                <For each={state.nav} by="slug">
                   {(item) => {
                     return (
                       <NavButton
-                        active={item.slug === screenSlug(screen)}
+                        active={item.slug === state.slug}
                         label={item.title}
-                        navigate={() => {
-                          if (item.slug === "home") navigation.home();
-                          else navigation.page({ slug: item.slug });
-                        }}
+                        slug={item.slug}
                       />
                     );
                   }}
@@ -167,46 +242,57 @@ export default {
               </Nav>
             </Sidebar>
             <Content>
-              <PageHero page={page.page} />
+              <PageHero page={state.page} />
             </Content>
           </Root>
         );
       },
     },
     NavButton: {
-      derive({ input }) {
-        return { active: input.active };
+      state({ input }) {
+        return { active: input.active, label: input.label, slug: input.slug };
       },
-      initial: "active",
-      states: {
-        active: {
-          on: {
-            navigate: { perform: ({ input }) => input.navigate() },
+      machine: {
+        initial: "active",
+        phases: {
+          active: {
+            on: {
+              navigate: "navigating",
+            },
+          },
+          navigating: {
+            task: { run: "navigate", input: ({ input }) => input.slug, done: "active" },
+          },
+        },
+        tasks: {
+          navigate({ navigation, value }) {
+            if (value === "home") navigation.home();
+            else navigation.page({ slug: value });
           },
         },
       },
-      render({ input, events, parts: { Root, Label } }) {
+      view({ state, actions, parts: { Root, Label } }) {
         return (
           <Root
             type="button"
-            aria-current={input.active ? "page" : undefined}
-            {...createPress(events.navigate)}
+            aria-current={state.active ? "page" : undefined}
+            {...createPress(actions.navigate)}
           >
-            <Label>{input.label}</Label>
+            <Label>{state.label}</Label>
           </Root>
         );
       },
     },
     PageHero: {
-      derive({ input }) {
+      state({ input }) {
         return {
           title: input.page.title,
           summary: input.page.summary,
           sections: input.page.sections,
         };
       },
-      render({
-        values,
+      view({
+        state,
         components: { SectionCard },
         parts: { Root, Mark, Eyebrow, Title, Summary, Sections },
       }) {
@@ -214,10 +300,10 @@ export default {
           <Root>
             <Mark aria-hidden>PK</Mark>
             <Eyebrow>Built with Poggers Kit</Eyebrow>
-            <Title>{values.title}</Title>
-            <Summary>{values.summary}</Summary>
+            <Title>{state.title}</Title>
+            <Summary>{state.summary}</Summary>
             <Sections>
-              <For each={values.sections} by="heading">
+              <For each={state.sections} by="heading">
                 {(section) => <SectionCard {...section} />}
               </For>
             </Sections>
@@ -226,11 +312,12 @@ export default {
       },
     },
     SectionCard: {
-      render({ input, parts: { Root, Title, Body } }) {
+      state: ({ input }) => ({ heading: input.heading, body: input.body }),
+      view({ state, parts: { Root, Title, Body } }) {
         return (
           <Root>
-            <Title>{input.heading}</Title>
-            <Body>{input.body}</Body>
+            <Title>{state.heading}</Title>
+            <Body>{state.body}</Body>
           </Root>
         );
       },

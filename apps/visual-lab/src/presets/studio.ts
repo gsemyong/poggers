@@ -1,5 +1,5 @@
-import type { Preset, Tokens } from "@poggers/kit/style";
-import type { App } from "src/types";
+import type { Preset, Tokens } from "@poggers/kit/preset";
+import type { App } from "src/app";
 
 const theme = {
   color: {
@@ -50,9 +50,7 @@ const theme = {
     },
   },
   font: {
-    body: {
-      families: ["Berkeley Mono", "SFMono-Regular", "ui-monospace", "monospace"],
-    },
+    body: { fallback: ["ui-monospace", "monospace"] },
   },
   motion: {
     sheet: { spring: { mass: 1, stiffness: 520, damping: 34 } },
@@ -89,15 +87,44 @@ export const studioPreset = (({ tokens, createRecipe, createMotion, interpolate 
   return {
     theme,
     components: {
-      Drawer({ values, writableValues, events, parts, interaction, geometry }) {
-        const open = values.opened;
-        const dragging = values.dragging;
+      PresetSwitch({ interaction }) {
+        return {
+          Root: [
+            {
+              layout: {
+                position: {
+                  kind: "fixed",
+                  inset: { blockStart: tokens.space.lg, inlineEnd: tokens.space.lg },
+                },
+                size: { block: 34 },
+                padding: { inline: tokens.space.md },
+              },
+              shape: { radius: tokens.radius.subtle },
+              paint: {
+                fill: tokens.color.raised,
+                stroke: { width: 1, line: "solid", color: tokens.color.line },
+              },
+              typography: {
+                color: tokens.color.accent,
+                size: 11,
+                weight: 700,
+                line: 1,
+                transform: "uppercase",
+              },
+            },
+            createControl({ hovered: interaction.hovered, pressed: interaction.pressed }),
+          ],
+        };
+      },
+      Drawer({ state, actions, parts, interaction, geometry }) {
+        const open = state.opened;
+        const dragging = state.dragging;
         const compact = geometry.inlineSize.isBelow(tokens.size.phone);
-        const dragOffset = dragging.choose(values.dragOffset, 0);
+        const dragOffset = dragging.choose(state.dragOffset, 0);
         const surfaceOffset = open.choose(dragOffset, 900);
         const sheet = createMotion({
           target: surfaceOffset,
-          velocity: values.dragVelocity,
+          velocity: state.dragVelocity,
           transition: dragging.choose(
             "instant",
             compact.choose(tokens.motion.sheet, tokens.motion.dialog),
@@ -128,19 +155,19 @@ export const studioPreset = (({ tokens, createRecipe, createMotion, interpolate 
               trigger: parts.Handle,
               axis: "block",
               enabled: compact.and(open),
-              bounds: { block: [0, values.sheetHeight] },
+              bounds: { block: [0, state.sheetHeight] },
               threshold: dragThreshold,
               maxVelocity,
               resistance: dragResistance,
               cursor: { idle: "grab", active: "grabbing" },
               output: {
-                block: writableValues.dragOffset,
-                velocityBlock: writableValues.dragVelocity,
-                progressBlock: writableValues.dragProgress,
+                block: state.dragOffset,
+                velocityBlock: state.dragVelocity,
+                progressBlock: state.dragProgress,
               },
-              start: events.startDragging,
-              release: events.releaseDragging,
-              cancel: events.cancelDragging,
+              start: actions.startDragging,
+              release: actions.releaseDragging,
+              cancel: actions.cancelDragging,
             },
           ],
           Root: {
@@ -168,31 +195,6 @@ export const studioPreset = (({ tokens, createRecipe, createMotion, interpolate 
             paint: { fill: tokens.color.canvas },
             motion: { scale: pageScale, reduceMotion: "instant" },
           },
-          PresetSwitch: [
-            {
-              layout: {
-                position: {
-                  kind: "fixed",
-                  inset: { blockStart: tokens.space.lg, inlineEnd: tokens.space.lg },
-                },
-                size: { block: 34 },
-                padding: { inline: tokens.space.md },
-              },
-              shape: { radius: tokens.radius.subtle },
-              paint: {
-                fill: tokens.color.raised,
-                stroke: { width: 1, line: "solid", color: tokens.color.line },
-              },
-              typography: {
-                color: tokens.color.accent,
-                size: 11,
-                weight: 700,
-                line: 1,
-                transform: "uppercase",
-              },
-            },
-            control,
-          ],
           Trigger: [
             {
               layout: {

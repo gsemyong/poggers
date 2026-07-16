@@ -1,0 +1,2470 @@
+import {
+  Virtualizer,
+  defaultRangeExtractor,
+  elementScroll,
+  measureElement as measureVirtualElement,
+  observeElementOffset,
+  observeElementRect,
+  type VirtualizerOptions,
+} from "@tanstack/virtual-core";
+import {
+  computed as alienComputed,
+  effect as alienEffect,
+  effectScope as alienEffectScope,
+  getActiveSub as alienGetActiveSub,
+  signal as alienSignal,
+  setActiveSub as alienSetActiveSub,
+} from "alien-signals";
+
+import type {
+  ActorOf,
+  App,
+  AppNavigation,
+  AppScreen,
+  AppSpec,
+  Client,
+  Submission,
+  CommandSpec,
+  JsonValue,
+  NavigationName,
+  NavigationParams,
+  ResourceSpec,
+  SyncMeta,
+} from "#kernel/app";
+import { connect as connectClient, type ConnectOpts } from "#substrate/client";
+import { scopeId } from "#substrate/protocol";
+import { submissionFrom } from "#substrate/submission";
+import type { Child } from "#ui/web/jsx-types";
+import {
+  adoptSceneChildren,
+  mountSceneElement,
+  PresenceScene,
+  setSceneElementPresence,
+  setSceneElementVisible,
+  unmountSceneElement,
+  type SceneElementRegistration,
+} from "#ui/web/scene";
+import { prefersReducedMotion, type VirtualCollectionGeometry } from "#ui/web/visual-runtime";
+
+type ResourceName<Spec extends AppSpec> = Extract<keyof Spec["Resources"], string>;
+
+type HookName<Name extends string> = `use${Capitalize<Name>}`;
+
+type ResourceFor<
+  Spec extends AppSpec,
+  Resource extends ResourceName<Spec>,
+> = Spec["Resources"][Resource] extends ResourceSpec ? Spec["Resources"][Resource] : never;
+
+type InputFor<Command> = Command extends {
+  Input: infer Input extends Record<string, unknown>;
+}
+  ? Input
+  : never;
+
+type ErrorFor<Command> = Command extends { Error: infer Error } ? Error : never;
+
+type ViewShape<Spec extends AppSpec, Resource extends ResourceName<Spec>> = {
+  readonly [View in keyof ResourceFor<Spec, Resource>["Views"]]: ResourceFor<
+    Spec,
+    Resource
+  >["Views"][View];
+};
+
+type CommandShape<Spec extends AppSpec, Resource extends ResourceName<Spec>> = {
+  [Command in keyof ResourceFor<Spec, Resource>["Commands"]]: (
+    input: ResourceFor<Spec, Resource>["Commands"][Command] extends CommandSpec
+      ? InputFor<ResourceFor<Spec, Resource>["Commands"][Command]>
+      : never,
+  ) => Submission<
+    ResourceFor<Spec, Resource>["Commands"][Command] extends CommandSpec
+      ? ErrorFor<ResourceFor<Spec, Resource>["Commands"][Command]>
+      : never
+  >;
+};
+
+type RawResourceHandle<Spec extends AppSpec, Resource extends ResourceName<Spec>> = {
+  [View in keyof ResourceFor<Spec, Resource>["Views"]]: ResourceFor<Spec, Resource>["Views"][View];
+} & {
+  [Command in keyof ResourceFor<Spec, Resource>["Commands"]]: (
+    input: ResourceFor<Spec, Resource>["Commands"][Command] extends CommandSpec
+      ? InputFor<ResourceFor<Spec, Resource>["Commands"][Command]>
+      : never,
+  ) => Submission<unknown>;
+} & {
+  readonly sync: SyncMeta;
+  setPresence?(value: unknown): void;
+  subscribe(fn: (scope: Record<string, unknown>) => void): () => void;
+};
+
+type NativePresenceShape<Spec extends AppSpec, Resource extends ResourceName<Spec>> =
+  ResourceFor<Spec, Resource> extends { Presence: infer Presence }
+    ? { setPresence(value: Presence): void }
+    : {};
+
+export type NativeResource<Spec extends AppSpec, Resource extends ResourceName<Spec>> = ViewShape<
+  Spec,
+  Resource
+> &
+  CommandShape<Spec, Resource> & {
+    readonly sync: SyncMeta;
+  } & NativePresenceShape<Spec, Resource>;
+
+export type NativeUIHooks<Spec extends AppSpec> = {
+  [Resource in ResourceName<Spec> as HookName<Resource>]: (
+    key: ResourceFor<Spec, Resource>["Key"],
+  ) => NativeResource<Spec, Resource>;
+} & {
+  useResource: <Resource extends ResourceName<Spec>>(
+    resource: Resource,
+    key: ResourceFor<Spec, Resource>["Key"],
+  ) => NativeResource<Spec, Resource>;
+};
+
+export type NativeAppApi<Spec extends AppSpec> = NativeUIHooks<Spec> & {
+  readonly screen: Signal<AppScreen<Spec>>;
+  readonly nav: AppNavigation<Spec>;
+  useScreen(): AppScreen<Spec>;
+};
+
+export type NativeAppRuntime<Spec extends AppSpec> = {
+  readonly api: NativeAppApi<Spec>;
+  start(connect?: ConnectOpts | (() => Promise<Client<Spec>>)): Promise<void>;
+  dispose(): void;
+};
+
+export type DefineUIProps<Spec extends AppSpec> = {
+  connect?: ConnectOpts | (() => Promise<Client<Spec>>);
+};
+
+export type Signal<T> = {
+  (): T;
+  (value: T): void;
+};
+
+const hotSignalCaptures = new WeakMap<Signal<unknown>, () => unknown>();
+
+export function captureSignalOnHotRefresh<T>(current: Signal<T>, capture: () => T): void {
+  hotSignalCaptures.set(current as Signal<unknown>, capture);
+}
+
+const reactiveValueRead = Symbol.for("poggers.reactiveValue.read");
+
+type ReactiveValue<T> = {
+  readonly [reactiveValueRead]: () => T;
+};
+
+export type Props = Record<string, unknown> & {
+  children?: Child;
+};
+
+export type Component<P extends object = Record<string, never>> = (props: P) => Child;
+
+export type HotRenderState = {
+  keyed?: Record<string, unknown>;
+  scroll?: Record<string, { left: number; top: number }>;
+  values?: unknown[];
+  mounted?: boolean;
+};
+
+type Owner = {
+  cleanups: Array<() => void>;
+  mounts: Array<() => void | (() => void)>;
+  hotState?: HotRenderState;
+  signalCursor: number;
+  signalKeys: Array<string | undefined>;
+  keyOccurrences: Map<string, number>;
+  signals: Signal<unknown>[];
+  hotRefresh: boolean;
+  disposed: boolean;
+  scene: PresenceScene<Element>;
+  sceneSequence: number;
+};
+
+type LifecycleScope = {
+  cleanups: Array<() => void>;
+  mounts: Array<() => void | (() => void)>;
+  disposed: boolean;
+  mounted: boolean;
+};
+
+let currentOwner: Owner | null = null;
+let currentLifecycleScope: LifecycleScope | null = null;
+let currentChildHost: HTMLElement | null = null;
+
+export function currentPresenceScene(): PresenceScene<Element> | undefined {
+  return currentOwner?.scene;
+}
+
+export function allocateSceneOwner(name: string): string {
+  const owner = currentOwner;
+  if (!owner) return `${name}:detached`;
+  return `${name}:${owner.sceneSequence++}`;
+}
+
+const virtualCollectionHosts = new WeakMap<
+  HTMLElement,
+  () => VirtualCollectionGeometry | undefined
+>();
+const virtualCollectionOpenHandlers = new WeakMap<HTMLElement, () => void>();
+
+export function bindVirtualCollectionHost(
+  element: HTMLElement,
+  read: () => VirtualCollectionGeometry | undefined,
+): void {
+  virtualCollectionHosts.set(element, read);
+}
+
+export function runtimeSignal<T>(initialValue: T): Signal<T> {
+  return alienSignal(initialValue) as Signal<T>;
+}
+
+export function signal<T>(initialValue: T, hotKey?: string): Signal<T> {
+  const owner = currentOwner;
+  if (owner?.hotState) {
+    const index = owner.signalCursor++;
+    let resolvedKey: string | undefined;
+    if (hotKey) {
+      const occurrence = owner.keyOccurrences.get(hotKey) ?? 0;
+      owner.keyOccurrences.set(hotKey, occurrence + 1);
+      resolvedKey = `${hotKey}#${occurrence}`;
+    }
+    const positional =
+      index < (owner.hotState.values?.length ?? 0)
+        ? (owner.hotState.values![index] as T)
+        : initialValue;
+    const restored = resolvedKey
+      ? Object.hasOwn(owner.hotState.keyed ?? {}, resolvedKey)
+        ? (owner.hotState.keyed![resolvedKey] as T)
+        : owner.hotState.keyed
+          ? initialValue
+          : positional
+      : positional;
+    const next = runtimeSignal(restored);
+    owner.signals[index] = next as Signal<unknown>;
+    owner.signalKeys[index] = resolvedKey;
+    return next;
+  }
+
+  return runtimeSignal(initialValue);
+}
+
+export function isHotRefresh(): boolean {
+  return currentOwner?.hotRefresh ?? false;
+}
+
+export function computed<T>(getter: (previousValue?: T) => T): () => T {
+  return alienComputed(getter);
+}
+
+export function effect(fn: () => void | (() => void)): () => void {
+  const dispose = alienEffect(fn);
+  registerCleanup(dispose);
+  return dispose;
+}
+
+export function untrack<T>(fn: () => T): T {
+  const activeSub = alienGetActiveSub();
+  alienSetActiveSub(undefined);
+  try {
+    return fn();
+  } finally {
+    alienSetActiveSub(activeSub);
+  }
+}
+
+function runtimeEffect(fn: () => void | (() => void)): () => void {
+  const activeSub = alienGetActiveSub();
+  alienSetActiveSub(undefined);
+  try {
+    return alienEffect(fn);
+  } finally {
+    alienSetActiveSub(activeSub);
+  }
+}
+
+export function onMount(fn: () => void | (() => void)): void {
+  if (currentLifecycleScope) {
+    currentLifecycleScope.mounts.push(fn);
+    return;
+  }
+  const owner = currentOwner;
+  if (owner) {
+    owner.mounts.push(fn);
+    return;
+  }
+  queueMicrotask(() => {
+    fn();
+  });
+}
+
+export function onCleanup(fn: () => void): void {
+  registerCleanup(fn);
+}
+
+export function defineUI<Spec extends AppSpec, Props extends object = Record<string, never>>(
+  app: App<Spec>,
+  setup: (hooks: NativeUIHooks<Spec>) => (props: Props) => Child,
+) {
+  const runtime = createNativeRuntime(app);
+  const hooks = createNativeHooks(app, runtime);
+  const Inner = setup(hooks);
+
+  function DefinedUI(
+    { connect, ...props }: Props & DefineUIProps<Spec> = {} as Props & DefineUIProps<Spec>,
+  ) {
+    runtime.start(connect);
+    return Inner(props as Props);
+  }
+
+  Object.defineProperty(DefinedUI, "poggersUiRuntime", {
+    value: "native",
+    enumerable: false,
+  });
+
+  return DefinedUI;
+}
+
+export function createNativeAppRuntime<Spec extends AppSpec>(
+  app: App<Spec>,
+): NativeAppRuntime<Spec> {
+  const runtime = createNativeRuntime(app);
+  const hooks = createNativeHooks(app, runtime);
+  const navigation = createNavigation(app);
+  const api = {
+    ...hooks,
+    screen: navigation.screen,
+    nav: navigation.nav,
+    useScreen() {
+      return navigation.screen();
+    },
+  } as NativeAppApi<Spec>;
+
+  return {
+    api,
+    start: runtime.start,
+    dispose() {
+      navigation.dispose();
+      runtime.dispose();
+    },
+  };
+}
+
+export function render(child: Child, root: Element, hotState?: HotRenderState): () => void {
+  const hotRefresh = Boolean(hotState?.mounted);
+  const hotScroll = hotState?.scroll;
+  if (hotState) hotState.mounted = true;
+  const scene = new PresenceScene<Element>();
+  const owner: Owner = {
+    cleanups: [],
+    mounts: [],
+    hotState,
+    signalCursor: 0,
+    signalKeys: [],
+    keyOccurrences: new Map(),
+    signals: [],
+    hotRefresh,
+    disposed: false,
+    scene,
+    sceneSequence: 0,
+  };
+  const previousOwner = currentOwner;
+  currentOwner = owner;
+  try {
+    root.replaceChildren(...toNodes(resolveChild(child)));
+    while (owner.mounts.length) {
+      for (const mount of owner.mounts.splice(0)) {
+        const cleanup = mount();
+        if (typeof cleanup === "function") owner.cleanups.push(cleanup);
+      }
+    }
+    if (hotRefresh && hotScroll) restoreHotScroll(root, hotScroll);
+  } finally {
+    currentOwner = previousOwner;
+  }
+
+  return () => {
+    if (owner.disposed) return;
+    owner.disposed = true;
+    if (owner.hotState) {
+      const captured = new Map(owner.signals.map((current) => [current, readHotSignal(current)]));
+      owner.hotState.scroll = captureHotScroll(root);
+      owner.hotState.values = owner.signals.map((current) => captured.get(current));
+      owner.hotState.keyed = Object.fromEntries(
+        owner.signalKeys.flatMap((key, index) =>
+          key ? ([[key, captured.get(owner.signals[index]!)]] as const) : [],
+        ),
+      );
+    }
+    for (const cleanup of owner.cleanups.splice(0)) cleanup();
+    owner.scene.dispose();
+    owner.mounts.length = 0;
+    root.replaceChildren();
+  };
+}
+
+function readHotSignal(current: Signal<unknown>): unknown {
+  return hotSignalCaptures.get(current)?.() ?? current();
+}
+
+function captureHotScroll(root: Element): Record<string, { left: number; top: number }> {
+  if (typeof root.querySelectorAll !== "function") return {};
+  return Object.fromEntries(
+    [...root.querySelectorAll<HTMLElement>("[id]")].flatMap((element) => {
+      if (!element.scrollTop && !element.scrollLeft) return [];
+      return [[element.id, { left: element.scrollLeft, top: element.scrollTop }] as const];
+    }),
+  );
+}
+
+function restoreHotScroll(
+  root: Element,
+  scroll: Readonly<Record<string, { left: number; top: number }>>,
+): void {
+  if (typeof root.querySelectorAll !== "function") return;
+  const restore = () => {
+    for (const element of root.querySelectorAll<HTMLElement>("[id]")) {
+      const position = scroll[element.id];
+      if (position) element.scrollTo(position.left, position.top);
+    }
+  };
+  requestAnimationFrame(() => {
+    restore();
+    requestAnimationFrame(() => {
+      restore();
+      setTimeout(restore, 100);
+    });
+  });
+}
+
+type ErasedComponent = (props: never) => Child;
+
+export function jsx(type: string | ErasedComponent, props: Props | null): Child {
+  return createNode(type, props ?? {});
+}
+
+export const jsxs = jsx;
+
+export function Fragment(props: { children?: Child }): Child {
+  return props.children ?? null;
+}
+
+type ForKey = string | number;
+
+export type VirtualForOptions = {
+  readonly anchor?: "start" | "end";
+  readonly follow?: "never" | "auto" | "smooth" | "instant";
+};
+
+type ForProps<Items extends readonly unknown[]> = {
+  each: Items | (() => Items);
+  by?: Extract<keyof Items[number], string> | ((item: Items[number], index: number) => ForKey);
+  children: (item: Items[number], index: number) => Child;
+  fallback?: Child;
+  virtual?: false;
+};
+
+type VirtualActive<Key extends ForKey> = Key | (() => Key | undefined);
+
+type VirtualPropertyKey<Items extends readonly unknown[]> = {
+  [Key in Extract<keyof Items[number], string>]: Extract<Items[number][Key], ForKey> extends never
+    ? never
+    : Key;
+}[Extract<keyof Items[number], string>];
+
+type VirtualForByProperty<
+  Items extends readonly unknown[],
+  Key extends VirtualPropertyKey<Items> = VirtualPropertyKey<Items>,
+> = Omit<ForProps<Items>, "by" | "virtual"> & {
+  by: Key;
+  virtual: true | VirtualForOptions;
+  active?: VirtualActive<NoInfer<Extract<Items[number][Key], ForKey>>>;
+};
+
+type VirtualForByFunction<Items extends readonly unknown[]> = Omit<
+  ForProps<Items>,
+  "by" | "virtual"
+> & {
+  by: (item: Items[number], index: number) => ForKey;
+  virtual: true | VirtualForOptions;
+  active?: VirtualActive<ForKey>;
+};
+
+type VirtualForProps<
+  Items extends readonly unknown[],
+  Key extends VirtualPropertyKey<Items> = VirtualPropertyKey<Items>,
+> = VirtualForByProperty<Items, Key> | VirtualForByFunction<Items>;
+
+type ScopedNodes = {
+  nodes: Node[];
+  mount(): void;
+  dispose(): void;
+};
+
+type RetainedPresence = {
+  finish(): void;
+  restore(): void;
+};
+
+const retainedPresenceSemantics = new WeakMap<
+  HTMLElement,
+  { readonly ariaHidden: string | null; readonly inert: boolean }
+>();
+const poppedPresenceStyles = new WeakMap<
+  HTMLElement,
+  {
+    readonly position: string;
+    readonly inset: string;
+    readonly insetInlineStart: string;
+    readonly insetBlockStart: string;
+    readonly inlineSize: string;
+    readonly blockSize: string;
+  }
+>();
+
+type KeyedScopedNodes<Item> = ScopedNodes & {
+  item: Item;
+  update(item: Item, index: number): boolean;
+};
+
+type CompiledForChild<Item> = (item: Item, index: number, reactiveIndex: Signal<number>) => Child;
+
+const structuralKeyStack: string[] = [];
+
+export function currentStructuralKey(): string | undefined {
+  return structuralKeyStack.length ? structuralKeyStack.join("/") : undefined;
+}
+
+function withStructuralKey<T>(key: string, fn: () => T): T {
+  structuralKeyStack.push(key);
+  try {
+    return fn();
+  } finally {
+    structuralKeyStack.pop();
+  }
+}
+
+export function For<
+  Items extends readonly unknown[],
+  Key extends VirtualPropertyKey<Items> = VirtualPropertyKey<Items>,
+>(props: ForProps<Items> | VirtualForProps<Items, Key>): Child {
+  if (props.virtual) return virtualFor(props as VirtualForProps<Items>);
+  const start = document.createComment("for");
+  const end = document.createComment("/for");
+  const parent = document.createDocumentFragment();
+  parent.append(start, end);
+  let rendered: ScopedNodes | undefined;
+  let fallback: ScopedNodes | undefined;
+  let keyed = new Map<ForKey, KeyedScopedNodes<Items[number]>>();
+  const exiting = new Map<
+    ForKey,
+    { entry: KeyedScopedNodes<Items[number]>; retention: RetainedPresence }
+  >();
+
+  const disposeEntry = (entry: ScopedNodes) => {
+    entry.dispose();
+    for (const node of entry.nodes) node.parentNode?.removeChild(node);
+  };
+
+  const clearKeyed = () => {
+    for (const entry of keyed.values()) {
+      disposeEntry(entry);
+    }
+    keyed.clear();
+    for (const { retention } of exiting.values()) retention.finish();
+    exiting.clear();
+  };
+
+  const createEntry = (
+    item: Items[number],
+    index: number,
+    itemKey: ForKey,
+  ): KeyedScopedNodes<Items[number]> => {
+    const current = runtimeSignal(item);
+    const currentIndex = runtimeSignal(index);
+    const objectBacked = item != null && typeof item === "object";
+    const visibleItem = objectBacked ? reactiveValue(current) : item;
+    const scope = createScopedNodes(() =>
+      withStructuralKey(String(itemKey), () =>
+        (props.children as CompiledForChild<Items[number]>)(visibleItem, index, currentIndex),
+      ),
+    );
+    return {
+      ...scope,
+      item,
+      update(next, nextIndex) {
+        if (objectBacked && next != null && typeof next === "object") {
+          this.item = next;
+          current(next);
+          currentIndex(nextIndex);
+          return true;
+        }
+        if (!Object.is(this.item, next)) return false;
+        currentIndex(nextIndex);
+        return true;
+      },
+    };
+  };
+
+  const startExit = (itemKey: ForKey, entry: KeyedScopedNodes<Items[number]>) => {
+    if (!shouldRetainForExit(entry.nodes)) {
+      disposeEntry(entry);
+      return;
+    }
+    let retention: RetainedPresence;
+    retention = retainForExit(
+      entry.nodes,
+      () => {
+        entry.dispose();
+        if (exiting.get(itemKey)?.retention === retention) exiting.delete(itemKey);
+      },
+      2,
+    );
+    exiting.set(itemKey, { entry, retention });
+  };
+
+  blockEffect(() => {
+    const items = readSource(props.each);
+    const key = props.by;
+
+    if (!key) {
+      clearKeyed();
+      const next = createScopedNodes(() =>
+        items.length === 0 && props.fallback !== undefined
+          ? props.fallback
+          : items.map((item, index) => props.children(item, index)),
+      );
+      rendered?.dispose();
+      replaceBetween(start, end, next.nodes);
+      rendered = next;
+      next.mount();
+      return;
+    }
+
+    if (rendered) {
+      disposeEntry(rendered);
+      rendered = undefined;
+    }
+
+    if (items.length === 0) {
+      for (const [itemKey, entry] of keyed) startExit(itemKey, entry);
+      keyed.clear();
+      if (!fallback && props.fallback !== undefined) {
+        fallback = createScopedNodes(() => props.fallback);
+        markPresenceState(fallback.nodes, "entering");
+        for (const node of fallback.nodes) end.parentNode?.insertBefore(node, end);
+        if (end.parentElement) adoptSceneChildren(end.parentElement);
+        fallback.mount();
+        queuePresenceTarget(() => fallback && markPresenceState(fallback.nodes, "entered"));
+      }
+      return;
+    }
+
+    if (fallback) {
+      disposeEntry(fallback);
+      fallback = undefined;
+    }
+
+    const nextKeyed = new Map<ForKey, KeyedScopedNodes<Items[number]>>();
+    const nextNodes: Node[] = [];
+    const entering: KeyedScopedNodes<Items[number]>[] = [];
+    for (const [index, item] of items.entries()) {
+      const itemKey =
+        typeof key === "function"
+          ? key(item, index)
+          : ((item as Record<string, unknown> | null | undefined)?.[key] as ForKey);
+      if (typeof itemKey !== "string" && typeof itemKey !== "number") {
+        throw new Error(`For key ${String(key)} must resolve to a string or number.`);
+      }
+      if (nextKeyed.has(itemKey)) throw new Error(`For received duplicate key ${String(itemKey)}.`);
+      const previous = keyed.get(itemKey);
+      let entry: KeyedScopedNodes<Items[number]>;
+      if (previous?.update(item, index)) {
+        entry = previous;
+      } else if (previous) {
+        startExit(itemKey, previous);
+        entry = createEntry(item, index, itemKey);
+        entering.push(entry);
+      } else {
+        const retained = exiting.get(itemKey);
+        if (retained?.entry.update(item, index)) {
+          exiting.delete(itemKey);
+          retained.retention.restore();
+          entry = retained.entry;
+        } else {
+          retained?.retention.finish();
+          entry = createEntry(item, index, itemKey);
+          entering.push(entry);
+        }
+      }
+      nextKeyed.set(itemKey, entry);
+      nextNodes.push(...entry.nodes);
+    }
+    for (const [itemKey, entry] of keyed) {
+      if (nextKeyed.has(itemKey)) continue;
+      startExit(itemKey, entry);
+    }
+    const host = end.parentNode;
+    if (host) {
+      for (const entry of entering) markPresenceState(entry.nodes, "entering");
+      for (const node of nextNodes) host.insertBefore(node, end);
+      if ("children" in host) adoptSceneChildren(host as Element);
+    }
+    keyed = nextKeyed;
+    for (const entry of keyed.values()) entry.mount();
+    if (entering.length) {
+      queuePresenceTarget(() => {
+        for (const entry of entering) markPresenceState(entry.nodes, "entered");
+      });
+    }
+  });
+
+  registerCleanup(() => {
+    if (rendered) disposeEntry(rendered);
+    rendered = undefined;
+    if (fallback) disposeEntry(fallback);
+    fallback = undefined;
+    clearKeyed();
+  });
+
+  return parent;
+}
+
+type VirtualKeyedScopedNodes<Item> = KeyedScopedNodes<Item> & {
+  readonly root: HTMLElement;
+};
+
+function virtualFor<Items extends readonly unknown[]>(props: VirtualForProps<Items>): Child {
+  const host = currentChildHost;
+  if (!host) {
+    throw new Error("A virtual For must be the direct child of a rendered component part.");
+  }
+  const readGeometry = virtualCollectionHosts.get(host);
+  if (!readGeometry) {
+    throw new Error("The preset must define collection geometry for a virtual For host.");
+  }
+
+  const space = document.createElement("div");
+  space.style.position = "relative";
+  space.style.flexShrink = "0";
+  space.style.minInlineSize = "100%";
+  let items = readSource(props.each);
+  let geometry = requiredVirtualGeometry(readGeometry());
+  let keyed = new Map<ForKey, VirtualKeyedScopedNodes<Items[number]>>();
+  const exiting = new Map<
+    ForKey,
+    { entry: VirtualKeyedScopedNodes<Items[number]>; retention: RetainedPresence }
+  >();
+  let fallback: ScopedNodes | undefined;
+  let disposed = false;
+  let mounted = false;
+  let activeInitialized = false;
+  let previousActive: ForKey | undefined;
+  let pinnedActiveIndex = -1;
+  let keyIndexes = new Map<ForKey, number>();
+  let anchorOnNextRender = false;
+  let sourceVersion = 0;
+  let renderedSourceVersion = -1;
+  let renderedRevision = -1;
+  let renderedGeometry: VirtualCollectionGeometry | undefined;
+  let notifyQueued = false;
+  const revision = runtimeSignal(0);
+  const sourceRevision = runtimeSignal(0);
+  const readVirtualOptions = (): VirtualForOptions => {
+    const value = readSource(
+      props.virtual as true | VirtualForOptions | (() => true | VirtualForOptions),
+    );
+    return typeof value === "object" ? value : {};
+  };
+
+  const itemKey = (item: Items[number], index: number): ForKey => {
+    const key =
+      typeof props.by === "function"
+        ? props.by(item, index)
+        : ((item as Record<string, unknown> | null | undefined)?.[props.by] as ForKey);
+    if (typeof key !== "string" && typeof key !== "number") {
+      throw new Error(`For key ${String(props.by)} must resolve to a string or number.`);
+    }
+    return key;
+  };
+
+  blockEffect(() => {
+    const next = readSource(props.each);
+    // Reading length subscribes when the source is a reactive collection proxy.
+    void next.length;
+    items = next;
+    sourceRevision(++sourceVersion);
+  });
+
+  const schedule = () => {
+    if (notifyQueued || disposed) return;
+    notifyQueued = true;
+    queueMicrotask(() => {
+      notifyQueued = false;
+      if (!disposed) revision(revision() + 1);
+    });
+  };
+
+  let virtualizer: Virtualizer<HTMLElement, HTMLElement>;
+  const scrollPinnedActive = () => {
+    const activeIndex = pinnedActiveIndex;
+    if (!mounted || disposed || activeIndex < 0) return;
+    queueMicrotask(() => {
+      if (disposed) return;
+      const activeItem = items[activeIndex];
+      const activeKey = activeItem === undefined ? undefined : itemKey(activeItem, activeIndex);
+      const activeElement = activeKey === undefined ? undefined : keyed.get(activeKey)?.root;
+      if (!activeElement || geometry.axis === "inline") {
+        virtualizer.scrollToIndex(activeIndex, { align: "auto" });
+        return;
+      }
+      const viewport = host.getBoundingClientRect();
+      const item = activeElement.getBoundingClientRect();
+      const delta =
+        item.top < viewport.top
+          ? item.top - viewport.top
+          : item.bottom > viewport.bottom
+            ? item.bottom - viewport.bottom
+            : 0;
+      if (Math.abs(delta) > 0.5) host.scrollTop += delta;
+    });
+  };
+  const handleCollectionOpen = () => {
+    const refresh = () => {
+      if (!mounted || disposed) return;
+      anchorOnNextRender = true;
+      virtualizer.measure();
+      revision(revision() + 1);
+      scrollPinnedActive();
+    };
+    refresh();
+    requestPresenceFrame(refresh);
+  };
+  const options = (): VirtualizerOptions<HTMLElement, HTMLElement> => {
+    const virtualOptions = readVirtualOptions();
+    return {
+      count: items.length,
+      getScrollElement: () => host,
+      estimateSize: () => geometry.estimate,
+      getItemKey: (index: number) => itemKey(items[index]!, index),
+      scrollToFn: elementScroll,
+      observeElementRect,
+      observeElementOffset,
+      measureElement: measureVirtualElement,
+      onChange: schedule,
+      overscan: 6,
+      rangeExtractor(range) {
+        const visible = defaultRangeExtractor(range);
+        if (pinnedActiveIndex < 0 || visible.includes(pinnedActiveIndex)) return visible;
+        return [...visible, pinnedActiveIndex].sort((left, right) => left - right);
+      },
+      horizontal: geometry.axis === "inline",
+      gap: geometry.gap,
+      lanes: geometry.lanes,
+      anchorTo: virtualOptions.anchor ?? "start",
+      followOnAppend:
+        !virtualOptions.follow || virtualOptions.follow === "never" ? false : virtualOptions.follow,
+      scrollEndThreshold: Math.max(24, geometry.gap * 2),
+      indexAttribute: "data-virtual-index",
+      initialRect: {
+        width: Math.max(host.clientWidth, 600),
+        height: Math.max(host.clientHeight, 600),
+      },
+      useAnimationFrameWithResizeObserver: true,
+    };
+  };
+  virtualizer = new Virtualizer(options());
+
+  const disposeEntry = (entry: ScopedNodes) => {
+    entry.dispose();
+    for (const node of entry.nodes) node.parentNode?.removeChild(node);
+  };
+
+  const startExit = (key: ForKey, entry: VirtualKeyedScopedNodes<Items[number]>) => {
+    if (!shouldRetainForExit(entry.nodes)) {
+      disposeEntry(entry);
+      return;
+    }
+    let retention: RetainedPresence;
+    retention = retainForExit(
+      entry.nodes,
+      () => {
+        entry.dispose();
+        virtualizer.measureElement(null);
+        if (exiting.get(key)?.retention === retention) exiting.delete(key);
+      },
+      2,
+    );
+    exiting.set(key, { entry, retention });
+  };
+
+  const clear = () => {
+    for (const entry of keyed.values()) disposeEntry(entry);
+    keyed.clear();
+    for (const { retention } of exiting.values()) retention.finish();
+    exiting.clear();
+    virtualizer.measureElement(null);
+  };
+
+  const createEntry = (
+    item: Items[number],
+    index: number,
+    key: ForKey,
+  ): VirtualKeyedScopedNodes<Items[number]> => {
+    const current = runtimeSignal(item);
+    const currentIndex = runtimeSignal(index);
+    const objectBacked = item != null && typeof item === "object";
+    const visibleItem = objectBacked ? reactiveValue(current) : item;
+    const scope = createScopedNodes(() =>
+      withStructuralKey(String(key), () =>
+        (props.children as CompiledForChild<Items[number]>)(visibleItem, index, currentIndex),
+      ),
+    );
+    const elements = scope.nodes.filter(
+      (node): node is HTMLElement =>
+        typeof HTMLElement !== "undefined" && node instanceof HTMLElement,
+    );
+    if (elements.length !== 1 || scope.nodes.some((node) => node.nodeType === Node.TEXT_NODE)) {
+      scope.dispose();
+      throw new Error("Each virtual For item must render exactly one HTML element.");
+    }
+    return {
+      ...scope,
+      root: elements[0]!,
+      item,
+      update(next, nextIndex) {
+        if (objectBacked && next != null && typeof next === "object") {
+          this.item = next;
+          current(next);
+          currentIndex(nextIndex);
+          return true;
+        }
+        if (!Object.is(this.item, next)) return false;
+        currentIndex(nextIndex);
+        return true;
+      },
+    };
+  };
+
+  blockEffect(() => {
+    const currentRevision = revision();
+    const currentSourceVersion = sourceRevision();
+    const nextGeometry = requiredVirtualGeometry(readGeometry());
+    const geometryChanged = !sameVirtualGeometry(renderedGeometry, nextGeometry);
+    geometry = nextGeometry;
+
+    const active = props.active === undefined ? undefined : readSource(props.active);
+    const activeChanged = !activeInitialized || !Object.is(active, previousActive);
+    const sourceChanged = currentSourceVersion !== renderedSourceVersion;
+    activeInitialized = true;
+    previousActive = active;
+    if (sourceChanged) {
+      const nextIndexes = new Map<ForKey, number>();
+      for (const [index, item] of items.entries()) {
+        const key = itemKey(item, index);
+        if (nextIndexes.has(key)) throw new Error(`For received duplicate key ${String(key)}.`);
+        nextIndexes.set(key, index);
+      }
+      keyIndexes = nextIndexes;
+    }
+    if (activeChanged || sourceChanged) {
+      pinnedActiveIndex = active === undefined ? -1 : (keyIndexes.get(active) ?? -1);
+    }
+    renderedSourceVersion = currentSourceVersion;
+    const activeOnly =
+      activeChanged && !sourceChanged && !geometryChanged && currentRevision === renderedRevision;
+    if (activeOnly) {
+      scrollPinnedActive();
+      return;
+    }
+    renderedRevision = currentRevision;
+    renderedGeometry = geometry;
+    virtualizer.setOptions(options());
+    virtualizer._willUpdate();
+    if (activeChanged && active !== undefined) scrollPinnedActive();
+
+    if (items.length === 0) {
+      clear();
+      space.style.removeProperty("block-size");
+      space.style.removeProperty("inline-size");
+      if (!fallback && props.fallback !== undefined) {
+        fallback = createScopedNodes(() => props.fallback);
+        space.append(...fallback.nodes);
+        fallback.mount();
+      }
+      return;
+    }
+
+    if (!host.getClientRects().length && keyed.size) {
+      anchorOnNextRender = true;
+      return;
+    }
+
+    if (fallback) {
+      disposeEntry(fallback);
+      fallback = undefined;
+    }
+
+    const visible = virtualizer.getVirtualItems();
+    const trackedSourceKeys = new Set<ForKey>();
+    if (sourceChanged && (keyed.size || exiting.size)) {
+      const tracked = new Set<ForKey>([...keyed.keys(), ...exiting.keys()]);
+      for (const [index, item] of items.entries()) {
+        const key = itemKey(item, index);
+        if (!tracked.has(key)) continue;
+        trackedSourceKeys.add(key);
+        if (trackedSourceKeys.size === tracked.size) break;
+      }
+    }
+    const next = new Map<ForKey, VirtualKeyedScopedNodes<Items[number]>>();
+    for (const virtualItem of visible) {
+      const item = items[virtualItem.index]!;
+      const key = itemKey(item, virtualItem.index);
+      if (next.has(key)) throw new Error(`For received duplicate key ${String(key)}.`);
+      const previous = keyed.get(key);
+      let entry: VirtualKeyedScopedNodes<Items[number]>;
+      if (previous?.update(item, virtualItem.index)) {
+        entry = previous;
+      } else if (previous) {
+        disposeEntry(previous);
+        entry = createEntry(item, virtualItem.index, key);
+      } else {
+        const retained = exiting.get(key);
+        if (retained?.entry.update(item, virtualItem.index)) {
+          exiting.delete(key);
+          retained.retention.restore();
+          entry = retained.entry;
+        } else {
+          retained?.retention.finish();
+          entry = createEntry(item, virtualItem.index, key);
+        }
+      }
+      positionVirtualItem(
+        entry.root,
+        virtualItem.index,
+        items.length,
+        virtualItem.start,
+        virtualItem.lane,
+        geometry,
+      );
+      next.set(key, entry);
+    }
+    for (const [key, entry] of keyed) {
+      if (next.has(key)) continue;
+      if (sourceChanged && !trackedSourceKeys.has(key)) startExit(key, entry);
+      else disposeEntry(entry);
+    }
+    keyed = next;
+
+    const totalSize = Math.max(0, virtualizer.getTotalSize());
+    const total = `${totalSize}px`;
+    if (geometry.axis === "inline") {
+      space.style.inlineSize = total;
+      space.style.blockSize = "100%";
+    } else {
+      space.style.blockSize = total;
+      space.style.inlineSize = "100%";
+    }
+    for (const entry of keyed.values()) {
+      space.append(...entry.nodes);
+      entry.mount();
+      virtualizer.measureElement(entry.root);
+    }
+    adoptSceneChildren(host);
+    virtualizer.measureElement(null);
+    if (anchorOnNextRender && keyed.size) {
+      anchorOnNextRender = false;
+      scrollPinnedActive();
+    }
+  });
+
+  onMount(() => {
+    mounted = true;
+    const unmount = virtualizer._didMount();
+    virtualCollectionOpenHandlers.set(host, handleCollectionOpen);
+    virtualizer._willUpdate();
+    schedule();
+    return () => {
+      mounted = false;
+      virtualCollectionOpenHandlers.delete(host);
+      unmount();
+    };
+  });
+
+  registerCleanup(() => {
+    disposed = true;
+    if (fallback) disposeEntry(fallback);
+    fallback = undefined;
+    clear();
+  });
+
+  return space;
+}
+
+function requiredVirtualGeometry(
+  geometry: VirtualCollectionGeometry | undefined,
+): VirtualCollectionGeometry {
+  if (!geometry) throw new Error("The active preset does not define virtual collection geometry.");
+  return geometry;
+}
+
+function sameVirtualGeometry(
+  left: VirtualCollectionGeometry | undefined,
+  right: VirtualCollectionGeometry,
+): boolean {
+  return (
+    left?.axis === right.axis &&
+    left.estimate === right.estimate &&
+    left.gap === right.gap &&
+    left.lanes === right.lanes
+  );
+}
+
+function positionVirtualItem(
+  element: HTMLElement,
+  index: number,
+  count: number,
+  start: number,
+  lane: number,
+  geometry: VirtualCollectionGeometry,
+) {
+  setAttributeIfChanged(element, "data-virtual-index", String(index));
+  const position = virtualItemPosition(start, lane, geometry);
+  element.style.position = "absolute";
+  element.style.insetInlineStart = position.insetInlineStart;
+  element.style.insetBlockStart = position.insetBlockStart;
+  element.style.inlineSize = position.inlineSize;
+  element.style.blockSize = position.blockSize;
+  const role = element.getAttribute("role");
+  if (role === "option" || role === "listitem" || role === "row" || role === "treeitem") {
+    setAttributeIfChanged(element, "aria-posinset", String(index + 1));
+    setAttributeIfChanged(element, "aria-setsize", String(count));
+  }
+}
+
+function setAttributeIfChanged(element: Element, name: string, value: string): void {
+  if (element.getAttribute(name) !== value) element.setAttribute(name, value);
+}
+
+export function virtualItemPosition(
+  start: number,
+  lane: number,
+  geometry: VirtualCollectionGeometry,
+): {
+  insetInlineStart: string;
+  insetBlockStart: string;
+  inlineSize: string;
+  blockSize: string;
+} {
+  if (geometry.axis === "inline") {
+    const insetInlineStart = `${start}px`;
+    const inlineSize = "";
+    if (geometry.lanes === 1) {
+      return { insetInlineStart, inlineSize, insetBlockStart: "0px", blockSize: "100%" };
+    }
+    const share = 100 / geometry.lanes;
+    const sizeGap = ((geometry.lanes - 1) * geometry.gap) / geometry.lanes;
+    const offsetGap = (lane * geometry.gap) / geometry.lanes;
+    return {
+      insetInlineStart,
+      inlineSize,
+      insetBlockStart: `calc(${lane * share}% + ${offsetGap}px)`,
+      blockSize: `calc(${share}% - ${sizeGap}px)`,
+    };
+  }
+  const insetBlockStart = `${start}px`;
+  const blockSize = "";
+  if (geometry.lanes === 1) {
+    return { insetBlockStart, blockSize, insetInlineStart: "0px", inlineSize: "100%" };
+  }
+  const share = 100 / geometry.lanes;
+  const sizeGap = ((geometry.lanes - 1) * geometry.gap) / geometry.lanes;
+  const offsetGap = (lane * geometry.gap) / geometry.lanes;
+  return {
+    insetBlockStart,
+    blockSize,
+    insetInlineStart: `calc(${lane * share}% + ${offsetGap}px)`,
+    inlineSize: `calc(${share}% - ${sizeGap}px)`,
+  };
+}
+
+export function Show(props: { when: unknown; children: Child; fallback?: Child }): Child {
+  const start = document.createComment("show");
+  const end = document.createComment("/show");
+  const parent = document.createDocumentFragment();
+  parent.append(start, end);
+  type Branch = "shown" | "fallback";
+  let active: { branch: Branch; scope: ScopedNodes } | undefined;
+  const exiting = new Map<Branch, { scope: ScopedNodes; retention: RetainedPresence }>();
+
+  const disposeScope = (scope: ScopedNodes) => {
+    scope.dispose();
+    for (const node of scope.nodes) node.parentNode?.removeChild(node);
+  };
+
+  const startExit = (branch: Branch, scope: ScopedNodes) => {
+    if (!shouldRetainForExit(scope.nodes)) {
+      disposeScope(scope);
+      return;
+    }
+    let retention: RetainedPresence;
+    retention = retainForExit(
+      scope.nodes,
+      () => {
+        scope.dispose();
+        if (exiting.get(branch)?.retention === retention) exiting.delete(branch);
+      },
+      1,
+    );
+    exiting.set(branch, { scope, retention });
+  };
+
+  blockEffect(() => {
+    const visible = readCondition(props.when);
+    const nextBranch: Branch = visible ? "shown" : "fallback";
+    if (active?.branch === nextBranch) return;
+
+    if (active) startExit(active.branch, active.scope);
+
+    const retained = exiting.get(nextBranch);
+    let scope: ScopedNodes;
+    if (retained) {
+      exiting.delete(nextBranch);
+      retained.retention.restore();
+      scope = retained.scope;
+    } else {
+      scope = createScopedNodes(() => resolveChild(visible ? props.children : props.fallback));
+      markPresenceState(scope.nodes, "entering");
+    }
+    for (const node of scope.nodes) end.parentNode?.insertBefore(node, end);
+    if (end.parentElement) adoptSceneChildren(end.parentElement);
+    scope.mount();
+    if (!retained) queuePresenceTarget(() => markPresenceState(scope.nodes, "entered"));
+    active = { branch: nextBranch, scope };
+  });
+
+  registerCleanup(() => {
+    if (active) disposeScope(active.scope);
+    active = undefined;
+    for (const { retention } of exiting.values()) retention.finish();
+    exiting.clear();
+  });
+
+  return parent;
+}
+
+function readCondition(value: unknown): boolean {
+  return Boolean(typeof value === "function" ? (value as () => unknown)() : read(value));
+}
+
+function shouldRetainForExit(nodes: Node[]): boolean {
+  if (prefersReducedMotion()) return false;
+  return presenceElements(nodes).some((element) => {
+    const lifecycle = element.getAttribute("data-motion-lifecycle") ?? "";
+    return lifecycle.includes("exit") && lifecycle.includes("exit-finished");
+  });
+}
+
+function retainForExit(nodes: Node[], onDone: () => void, priority = 1): RetainedPresence {
+  const elements = presenceElements(nodes).filter((element) => {
+    return (element.getAttribute("data-motion-lifecycle") ?? "").includes("exit");
+  });
+  markPresenceState(nodes, "exiting");
+
+  let settled = false;
+  let waiting: PresenceWait | undefined;
+  const finish = () => {
+    if (settled) return;
+    settled = true;
+    waiting?.cancel();
+    for (const node of nodes) node.parentNode?.removeChild(node);
+    onDone();
+  };
+
+  waiting = waitForPresenceFinish(elements, finish, priority);
+  return {
+    finish,
+    restore() {
+      if (settled) return;
+      settled = true;
+      waiting?.restore();
+      markPresenceState(nodes, "entered", true);
+    },
+  };
+}
+
+type PresenceWait = {
+  cancel(): void;
+  restore(): void;
+};
+
+function waitForPresenceFinish(
+  elements: HTMLElement[],
+  onDone: () => void,
+  _priority = 1,
+): PresenceWait {
+  const roots = elements.filter(
+    (element) => !elements.some((parent) => parent !== element && parent.contains(element)),
+  );
+  let stopped = false;
+  const stopLifecycle = roots.length ? waitForLifecycleFinish(roots, onDone) : undefined;
+  if (!roots.length) queueMicrotask(onDone);
+  const stop = () => {
+    if (stopped) return;
+    stopped = true;
+    stopLifecycle?.();
+  };
+  return {
+    cancel: stop,
+    restore: stop,
+  };
+}
+
+function waitForLifecycleFinish(elements: HTMLElement[], onDone: () => void): () => void {
+  let finished = false;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const finish = () => {
+    if (finished) return;
+    finished = true;
+    if (timeout) clearTimeout(timeout);
+    for (const element of elements) {
+      element.removeEventListener("transitionend", finish);
+      element.removeEventListener("animationend", finish);
+      element.removeEventListener("poggersmotionfinish", finish);
+    }
+    onDone();
+  };
+
+  for (const element of elements) {
+    element.addEventListener("transitionend", finish);
+    element.addEventListener("animationend", finish);
+    element.addEventListener("poggersmotionfinish", finish);
+  }
+
+  timeout = setTimeout(finish, Math.max(maxLifecycleDurationMs(elements) + 50, 240));
+  return () => {
+    if (finished) return;
+    finished = true;
+    if (timeout) clearTimeout(timeout);
+    for (const element of elements) {
+      element.removeEventListener("transitionend", finish);
+      element.removeEventListener("animationend", finish);
+      element.removeEventListener("poggersmotionfinish", finish);
+    }
+  };
+}
+
+function markPresenceState(
+  nodes: Node[],
+  state: "entering" | "entered" | "exiting",
+  _restoring = false,
+) {
+  for (const element of presenceElements(nodes)) {
+    setSceneElementPresence(
+      element,
+      state === "entered" ? "present" : state === "exiting" ? "exiting" : "entering",
+    );
+    element.setAttribute("data-motion-state", state);
+    if (state === "exiting") {
+      popPresenceElement(element);
+      if (!retainedPresenceSemantics.has(element)) {
+        retainedPresenceSemantics.set(element, {
+          ariaHidden: element.getAttribute("aria-hidden"),
+          inert: element.hasAttribute("inert"),
+        });
+      }
+      element.setAttribute("aria-hidden", "true");
+      element.setAttribute("inert", "");
+    } else {
+      restorePoppedPresenceElement(element);
+      const semantics = retainedPresenceSemantics.get(element);
+      if (!semantics) continue;
+      retainedPresenceSemantics.delete(element);
+      if (semantics.ariaHidden == null) element.removeAttribute("aria-hidden");
+      else element.setAttribute("aria-hidden", semantics.ariaHidden);
+      if (!semantics.inert) element.removeAttribute("inert");
+    }
+  }
+}
+
+function popPresenceElement(element: HTMLElement): void {
+  if (element.getAttribute("data-motion-layout") !== "pop" || poppedPresenceStyles.has(element)) {
+    return;
+  }
+  const parent = element.parentElement;
+  if (!parent) return;
+  const rectangle = element.getBoundingClientRect();
+  const parentRectangle = parent.getBoundingClientRect();
+  poppedPresenceStyles.set(element, {
+    position: element.style.position,
+    inset: element.style.inset,
+    insetInlineStart: element.style.insetInlineStart,
+    insetBlockStart: element.style.insetBlockStart,
+    inlineSize: element.style.inlineSize,
+    blockSize: element.style.blockSize,
+  });
+  element.style.position = "absolute";
+  element.style.inset = "auto";
+  element.style.insetInlineStart = `${rectangle.left - parentRectangle.left}px`;
+  element.style.insetBlockStart = `${rectangle.top - parentRectangle.top}px`;
+  element.style.inlineSize = `${rectangle.width}px`;
+  element.style.blockSize = `${rectangle.height}px`;
+}
+
+function restorePoppedPresenceElement(element: HTMLElement): void {
+  const styles = poppedPresenceStyles.get(element);
+  if (!styles) return;
+  poppedPresenceStyles.delete(element);
+  element.style.position = styles.position;
+  element.style.inset = styles.inset;
+  element.style.insetInlineStart = styles.insetInlineStart;
+  element.style.insetBlockStart = styles.insetBlockStart;
+  element.style.inlineSize = styles.inlineSize;
+  element.style.blockSize = styles.blockSize;
+}
+
+function presenceElements(nodes: Node[]): HTMLElement[] {
+  const elements: HTMLElement[] = [];
+  for (const node of nodes) collectPresenceElements(node, elements);
+  return elements;
+}
+
+function collectPresenceElements(node: Node, elements: HTMLElement[]) {
+  if (!isHtmlElement(node)) return;
+  if (node.getAttribute("data-motion-lifecycle")) elements.push(node);
+  for (const child of Array.from(node.childNodes)) collectPresenceElements(child, elements);
+}
+
+function isHtmlElement(node: unknown): node is HTMLElement {
+  return typeof HTMLElement !== "undefined" && node instanceof HTMLElement;
+}
+
+function maxLifecycleDurationMs(elements: HTMLElement[]): number {
+  if (typeof getComputedStyle !== "function") return 0;
+  let max = 0;
+  for (const element of elements) {
+    const style = getComputedStyle(element);
+    max = Math.max(
+      max,
+      maxTimeListMs(style.transitionDuration) + maxTimeListMs(style.transitionDelay),
+      maxTimeListMs(style.animationDuration) + maxTimeListMs(style.animationDelay),
+    );
+  }
+  return max;
+}
+
+function maxTimeListMs(value: string): number {
+  let max = 0;
+  for (const item of value.split(",")) max = Math.max(max, timeMs(item.trim()));
+  return max;
+}
+
+function timeMs(value: string): number {
+  if (value.endsWith("ms")) return Number(value.slice(0, -2)) || 0;
+  if (value.endsWith("s")) return (Number(value.slice(0, -1)) || 0) * 1000;
+  return 0;
+}
+
+function queuePresenceTarget(fn: () => void) {
+  queueMicrotask(fn);
+}
+
+function requestPresenceFrame(fn: () => void) {
+  if (typeof requestAnimationFrame === "function") requestAnimationFrame(fn);
+  else setTimeout(fn, 0);
+}
+
+function createNode(type: string | ErasedComponent, props: Props): Child {
+  if (typeof type === "function") return untrack(() => type(props as never));
+
+  const element = document.createElement(type);
+  const { children, __poggersStructuralChildren, __poggersScene, ...attributes } = props;
+
+  if (__poggersScene) {
+    const registration = __poggersScene as SceneElementRegistration;
+    mountSceneElement(element, registration, currentChildHost);
+    registerCleanup(() => unmountSceneElement(element, registration.scene));
+  }
+
+  for (const [name, value] of Object.entries(attributes)) {
+    applyProp(element, name, value);
+  }
+
+  const previousHost = currentChildHost;
+  currentChildHost = element;
+  try {
+    const resolvedChildren =
+      __poggersStructuralChildren === true && typeof children === "function"
+        ? untrack(() => resolveChild(children))
+        : children;
+    element.append(...toNodes(resolvedChildren));
+    adoptSceneChildren(element);
+  } finally {
+    currentChildHost = previousHost;
+  }
+  return element;
+}
+
+function applyProp(element: HTMLElement, name: string, value: unknown) {
+  if (name === "ref" && typeof value === "function") {
+    const cleanup = value(element);
+    if (typeof cleanup === "function") registerCleanup(cleanup);
+    return;
+  }
+
+  if (name === "className") {
+    bindValue((next) => {
+      setAttributeIfChanged(element, "class", stringify(next));
+    }, value);
+    return;
+  }
+
+  if (name === "style") {
+    bindStyle(element, value);
+    return;
+  }
+
+  if (name === "hidden") {
+    bindHidden(element, value);
+    return;
+  }
+
+  if (name.startsWith("on") && typeof value === "function") {
+    const eventName = eventNameForProp(name);
+    element.addEventListener(eventName, value as EventListener);
+    registerCleanup(() => element.removeEventListener(eventName, value as EventListener));
+    return;
+  }
+
+  const attributeName = attributeNameForProp(name);
+  bindValue((next) => {
+    const ariaAttribute = attributeName.startsWith("aria-");
+    if ((next === false && !ariaAttribute) || next == null) {
+      if (element.hasAttribute(attributeName)) element.removeAttribute(attributeName);
+      return;
+    }
+    if (ariaAttribute && typeof next === "boolean") {
+      setAttributeIfChanged(element, attributeName, next ? "true" : "false");
+      return;
+    }
+    if (attributeName === name && name in element) {
+      try {
+        Reflect.set(element, name, next);
+        return;
+      } catch {}
+    }
+    setAttributeIfChanged(element, attributeName, next === true ? "" : stringify(next));
+  }, value);
+}
+
+function attributeNameForProp(name: string): string {
+  switch (name) {
+    case "popoverTarget":
+      return "popovertarget";
+    case "popoverTargetAction":
+      return "popovertargetaction";
+    default:
+      return name;
+  }
+}
+
+function eventNameForProp(name: string): string {
+  const eventName = name.slice(2).toLowerCase();
+  return eventName === "doubleclick" ? "dblclick" : eventName;
+}
+
+function bindStyle(element: HTMLElement, value: unknown) {
+  bindValue((next) => {
+    if (typeof next === "string") {
+      element.setAttribute("style", next);
+      return;
+    }
+    if (!next || typeof next !== "object") {
+      element.removeAttribute("style");
+      return;
+    }
+    for (const [key, styleValue] of Object.entries(next as Record<string, unknown>)) {
+      if (key.startsWith("--")) {
+        if (styleValue == null) element.style.removeProperty(key);
+        else element.style.setProperty(key, String(styleValue));
+      } else {
+        Reflect.set(element.style, key, styleValue == null ? "" : String(styleValue));
+      }
+    }
+  }, value);
+}
+
+function bindHidden(element: HTMLElement, value: unknown) {
+  let initialized = false;
+  let currentHidden = element.hasAttribute("hidden");
+  let targetHidden = currentHidden;
+  let stopExit: PresenceWait | undefined;
+
+  const stopPendingExit = (restore = false) => {
+    if (restore) stopExit?.restore();
+    else stopExit?.cancel();
+    stopExit = undefined;
+  };
+
+  bindValue((next) => {
+    const hidden = Boolean(next);
+
+    if (!initialized) {
+      initialized = true;
+      currentHidden = hidden;
+      targetHidden = hidden;
+      setHiddenAttribute(element, hidden);
+      return;
+    }
+
+    if (hidden === targetHidden) return;
+    targetHidden = hidden;
+    const restoring = !hidden && Boolean(stopExit);
+    stopPendingExit(restoring);
+
+    if (hidden) {
+      if (currentHidden) return;
+      if (!shouldRetainElementForExit(element)) {
+        setHiddenAttribute(element, true);
+        currentHidden = true;
+        return;
+      }
+
+      markPresenceState([element], "exiting");
+      stopExit = waitForPresenceFinish([element], () => {
+        stopExit = undefined;
+        if (!targetHidden) return;
+        setHiddenAttribute(element, true);
+        currentHidden = true;
+      });
+      return;
+    }
+
+    setHiddenAttribute(element, false);
+    currentHidden = false;
+    markPresenceState([element], "entering", restoring);
+    queuePresenceTarget(() => {
+      if (!targetHidden) markPresenceState([element], "entered", restoring);
+    });
+  }, value);
+
+  registerCleanup(() => stopPendingExit());
+}
+
+function notifyVirtualCollectionsOpened(layer: HTMLElement): void {
+  for (const candidate of layer.querySelectorAll<HTMLElement>("*")) {
+    const handler = virtualCollectionOpenHandlers.get(candidate);
+    if (!handler) continue;
+    handler();
+  }
+}
+
+const documentScrollLocks = new WeakMap<
+  Document,
+  {
+    count: number;
+    readonly restore: () => void;
+  }
+>();
+
+function retainDocumentScrollLock(document: Document): () => void {
+  const active = documentScrollLocks.get(document);
+  if (active) {
+    active.count += 1;
+  } else {
+    const elements = [document.documentElement, document.body].filter(
+      (element): element is HTMLElement => Boolean(element?.style),
+    );
+    const properties = ["overflow", "overscroll-behavior"] as const;
+    const previous = elements.map((element) =>
+      properties.map((property) => element.style.getPropertyValue(property)),
+    );
+    const body = document.body;
+    const previousBodyPadding = body?.style.getPropertyValue("padding-inline-end") ?? "";
+    const viewportWidth = document.defaultView?.innerWidth;
+    const clientWidth = document.documentElement?.clientWidth;
+    const scrollbarWidth =
+      typeof viewportWidth === "number" && typeof clientWidth === "number"
+        ? Math.max(0, viewportWidth - clientWidth)
+        : 0;
+    for (const element of elements) {
+      element.style.setProperty("overflow", "hidden");
+      element.style.setProperty("overscroll-behavior", "none");
+    }
+    if (body && scrollbarWidth > 0) {
+      const padding = document.defaultView?.getComputedStyle(body).paddingInlineEnd || "0px";
+      body.style.setProperty("padding-inline-end", `calc(${padding} + ${scrollbarWidth}px)`);
+    }
+    documentScrollLocks.set(document, {
+      count: 1,
+      restore() {
+        elements.forEach((element, elementIndex) => {
+          properties.forEach((property, propertyIndex) => {
+            const value = previous[elementIndex]?.[propertyIndex] ?? "";
+            if (value) element.style.setProperty(property, value);
+            else element.style.removeProperty(property);
+          });
+        });
+        if (body) {
+          if (previousBodyPadding) {
+            body.style.setProperty("padding-inline-end", previousBodyPadding);
+          } else {
+            body.style.removeProperty("padding-inline-end");
+          }
+        }
+      },
+    });
+  }
+
+  let retained = true;
+  return () => {
+    if (!retained) return;
+    retained = false;
+    const lock = documentScrollLocks.get(document);
+    if (!lock) return;
+    lock.count -= 1;
+    if (lock.count > 0) return;
+    lock.restore();
+    documentScrollLocks.delete(document);
+  };
+}
+
+export function mountDialog(
+  element: HTMLDialogElement,
+  value: false | "modal" | "nonmodal" | (() => false | "modal" | "nonmodal"),
+) {
+  if (!(element instanceof HTMLDialogElement)) {
+    throw new TypeError("mountDialog requires a <dialog> element.");
+  }
+
+  let initialized = false;
+  let targetMode: false | "modal" | "nonmodal" = false;
+  let currentMode: false | "modal" | "nonmodal" = false;
+  let invoker: HTMLElement | null = null;
+  let revision = 0;
+  let programmaticCloses = 0;
+  let browserMode: false | "modal" | "nonmodal" = false;
+  let releaseScrollLock: (() => void) | undefined;
+
+  const suppressProgrammaticClose = (event: Event) => {
+    if (programmaticCloses === 0) return;
+    programmaticCloses -= 1;
+    event.stopImmediatePropagation();
+  };
+  element.addEventListener("close", suppressProgrammaticClose, true);
+  registerCleanup(() => element.removeEventListener("close", suppressProgrammaticClose, true));
+
+  const resetOpenMode = () => {
+    if (element.open) {
+      programmaticCloses += 1;
+      element.close();
+    }
+    browserMode = false;
+    releaseScrollLock?.();
+    releaseScrollLock = undefined;
+  };
+  const show = (mode: "modal" | "nonmodal") => {
+    if (currentMode === mode && element.open) return;
+    const entering = currentMode === false;
+
+    if (element.open && browserMode === "modal") {
+      currentMode = mode;
+      if (mode === "nonmodal") {
+        // Keep the retained node and document lock, but leave the modal top
+        // layer so the inert exit surface cannot block a reversible trigger.
+        programmaticCloses += 1;
+        element.close();
+        try {
+          element.show();
+          browserMode = "nonmodal";
+        } catch {
+          browserMode = false;
+        }
+        element.setAttribute("aria-hidden", "true");
+        element.setAttribute("inert", "");
+        restoreLayerFocus(invoker);
+      } else {
+        element.removeAttribute("aria-hidden");
+        element.removeAttribute("inert");
+        focusDialogDefault(element);
+      }
+      return;
+    }
+
+    resetOpenMode();
+    element.hidden = false;
+    setSceneElementVisible(element, true);
+    if (!invoker) invoker = resolveLayerInvoker(element);
+    element.removeAttribute("aria-hidden");
+    element.removeAttribute("inert");
+    try {
+      if (mode === "modal") element.showModal();
+      else element.show();
+    } catch {
+      return;
+    }
+    browserMode = mode;
+    if (mode === "modal") {
+      releaseScrollLock = retainDocumentScrollLock(element.ownerDocument ?? document);
+    }
+    currentMode = mode;
+
+    if (mode === "nonmodal") {
+      element.setAttribute("aria-hidden", "true");
+      element.setAttribute("inert", "");
+      restoreLayerFocus(invoker);
+      return;
+    }
+
+    focusDialogDefault(element);
+    if (entering) {
+      element.setAttribute("data-motion-state", "entering");
+      notifyVirtualCollectionsOpened(element);
+      queuePresenceTarget(() => {
+        if (!element.open || currentMode !== "modal") return;
+        if (!element.contains(document.activeElement)) focusDialogDefault(element);
+        element.setAttribute("data-motion-state", "entered");
+      });
+    }
+  };
+  const close = () => {
+    resetOpenMode();
+    currentMode = false;
+    element.removeAttribute("aria-hidden");
+    element.removeAttribute("inert");
+    element.removeAttribute("data-motion-state");
+    restoreLayerFocus(invoker);
+    setSceneElementVisible(element, false);
+    element.hidden = true;
+  };
+
+  registerCleanup(() => {
+    resetOpenMode();
+    currentMode = false;
+  });
+
+  bindValue((next) => {
+    const mode = next === "modal" || next === "nonmodal" ? next : false;
+    if (initialized && mode === targetMode) return;
+    targetMode = mode;
+    const currentRevision = ++revision;
+
+    if (mode) {
+      if (currentMode !== false || element.open) {
+        show(mode);
+        initialized = true;
+        return;
+      }
+      requestPresenceFrame(() => {
+        if (targetMode === mode && element.isConnected) show(mode);
+      });
+      initialized = true;
+      return;
+    }
+
+    if (!initialized || (!element.open && currentMode === false)) {
+      setSceneElementVisible(element, false);
+      element.hidden = true;
+      initialized = true;
+      return;
+    }
+    if (!targetMode && currentRevision === revision) close();
+  }, value);
+}
+
+function focusDialogDefault(dialog: HTMLDialogElement): void {
+  const target = dialog.querySelector<HTMLElement>("[autofocus]:not([disabled])");
+  if (!target?.isConnected) return;
+  target.focus({ preventScroll: true });
+}
+
+function resolveLayerInvoker(layer: HTMLElement): HTMLElement | null {
+  const active = document.activeElement;
+  if (layer.id) {
+    const controllers = [...document.querySelectorAll<HTMLElement>("[aria-controls]")].filter(
+      (candidate) =>
+        (candidate.getAttribute("aria-controls") ?? "").split(/\s+/).includes(layer.id),
+    );
+    const activeController = controllers.find((candidate) => candidate === active);
+    if (activeController) return activeController;
+    if (controllers.length === 1) return controllers[0]!;
+  }
+  if (
+    active instanceof HTMLElement &&
+    active !== document.body &&
+    active !== document.documentElement &&
+    !layer.contains(active)
+  ) {
+    return active;
+  }
+  return null;
+}
+
+function restoreLayerFocus(invoker: HTMLElement | null): void {
+  if (!invoker?.isConnected) return;
+  invoker.focus({ preventScroll: true });
+  queueMicrotask(() => {
+    if (invoker.isConnected && document.activeElement !== invoker) {
+      invoker.focus({ preventScroll: true });
+    }
+  });
+}
+
+function shouldRetainElementForExit(element: HTMLElement): boolean {
+  if (prefersReducedMotion()) return false;
+  const lifecycle = element.getAttribute("data-motion-lifecycle") ?? "";
+  return lifecycle.includes("exit") && lifecycle.includes("exit-finished");
+}
+
+function setHiddenAttribute(element: HTMLElement, hidden: boolean) {
+  setSceneElementVisible(element, !hidden);
+  try {
+    element.hidden = hidden;
+  } catch {}
+
+  if (hidden) element.setAttribute("hidden", "");
+  else element.removeAttribute("hidden");
+}
+
+function bindValue(set: (value: unknown) => void, value: unknown) {
+  if (typeof value === "function") {
+    effect(() => set((value as () => unknown)()));
+  } else {
+    set(value);
+  }
+}
+
+function resolveChild(child: Child): Child {
+  return typeof child === "function" ? resolveChild(child()) : child;
+}
+
+function toNodes(child: Child): Node[] {
+  if (typeof child === "function") return dynamicNodes(child);
+
+  const resolved = resolveChild(child);
+  if (resolved == null || resolved === false || resolved === true) return [];
+  if (Array.isArray(resolved)) return resolved.flatMap(toNodes);
+  if (resolved instanceof Node && resolved.nodeType === 11) {
+    return Array.from(resolved.childNodes);
+  }
+  if (resolved instanceof Node) return [resolved];
+  return [document.createTextNode(String(resolved))];
+}
+
+function dynamicNodes(readChild: () => Child): Node[] {
+  const start = document.createComment("dynamic");
+  const end = document.createComment("/dynamic");
+  const parent = document.createDocumentFragment();
+  parent.append(start, end);
+  let rendered: Node[] = [];
+
+  blockEffect(() => {
+    const nextNodes = toNodes(readChild());
+    replaceBetween(start, end, nextNodes);
+    rendered = nextNodes;
+  });
+
+  registerCleanup(() => {
+    for (const node of rendered) node.parentNode?.removeChild(node);
+    rendered = [];
+  });
+
+  return [start, ...rendered, end];
+}
+
+function replaceBetween(start: Node, end: Node, nodes: Node[]) {
+  let cursor = start.nextSibling;
+  while (cursor && cursor !== end) {
+    const next = cursor.nextSibling;
+    cursor.parentNode?.removeChild(cursor);
+    cursor = next;
+  }
+  start.parentNode?.insertBefore(document.createDocumentFragment(), end);
+  for (const node of nodes) {
+    end.parentNode?.insertBefore(node, end);
+  }
+  if (end.parentElement) adoptSceneChildren(end.parentElement);
+}
+
+function read<T>(value: T): T {
+  const reactiveReader = reactiveValueReader<T>(value);
+  if (reactiveReader) return reactiveReader();
+  return value;
+}
+
+function readSource<T>(value: T | (() => T)): T {
+  return typeof value === "function" ? (value as () => T)() : read(value);
+}
+
+export function reactiveValue<T>(source: () => T): T {
+  const initial = source();
+  if (initial == null || typeof initial !== "object") return initial;
+
+  const emptyTarget = Array.isArray(initial) ? [] : Object.create(null);
+  return new Proxy(emptyTarget, {
+    get(_target, prop, receiver) {
+      if (prop === reactiveValueRead) return source;
+      const value = source();
+      if (value == null || typeof value !== "object") return undefined;
+      const item = Reflect.get(value as object, prop, receiver);
+      return typeof item === "function" ? item.bind(value) : item;
+    },
+    has(_target, prop) {
+      const value = source();
+      return value != null && typeof value === "object" && prop in value;
+    },
+    ownKeys() {
+      const value = source();
+      return value != null && typeof value === "object" ? Reflect.ownKeys(value) : [];
+    },
+    getOwnPropertyDescriptor(_target, prop) {
+      const value = source();
+      if (value == null || typeof value !== "object") return undefined;
+      const descriptor = Reflect.getOwnPropertyDescriptor(value, prop);
+      return descriptor ? { ...descriptor, configurable: true } : undefined;
+    },
+    getPrototypeOf() {
+      const value = source();
+      return value != null && typeof value === "object" ? Reflect.getPrototypeOf(value) : null;
+    },
+  }) as T;
+}
+
+function reactiveValueReader<T>(value: unknown): (() => T) | undefined {
+  if (value == null || (typeof value !== "object" && typeof value !== "function")) return;
+  return (value as ReactiveValue<T>)[reactiveValueRead];
+}
+
+function stringify(value: unknown): string {
+  return value == null ? "" : String(value);
+}
+
+function registerCleanup(cleanup: () => void) {
+  if (currentLifecycleScope) currentLifecycleScope.cleanups.push(cleanup);
+  else currentOwner?.cleanups.push(cleanup);
+}
+
+function blockEffect(fn: () => void | (() => void)) {
+  if (currentLifecycleScope) {
+    currentLifecycleScope.cleanups.push(alienEffect(fn));
+    return;
+  }
+  const owner = currentOwner;
+  if (owner) {
+    owner.mounts.push(() => alienEffect(fn));
+    return;
+  }
+  queueMicrotask(() => {
+    alienEffect(fn);
+  });
+}
+
+function createScopedNodes(readNodes: () => Child): ScopedNodes {
+  const scope: LifecycleScope = {
+    cleanups: [],
+    mounts: [],
+    disposed: false,
+    mounted: false,
+  };
+  let nodes: Node[] = [];
+  const previousScope = currentLifecycleScope;
+  const previousSub = alienGetActiveSub();
+  currentLifecycleScope = scope;
+  alienSetActiveSub(undefined);
+  try {
+    const dispose = alienEffectScope(() => {
+      nodes = toNodes(resolveChild(readNodes()));
+    });
+    scope.cleanups.push(dispose);
+  } finally {
+    alienSetActiveSub(previousSub);
+    currentLifecycleScope = previousScope;
+  }
+
+  return {
+    nodes,
+    mount() {
+      if (scope.mounted || scope.disposed) return;
+      scope.mounted = true;
+      const activeScope = currentLifecycleScope;
+      currentLifecycleScope = scope;
+      try {
+        while (scope.mounts.length) {
+          for (const mount of scope.mounts.splice(0)) {
+            const cleanup = mount();
+            if (typeof cleanup === "function") scope.cleanups.push(cleanup);
+          }
+        }
+      } finally {
+        currentLifecycleScope = activeScope;
+      }
+    },
+    dispose() {
+      if (scope.disposed) return;
+      scope.disposed = true;
+      scope.mounts.length = 0;
+      for (const cleanup of scope.cleanups.splice(0)) cleanup();
+    },
+  };
+}
+
+type NativeRuntime<Spec extends AppSpec> = ReturnType<typeof createNativeRuntime<Spec>>;
+
+function createNativeRuntime<Spec extends AppSpec>(app: App<Spec>) {
+  let started = false;
+  let disposed = false;
+  let clientPromise: Promise<Client<Spec>> | null = null;
+  const client = runtimeSignal<Client<Spec> | null>(null);
+  const resources = new Map<string, NativeResourceState<Spec, ResourceName<Spec>>>();
+
+  function start(connect?: ConnectOpts | (() => Promise<Client<Spec>>)): Promise<void> {
+    if (disposed) return Promise.reject(new Error("Cannot start a disposed native app runtime."));
+    if (started) return clientPromise?.then(() => undefined) ?? Promise.resolve();
+    started = true;
+    if (!connect) return Promise.resolve();
+
+    clientPromise = Promise.resolve(
+      typeof connect === "function" ? connect() : connectClient(app, connect),
+    )
+      .then((nextClient) => {
+        if (disposed) {
+          nextClient.dispose();
+          return nextClient;
+        }
+        client(nextClient);
+        return nextClient;
+      })
+      .catch((error) => {
+        for (const resource of resources.values()) {
+          resource.sync({ ...resource.sync(), syncing: false, stale: true, error: String(error) });
+        }
+        throw error;
+      });
+    return clientPromise.then(() => undefined);
+  }
+
+  function resource<Resource extends ResourceName<Spec>>(
+    resourceName: Resource,
+    key: ResourceFor<Spec, Resource>["Key"],
+  ) {
+    if (disposed) throw new Error("Cannot access a disposed native app runtime.");
+    const id = scopeId(resourceName, key as JsonValue);
+    const existing = resources.get(id);
+    if (existing) return existing.handle as NativeResource<Spec, Resource>;
+
+    const state = createNativeResourceState(app, client, clientPromise, resourceName, key);
+    resources.set(id, state as NativeResourceState<Spec, ResourceName<Spec>>);
+    return state.handle;
+  }
+
+  function dispose() {
+    if (disposed) return;
+    disposed = true;
+    for (const resource of resources.values()) resource.dispose();
+    resources.clear();
+    const readyClient = client();
+    client(null);
+    readyClient?.dispose();
+    clientPromise = null;
+  }
+
+  return { start, resource, dispose };
+}
+
+type NativeResourceState<Spec extends AppSpec, Resource extends ResourceName<Spec>> = {
+  handle: NativeResource<Spec, Resource>;
+  sync: Signal<SyncMeta>;
+  dispose(): void;
+};
+
+function createNativeResourceState<Spec extends AppSpec, Resource extends ResourceName<Spec>>(
+  app: App<Spec>,
+  client: Signal<Client<Spec> | null>,
+  clientPromise: Promise<Client<Spec>> | null,
+  resource: Resource,
+  key: ResourceFor<Spec, Resource>["Key"],
+): NativeResourceState<Spec, Resource> {
+  const resourceDef = app.def.resources[resource];
+  const actor = { id: "local" } as ActorOf<Spec>;
+  const localState = app.createState(resource);
+  const views: Record<string, Signal<unknown>> = {};
+  const viewValues: Record<string, unknown> = {};
+  const sync = runtimeSignal<SyncMeta>({ cursor: 0, syncing: true, stale: true, error: null });
+  const syncValue = reactiveValue(() => sync());
+
+  for (const viewName of Object.keys(resourceDef.views ?? {})) {
+    const initialView = cloneViewValue(readLocalView(app, resource, key, localState, viewName));
+    views[viewName] = runtimeSignal(initialView);
+    if (isReactiveObject(initialView)) {
+      viewValues[viewName] = reactiveValue(() => views[viewName]!());
+    }
+  }
+
+  const commands: Record<string, (...args: unknown[]) => Submission<string>> = {};
+  for (const commandName of Object.keys(resourceDef.commands ?? {})) {
+    commands[commandName] = (...args: unknown[]) => {
+      const result = (async () => {
+        applyLocalCommand(app, resource, key, localState, actor, commandName, args, views);
+        const readyClient =
+          client() ?? (clientPromise ? await clientPromise.catch(() => null) : null);
+        const remote = readyClient?.[resource]?.(key as never) as RawResourceHandle<
+          Spec,
+          Resource
+        > | null;
+        const command = remote?.[commandName as keyof typeof remote] as
+          | ((...args: unknown[]) => Submission<string>)
+          | undefined;
+        if (typeof command !== "function") return { ok: true } as const;
+        return command(...args);
+      })();
+      return submissionFrom<string>(result);
+    };
+  }
+
+  const handle = new Proxy(Object.create(null), {
+    get(_target, prop: string) {
+      if (prop === "sync") return syncValue;
+      if (prop === "setPresence" && Object.prototype.hasOwnProperty.call(resourceDef, "presence")) {
+        return (value: unknown) => {
+          const publish = (readyClient: Client<Spec> | null) => {
+            const remote = readyClient?.[resource]?.(key as never) as
+              | RawResourceHandle<Spec, Resource>
+              | undefined;
+            remote?.setPresence?.(value);
+          };
+          const readyClient = client();
+          if (readyClient) publish(readyClient);
+          else if (clientPromise) void clientPromise.then(publish, () => undefined);
+        };
+      }
+      const command = commands[prop];
+      if (command) return command;
+      if (prop in viewValues) return viewValues[prop];
+      const view = views[prop];
+      if (view) return view();
+      return undefined;
+    },
+  }) as NativeResource<Spec, Resource>;
+
+  const dispose = runtimeEffect(() => {
+    const readyClient = client();
+    if (!readyClient) return;
+
+    const remote = readyClient[resource]?.(key as never) as RawResourceHandle<Spec, Resource>;
+    if (!remote) return;
+
+    const update = () => {
+      for (const viewName of Object.keys(views)) {
+        views[viewName]!(cloneViewValue(remote[viewName as keyof typeof remote]));
+      }
+      sync(remote.sync);
+    };
+
+    update();
+    return remote.subscribe(update);
+  });
+
+  return { handle, sync, dispose };
+}
+
+function createNativeHooks<Spec extends AppSpec>(
+  app: App<Spec>,
+  runtime: NativeRuntime<Spec>,
+): NativeUIHooks<Spec> {
+  const hooks: Record<string, unknown> = {
+    useResource: runtime.resource,
+  };
+
+  for (const resource of Object.keys(app.def.resources)) {
+    hooks[`use${capitalize(resource)}`] = (key: JsonValue) =>
+      runtime.resource(resource as ResourceName<Spec>, key as never);
+  }
+
+  return hooks as NativeUIHooks<Spec>;
+}
+
+function createNavigation<Spec extends AppSpec>(app: App<Spec>) {
+  const entries = Object.entries((app.def.navigation ?? { home: "/" }) as Record<string, string>);
+  const fallback = entries[0] ?? ["home", "/"];
+  const screen = runtimeSignal<AppScreen<Spec>>(parseScreen());
+  const nav: Record<string, unknown> = {};
+
+  for (const [name, pattern] of entries) {
+    nav[name] = (params: Record<string, unknown> = {}) => {
+      const path = pathFor(pattern, params);
+      if (typeof history !== "undefined") {
+        history.pushState({ poggersScreen: name }, "", path);
+      }
+      screen({
+        name,
+        params: params as NavigationParams<Spec, NavigationName<Spec>>,
+      } as AppScreen<Spec>);
+    };
+  }
+
+  const handlePopState = () => {
+    screen(parseScreen());
+  };
+  if (typeof addEventListener !== "undefined") {
+    addEventListener("popstate", handlePopState);
+  }
+
+  const dispose = () => {
+    if (typeof removeEventListener !== "undefined") {
+      removeEventListener("popstate", handlePopState);
+    }
+  };
+
+  function parseScreen(): AppScreen<Spec> {
+    const pathname = typeof location === "undefined" ? "/" : location.pathname;
+    for (const [name, pattern] of entries) {
+      const params = matchPath(pattern, pathname);
+      if (params) {
+        return {
+          name,
+          params,
+        } as AppScreen<Spec>;
+      }
+    }
+    return {
+      name: fallback[0],
+      params: {},
+    } as AppScreen<Spec>;
+  }
+
+  return {
+    screen,
+    nav: nav as AppNavigation<Spec>,
+    dispose,
+  };
+}
+
+function pathFor(pattern: string, params: Record<string, unknown>): string {
+  return pattern.replace(/:([A-Za-z0-9_]+)/g, (_, name: string) => {
+    const value = params[name];
+    if (value == null) {
+      throw new Error(`Missing navigation param "${name}" for path "${pattern}".`);
+    }
+    return encodeURIComponent(String(value));
+  });
+}
+
+function matchPath(pattern: string, pathname: string): Record<string, string> | null {
+  const patternParts = splitPath(pattern);
+  const pathParts = splitPath(pathname);
+  if (patternParts.length !== pathParts.length) return null;
+
+  const params: Record<string, string> = {};
+  for (let index = 0; index < patternParts.length; index++) {
+    const patternPart = patternParts[index]!;
+    const pathPart = pathParts[index]!;
+    if (patternPart.startsWith(":")) {
+      params[patternPart.slice(1)] = decodeURIComponent(pathPart);
+      continue;
+    }
+    if (patternPart !== pathPart) return null;
+  }
+  return params;
+}
+
+function splitPath(path: string): string[] {
+  return path.replace(/\/+$/g, "").split("/").filter(Boolean);
+}
+
+function applyLocalCommand<Spec extends AppSpec, Resource extends ResourceName<Spec>>(
+  app: App<Spec>,
+  resource: Resource,
+  key: ResourceFor<Spec, Resource>["Key"],
+  state: unknown,
+  actor: ActorOf<Spec>,
+  command: string,
+  args: unknown[],
+  views: Record<string, Signal<unknown>>,
+) {
+  const events: Array<{
+    id: string;
+    seq: number;
+    at: number;
+    actor: ActorOf<Spec>;
+    name: string;
+    payload: unknown;
+  }> = [];
+  let commandError: { error: string; data?: unknown } | null = null;
+
+  app.runCommand(
+    resource,
+    state,
+    actor,
+    key,
+    command,
+    args,
+    (event) => events.push(event),
+    (error, data) => {
+      commandError = { error, data };
+    },
+  );
+
+  if (commandError) return;
+
+  for (const event of events) {
+    app.applyEvent(resource, state as never, event, app.def.version);
+  }
+
+  for (const viewName of Object.keys(views)) {
+    views[viewName]!(cloneViewValue(readLocalView(app, resource, key, state, viewName)));
+  }
+}
+
+function cloneViewValue<T>(value: T): T {
+  if (value == null || typeof value !== "object") return value;
+  try {
+    return structuredClone(value);
+  } catch {
+    if (Array.isArray(value)) return value.slice() as T;
+    return { ...(value as Record<string, unknown>) } as T;
+  }
+}
+
+function isReactiveObject(value: unknown): value is object {
+  return value != null && typeof value === "object";
+}
+
+function readLocalView<Spec extends AppSpec, Resource extends ResourceName<Spec>>(
+  app: App<Spec>,
+  resource: Resource,
+  key: ResourceFor<Spec, Resource>["Key"],
+  state: unknown,
+  viewName: string,
+) {
+  const view = (
+    app.def.resources[resource].views as unknown as
+      | Record<
+          string,
+          (input: {
+            state: unknown;
+            actor: ActorOf<Spec> | null;
+            sessions: readonly unknown[];
+            key: ResourceFor<Spec, Resource>["Key"];
+          }) => unknown
+        >
+      | undefined
+  )?.[viewName];
+  return view?.({
+    state,
+    actor: null,
+    sessions: [],
+    key,
+  });
+}
+
+function capitalize(value: string): string {
+  return value.length === 0 ? value : value[0]!.toUpperCase() + value.slice(1);
+}
+
+export type {
+  Child,
+  CSSProperties,
+  CustomElementAttributes,
+  HTMLAttributes,
+  IntrinsicElements,
+  SVGAttributes,
+} from "#ui/web/jsx-types";
