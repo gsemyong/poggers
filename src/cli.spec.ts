@@ -32,6 +32,7 @@ describe("project template", () => {
 
     expect((await readdir(target)).sort()).toEqual([
       ".gitignore",
+      ".node-version",
       ".oxfmtrc.json",
       ".oxlintrc.json",
       "mise.toml",
@@ -74,7 +75,11 @@ describe("project template", () => {
     expect(packageJson.dependencies).toEqual({ "@poggers/kit": "latest" });
     expect(packageJson.engines.node).toBe(">=26.0.0");
     expect(packageJson.packageManager).toBe("nub@0.4.13");
-    expect(await readFile(resolve(target, "mise.toml"), "utf8")).toContain('node = "26.5.0"');
+    expect(await readFile(resolve(target, ".node-version"), "utf8")).toBe("26.5.0\n");
+    expect(await readFile(resolve(target, "mise.toml"), "utf8")).toContain(
+      '"github:nubjs/nub" = "0.4.13"',
+    );
+    expect(await readFile(resolve(target, "mise.toml"), "utf8")).toContain('rust = "1.97.1"');
     expect(await readFile(resolve(target, ".gitignore"), "utf8")).not.toContain("app.d.ts");
     expect(
       await run(

@@ -80,6 +80,7 @@ poggers/
 
   template/
     .gitignore
+    .node-version
     mise.toml
     package.json
     tsconfig.json
@@ -104,8 +105,8 @@ poggers/
 ```
 
 Configuration files required by their tools, including `.gitignore`,
-`.oxfmtrc.json`, `.oxlintrc.json`, and `mise.toml`, remain at the repository
-root.
+`.node-version`, `.oxfmtrc.json`, `.oxlintrc.json`, and `mise.toml`, remain at
+the repository root.
 
 ## Responsibility map
 

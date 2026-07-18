@@ -166,11 +166,12 @@ production backend turns the same meaning into optimized artifacts. Either
 backend may emit or embed any implementation language; those choices do not
 change the product language or repository architecture.
 
-Mise pins Node 26.5 and Nub 0.4.13 for development and generated applications.
-Poggers owns transactional semantic replacement on top of Vite HMR: compatible
-Program and Component state, focus, selection, scroll, and native dialog state
-survive replacement; failed compilation or activation leaves the previous
-revision live.
+Mise installs Nub 0.4.13 and Rust 1.97.1 for development and generated
+applications. Nub owns and provisions the Node 26.5 project pin from
+`.node-version`. Poggers owns transactional semantic replacement on top of Vite
+HMR: compatible Program and Component state, focus, selection, scroll, and
+native dialog state survive replacement; failed compilation or activation
+leaves the previous revision live.
 
 The current web production implementation uses Vite/Rolldown. The current
 headless production implementation can emit a selected Program as Rust with:
