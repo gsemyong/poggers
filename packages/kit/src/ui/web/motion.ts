@@ -194,8 +194,8 @@ export function createAdaptiveMotionBackend(options: {
       let disposed = false;
       const select = (next: keyof typeof adapters) => {
         if (active === next) return adapters[active];
-        const value = adapters[active].read();
         adapters[active].stop();
+        const value = adapters[active].read();
         active = next;
         adapters[active].write(value);
         return adapters[active];
@@ -454,6 +454,10 @@ export function createAnimeLayoutBackend(
 export type MotionOutcome = "settled" | "replaced" | "disposed";
 
 export type TransformChannel =
+  | "layoutTranslateX"
+  | "layoutTranslateY"
+  | "layoutScaleX"
+  | "layoutScaleY"
   | "translateX"
   | "translateY"
   | "translateZ"
@@ -700,6 +704,15 @@ export class RetainedMotionGraph {
     if (options?.velocity !== undefined) finite(options.velocity, "Motion velocity");
     if (options?.from !== undefined) finite(options.from, "Motion initial value");
     this.#replacePending(record);
+    if (options?.from !== undefined) {
+      if (record.active) {
+        const active = record.active;
+        record.active = undefined;
+        record.adapter.stop();
+        active.resolve("replaced");
+      }
+      record.adapter.write(options.from);
+    }
     return new Promise((resolve) => {
       const settlement = { revision: ++record.revision, resolve };
       record.pending = {
@@ -741,7 +754,6 @@ export class RetainedMotionGraph {
     record.driver = "target";
     record.active = operation.settlement;
     const revision = operation.settlement.revision;
-    if (operation.from !== undefined) record.adapter.write(operation.from);
     record.adapter.retarget({
       value: operation.value,
       velocity:
@@ -945,6 +957,10 @@ export class RetainedTransformComposer {
   }
 
   value(): string {
+    const layoutTranslateX = this.#values.get("layoutTranslateX") ?? 0;
+    const layoutTranslateY = this.#values.get("layoutTranslateY") ?? 0;
+    const layoutScaleX = this.#values.get("layoutScaleX") ?? 1;
+    const layoutScaleY = this.#values.get("layoutScaleY") ?? 1;
     const perspective = this.#values.get("perspective");
     const translateX = this.#values.get("translateX") ?? 0;
     const translateY = this.#values.get("translateY") ?? 0;
@@ -959,6 +975,12 @@ export class RetainedTransformComposer {
     const usesDepth =
       perspective !== undefined || translateZ !== 0 || rotateX !== 0 || rotateY !== 0;
     const values = [
+      ...(layoutTranslateX === 0 && layoutTranslateY === 0
+        ? []
+        : [`translate(${format(layoutTranslateX)}px, ${format(layoutTranslateY)}px)`]),
+      ...(layoutScaleX === 1 && layoutScaleY === 1
+        ? []
+        : [`scale(${format(layoutScaleX)}, ${format(layoutScaleY)})`]),
       ...(perspective === undefined ? [] : [`perspective(${format(perspective)}px)`]),
       ...(translateX === 0 && translateY === 0 && translateZ === 0
         ? []

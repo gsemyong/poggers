@@ -260,6 +260,15 @@ export class RuntimeScope {
   }
 
   async #finishDisposal(): Promise<void> {
+    for (const cleanup of this.resources.reverse()) {
+      try {
+        await cleanup();
+      } catch (error) {
+        this.errors.push(error);
+      }
+    }
+    this.resources.length = 0;
+
     const iteratorResults = await Promise.allSettled(
       [...this.iterators].map((iterator) => iterator.return?.()),
     );
@@ -269,14 +278,6 @@ export class RuntimeScope {
     }
 
     while (this.pending.size) await Promise.all(this.pending);
-    for (const cleanup of this.resources.reverse()) {
-      try {
-        await cleanup();
-      } catch (error) {
-        this.errors.push(error);
-      }
-    }
-    this.resources.length = 0;
     if (this.errors.length === 1) throw this.errors[0];
     if (this.errors.length > 1) {
       throw new AggregateError(this.errors, "Runtime scope disposal failed.");

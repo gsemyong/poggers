@@ -1,10 +1,10 @@
-import type { ComponentIR, ProductIR, TypeIR } from "./ir";
+import type { ComponentIR, ProductIR, ProgramIR, TypeIR } from "./ir";
 
 export type HotManifest = Readonly<{
   revision: string;
   programs: readonly Readonly<{
     id: string;
-    runtime: string;
+    runtime: ProgramIR["runtime"];
     state?: TypeIR;
     components: readonly ComponentIR[];
   }>[];
@@ -33,7 +33,7 @@ export type HotUpdateResult<Value> =
 export function createHotManifest(ir: ProductIR): HotManifest {
   const programs = ir.programs.map((program) => ({
     id: program.id,
-    runtime: program.runtime.name,
+    runtime: program.runtime,
     ...(program.ui ? { state: program.ui.state } : {}),
     components: program.ui?.components ?? [],
   }));
@@ -45,7 +45,7 @@ export function isHotManifestCompatible(previous: HotManifest, next: HotManifest
   for (const program of next.programs) {
     const before = previousPrograms.get(program.id);
     if (!before) continue;
-    if (before.runtime !== program.runtime) return false;
+    if (JSON.stringify(before.runtime) !== JSON.stringify(program.runtime)) return false;
     if (before.state && program.state && !compatibleType(before.state, program.state)) return false;
     if (Boolean(before.state) !== Boolean(program.state)) return false;
     const beforeComponents = new Map(
@@ -60,9 +60,9 @@ export function isHotManifestCompatible(previous: HotManifest, next: HotManifest
 }
 
 function compatibleComponent(previous: ComponentIR, next: ComponentIR): boolean {
+  if (JSON.stringify(previous.propCallbacks) !== JSON.stringify(next.propCallbacks)) return false;
   if (!compatibleType(previous.state, next.state)) return false;
-  if (!compatibleType(previous.parameters, next.parameters)) return false;
-  if (JSON.stringify(previous.parts) !== JSON.stringify(next.parts)) return false;
+  if (JSON.stringify(previous.elements) !== JSON.stringify(next.elements)) return false;
   return JSON.stringify(previous.visualValues) === JSON.stringify(next.visualValues);
 }
 

@@ -1,3 +1,5 @@
+import type { PlatformContract } from "./platform";
+
 type Empty = Record<never, never>;
 type ActionRecord = Record<string, (...args: never[]) => unknown>;
 
@@ -19,18 +21,18 @@ export type VisualValue<Kind extends ComponentValueKind> = {
   readonly "poggers.visualValue": Kind;
 };
 
-/** The platform-independent meaning exposed by one Component. */
+/** The platform-specific structural meaning exposed by one Component. */
 export type ComponentContract = {
-  Input?: Record<string, unknown>;
+  Props?: Record<string, unknown>;
   State?: Record<string, unknown>;
   Actions?: ActionRecord;
-  Parameters?: Record<string, unknown>;
   Slots?: Record<string, unknown>;
-  Parts: { Root: string } & Record<string, string>;
+  Elements: { Root: string } & Record<string, string>;
 };
 
 /** A Feature or Program shape from which Component meaning can be projected. */
 export type ComponentOwner = {
+  Runtime?: { Name: string; Platform?: PlatformContract };
   State?: object;
   Actions?: ActionRecord;
   Requires?: object;
@@ -39,6 +41,7 @@ export type ComponentOwner = {
   Programs?: Record<
     string,
     {
+      Runtime?: { Name: string; Platform?: PlatformContract };
       State?: object;
       Actions?: ActionRecord;
       Requires?: object;
@@ -67,6 +70,12 @@ type ProgramUIOf<Owner extends ComponentOwner> = Owner extends {
 type UIOf<Owner extends ComponentOwner> = [DirectUIOf<Owner>] extends [never]
   ? ProgramUIOf<Owner>
   : DirectUIOf<Owner>;
+export type ComponentPlatform<Owner extends ComponentOwner> =
+  UIOf<Owner> extends {
+    Runtime: { Platform: infer Platform extends PlatformContract };
+  }
+    ? Platform
+    : never;
 type ComponentsOf<Owner extends ComponentOwner> = [UIOf<Owner>] extends [never]
   ? Empty
   : UIOf<Owner> extends {
@@ -116,9 +125,9 @@ export type ComponentFor<
   Owner extends ComponentOwner,
   Name extends ComponentName<Owner>,
 > = ComponentsOf<Owner>[Name];
-export type ComponentInput<Owner extends ComponentOwner, Name extends ComponentName<Owner>> =
-  ComponentFor<Owner, Name> extends { Input: infer Input extends Record<string, unknown> }
-    ? Input
+export type ComponentProps<Owner extends ComponentOwner, Name extends ComponentName<Owner>> =
+  ComponentFor<Owner, Name> extends { Props: infer Props extends Record<string, unknown> }
+    ? Props
     : Empty;
 type ComponentStateContract<Owner extends ComponentOwner, Name extends ComponentName<Owner>> =
   ComponentFor<Owner, Name> extends { State: infer State extends Record<string, unknown> }
@@ -152,21 +161,15 @@ export type ComponentActions<Owner extends ComponentOwner, Name extends Componen
 export type ComponentActionArgs<Action> = Action extends (...args: infer Args) => unknown
   ? Args
   : [];
-export type ComponentParameters<Owner extends ComponentOwner, Name extends ComponentName<Owner>> =
-  ComponentFor<Owner, Name> extends {
-    Parameters: infer Parameters extends Record<string, unknown>;
-  }
-    ? Parameters
-    : Empty;
 export type ComponentSlots<Owner extends ComponentOwner, Name extends ComponentName<Owner>> =
   ComponentFor<Owner, Name> extends { Slots: infer Slots extends Record<string, unknown> }
     ? Slots
     : Empty;
-export type ComponentParts<Owner extends ComponentOwner, Name extends ComponentName<Owner>> =
-  ComponentFor<Owner, Name> extends { Parts: infer Parts extends Record<string, string> }
-    ? Parts
+export type ComponentElements<Owner extends ComponentOwner, Name extends ComponentName<Owner>> =
+  ComponentFor<Owner, Name> extends { Elements: infer Elements extends Record<string, string> }
+    ? Elements
     : never;
-export type ComponentPartName<
+export type ComponentElementName<
   Owner extends ComponentOwner,
   Name extends ComponentName<Owner>,
-> = Extract<keyof ComponentParts<Owner, Name>, string>;
+> = Extract<keyof ComponentElements<Owner, Name>, string>;

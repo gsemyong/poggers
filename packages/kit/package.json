@@ -18,13 +18,20 @@
     "src/tooling/cli.ts",
     "src/tooling/create.ts",
     "src/ui/compiler/application.ts",
-    "src/ui/compiler/presentation.ts",
-    "src/ui/compiler/stylex.ts",
     "src/ui/component.ts",
     "src/ui/component.contract.ts",
     "src/ui/index.ts",
     "src/ui/presentation.ts",
-    "src/ui/web/component.ts",
+    "src/ui/platform.ts",
+    "src/ui/three/adapter.ts",
+    "src/ui/three/jsx-dev-runtime.ts",
+    "src/ui/three/jsx-runtime.ts",
+    "src/ui/three/presentation.ts",
+    "src/ui/three/presentation/adapter.ts",
+    "src/ui/three/presentation/language.ts",
+    "src/ui/three/platform.ts",
+    "src/ui/three/structure.ts",
+    "src/ui/web/adapter.ts",
     "src/ui/web/drag.anime.ts",
     "src/ui/web/drag.ts",
     "src/ui/web/interaction.ts",
@@ -33,12 +40,14 @@
     "src/ui/web/jsx-types.ts",
     "src/ui/web/motion.ts",
     "src/ui/web/presentation.ts",
+    "src/ui/web/presentation/language.ts",
+    "src/ui/web/platform.ts",
     "src/ui/web/presentation/adapter.ts",
+    "src/ui/web/presentation/font.ts",
     "src/ui/web/presentation/style.ts",
     "src/ui/web/runtime.ts",
     "src/ui/web/scene.ts",
-    "src/ui/web/visual-runtime.ts",
-    "src/ui/web/visual.ts",
+    "src/ui/web/structure.ts",
     "dist",
     "tsconfig.app.json"
   ],
@@ -82,6 +91,21 @@
       "types": "./dist/src/ui/web/presentation.d.ts",
       "default": "./dist/src/ui/web/presentation.js"
     },
+    "./presentation/three": {
+      "poggers-source": "./src/ui/three/presentation.ts",
+      "types": "./dist/src/ui/three/presentation.d.ts",
+      "default": "./dist/src/ui/three/presentation.js"
+    },
+    "./presentation/three/jsx-runtime": {
+      "poggers-source": "./src/ui/three/jsx-runtime.ts",
+      "types": "./dist/src/ui/three/jsx-runtime.d.ts",
+      "default": "./dist/src/ui/three/jsx-runtime.js"
+    },
+    "./presentation/three/jsx-dev-runtime": {
+      "poggers-source": "./src/ui/three/jsx-dev-runtime.ts",
+      "types": "./dist/src/ui/three/jsx-dev-runtime.d.ts",
+      "default": "./dist/src/ui/three/jsx-dev-runtime.js"
+    },
     "./tsconfig": "./tsconfig.app.json"
   },
   "publishConfig": {
@@ -94,16 +118,16 @@
     "test": "vitest run src"
   },
   "dependencies": {
-    "@stylexjs/stylex": "^0.19.0",
-    "@stylexjs/unplugin": "^0.19.0",
     "@tanstack/virtual-core": "^3.17.3",
+    "@types/node": "^24.13.3",
+    "@types/three": "^0.185.1",
     "@typescript/typescript6": "^6.0.2",
     "alien-signals": "^3.2.1",
     "animejs": "^4.5.0",
+    "three": "^0.185.1",
     "vite": "^8.1.5"
   },
   "devDependencies": {
-    "@types/node": "^24.13.3",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10"
   }

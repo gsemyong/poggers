@@ -1,9 +1,8 @@
 import { accessSync, statSync } from "node:fs";
-import { glob, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { basename, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import stylex from "@stylexjs/unplugin/vite";
 import {
   build,
   createServer,
@@ -17,9 +16,8 @@ import {
 import { emitRustProgram } from "../compiler/backend.rust";
 import { compileProduct } from "../compiler/frontend";
 import { createHotManifest } from "../compiler/hot";
-import { serializeProductIR, type ProductIR } from "../compiler/ir";
+import { serializeProductIR, type ComponentIR, type ProductIR } from "../compiler/ir";
 import { transformComponentSource } from "../ui/compiler/application";
-import { analyzeVisualContract } from "../ui/compiler/presentation";
 
 export type ApplicationPaths = Readonly<{
   directory: string;
@@ -37,8 +35,51 @@ type PreparedApplication = Readonly<{
   entry: string;
   ir: ProductIR;
   updateKind: "full" | "presentation";
-  visual: string;
 }>;
+
+type WebComponentRuntimeContract = Readonly<{
+  elements: Readonly<Record<string, string>>;
+  state: readonly Readonly<{ name: string }>[];
+  propCallbacks: readonly string[];
+}>;
+
+function webApplicationContract(ir: ProductIR): Readonly<{
+  uiProgram: string;
+  components: Readonly<Record<string, WebComponentRuntimeContract>>;
+}> {
+  const names = new Set(
+    ir.programs
+      .filter(({ runtime, ui }) => runtime.name === "web-main" && ui)
+      .map(({ name }) => name),
+  );
+  if (names.size !== 1) {
+    throw new Error(`Application must define exactly one WebMain UI Program; found ${names.size}.`);
+  }
+  const uiProgram = [...names][0]!;
+  const components: Record<string, WebComponentRuntimeContract> = Object.create(null);
+  for (const program of ir.programs) {
+    if (program.name !== uiProgram || program.runtime.name !== "web-main" || !program.ui) continue;
+    for (const component of program.ui.components) {
+      const name = runtimeComponentName(program.feature, component.name);
+      if (components[name]) throw new Error(`Duplicate runtime Component ${JSON.stringify(name)}.`);
+      components[name] = componentRuntimeContract(component);
+    }
+  }
+  return { uiProgram, components };
+}
+
+function runtimeComponentName(feature: string, component: string): string {
+  return feature ? `@feature/${feature}/component/${component}` : component;
+}
+
+function componentRuntimeContract(component: ComponentIR): WebComponentRuntimeContract {
+  return {
+    elements: Object.fromEntries(component.elements.map(({ name, element }) => [name, element])),
+    state:
+      component.state.kind === "record" ? component.state.fields.map(({ name }) => ({ name })) : [],
+    propCallbacks: component.propCallbacks,
+  };
+}
 
 export function resolveApplication(directory: string): ApplicationPaths {
   const root = resolve(directory);
@@ -88,13 +129,7 @@ export async function buildApplication(options: {
       target: "es2022",
     },
   });
-  for await (const asset of glob("**/*.css", { cwd: outdir })) {
-    const path = resolve(outdir, asset);
-    if (path !== resolve(outdir, "styles.css")) {
-      await rename(path, resolve(outdir, "styles.css"));
-    }
-  }
-  await writeFile(resolve(outdir, "index.html"), htmlSource("/app.js", false));
+  await writeFile(resolve(outdir, "index.html"), htmlSource("/app.js"));
   return outdir;
 }
 
@@ -149,12 +184,12 @@ export async function runApplication(options: {
   const work = resolve(paths.directory, ".poggers", "dev");
   await rm(work, { recursive: true, force: true });
   await prepareApplication(paths, work, true);
-  await writeFile(resolve(work, "index.html"), htmlSource("/browser.generated.ts", true));
+  await writeFile(resolve(work, "index.html"), htmlSource("/browser.generated.ts"));
 
   const server = await createServer({
     ...viteConfiguration(paths, true),
     appType: "spa",
-    plugins: [visualContractPlugin(paths, work), ...vitePlugins(paths, true)],
+    plugins: [visualContractPlugin(paths, work), ...vitePlugins(paths)],
     root: work,
     server: {
       fs: { allow: [paths.directory, resolve(import.meta.dirname, "../../..")] },
@@ -184,28 +219,25 @@ async function prepareApplication(
 ): Promise<PreparedApplication> {
   await mkdir(work, { recursive: true });
   const ir = compileProduct(paths.application);
-  const contract = analyzeVisualContract(paths.application);
+  const contract = webApplicationContract(ir);
   const application = await loadApplication(paths, work);
   validateUIProgramRoot(application, contract.uiProgram);
   const authored = record(application.presentations);
-  for (const presentation of contract.presentations) {
-    if (!authored[presentation.name]) {
-      throw new Error(`Application is missing Presentation "${presentation.name}".`);
+  for (const presentation of ir.application.presentations) {
+    if (!authored[presentation]) {
+      throw new Error(`Application is missing Presentation "${presentation}".`);
     }
   }
 
-  const visualModule = resolve(work, "visual.generated.stylex.ts");
-  await writeIfChanged(visualModule, "export const compiledVisuals = {};\n");
   const candidate = resolve(work, "application.generated.ts");
   await writeIfChanged(
     candidate,
     candidateSource({
       application: paths.application,
-      componentRuntime: resolve(import.meta.dirname, `../ui/web/component${moduleExtension()}`),
+      platformAdapter: resolve(import.meta.dirname, `../ui/web/adapter${moduleExtension()}`),
       renderer: resolve(import.meta.dirname, `../ui/web/runtime${moduleExtension()}`),
-      visualModule,
       program: contract.uiProgram,
-      components: contract.surface.components,
+      components: contract.components,
       hotManifest: createHotManifest(ir),
       updateKind,
     }),
@@ -219,7 +251,7 @@ async function prepareApplication(
       hotRuntime: resolve(import.meta.dirname, `../compiler/hot${moduleExtension()}`),
     }),
   );
-  return { candidate, entry, ir, updateKind, visual: visualModule };
+  return { candidate, entry, ir, updateKind };
 }
 
 async function writeIfChanged(path: string, contents: string): Promise<boolean> {
@@ -234,7 +266,7 @@ function viteConfiguration(paths: ApplicationPaths, development = false) {
   return {
     configFile: false as const,
     mode: development ? "development" : "production",
-    plugins: vitePlugins(paths, development),
+    plugins: vitePlugins(paths),
     resolve: {
       alias: kitAliases(),
       conditions: ["poggers-source", ...defaultClientConditions],
@@ -250,19 +282,34 @@ function kitAliases() {
   return [
     { find: "#ui", replacement: ui },
     {
-      find: "@poggers/kit/jsx-dev-runtime",
+      find: /^@poggers\/kit\/jsx-dev-runtime$/,
       replacement: resolve(ui, `web/jsx-dev-runtime${extension}`),
     },
     {
-      find: "@poggers/kit/jsx-runtime",
+      find: /^@poggers\/kit\/jsx-runtime$/,
       replacement: resolve(ui, `web/jsx-runtime${extension}`),
     },
     {
-      find: "@poggers/kit/presentation/web",
+      find: /^@poggers\/kit\/presentation\/three\/jsx-dev-runtime$/,
+      replacement: resolve(ui, `three/jsx-dev-runtime${extension}`),
+    },
+    {
+      find: /^@poggers\/kit\/presentation\/three\/jsx-runtime$/,
+      replacement: resolve(ui, `three/jsx-runtime${extension}`),
+    },
+    {
+      find: /^@poggers\/kit\/presentation\/three$/,
+      replacement: resolve(ui, `three/presentation${extension}`),
+    },
+    {
+      find: /^@poggers\/kit\/presentation\/web$/,
       replacement: resolve(ui, `web/presentation${extension}`),
     },
-    { find: "@poggers/kit/presentation", replacement: resolve(ui, `presentation${extension}`) },
-    { find: "@poggers/kit/ui", replacement: resolve(ui, `index${extension}`) },
+    {
+      find: /^@poggers\/kit\/presentation$/,
+      replacement: resolve(ui, `presentation${extension}`),
+    },
+    { find: /^@poggers\/kit\/ui$/, replacement: resolve(ui, `index${extension}`) },
     { find: /^@poggers\/kit$/, replacement: resolve(kit, `index${extension}`) },
   ];
 }
@@ -271,17 +318,8 @@ function moduleExtension(): ".ts" | ".js" {
   return import.meta.filename.endsWith(".ts") ? ".ts" : ".js";
 }
 
-function vitePlugins(paths: ApplicationPaths, development: boolean): Plugin[] {
-  return [
-    sourceAliasPlugin(paths.source),
-    componentTransformPlugin(paths.source),
-    stylex({
-      devMode: development ? "full" : "off",
-      enableMediaQueryOrder: false,
-      runtimeInjection: false,
-      useCSSLayers: true,
-    }) as Plugin,
-  ];
+function vitePlugins(paths: ApplicationPaths): Plugin[] {
+  return [sourceAliasPlugin(paths.source), componentTransformPlugin(paths.source)];
 }
 
 function componentTransformPlugin(source: string): Plugin {
@@ -324,7 +362,6 @@ function visualContractPlugin(paths: ApplicationPaths, work: string): Plugin {
   const generated = [
     resolve(work, "application.generated.ts"),
     resolve(work, "browser.generated.ts"),
-    resolve(work, "visual.generated.stylex.ts"),
   ];
   let updates = Promise.resolve();
   const refresh = async (context: HmrContext): Promise<ModuleNode[] | undefined> => {
@@ -340,13 +377,10 @@ function visualContractPlugin(paths: ApplicationPaths, work: string): Plugin {
           true,
           context.file.startsWith(presentationRoot) ? "presentation" : "full",
         );
-        const visualModules = [
-          ...(context.server.moduleGraph.getModulesByFile(prepared.visual) ?? []),
-        ];
         const candidateModules = [
           ...(context.server.moduleGraph.getModulesByFile(prepared.candidate) ?? []),
         ];
-        for (const module of [...visualModules, ...candidateModules]) {
+        for (const module of candidateModules) {
           context.server.moduleGraph.invalidateModule(module);
         }
         modules = [...new Set([...context.modules, ...candidateModules])];
@@ -402,22 +436,19 @@ async function loadApplication(
 
 function candidateSource(input: {
   application: string;
-  componentRuntime: string;
+  platformAdapter: string;
   renderer: string;
-  visualModule: string;
   program: string;
   components: unknown;
   hotManifest: unknown;
   updateKind: "full" | "presentation";
 }): string {
   return `import application from ${JSON.stringify(input.application)};
-import { createApplicationUI } from ${JSON.stringify(input.componentRuntime)};
+import { createWebPlatformAdapter } from ${JSON.stringify(input.platformAdapter)};
 import { render } from ${JSON.stringify(input.renderer)};
-import { compiledVisuals } from ${JSON.stringify(input.visualModule)};
 
 export const manifest = ${JSON.stringify(input.hotManifest)};
 export const updateKind = ${JSON.stringify(input.updateKind)};
-export { compiledVisuals };
 export const presentations = application.presentations ?? {};
 
 export async function activate(root, previous = {}) {
@@ -430,12 +461,12 @@ export async function activate(root, previous = {}) {
     scroll: { ...previous.scroll },
     values: previous.values?.slice(),
   };
-  const ui = createApplicationUI({
+  const platform = createWebPlatformAdapter();
+  const ui = platform.structure.createApplicationUI({
     application,
     program: ${JSON.stringify(input.program)},
     presentations: { presentations },
     components: ${JSON.stringify(input.components)},
-    compiledVisuals,
     hotState,
   });
   let disposeRender;
@@ -489,8 +520,7 @@ const coordinator = import.meta.hot?.data.coordinator ?? new HotUpdateCoordinato
 const apply = async (candidate) => {
   if (
     candidate.updateKind === "presentation" &&
-    coordinator.value?.updatePresentations(candidate.presentations) &&
-    coordinator.value?.updateCompiledVisuals(candidate.compiledVisuals)
+    coordinator.value?.updatePresentations(candidate.presentations)
   ) {
     return;
   }
@@ -522,12 +552,9 @@ if (import.meta.hot) {
 `;
 }
 
-function htmlSource(entry: string, development: boolean): string {
-  const styles = development
-    ? '<link rel="stylesheet" href="/virtual:stylex.css"><script type="module">import("virtual:stylex:runtime")</script>'
-    : '<link rel="stylesheet" href="/styles.css">';
+function htmlSource(entry: string): string {
   return `<!doctype html>
-<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><style>@layer reset{${resetCss()}}</style>${styles}<title>Poggers</title></head><body><div id="app"></div><script type="module" src="${entry}"></script></body></html>`;
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><style>@layer reset{${resetCss()}}</style><title>Poggers</title></head><body><div id="app"></div><script type="module" src="${entry}"></script></body></html>`;
 }
 
 function resetCss(): string {

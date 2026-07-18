@@ -1,5 +1,5 @@
-import { mountDialog as mountRetainedDialog } from "#ui/web/runtime";
 import { mountAnimeDrag } from "#ui/web/drag.anime";
+import { mountDialog as mountRetainedDialog } from "#ui/web/runtime";
 
 export type { DragOptions, DragRelease, DragSample } from "#ui/web/drag";
 import type { DragOptions } from "#ui/web/drag";
@@ -42,6 +42,9 @@ export function createPress(activate: () => void): PressBindings {
         return;
       }
       suppressPointerClick = true;
+      suppressFollowingPointerClick(event.currentTarget, () => {
+        suppressPointerClick = false;
+      });
       activate();
     },
     onClick(event) {
@@ -55,6 +58,27 @@ export function createPress(activate: () => void): PressBindings {
       activate();
     },
   };
+}
+
+function suppressFollowingPointerClick(target: EventTarget | null, release: () => void): void {
+  const ownerDocument = (target as Node | null)?.ownerDocument;
+  if (!ownerDocument) return;
+
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const cleanup = () => {
+    ownerDocument.removeEventListener("click", suppress, true);
+    if (timeout !== undefined) clearTimeout(timeout);
+    release();
+  };
+  const suppress = (event: MouseEvent) => {
+    cleanup();
+    if (event.detail === 0) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  };
+
+  ownerDocument.addEventListener("click", suppress, true);
+  timeout = setTimeout(cleanup, 1_000);
 }
 
 export function createShortcut(shortcut: Shortcut, activate: () => void): ShortcutBinding {

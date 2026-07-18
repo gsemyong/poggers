@@ -3,7 +3,7 @@ export type ScenePresence = "entering" | "present" | "exiting" | "detached";
 export type SceneNode<Backend = unknown> = {
   readonly id: string;
   readonly owner: string;
-  readonly part: string;
+  readonly element: string;
   readonly key?: string;
   readonly children: SceneNode<Backend>[];
   parent: SceneNode<Backend> | null;
@@ -14,7 +14,7 @@ export type SceneNode<Backend = unknown> = {
 
 export type SceneRegistration<Backend> = {
   readonly owner: string;
-  readonly part: string;
+  readonly element: string;
   readonly key?: string;
   readonly backend: Backend;
   readonly parent?: SceneNode<Backend> | null;
@@ -31,7 +31,7 @@ export class PresenceScene<Backend = unknown> {
   }
 
   register(registration: SceneRegistration<Backend>): SceneNode<Backend> {
-    const id = this.#identity(registration.owner, registration.part, registration.key);
+    const id = this.#identity(registration.owner, registration.element, registration.key);
     const existing = this.#nodes.get(id);
     if (existing) {
       existing.backend = registration.backend;
@@ -43,7 +43,7 @@ export class PresenceScene<Backend = unknown> {
     const node: SceneNode<Backend> = {
       id,
       owner: registration.owner,
-      part: registration.part,
+      element: registration.element,
       ...(registration.key === undefined ? {} : { key: registration.key }),
       children: [],
       parent: null,
@@ -101,9 +101,9 @@ export class PresenceScene<Backend = unknown> {
     this.roots.length = 0;
   }
 
-  #identity(owner: string, part: string, key: string | undefined): string {
-    if (key !== undefined) return `${owner}/${part}:${key}`;
-    const occurrenceKey = `${owner}/${part}`;
+  #identity(owner: string, element: string, key: string | undefined): string {
+    if (key !== undefined) return `${owner}/${element}:${key}`;
+    const occurrenceKey = `${owner}/${element}`;
     const occurrence = this.#occurrences.get(occurrenceKey) ?? 0;
     this.#occurrences.set(occurrenceKey, occurrence + 1);
     return `${occurrenceKey}:#${occurrence}`;
@@ -130,7 +130,7 @@ export class PresenceScene<Backend = unknown> {
 export type SceneElementRegistration = {
   readonly scene: PresenceScene<Element>;
   readonly owner: string;
-  readonly part: string;
+  readonly element: string;
   readonly key?: string;
 };
 
@@ -145,7 +145,7 @@ export function mountSceneElement(
   const parent = findSceneParent(host, registration.scene);
   const node = registration.scene.register({
     owner: registration.owner,
-    part: registration.part,
+    element: registration.element,
     ...(registration.key === undefined ? {} : { key: registration.key }),
     backend: element,
     parent,

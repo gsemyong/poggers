@@ -1,7 +1,7 @@
 import type {
   PresentationAdapter,
   PresentationAdapterSession,
-  PresentationTargets,
+  PresentationTargetSources,
 } from "../../presentation";
 import {
   createAdaptiveMotionBackend,
@@ -18,19 +18,24 @@ import {
   type MotionTransition,
   type TransformChannel,
 } from "../motion";
-import { signal, type Signal } from "../runtime";
+import {
+  bindVirtualCollectionHost,
+  unbindVirtualCollectionHost,
+  type VirtualCollectionGeometry,
+} from "../runtime";
+import { createWebFontBackend, webFontKey, type WebFontBackend, type WebFontLease } from "./font";
 import type {
+  FontAsset,
   WebMotionDeclaration,
-  WebMotionTarget,
   WebMotionValue,
   WebPresentationCondition,
-  WebPresentationContext,
   WebPresentationDeclaration,
   WebPresentationLanguage,
   WebPresentationResource,
-  WebPresentationTheme,
+  WebPresentationTokens,
   WebRenderLayer,
-} from "../visual";
+  WebTargetCondition,
+} from "./language";
 import { translateWebPresentationStyle } from "./style";
 
 type StyledElement = Element & { readonly style: CSSStyleDeclaration };
@@ -40,12 +45,27 @@ type MotionProperty =
   | "translateX"
   | "translateY"
   | "translateZ"
+  | "layoutTranslateX"
+  | "layoutTranslateY"
   | "scaleX"
   | "scaleY"
+  | "layoutScaleX"
+  | "layoutScaleY"
   | "rotateZ"
   | "borderRadius";
 
-type NativeConditionState = Record<WebPresentationCondition, boolean>;
+type NativeConditionState = Record<WebTargetCondition, boolean>;
+
+type WebConditionEnvironment = Readonly<{
+  allocated: Readonly<{ inlineSize: number; blockSize: number }>;
+  preferences: Readonly<{
+    reducedMotion: boolean;
+    moreContrast: boolean;
+    forcedColors: boolean;
+    dark: boolean;
+  }>;
+  pointer: Readonly<{ hover: boolean; fine: boolean; coarse: boolean }>;
+}>;
 
 type PresenceState = {
   visible: boolean;
@@ -76,55 +96,102 @@ type PoppedPresenceStyles = Readonly<{
 export type WebPresentationAdapterOptions = Readonly<{
   motionBackend?: MotionBackend;
   layoutBackend?: LayoutBackend;
+  fontBackend?: WebFontBackend;
   scheduler?: MotionScheduler;
   suppressInitialEnter?: boolean;
 }>;
 
 type MediaObservation = {
-  readonly value: Signal<boolean>;
+  readonly read: () => boolean;
   readonly release: () => void;
 };
 
-const sharedMedia = new Map<
-  string,
-  {
-    readonly value: Signal<boolean>;
-    readonly media: MediaQueryList;
-    readonly change: () => void;
-    references: number;
-  }
->();
+type PreparedTarget<ElementName extends string, Theme extends WebPresentationTokens> = Readonly<{
+  elementName: ElementName;
+  target: Element;
+  authored: WebPresentationDeclaration<Theme> | undefined;
+  declaration: WebPresentationDeclaration<Theme> | undefined;
+  style: Readonly<Record<string, string>>;
+}>;
+
+type SharedGeometry = Readonly<{
+  target: Element;
+  rectangle: DOMRect;
+}>;
+
+type SharedIdentityClaim = Readonly<{
+  owner: string;
+  target: Element;
+}>;
+
+type SharedIdentityCoordinator = ReturnType<typeof createSharedIdentityCoordinator>;
 
 let nextSessionIdentity = 0;
+const defaultFontBackend = createWebFontBackend();
 
 /** Implements the web presentation language with native styles and retained motion. */
-export function createWebPresentationAdapter<Theme extends WebPresentationTheme>(
+export function createWebPresentationAdapter<Theme extends WebPresentationTokens>(
   options: WebPresentationAdapterOptions = {},
 ): PresentationAdapter<WebPresentationLanguage<Theme>, Element> {
-  const claimedIdentities = new Map<string, Element>();
+  const sharedIdentityCoordinator = createSharedIdentityCoordinator(options);
 
   return {
-    create<const Part extends string>(input: {
+    create<const ElementName extends string>(input: {
       readonly boundary: Element;
-      readonly parts: PresentationTargets<Part, Element>;
-    }): PresentationAdapterSession<WebPresentationLanguage<Theme>, Part> {
-      return createWebPresentationSession(input, options, claimedIdentities);
+      readonly targets: PresentationTargetSources<ElementName, Element>;
+    }): PresentationAdapterSession<WebPresentationLanguage<Theme>, ElementName> {
+      return createWebPresentationSession(input, options, sharedIdentityCoordinator);
     },
   };
 }
 
-function createWebPresentationSession<Theme extends WebPresentationTheme, Part extends string>(
+function createSharedIdentityCoordinator(options: WebPresentationAdapterOptions) {
+  const claims = new Map<string, SharedIdentityClaim>();
+  const geometries = new Map<string, SharedGeometry>();
+
+  const requestFrame = (callback: () => void): unknown =>
+    options.scheduler ? options.scheduler.requestFrame(callback) : requestAnimationFrame(callback);
+
+  return {
+    claim(identity: string): SharedIdentityClaim | undefined {
+      return claims.get(identity);
+    },
+    geometry(identity: string): SharedGeometry | undefined {
+      return geometries.get(identity);
+    },
+    acquire(identity: string, owner: string, target: Element): void {
+      claims.set(identity, { owner, target });
+    },
+    release(identity: string, owner: string, target: Element): void {
+      const current = claims.get(identity);
+      if (current?.owner !== owner || current.target !== target) return;
+      claims.delete(identity);
+      requestFrame(() => {
+        if (!claims.has(identity)) geometries.delete(identity);
+      });
+    },
+    capture(identity: string, target: Element, rectangle: DOMRect): void {
+      geometries.set(identity, { target, rectangle });
+    },
+  };
+}
+
+function createWebPresentationSession<
+  Theme extends WebPresentationTokens,
+  ElementName extends string,
+>(
   input: {
     readonly boundary: Element;
-    readonly parts: PresentationTargets<Part, Element>;
+    readonly targets: PresentationTargetSources<ElementName, Element>;
   },
   options: WebPresentationAdapterOptions,
-  claimedIdentities: Map<string, Element>,
-): PresentationAdapterSession<WebPresentationLanguage<Theme>, Part> {
+  sharedIdentityCoordinator: SharedIdentityCoordinator,
+): PresentationAdapterSession<WebPresentationLanguage<Theme>, ElementName> {
   const sessionIdentity = `presentation-${nextSessionIdentity++}`;
   const cleanups: Array<() => void> = [];
   const styles = new Map<StyledElement, Map<string, string>>();
   const resources = new Map<Element, string | null>();
+  const fontLeases = new Map<string, WebFontLease>();
   const hidden = new Map<Element, boolean>();
   const lifecycles = new Map<Element, string | null>();
   const presenceLayouts = new Map<Element, string | null>();
@@ -132,6 +199,7 @@ function createWebPresentationSession<Theme extends WebPresentationTheme, Part e
   const layers = new Map<Element, Map<string, Element>>();
   const presence = new Map<Element, PresenceState>();
   const conditions = new Map<Element, NativeConditionState>();
+  const conditionCleanups = new Map<Element, () => void>();
   const targetIdentities = new WeakMap<Element, number>();
   const sharedIdentities = new Map<Element, string>();
   const composers = new WeakMap<StyledElement, RetainedTransformComposer>();
@@ -140,13 +208,15 @@ function createWebPresentationSession<Theme extends WebPresentationTheme, Part e
     { readonly element: StyledElement; readonly property: MotionProperty }
   >();
   const desiredMotion = new Map<string, DesiredMotion>();
-  const sessionClaims = new Set<string>();
+  const collectionHosts = new Set<HTMLElement>();
+  const activeSharedTransfers = new Map<Element, { revision: number; keys: Set<string> }>();
+  let nextSharedTransferRevision = 0;
   let nextTargetIdentity = 0;
   let disposed = false;
   let conditionCommitQueued = false;
   let lastDeclarations: Readonly<
-    Partial<Record<Part, Readonly<WebPresentationDeclaration<Theme>>>>
-  > = {} as Readonly<Partial<Record<Part, Readonly<WebPresentationDeclaration<Theme>>>>>;
+    Partial<Record<ElementName, Readonly<WebPresentationDeclaration<Theme>>>>
+  > = {} as Readonly<Partial<Record<ElementName, Readonly<WebPresentationDeclaration<Theme>>>>>;
 
   const identityFor = (target: Element): number => {
     const current = targetIdentities.get(target);
@@ -191,7 +261,7 @@ function createWebPresentationSession<Theme extends WebPresentationTheme, Part e
               property: bindings.get(key)?.property ?? "unknown",
               transition,
               continuous: transition === "instant",
-              continuity: transition === "instant" ? "replace" : "preserve",
+              continuity: "replace",
               layout: false,
               snapshotSafe: false,
               liveContent: true,
@@ -206,80 +276,83 @@ function createWebPresentationSession<Theme extends WebPresentationTheme, Part e
     options.layoutBackend ?? createAnimeLayoutBackend(),
     options.scheduler,
   );
-  const context = createWebPresentationContext(input.boundary, cleanups);
+  const environment = createWebConditionEnvironment(
+    input.boundary,
+    cleanups,
+    scheduleConditionCommit,
+    options.scheduler,
+  );
   let currentMotionKeys = new Set<string>();
   let currentLayoutKeys = new Set<string>();
+  let activeTargets = new Set<Element>();
 
-  const keyFor = (part: string, target: Element, property: MotionProperty | "layout") =>
-    `${sessionIdentity}/${part}/${identityFor(target)}/${property}`;
-  const targetsFor = (part: Part): readonly Element[] => input.parts[part]?.() ?? [];
-
-  const session: PresentationAdapterSession<WebPresentationLanguage<Theme>, Part> = {
-    platform: context,
+  const keyFor = (elementName: string, target: Element, property: MotionProperty | "layout") =>
+    `${sessionIdentity}/${elementName}/${identityFor(target)}/${property}`;
+  const session: PresentationAdapterSession<WebPresentationLanguage<Theme>, ElementName> = {
     commit(declarations) {
       if (disposed) throw new Error("Cannot commit a disposed web presentation session.");
       lastDeclarations = declarations;
-      synchronizeSharedIdentities(declarations);
+      const resolvedTargets = resolveTargets();
+      const prepared = prepareTargets(declarations, resolvedTargets);
+      const transfers = sharedTransfers(prepared);
+      synchronizeSharedIdentities(prepared);
+      synchronizeTargets(new Set(prepared.map(({ target }) => target)));
       const nextMotionKeys = new Set<string>();
       const nextLayoutKeys = new Set<string>();
+      const nextFonts = new Map<string, FontAsset>();
       const layoutProjects: Array<{
         key: string;
         element: HTMLElement;
         transition: MotionTransition;
       }> = [];
 
-      for (const part of Object.keys(input.parts) as Part[]) {
-        const authored = declarations[part] as WebPresentationDeclaration<Theme> | undefined;
-        for (const target of targetsFor(part)) {
-          observeNativeConditions(target, authored);
-          const declaration = resolveNativeConditions(authored, conditions.get(target));
-          applyStructuralPresenceLayout(target, declaration?.motion?.presence, poppedPresence);
-          if (!declaration) {
-            applyOwnedStyles(target, {}, styles);
-            applyResource(target, undefined, resources);
-            applyLayers(target, [], layers, styles);
-            applyPresenceLifecycle(target, undefined, lifecycles, presenceLayouts);
-            continue;
+      for (const { elementName, target, authored, declaration } of prepared) {
+        observeNativeConditions(target, authored);
+        applyCollectionGeometry(target, declaration);
+        applyStructuralPresenceLayout(target, declaration?.motion?.presence, poppedPresence);
+        if (!declaration) {
+          applyOwnedStyles(target, {}, styles);
+          applyResource(target, undefined, resources);
+          applyLayers(target, [], layers, styles);
+          applyPresenceLifecycle(target, undefined, lifecycles, presenceLayouts);
+          continue;
+        }
+        const transition = declaration.motion?.layout;
+        if (
+          transition !== undefined &&
+          transition !== "instant" &&
+          retainsVisibleLayout(target, declaration.motion?.presence, presence.get(target)) &&
+          typeof HTMLElement !== "undefined" &&
+          target instanceof HTMLElement
+        ) {
+          const key = keyFor(elementName, target, "layout");
+          const registering = !currentLayoutKeys.has(key);
+          if (registering) {
+            layout.register(
+              key,
+              sessionIdentity,
+              target,
+              [...target.children].filter(isHTMLElement),
+            );
           }
-          const transition = declaration.motion?.layout;
-          if (
-            transition !== undefined &&
-            transition !== "instant" &&
-            retainsVisibleLayout(target, declaration.motion?.presence, presence.get(target)) &&
-            typeof HTMLElement !== "undefined" &&
-            target instanceof HTMLElement
-          ) {
-            const key = keyFor(part, target, "layout");
-            const registering = !currentLayoutKeys.has(key);
-            if (registering) {
-              layout.register(
-                key,
-                sessionIdentity,
-                target,
-                [...target.children].filter(isHTMLElement),
-              );
-            }
-            nextLayoutKeys.add(key);
-            if (!registering) layoutProjects.push({ key, element: target, transition });
-          }
+          nextLayoutKeys.add(key);
+          if (!registering) layoutProjects.push({ key, element: target, transition });
         }
       }
-      for (const part of Object.keys(input.parts) as Part[]) {
-        const authored = declarations[part] as WebPresentationDeclaration<Theme> | undefined;
-        for (const target of targetsFor(part)) {
-          const declaration = resolveNativeConditions(authored, conditions.get(target));
-          applyOwnedStyles(target, translateWebPresentationStyle(declaration ?? {}), styles);
-          applyAnchor(target, declaration, input.parts, sessionIdentity, styles);
-          applyResource(target, declaration?.resource, resources);
-          applyLayers(target, declaration?.layers ?? [], layers, styles);
-          applyPresenceLifecycle(
-            target,
-            declaration?.motion?.presence,
-            lifecycles,
-            presenceLayouts,
-          );
-          applyElementMotion(part, target, declaration?.motion, nextMotionKeys);
-        }
+      for (const { elementName, target, declaration, style } of prepared) {
+        const font = declaration?.typography?.font;
+        if (font?.sources?.length) nextFonts.set(webFontKey(font), font);
+        applyOwnedStyles(target, style, styles);
+        applyAnchor(target, declaration, resolvedTargets, sessionIdentity, styles);
+        applyResource(target, declaration?.resource, resources);
+        applyLayers(target, declaration?.layers ?? [], layers, styles);
+        applyPresenceLifecycle(target, declaration?.motion?.presence, lifecycles, presenceLayouts);
+        applyElementMotion(elementName, target, declaration?.motion, nextMotionKeys);
+      }
+      applySharedTransfers(transfers, nextMotionKeys);
+      captureSharedGeometry(prepared);
+      for (const transfer of activeSharedTransfers.values()) {
+        for (const key of transfer.keys) nextMotionKeys.add(key);
       }
 
       for (const project of layoutProjects) {
@@ -289,8 +362,13 @@ function createWebPresentationSession<Theme extends WebPresentationTheme, Part e
           project.transition,
         );
       }
-      for (const key of currentMotionKeys) if (!nextMotionKeys.has(key)) motion.release(key);
-      for (const key of currentMotionKeys) if (!nextMotionKeys.has(key)) desiredMotion.delete(key);
+      synchronizeFonts(nextFonts);
+      for (const key of currentMotionKeys) {
+        if (nextMotionKeys.has(key)) continue;
+        motion.release(key);
+        desiredMotion.delete(key);
+        bindings.delete(key);
+      }
       for (const key of currentLayoutKeys) if (!nextLayoutKeys.has(key)) layout.release(key);
       currentMotionKeys = nextMotionKeys;
       currentLayoutKeys = nextLayoutKeys;
@@ -301,8 +379,11 @@ function createWebPresentationSession<Theme extends WebPresentationTheme, Part e
       motion.dispose();
       layout.dispose();
       for (const cleanup of cleanups.reverse()) cleanup();
+      for (const cleanup of conditionCleanups.values()) cleanup();
+      for (const target of collectionHosts) unbindVirtualCollectionHost(target);
       for (const [target, owned] of styles) restoreOwnedStyles(target, owned);
       for (const [target, source] of resources) restoreResource(target, source);
+      for (const lease of fontLeases.values()) lease.release();
       for (const [target, wasHidden] of hidden) {
         if ("hidden" in target) (target as HTMLElement).hidden = wasHidden;
       }
@@ -316,16 +397,20 @@ function createWebPresentationSession<Theme extends WebPresentationTheme, Part e
       }
       for (const owned of layers.values()) for (const layer of owned.values()) layer.remove();
       for (const target of poppedPresence.keys()) restorePoppedPresence(target, poppedPresence);
-      for (const identity of sessionClaims) {
-        if (claimedIdentities.get(identity)) claimedIdentities.delete(identity);
+      for (const [target, identity] of sharedIdentities) {
+        sharedIdentityCoordinator.release(identity, sessionIdentity, target);
       }
       styles.clear();
       resources.clear();
+      fontLeases.clear();
       layers.clear();
       presence.clear();
       desiredMotion.clear();
+      activeSharedTransfers.clear();
+      collectionHosts.clear();
       sharedIdentities.clear();
       conditions.clear();
+      conditionCleanups.clear();
       lifecycles.clear();
       presenceLayouts.clear();
       poppedPresence.clear();
@@ -345,25 +430,166 @@ function createWebPresentationSession<Theme extends WebPresentationTheme, Part e
 
   return session;
 
+  function resolveTargets(): ReadonlyMap<ElementName, readonly Element[]> {
+    const resolved = new Map<ElementName, readonly Element[]>();
+    const owners = new Map<Element, ElementName>();
+    for (const elementName of Object.keys(input.targets) as ElementName[]) {
+      const targets = [...new Set(input.targets[elementName]?.() ?? [])];
+      for (const target of targets) {
+        const owner = owners.get(target);
+        if (owner !== undefined && owner !== elementName) {
+          throw new Error(
+            `Presentation target is claimed by two Elements: ${JSON.stringify(owner)} and ${JSON.stringify(elementName)}.`,
+          );
+        }
+        owners.set(target, elementName);
+      }
+      resolved.set(elementName, targets);
+    }
+    return resolved;
+  }
+
+  function prepareTargets(
+    declarations: Readonly<
+      Partial<Record<ElementName, Readonly<WebPresentationDeclaration<Theme>>>>
+    >,
+    targets: ReadonlyMap<ElementName, readonly Element[]>,
+  ): readonly PreparedTarget<ElementName, Theme>[] {
+    const prepared: PreparedTarget<ElementName, Theme>[] = [];
+    for (const elementName of Object.keys(input.targets) as ElementName[]) {
+      const authored = declarations[elementName] as WebPresentationDeclaration<Theme> | undefined;
+      if (authored) validateWebPresentationDeclaration(authored, String(elementName));
+      for (const target of targets.get(elementName) ?? []) {
+        const state = refreshNativeConditionState(target, authored);
+        const declaration = resolveWebConditions(authored, state, environment);
+        prepared.push({
+          elementName,
+          target,
+          authored,
+          declaration,
+          style: translateWebPresentationStyle(declaration ?? {}),
+        });
+      }
+    }
+    return prepared;
+  }
+
+  function synchronizeTargets(next: Set<Element>): void {
+    for (const target of activeTargets) {
+      if (!next.has(target)) releaseTarget(target);
+    }
+    activeTargets = next;
+  }
+
+  function releaseTarget(target: Element): void {
+    const conditionCleanup = conditionCleanups.get(target);
+    conditionCleanup?.();
+    conditionCleanups.delete(target);
+    conditions.delete(target);
+
+    if (isStyledElement(target)) {
+      const owned = styles.get(target);
+      if (owned) restoreOwnedStyles(target, owned);
+      styles.delete(target);
+      composers.delete(target);
+    }
+    const source = resources.get(target);
+    if (source !== undefined) restoreResource(target, source);
+    resources.delete(target);
+    const ownedLayers = layers.get(target);
+    if (ownedLayers) for (const layer of ownedLayers.values()) removeLayer(layer, styles);
+    layers.delete(target);
+    const wasHidden = hidden.get(target);
+    if (wasHidden !== undefined && "hidden" in target) (target as HTMLElement).hidden = wasHidden;
+    hidden.delete(target);
+    restoreAttribute(target, "data-motion-lifecycle", lifecycles.get(target));
+    restoreAttribute(target, "data-motion-layout", presenceLayouts.get(target));
+    lifecycles.delete(target);
+    presenceLayouts.delete(target);
+    if (typeof HTMLElement !== "undefined" && target instanceof HTMLElement) {
+      restorePoppedPresence(target, poppedPresence);
+    }
+    presence.delete(target);
+    activeSharedTransfers.delete(target);
+    if (typeof HTMLElement !== "undefined" && target instanceof HTMLElement) {
+      unbindVirtualCollectionHost(target);
+      collectionHosts.delete(target);
+    }
+    targetIdentities.delete(target);
+  }
+
+  function applyCollectionGeometry(
+    target: Element,
+    declaration: WebPresentationDeclaration<Theme> | undefined,
+  ): void {
+    if (typeof HTMLElement === "undefined" || !(target instanceof HTMLElement)) return;
+    const collection = declaration?.layout?.collection;
+    if (!collection) {
+      if (collectionHosts.delete(target)) unbindVirtualCollectionHost(target);
+      return;
+    }
+    const geometry: VirtualCollectionGeometry = {
+      axis: collection.axis ?? "block",
+      estimate: collectionMetric(collection.estimate),
+      gap: collection.gap === undefined ? 0 : collectionMetric(collection.gap),
+      lanes: collection.lanes ?? 1,
+    };
+    if (geometry.estimate <= 0) {
+      throw new TypeError("Presentation collection estimate must be greater than zero.");
+    }
+    if (geometry.gap < 0) {
+      throw new TypeError("Presentation collection gap cannot be negative.");
+    }
+    if (!Number.isInteger(geometry.lanes) || geometry.lanes <= 0) {
+      throw new TypeError("Presentation collection lanes must be a positive integer.");
+    }
+    bindVirtualCollectionHost(target, geometry);
+    collectionHosts.add(target);
+  }
+
+  function refreshNativeConditionState(
+    target: Element,
+    declaration: WebPresentationDeclaration<Theme> | undefined,
+  ): NativeConditionState | undefined {
+    if (!needsTargetConditions(declaration)) return conditions.get(target);
+    const state = conditions.get(target) ?? {
+      hovered: false,
+      pressed: false,
+      focusVisible: false,
+      disabled: false,
+    };
+    state.focusVisible = matches(target, ":focus-visible");
+    state.disabled = isDisabled(target);
+    conditions.set(target, state);
+    return state;
+  }
+
+  function synchronizeFonts(next: ReadonlyMap<string, FontAsset>): void {
+    const document = input.boundary.ownerDocument;
+    if (!document) return;
+    const backend = options.fontBackend ?? defaultFontBackend;
+    for (const [key, font] of next) {
+      if (!fontLeases.has(key)) fontLeases.set(key, backend.acquire(document, font));
+    }
+    for (const [key, lease] of fontLeases) {
+      if (next.has(key)) continue;
+      lease.release();
+      fontLeases.delete(key);
+    }
+  }
+
   function observeNativeConditions(
     target: Element,
     declaration: WebPresentationDeclaration<Theme> | undefined,
   ): void {
-    const needsFocusRing = record(declaration?.paint).focusRing !== undefined;
-    if (!declaration?.conditions && !needsFocusRing) return;
-    const existing = conditions.get(target);
-    if (existing) {
-      existing.focusVisible = matches(target, ":focus-visible");
-      existing.disabled = isDisabled(target);
+    if (!needsTargetConditions(declaration)) {
+      conditionCleanups.get(target)?.();
+      conditionCleanups.delete(target);
+      conditions.delete(target);
       return;
     }
-    const state: NativeConditionState = {
-      hovered: false,
-      pressed: false,
-      focusVisible: matches(target, ":focus-visible"),
-      disabled: isDisabled(target),
-    };
-    conditions.set(target, state);
+    const state = refreshNativeConditionState(target, declaration)!;
+    if (conditionCleanups.has(target)) return;
     if (!("addEventListener" in target) || typeof target.addEventListener !== "function") return;
 
     const update = (condition: keyof NativeConditionState, value: boolean) => {
@@ -387,7 +613,7 @@ function createWebPresentationSession<Theme extends WebPresentationTheme, Part e
     const view = target.ownerDocument?.defaultView;
     view?.addEventListener("pointerup", release);
     view?.addEventListener("pointercancel", release);
-    cleanups.push(() => {
+    conditionCleanups.set(target, () => {
       target.removeEventListener("pointerenter", enter);
       target.removeEventListener("pointerleave", leave);
       target.removeEventListener("pointerdown", down);
@@ -410,48 +636,134 @@ function createWebPresentationSession<Theme extends WebPresentationTheme, Part e
   }
 
   function synchronizeSharedIdentities(
-    declarations: Readonly<Partial<Record<Part, Readonly<WebPresentationDeclaration<Theme>>>>>,
+    prepared: readonly PreparedTarget<ElementName, Theme>[],
   ): void {
     const next = new Map<Element, string>();
     const targets = new Map<string, Element>();
-    for (const part of Object.keys(input.parts) as Part[]) {
-      const authored = declarations[part];
-      for (const target of targetsFor(part)) {
-        const identity = resolveNativeConditions(authored, conditions.get(target))?.motion?.identity;
-        if (!identity) continue;
-        const duplicate = targets.get(identity);
-        if (duplicate && duplicate !== target) {
-          throw new Error(`Presentation identity ${JSON.stringify(identity)} has multiple targets.`);
-        }
-        targets.set(identity, target);
-        next.set(target, identity);
+    for (const { target, declaration } of prepared) {
+      const identity = activeSharedIdentity(target, declaration);
+      if (!identity) continue;
+      const duplicate = targets.get(identity);
+      if (duplicate && duplicate !== target) {
+        throw new Error(`Presentation identity ${JSON.stringify(identity)} has multiple targets.`);
       }
+      targets.set(identity, target);
+      next.set(target, identity);
     }
     for (const [target, identity] of next) {
-      const current = claimedIdentities.get(identity);
+      const current = sharedIdentityCoordinator.claim(identity);
       const releasedByThisCommit =
         current !== undefined &&
-        sharedIdentities.get(current) === identity &&
-        next.get(current) !== identity;
-      if (current && current !== target && !releasedByThisCommit) {
+        current.owner === sessionIdentity &&
+        sharedIdentities.get(current.target) === identity &&
+        next.get(current.target) !== identity;
+      const enteringHandoff = target.getAttribute("data-motion-state") === "entering";
+      if (current && current.target !== target && !releasedByThisCommit && !enteringHandoff) {
         throw new Error(`Presentation identity ${JSON.stringify(identity)} has multiple targets.`);
       }
     }
     for (const [target, identity] of sharedIdentities) {
       if (next.get(target) === identity) continue;
-      if (claimedIdentities.get(identity) === target) claimedIdentities.delete(identity);
-      sessionClaims.delete(identity);
+      sharedIdentityCoordinator.release(identity, sessionIdentity, target);
     }
     sharedIdentities.clear();
     for (const [target, identity] of next) {
       sharedIdentities.set(target, identity);
-      claimedIdentities.set(identity, target);
-      sessionClaims.add(identity);
+      sharedIdentityCoordinator.acquire(identity, sessionIdentity, target);
     }
   }
 
+  function sharedTransfers(
+    prepared: readonly PreparedTarget<ElementName, Theme>[],
+  ): readonly Readonly<{
+    elementName: ElementName;
+    target: Element;
+    source: DOMRect;
+    transition: MotionTransition;
+  }>[] {
+    const transfers: Array<{
+      elementName: ElementName;
+      target: Element;
+      source: DOMRect;
+      transition: MotionTransition;
+    }> = [];
+    for (const { elementName, target, declaration } of prepared) {
+      const identity = activeSharedIdentity(target, declaration);
+      const previous = identity ? sharedIdentityCoordinator.geometry(identity) : undefined;
+      if (!previous || previous.target === target) continue;
+      transfers.push({
+        elementName,
+        target,
+        source: previous.target.isConnected
+          ? previous.target.getBoundingClientRect()
+          : previous.rectangle,
+        transition:
+          declaration?.motion?.layout ?? declaration?.motion?.presence?.transition ?? "instant",
+      });
+    }
+    return transfers;
+  }
+
+  function applySharedTransfers(
+    transfers: ReturnType<typeof sharedTransfers>,
+    nextKeys: Set<string>,
+  ): void {
+    for (const { elementName, target, source, transition } of transfers) {
+      if (!isStyledElement(target)) continue;
+      const destination = target.getBoundingClientRect();
+      const keys = new Set<string>();
+      const outcomes: Promise<unknown>[] = [];
+      const channels = [
+        ["layoutTranslateX", source.left - destination.left],
+        ["layoutTranslateY", source.top - destination.top],
+        ["layoutScaleX", destination.width > 0 ? source.width / destination.width : 1],
+        ["layoutScaleY", destination.height > 0 ? source.height / destination.height : 1],
+      ] as const;
+      setAdditionalOwnedStyles(target, { transformOrigin: "top left" }, styles);
+      for (const [property, from] of channels) {
+        keys.add(keyFor(elementName, target, property));
+        outcomes.push(
+          targetProperty(
+            elementName,
+            target,
+            property,
+            defaultMotionValue(property),
+            transition,
+            0,
+            from,
+            nextKeys,
+          ),
+        );
+      }
+      const revision = nextSharedTransferRevision++;
+      activeSharedTransfers.set(target, { revision, keys });
+      void Promise.allSettled(outcomes).then(() => {
+        if (disposed || activeSharedTransfers.get(target)?.revision !== revision) return;
+        activeSharedTransfers.delete(target);
+        scheduleConditionCommit();
+      });
+    }
+  }
+
+  function captureSharedGeometry(prepared: readonly PreparedTarget<ElementName, Theme>[]): void {
+    for (const { target, declaration } of prepared) {
+      const identity = activeSharedIdentity(target, declaration);
+      if (!identity) continue;
+      sharedIdentityCoordinator.capture(identity, target, target.getBoundingClientRect());
+    }
+  }
+
+  function activeSharedIdentity(
+    target: Element,
+    declaration: WebPresentationDeclaration<Theme> | undefined,
+  ): string | undefined {
+    return target.getAttribute("data-motion-state") === "exiting"
+      ? undefined
+      : declaration?.motion?.identity;
+  }
+
   function applyElementMotion(
-    part: Part,
+    elementName: ElementName,
     target: Element,
     declaration: WebMotionDeclaration<Theme> | undefined,
     nextKeys: Set<string>,
@@ -474,6 +786,10 @@ function createWebPresentationSession<Theme extends WebPresentationTheme, Part e
       state.visible = desiredVisible;
       state.transitioning = true;
       state.revision += 1;
+    } else if (state.transitioning) {
+      // A moving target replaces the previous motion outcome. Only the latest
+      // commit may settle presence; a replaced trajectory is not completion.
+      state.revision += 1;
     }
     const revision = state.revision;
     presence.set(target, state);
@@ -484,18 +800,17 @@ function createWebPresentationSession<Theme extends WebPresentationTheme, Part e
 
     const values = motionValues(declaration);
     const enterFrom =
-      entering && !options.suppressInitialEnter
-        ? declaration?.presence?.enter?.from
-        : undefined;
+      entering && !options.suppressInitialEnter ? declaration?.presence?.enter?.from : undefined;
+    const exitActive = !desiredVisible && state.transitioning;
 
     const pending: Promise<unknown>[] = [];
-    if (exiting) {
+    if (exitActive) {
       const transition = declaration?.presence?.transition ?? "instant";
       for (const [property, value] of Object.entries(declaration?.presence?.exit?.to ?? {})) {
         for (const channel of motionProperties(property)) {
           pending.push(
             targetProperty(
-              part,
+              elementName,
               target,
               channel,
               Number(value),
@@ -511,11 +826,11 @@ function createWebPresentationSession<Theme extends WebPresentationTheme, Part e
       for (const [property, value] of values) {
         const initial = enterMotionValue(enterFrom, property);
         if (typeof value === "number") {
-          if (initial === undefined) directProperty(part, target, property, value, nextKeys);
+          if (initial === undefined) directProperty(elementName, target, property, value, nextKeys);
           else {
             pending.push(
               targetProperty(
-                part,
+                elementName,
                 target,
                 property,
                 value,
@@ -528,12 +843,12 @@ function createWebPresentationSession<Theme extends WebPresentationTheme, Part e
           }
         } else {
           const reduce = declaration?.reduceMotion;
-          if (initiallyHidden || (reduce === "instant" && context.preferences.reducedMotion)) {
-            directProperty(part, target, property, value.target, nextKeys);
+          if (initiallyHidden || (reduce === "instant" && environment.preferences.reducedMotion)) {
+            directProperty(elementName, target, property, value.target, nextKeys);
           } else {
             pending.push(
               targetProperty(
-                part,
+                elementName,
                 target,
                 property,
                 value.target,
@@ -548,13 +863,12 @@ function createWebPresentationSession<Theme extends WebPresentationTheme, Part e
       }
     }
 
-    if (!desiredVisible && (exiting || initiallyHidden)) {
+    if (!desiredVisible && (exitActive || initiallyHidden)) {
       if (!pending.length) {
         state.transitioning = false;
         hideTarget(target, styles);
         dispatchMotionFinish(target);
-      }
-      else {
+      } else {
         void Promise.allSettled(pending).then(() => {
           if (!disposed && presence.get(target)?.revision === revision) {
             state.transitioning = false;
@@ -577,14 +891,14 @@ function createWebPresentationSession<Theme extends WebPresentationTheme, Part e
   }
 
   function directProperty(
-    part: Part,
+    elementName: ElementName,
     target: StyledElement,
     property: MotionProperty,
     value: number,
     nextKeys: Set<string>,
   ): void {
     if (!Number.isFinite(value)) return;
-    const key = keyFor(part, target, property);
+    const key = keyFor(elementName, target, property);
     ownMotionStyle(target, property);
     bindings.set(key, { element: target, property });
     nextKeys.add(key);
@@ -595,7 +909,7 @@ function createWebPresentationSession<Theme extends WebPresentationTheme, Part e
   }
 
   function targetProperty(
-    part: Part,
+    elementName: ElementName,
     target: StyledElement,
     property: MotionProperty,
     value: number,
@@ -605,7 +919,7 @@ function createWebPresentationSession<Theme extends WebPresentationTheme, Part e
     nextKeys: Set<string>,
   ): Promise<unknown> {
     if (!Number.isFinite(value)) return Promise.resolve();
-    const key = keyFor(part, target, property);
+    const key = keyFor(elementName, target, property);
     ownMotionStyle(target, property);
     bindings.set(key, { element: target, property });
     nextKeys.add(key);
@@ -655,7 +969,7 @@ function createWebPresentationSession<Theme extends WebPresentationTheme, Part e
   }
 }
 
-function retainsVisibleLayout<Theme extends WebPresentationTheme>(
+function retainsVisibleLayout<Theme extends WebPresentationTokens>(
   target: Element,
   next: WebMotionDeclaration<Theme>["presence"] | undefined,
   previous: PresenceState | undefined,
@@ -668,18 +982,17 @@ function retainsVisibleLayout<Theme extends WebPresentationTheme>(
   return visible && previous?.visible === true && !previous.transitioning;
 }
 
-function resolveNativeConditions<Theme extends WebPresentationTheme>(
+function resolveWebConditions<Theme extends WebPresentationTokens>(
   declaration: WebPresentationDeclaration<Theme> | undefined,
   state: NativeConditionState | undefined,
+  environment: WebConditionEnvironment,
 ): WebPresentationDeclaration<Theme> | undefined {
   if (!declaration) return undefined;
   const { conditions, ...base } = declaration;
   let resolved = base as WebPresentationDeclaration<Theme>;
-  if (state && conditions) {
-    for (const condition of ["hovered", "pressed", "focusVisible", "disabled"] as const) {
-      if (state[condition] && conditions[condition]) {
-        resolved = mergeDeclarations(resolved, conditions[condition]!);
-      }
+  for (const rule of conditions ?? []) {
+    if (matchesWebCondition(rule.when, state, environment)) {
+      resolved = mergeDeclarations(resolved, rule.use);
     }
   }
   const paint = record(resolved.paint);
@@ -691,20 +1004,71 @@ function resolveNativeConditions<Theme extends WebPresentationTheme>(
   return resolved;
 }
 
-function mergeDeclarations<Theme extends WebPresentationTheme>(
+function matchesWebCondition<Theme extends WebPresentationTokens>(
+  condition: WebPresentationCondition<Theme>,
+  target: NativeConditionState | undefined,
+  environment: WebConditionEnvironment,
+): boolean {
+  let matches = true;
+  for (const [name, expected] of Object.entries(condition.target ?? {}) as Array<
+    [WebTargetCondition, boolean]
+  >) {
+    if ((target?.[name] ?? false) !== expected) matches = false;
+  }
+  const inline = condition.container?.inline;
+  if (inline && !matchesRange(environment.allocated.inlineSize, inline)) matches = false;
+  const block = condition.container?.block;
+  if (block && !matchesRange(environment.allocated.blockSize, block)) matches = false;
+  for (const [name, expected] of Object.entries(condition.preferences ?? {}) as Array<
+    [keyof WebConditionEnvironment["preferences"], boolean]
+  >) {
+    if (environment.preferences[name] !== expected) matches = false;
+  }
+  for (const [name, expected] of Object.entries(condition.pointer ?? {}) as Array<
+    [keyof WebConditionEnvironment["pointer"], boolean]
+  >) {
+    if (environment.pointer[name] !== expected) matches = false;
+  }
+  return matches;
+}
+
+function matchesRange(value: number, range: Readonly<{ min?: unknown; max?: unknown }>): boolean {
+  const minimum = conditionMetric(range.min);
+  const maximum = conditionMetric(range.max);
+  return (minimum === undefined || value >= minimum) && (maximum === undefined || value <= maximum);
+}
+
+function conditionMetric(value: unknown): number | undefined {
+  if (value === undefined) return;
+  if (typeof value === "number") return value;
+  const metric = record(value).value;
+  return typeof metric === "number" ? metric : undefined;
+}
+
+function mergeDeclarations<Theme extends WebPresentationTokens>(
   base: WebPresentationDeclaration<Theme>,
   override: object,
 ): WebPresentationDeclaration<Theme> {
-  return mergeRecords(base as UnknownRecord, override as UnknownRecord) as WebPresentationDeclaration<Theme>;
+  const merged = mergeRecords(
+    base as UnknownRecord,
+    override as UnknownRecord,
+  ) as WebPresentationDeclaration<Theme>;
+  const overrideLayout = record(record(override).layout);
+  const modes = ["flow", "grid", "overlay"].filter((mode) => mode in overrideLayout);
+  if (modes.length !== 1) return merged;
+  const layout = { ...record(merged.layout) };
+  for (const mode of ["flow", "grid", "overlay"]) {
+    if (mode !== modes[0]) delete layout[mode];
+  }
+  return { ...merged, layout } as WebPresentationDeclaration<Theme>;
 }
 
 function mergeRecords(base: UnknownRecord, override: UnknownRecord): UnknownRecord {
   const result: UnknownRecord = { ...base };
   for (const [name, value] of Object.entries(override)) {
     const current = result[name];
-    result[name] = isMergeableRecord(current) && isMergeableRecord(value)
-      ? mergeRecords(current, value)
-      : value;
+    result[name] =
+      isMergeableRecord(current) && isMergeableRecord(value) ? mergeRecords(current, value) : value;
   }
   return result;
 }
@@ -728,18 +1092,20 @@ function isDisabled(target: Element): boolean {
   );
 }
 
-function createWebPresentationContext(
+function createWebConditionEnvironment(
   boundary: Element,
   cleanups: Array<() => void>,
-): WebPresentationContext {
-  const size = createAllocatedSize(boundary, cleanups);
+  changed: () => void,
+  scheduler?: MotionScheduler,
+): WebConditionEnvironment {
+  const size = createAllocatedSize(boundary, cleanups, changed, scheduler);
   const media = (query: string): (() => boolean) => {
     let observation: MediaObservation | undefined;
     return () => {
-      observation ??= observeMedia(query);
+      observation ??= observeMedia(boundary, query, changed);
       if (observation && !cleanups.includes(observation.release))
         cleanups.push(observation.release);
-      return observation.value();
+      return observation.read();
     };
   };
   const reducedMotion = media("(prefers-reduced-motion: reduce)");
@@ -773,14 +1139,14 @@ function createWebPresentationContext(
         return dark();
       },
     },
-    input: {
+    pointer: {
       get hover() {
         return hover();
       },
-      get finePointer() {
+      get fine() {
         return finePointer();
       },
-      get coarsePointer() {
+      get coarse() {
         return coarsePointer();
       },
     },
@@ -790,55 +1156,62 @@ function createWebPresentationContext(
 function createAllocatedSize(
   boundary: Element,
   cleanups: Array<() => void>,
-): Signal<Readonly<{ inlineSize: number; blockSize: number }>> {
+  changed: () => void,
+  scheduler?: MotionScheduler,
+): () => Readonly<{ inlineSize: number; blockSize: number }> {
   const read = () => {
     const rectangle = boundary.getBoundingClientRect();
     return { inlineSize: rectangle.width, blockSize: rectangle.height };
   };
-  const value = signal(read());
+  let value: Readonly<{ inlineSize: number; blockSize: number }> | undefined;
   let observer: ResizeObserver | undefined;
-  let frame: number | undefined;
+  let frame: unknown;
   const observe = () => {
+    value ??= read();
     if (observer || typeof ResizeObserver === "undefined") return;
     observer = new ResizeObserver(() => {
       if (frame !== undefined) return;
-      frame = requestAnimationFrame(() => {
+      frame = scheduler ? scheduler.requestFrame(update) : requestAnimationFrame(update);
+      function update() {
         frame = undefined;
         const next = read();
-        const current = value();
+        const current = value!;
         if (next.inlineSize !== current.inlineSize || next.blockSize !== current.blockSize) {
-          value(next);
+          value = next;
+          changed();
         }
-      });
+      }
     });
     observer.observe(boundary);
     cleanups.push(() => {
       observer?.disconnect();
-      if (frame !== undefined) cancelAnimationFrame(frame);
+      if (frame !== undefined) {
+        if (scheduler) scheduler.cancelFrame(frame);
+        else cancelAnimationFrame(frame as number);
+      }
     });
   };
-  return (() => {
+  return () => {
     observe();
-    return value();
-  }) as Signal<Readonly<{ inlineSize: number; blockSize: number }>>;
+    return value!;
+  };
 }
 
-function observeMedia(query: string): MediaObservation {
-  const existing = sharedMedia.get(query);
-  if (existing) {
-    existing.references += 1;
-    return { value: existing.value, release: () => releaseMedia(query, existing) };
-  }
-  const media = matchMedia(query);
-  const value = signal(media.matches);
-  const change = () => value(media.matches);
+function observeMedia(boundary: Element, query: string, changed: () => void): MediaObservation {
+  const match =
+    boundary.ownerDocument?.defaultView?.matchMedia ??
+    (typeof matchMedia === "function" ? matchMedia : undefined);
+  if (!match) return { read: () => false, release() {} };
+  const media = match.call(boundary.ownerDocument?.defaultView, query);
+  const change = () => changed();
   media.addEventListener("change", change);
-  const observation = { value, media, change, references: 1 };
-  sharedMedia.set(query, observation);
-  return { value, release: () => releaseMedia(query, observation) };
+  return {
+    read: () => media.matches,
+    release: () => media.removeEventListener("change", change),
+  };
 }
 
-function applyPresenceLifecycle<Theme extends WebPresentationTheme>(
+function applyPresenceLifecycle<Theme extends WebPresentationTokens>(
   target: Element,
   presence: WebMotionDeclaration<Theme>["presence"] | undefined,
   lifecycleRecords: Map<Element, string | null>,
@@ -853,7 +1226,8 @@ function applyPresenceLifecycle<Theme extends WebPresentationTheme>(
   if (presence?.exit) target.setAttribute("data-motion-lifecycle", "enter exit exit-finished");
   else {
     const previous = lifecycleRecords.get(target);
-    if (previous === null || previous === undefined) target.removeAttribute("data-motion-lifecycle");
+    if (previous === null || previous === undefined)
+      target.removeAttribute("data-motion-lifecycle");
     else target.setAttribute("data-motion-lifecycle", previous);
   }
   if (presence?.layout) target.setAttribute("data-motion-layout", presence.layout);
@@ -864,7 +1238,7 @@ function applyPresenceLifecycle<Theme extends WebPresentationTheme>(
   }
 }
 
-function applyStructuralPresenceLayout<Theme extends WebPresentationTheme>(
+function applyStructuralPresenceLayout<Theme extends WebPresentationTokens>(
   target: Element,
   presence: WebMotionDeclaration<Theme>["presence"] | undefined,
   records: Map<HTMLElement, PoppedPresenceStyles>,
@@ -918,13 +1292,6 @@ function dispatchMotionFinish(target: Element): void {
   }
 }
 
-function releaseMedia(query: string, observation: NonNullable<ReturnType<typeof sharedMedia.get>>) {
-  observation.references -= 1;
-  if (observation.references > 0) return;
-  observation.media.removeEventListener("change", observation.change);
-  sharedMedia.delete(query);
-}
-
 function applyOwnedStyles(
   target: Element,
   next: Readonly<Record<string, string>>,
@@ -971,22 +1338,34 @@ function restoreOwnedStyles(target: StyledElement, owned: Map<string, string>): 
   for (const [property, value] of owned) setStyle(target.style, property, value);
 }
 
-function applyAnchor<Part extends string, Theme extends WebPresentationTheme>(
+function applyAnchor<ElementName extends string, Theme extends WebPresentationTokens>(
   target: Element,
   declaration: WebPresentationDeclaration<Theme> | undefined,
-  parts: PresentationTargets<Part, Element>,
+  elements: ReadonlyMap<ElementName, readonly Element[]>,
   session: string,
   styles: Map<StyledElement, Map<string, string>>,
 ): void {
   const reference = record(record(declaration?.layout).position).anchor;
   if (!reference || typeof reference !== "object") return;
   const name = String(record(reference).name ?? "");
-  if (!name || !(name in parts)) return;
-  const anchor = parts[name as Part]?.()[0];
+  if (!name) return;
+  const anchor = elements.get(name as ElementName)?.[0];
   if (!isStyledElement(anchor) || !isStyledElement(target)) return;
   const anchorName = `--${session}-${name.toLowerCase()}`;
   setAdditionalOwnedStyles(anchor, { anchorName }, styles);
   setAdditionalOwnedStyles(target, { positionAnchor: anchorName }, styles);
+}
+
+function collectionMetric(value: unknown): number {
+  if (typeof value === "number") return value;
+  if (
+    value &&
+    typeof value === "object" &&
+    typeof (value as { value?: unknown }).value === "number"
+  ) {
+    return (value as { value: number }).value;
+  }
+  throw new TypeError("Presentation collection metrics must resolve to numbers.");
 }
 
 function applyResource(
@@ -1009,7 +1388,7 @@ function restoreResource(target: Element, source: string | null): void {
   else target.setAttribute("src", source);
 }
 
-function applyLayers<Theme extends WebPresentationTheme>(
+function applyLayers<Theme extends WebPresentationTokens>(
   target: Element,
   definitions: readonly WebRenderLayer<Theme>[],
   records: Map<Element, Map<string, Element>>,
@@ -1020,7 +1399,7 @@ function applyLayers<Theme extends WebPresentationTheme>(
   const expected = new Set(definitions.map(({ id }) => id));
   for (const [id, layer] of current) {
     if (!expected.has(id)) {
-      layer.remove();
+      removeLayer(layer, styles);
       current.delete(id);
     }
   }
@@ -1064,7 +1443,144 @@ function applyLayers<Theme extends WebPresentationTheme>(
   }
 }
 
-function motionValues<Theme extends WebPresentationTheme>(
+function removeLayer(layer: Element, styles: Map<StyledElement, Map<string, string>>): void {
+  if (isStyledElement(layer)) {
+    const owned = styles.get(layer);
+    if (owned) restoreOwnedStyles(layer, owned);
+    styles.delete(layer);
+  }
+  layer.remove();
+}
+
+function restoreAttribute(target: Element, name: string, value: string | null | undefined): void {
+  if (value === undefined) return;
+  if (value === null) target.removeAttribute(name);
+  else target.setAttribute(name, value);
+}
+
+function needsTargetConditions<Theme extends WebPresentationTokens>(
+  declaration: WebPresentationDeclaration<Theme> | undefined,
+): boolean {
+  return (
+    declaration?.conditions?.some((rule) => Object.keys(rule.when.target ?? {}).length > 0) ===
+      true || record(declaration?.paint).focusRing !== undefined
+  );
+}
+
+function validateWebPresentationDeclaration<Theme extends WebPresentationTokens>(
+  declaration: WebPresentationDeclaration<Theme>,
+  elementName: string,
+): void {
+  validateSerializableValue(
+    declaration,
+    `Presentation Element ${JSON.stringify(elementName)}`,
+    new Set(),
+  );
+  const identity = declaration.motion?.identity;
+  if (identity !== undefined && identity.length === 0) {
+    throw new TypeError(
+      `Presentation Element ${JSON.stringify(elementName)} has an empty motion identity.`,
+    );
+  }
+  validateResource(declaration.resource, elementName);
+  for (const [index, rule] of (declaration.conditions ?? []).entries()) {
+    const condition = rule.when;
+    const groups = [
+      condition.target,
+      condition.container,
+      condition.preferences,
+      condition.pointer,
+    ];
+    if (!groups.some((group) => group && Object.keys(group).length > 0)) {
+      throw new TypeError(
+        `Presentation Element ${JSON.stringify(elementName)} condition ${index} is empty.`,
+      );
+    }
+    validateConditionRange(condition.container?.inline, elementName, index, "inline");
+    validateConditionRange(condition.container?.block, elementName, index, "block");
+  }
+  const layerIds = new Set<string>();
+  for (const layer of declaration.layers ?? []) {
+    if (!layer.id) {
+      throw new TypeError(
+        `Presentation Element ${JSON.stringify(elementName)} has an empty render-layer id.`,
+      );
+    }
+    if (layerIds.has(layer.id)) {
+      throw new TypeError(
+        `Presentation Element ${JSON.stringify(elementName)} repeats render-layer id ${JSON.stringify(layer.id)}.`,
+      );
+    }
+    layerIds.add(layer.id);
+    validateResource(layer.resource, elementName);
+  }
+}
+
+function validateConditionRange(
+  range: Readonly<{ min?: unknown; max?: unknown }> | undefined,
+  elementName: string,
+  index: number,
+  axis: string,
+): void {
+  if (!range) return;
+  const minimum = conditionMetric(range.min);
+  const maximum = conditionMetric(range.max);
+  if (
+    (range.min !== undefined && minimum === undefined) ||
+    (range.max !== undefined && maximum === undefined)
+  ) {
+    throw new TypeError(
+      `Presentation Element ${JSON.stringify(elementName)} condition ${index} has an invalid ${axis} range.`,
+    );
+  }
+  if (minimum !== undefined && maximum !== undefined && minimum > maximum) {
+    throw new TypeError(
+      `Presentation Element ${JSON.stringify(elementName)} condition ${index} has an inverted ${axis} range.`,
+    );
+  }
+}
+
+function validateResource(resource: unknown, elementName: string): void {
+  if (resource === undefined) return;
+  const value = record(resource);
+  if (
+    !["image", "symbol", "shader"].includes(String(value.kind)) ||
+    typeof value.source !== "string" ||
+    value.source.length === 0
+  ) {
+    throw new TypeError(
+      `Presentation Element ${JSON.stringify(elementName)} has an invalid resource.`,
+    );
+  }
+}
+
+function validateSerializableValue(value: unknown, path: string, ancestors: Set<object>): void {
+  if (typeof value === "number" && !Number.isFinite(value)) {
+    throw new TypeError(`${path} contains a non-finite number.`);
+  }
+  if (
+    value === undefined ||
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "boolean" ||
+    typeof value === "number"
+  ) {
+    return;
+  }
+  if (typeof value !== "object") {
+    throw new TypeError(`${path} contains unsupported ${typeof value} data.`);
+  }
+  if (ancestors.has(value)) throw new TypeError(`${path} contains a cyclic value.`);
+  ancestors.add(value);
+  if (Array.isArray(value)) {
+    for (const item of value) validateSerializableValue(item, path, ancestors);
+  } else {
+    for (const item of Object.values(value)) validateSerializableValue(item, path, ancestors);
+  }
+  ancestors.delete(value);
+}
+
+function motionValues<Theme extends WebPresentationTokens>(
   declaration: WebMotionDeclaration<Theme> | undefined,
 ): readonly [MotionProperty, WebMotionValue<Theme>][] {
   if (!declaration) return [];
@@ -1094,32 +1610,33 @@ function motionProperties(property: string): readonly MotionProperty[] {
     scale: ["scaleX", "scaleY"],
   }[property] ?? [
     {
-    opacity: "opacity",
-    inline: "translateX",
-    block: "translateY",
-    depth: "translateZ",
-    scale: "scaleX",
-    scaleInline: "scaleX",
-    scaleBlock: "scaleY",
-    rotate: "rotateZ",
-    radius: "borderRadius",
+      opacity: "opacity",
+      inline: "translateX",
+      block: "translateY",
+      depth: "translateZ",
+      scale: "scaleX",
+      scaleInline: "scaleX",
+      scaleBlock: "scaleY",
+      rotate: "rotateZ",
+      radius: "borderRadius",
     }[property] as MotionProperty,
   ];
   return values.filter((value): value is MotionProperty => value !== undefined);
 }
 
-function enterMotionValue(
-  from: object | undefined,
-  property: MotionProperty,
-): number | undefined {
+function enterMotionValue(from: object | undefined, property: MotionProperty): number | undefined {
   const values = record(from);
   const names = {
     opacity: ["opacity"],
     translateX: ["inline"],
     translateY: ["block"],
     translateZ: ["depth"],
+    layoutTranslateX: [],
+    layoutTranslateY: [],
     scaleX: ["scaleInline", "scale"],
     scaleY: ["scaleBlock", "scale"],
+    layoutScaleX: [],
+    layoutScaleY: [],
     rotateZ: ["rotate"],
     borderRadius: ["radius"],
   }[property];
@@ -1131,7 +1648,7 @@ function enterMotionValue(
 }
 
 function defaultMotionValue(property: MotionProperty): number {
-  return property === "opacity" || property === "scaleX" || property === "scaleY" ? 1 : 0;
+  return property === "opacity" || property.toLowerCase().includes("scale") ? 1 : 0;
 }
 
 function currentMotionValue(target: StyledElement, property: MotionProperty): number {
@@ -1148,16 +1665,10 @@ function currentMotionValue(target: StyledElement, property: MotionProperty): nu
 
 function showTarget(target: Element, styles: Map<StyledElement, Map<string, string>>): void {
   if ("hidden" in target) (target as HTMLElement).hidden = false;
-  if (typeof HTMLDialogElement !== "undefined" && target instanceof HTMLDialogElement) {
-    if (!target.open) target.showModal();
-  }
   setAdditionalOwnedStyles(target, { pointerEvents: "" }, styles);
 }
 
 function hideTarget(target: Element, styles: Map<StyledElement, Map<string, string>>): void {
-  if (typeof HTMLDialogElement !== "undefined" && target instanceof HTMLDialogElement) {
-    if (target.open) target.close();
-  }
   if ("hidden" in target) (target as HTMLElement).hidden = true;
   setAdditionalOwnedStyles(target, { pointerEvents: "none" }, styles);
 }

@@ -83,7 +83,8 @@ function template(name: string, version: string): Record<string, string> {
 }
 `,
     "src/app.tsx": `import type { Application, Feature, Program, WebMain } from "@poggers/kit";
-import type { WebPresentation, WebPresentationTheme } from "@poggers/kit/presentation/web";
+import type { PresentationRegistration } from "@poggers/kit/presentation";
+import type { WebPresentation, WebPresentationTokens } from "@poggers/kit/presentation/web";
 
 export type App = {
   Features: { shell: ShellFeature };
@@ -96,37 +97,40 @@ type ShellFeature = {
       WebMain,
       {
         Components: {
-          Application: { Parts: { Root: "main"; Title: "h1" } };
+          Application: { Elements: { Root: "main"; Title: "h1" } };
         };
       }
     >;
   };
 };
 
-const theme = {} as const satisfies WebPresentationTheme;
+const theme = {} as const satisfies WebPresentationTokens;
 
 const clean = ((_) => ({
-  components: {
-    Shell: {
-      Application: () => ({
-        Root: {
-          layout: {
-            flow: { axis: "block", align: "center", distribute: "center" },
-            size: { block: { min: { viewport: { axis: "block", percent: 100 } } } },
-          },
+  Shell: {
+    Application: () => ({
+      Root: {
+        layout: {
+          flow: { axis: "block", align: "center", distribute: "center" },
+          size: { block: { min: { viewport: { axis: "block", percent: 100 } } } },
         },
-        Title: { typography: { size: 32, weight: 600, color: "current" } },
-      }),
-    },
+      },
+      Title: { typography: { size: 32, weight: 600, color: "current" } },
+    }),
   },
 })) satisfies WebPresentation<App, typeof theme>;
+
+const cleanRegistration = {
+  presentation: clean,
+  themes: { default: theme },
+} satisfies PresentationRegistration<typeof clean>;
 
 const shellFeature = {
   programs: {
     browser: {
       components: {
         Application: {
-          view({ parts: { Root, Title } }) {
+          view({ elements: { Root, Title } }) {
             return (
               <Root>
                 <Title>${name}</Title>
@@ -143,7 +147,7 @@ const shellFeature = {
 export default {
   metadata: { name: ${JSON.stringify(name)} },
   features: { shell: shellFeature },
-  presentations: { clean: { default: clean(theme) } },
+  presentations: { clean: cleanRegistration },
 } satisfies Application<App>;
 `,
   };

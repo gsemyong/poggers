@@ -1,7 +1,9 @@
 import { describe, expect, test } from "vitest";
 
 import type { Application, Feature, Program, WebMain } from "../../application";
-import { createApplicationUI } from "./component";
+import { createWebPlatformAdapter } from "./adapter";
+
+const createApplicationUI = createWebPlatformAdapter().structure.createApplicationUI;
 
 type Counter = {
   Programs: {
@@ -25,7 +27,7 @@ type Shell = {
         Actions: {
           increment(input: { feature: "first" | "second"; by: number }): number;
         };
-        Components: { Root: { Parts: { Root: "main" } } };
+        Components: { Root: { Elements: { Root: "main" } } };
       }
     >;
   };
@@ -103,7 +105,7 @@ describe("Program UI composition", () => {
     ).toThrow("exactly one root");
   });
 
-  test("updates presentation visuals in place unless collection mounting changes", async () => {
+  test("updates authored Presentations in place when their public names are stable", async () => {
     const shell: Feature<Shell> = {
       features: { first: counter(1), second: counter(10) },
       programs: {
@@ -120,19 +122,29 @@ describe("Program UI composition", () => {
         },
       },
     };
-    const ui = createApplicationUI({
-      application: { features: { shell } },
+    const family = {
+      presentation: (_: { tone: string }) => ({ components: {} }),
+      themes: { default: { tone: "quiet" }, vivid: { tone: "bright" } },
+    };
+    type AppearanceContract = Contract & { Presentations: "family" };
+    const application = {
+      features: { shell },
+      presentations: { family },
+    } satisfies Application<AppearanceContract>;
+    const ui = createApplicationUI<AppearanceContract>({
+      application,
       program: "browser",
-      presentations: { presentations: {} },
+      presentations: { presentations: { family } },
     });
 
-    expect(ui.updateCompiledVisuals({})).toBe(true);
+    ui.setPresentation({ presentation: "family", theme: "vivid" });
+    expect(ui.presentation()).toEqual({ presentation: "family", theme: "vivid" });
+    expect(ui.process.total).toBe(0);
+    expect(ui.updatePresentations({ family })).toBe(true);
     expect(
-      ui.updateCompiledVisuals({
-        family: {
-          components: { Root: { Root: { collection: {} } } },
-        },
-      } as never),
+      ui.updatePresentations({
+        studio: { presentation: (_: {}) => ({ components: {} }), themes: { default: {} } },
+      }),
     ).toBe(false);
 
     await ui.dispose();
@@ -184,7 +196,7 @@ describe("Program UI composition", () => {
             Requires: { reader: { read(): string } };
             State: { value: string };
             Actions: { receive(input: { value: string }): void };
-            Components: { Root: { Parts: { Root: "main" } } };
+            Components: { Root: { Elements: { Root: "main" } } };
           }
         >;
       };

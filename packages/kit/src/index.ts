@@ -26,3 +26,16 @@ export type {
 
 export type { ProgramAdapter, ProgramAddress, Process } from "./runtime";
 export { startProgram } from "./runtime";
+
+export type {
+  PlatformAdapter,
+  PlatformChild,
+  PlatformContract,
+  PlatformPresentationLanguage,
+  PlatformPrimitive,
+  PlatformPrimitiveName,
+  PlatformPrimitivePresentation,
+  PlatformPrimitiveProps,
+  PlatformPrimitiveTarget,
+  PlatformTarget,
+} from "./ui/platform";

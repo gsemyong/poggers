@@ -1,7 +1,7 @@
 import type { Application, Feature, Program, WebMain } from "@poggers/kit";
 import { Show, createPress } from "@poggers/kit/ui";
 import { chatFeature, type ChatFeature } from "src/features/chat";
-import { paperPresentation, paperTheme } from "src/presentations/paper";
+import { paper } from "src/presentations/paper";
 
 type Route = "chat" | "about";
 
@@ -29,7 +29,7 @@ type ShellFeature = {
         };
         Components: {
           Shell: {
-            Parts: {
+            Elements: {
               Root: "div";
               Navigation: "nav";
               ChatLink: "button";
@@ -97,9 +97,9 @@ const shellFeature = {
       },
       components: {
         Shell: {
-          view({ process, components: { Chat }, parts }) {
+          view({ process, components: { Chat }, elements }) {
             const { Root, Navigation, ChatLink, AboutLink, Content, About, AboutTitle, AboutText } =
-              parts;
+              elements;
             return (
               <Root>
                 <Navigation aria-label="Primary navigation">
@@ -161,5 +161,5 @@ export default {
     display: "standalone",
   },
   features: { shell: shellFeature },
-  presentations: { paper: { default: paperPresentation(paperTheme) } },
+  presentations: { paper },
 } satisfies Application<App>;

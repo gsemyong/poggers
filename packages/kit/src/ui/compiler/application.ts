@@ -123,7 +123,7 @@ const reactiveComponentTransformer: ts.TransformerFactory<ts.SourceFile> = (cont
         : ts.isIdentifier(element.name)
           ? element.name.text
           : undefined;
-      if (sourceName === "parts" && ts.isObjectBindingPattern(element.name)) {
+      if (sourceName === "elements" && ts.isObjectBindingPattern(element.name)) {
         for (const part of element.name.elements) {
           if (ts.isIdentifier(part.name)) nextPartBindings.add(part.name.text);
         }
@@ -412,7 +412,7 @@ const reactiveComponentTransformer: ts.TransformerFactory<ts.SourceFile> = (cont
     if (!ts.isPropertyAccessExpression(node.expression)) return false;
     const owner = node.expression.expression;
     if (!ts.isIdentifier(owner) || isBindingShadowed(owner, owner.text, activeMethod)) return false;
-    return (renderBindings.get(owner.text) ?? owner.text) === "parts";
+    return (renderBindings.get(owner.text) ?? owner.text) === "elements";
   };
 
   return (sourceFile) => {

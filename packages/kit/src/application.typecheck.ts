@@ -16,7 +16,12 @@ type Messages = Readonly<{
 type Store = Readonly<{ append(input: { text: string }): Promise<void> }>;
 type Navigation = Readonly<{ push(input: { route: "chat" | "about" }): void }>;
 type Clock = Readonly<{ subscribe(receive: () => void): Disposable }>;
-type DesktopMain = { readonly Name: "desktop-main"; readonly Platform: "desktop" };
+type DesktopPlatform = {
+  readonly Name: "desktop";
+  readonly Child: unknown;
+  readonly Primitives: {};
+};
+type DesktopMain = { readonly Name: "desktop-main"; readonly Platform: DesktopPlatform };
 
 type ChatFeature = {
   Programs: {
@@ -43,8 +48,7 @@ type ChatFeature = {
               change(input: { value: string }): string;
               clear(): void;
             };
-            Parameters: { minimumLength: number };
-            Parts: { Root: "main"; Send: "button" };
+            Elements: { Root: "main"; Send: "button" };
           };
         };
       }
@@ -96,9 +100,8 @@ const chatFeature = {
         Chat: {
           state: { draft: "" },
           actions: {
-            change({ state, capabilities, parameters }, { value }) {
+            change({ state, capabilities }, { value }) {
               capabilities.messages satisfies Messages;
-              parameters.minimumLength satisfies number;
               state.draft = value;
               // @ts-expect-error Components may access only declared Capabilities.
               void capabilities.unknown;
@@ -109,20 +112,23 @@ const chatFeature = {
             },
           },
           start(scope) {
-            scope.parts.Send.element satisfies HTMLButtonElement | null;
-            // @ts-expect-error Component start cannot mutate state directly.
-            void scope.state;
+            scope.elements.Send.element satisfies HTMLButtonElement | null;
+            scope.state.draft satisfies string;
+            // @ts-expect-error Component start receives readonly state.
+            scope.state.draft = "invalid";
             return scope.capabilities.clock.subscribe(scope.actions.clear);
           },
-          view({ process, state, actions, parts: { Root, Send } }) {
+          view({ process, state, actions, elements: { Root, Send } }) {
             process.messages satisfies readonly Message[];
             process.send satisfies (input: { text: string }) => Promise<void>;
             state.draft satisfies string;
             actions.change satisfies (input: { value: string }) => string;
             // @ts-expect-error Component views receive readonly state.
             state.draft = "invalid";
-            void Root;
-            void Send;
+            Root({ role: "main" });
+            Send({ type: "button", "aria-label": "Send message", onPointerDown() {} });
+            // @ts-expect-error Web button structure cannot use Three camera props.
+            Send({ fov: 42 });
             return null;
           },
         },
@@ -148,7 +154,7 @@ type ShellFeature = {
         Requires: { navigation: Navigation };
         State: { route: "chat" | "about" };
         Actions: { navigate(input: { route: "chat" | "about" }): void };
-        Components: { Root: { Parts: { Root: "div" } } };
+        Components: { Root: { Elements: { Root: "div" } } };
       }
     >;
   };
@@ -167,7 +173,7 @@ const shellFeature = {
       },
       components: {
         Root: {
-          view({ components: { Chat }, parts: { Root } }) {
+          view({ components: { Chat }, elements: { Root } }) {
             Chat.Chat satisfies (props?: object) => unknown;
             void Root;
             return null;
@@ -187,7 +193,10 @@ type Product = {
 const product = {
   metadata: { name: "Messages" },
   features: { shell: shellFeature },
-  presentations: { paper: {}, native: {} },
+  presentations: {
+    paper: { presentation: (_: {}) => ({}), themes: { default: {} } },
+    native: { presentation: (_: {}) => ({}), themes: { default: {} } },
+  },
 } satisfies Application<Product>;
 
 void product;
@@ -239,7 +248,7 @@ type RemovedComponentSurface = {
   Programs: {
     browser: Program<
       WebMain,
-      { Components: { Root: { State: { open: boolean }; Parts: { Root: "main" } } } }
+      { Components: { Root: { State: { open: boolean }; Elements: { Root: "main" } } } }
     >;
   };
 };

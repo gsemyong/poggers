@@ -2,20 +2,24 @@ import type {
   ComponentActionArgs,
   ComponentActions,
   ComponentCapabilities,
-  ComponentContract,
   ComponentFeatures,
-  ComponentInput,
+  ComponentProps as ComponentExternalProps,
   ComponentName,
   ComponentOwner,
-  ComponentParameters,
-  ComponentPartName,
-  ComponentParts,
-  ComponentProgramState,
+  ComponentPlatform,
+  ComponentElementName,
+  ComponentElements,
   ComponentProcess,
   ComponentSlots,
   ComponentState,
 } from "./component.contract";
-import type { Child, IntrinsicElements } from "./web/jsx-types";
+import type {
+  PlatformChild,
+  PlatformContract,
+  PlatformPrimitiveName,
+  PlatformPrimitiveProps,
+  PlatformPrimitiveTarget,
+} from "./platform";
 
 export type {
   ComponentActionArgs,
@@ -23,12 +27,12 @@ export type {
   ComponentCapabilities,
   ComponentContract,
   ComponentFor,
-  ComponentInput,
+  ComponentProps,
   ComponentName,
   ComponentOwner,
-  ComponentParameters,
-  ComponentPartName,
-  ComponentParts,
+  ComponentPlatform,
+  ComponentElementName,
+  ComponentElements,
   ComponentProgramState,
   ComponentProcess,
   ComponentSlots,
@@ -63,55 +67,62 @@ export type PresentationAppearance<Root extends ComponentOwner> = Readonly<{
 export type PresentationControl<Root extends ComponentOwner> = Readonly<{
   select(appearance: PresentationAppearance<Root>): void;
 }>;
-type ComponentPresentationAppearance<
-  Root extends ComponentOwner,
+type ElementTag<
   Owner extends ComponentOwner,
   Name extends ComponentName<Owner>,
-> = Omit<PresentationAppearance<Root>, "presentation"> &
-  Readonly<{
-    presentation: ComponentState<Owner, Name> extends { presentation: infer Value extends string }
-      ? Value
-      : PresentationName<Root>;
-  }>;
-
-type PartElement<
+  ElementName extends ComponentElementName<Owner, Name>,
+> = ComponentElements<Owner, Name>[ElementName] & string;
+type OwnerPlatform<Owner extends ComponentOwner> = Extract<
+  ComponentPlatform<Owner>,
+  PlatformContract
+>;
+type ComponentChild<Owner extends ComponentOwner> = [OwnerPlatform<Owner>] extends [never]
+  ? unknown
+  : PlatformChild<OwnerPlatform<Owner>>;
+type PrimitiveFor<
   Owner extends ComponentOwner,
   Name extends ComponentName<Owner>,
-  Part extends ComponentPartName<Owner, Name>,
-> = ComponentParts<Owner, Name>[Part] & string;
-type NativeProps<ElementName extends string> = ElementName extends keyof IntrinsicElements
-  ? Omit<IntrinsicElements[ElementName], "class" | "className" | "style">
-  : Record<string, unknown>;
-type NativeElement<ElementName extends string> = ElementName extends keyof HTMLElementTagNameMap
-  ? HTMLElementTagNameMap[ElementName]
-  : ElementName extends keyof SVGElementTagNameMap
-    ? SVGElementTagNameMap[ElementName]
-    : Element;
-export type ComponentPart<
+  ElementName extends ComponentElementName<Owner, Name>,
+> = Extract<ElementTag<Owner, Name, ElementName>, PlatformPrimitiveName<OwnerPlatform<Owner>>>;
+type NativeProps<
   Owner extends ComponentOwner,
   Name extends ComponentName<Owner>,
-  Part extends ComponentPartName<Owner, Name>,
+  ElementName extends ComponentElementName<Owner, Name>,
+> = PlatformPrimitiveProps<OwnerPlatform<Owner>, PrimitiveFor<Owner, Name, ElementName>>;
+type NativeElement<
+  Owner extends ComponentOwner,
+  Name extends ComponentName<Owner>,
+  ElementName extends ComponentElementName<Owner, Name>,
+> = PlatformPrimitiveTarget<OwnerPlatform<Owner>, PrimitiveFor<Owner, Name, ElementName>>;
+export type ComponentElement<
+  Owner extends ComponentOwner,
+  Name extends ComponentName<Owner>,
+  ElementName extends ComponentElementName<Owner, Name>,
 > = {
-  (props?: NativeProps<PartElement<Owner, Name, Part>>): Child;
-  readonly element: NativeElement<PartElement<Owner, Name, Part>> | null;
-  readonly elements: readonly NativeElement<PartElement<Owner, Name, Part>>[];
+  (props?: NativeProps<Owner, Name, ElementName>): ComponentChild<Owner>;
+  readonly element: NativeElement<Owner, Name, ElementName> | null;
+  readonly elements: readonly NativeElement<Owner, Name, ElementName>[];
 };
-type ComponentPartSurface<Owner extends ComponentOwner, Name extends ComponentName<Owner>> = {
-  readonly [Part in ComponentPartName<Owner, Name>]: ComponentPart<Owner, Name, Part>;
+type ComponentElementSurface<Owner extends ComponentOwner, Name extends ComponentName<Owner>> = {
+  readonly [ElementName in ComponentElementName<Owner, Name>]: ComponentElement<
+    Owner,
+    Name,
+    ElementName
+  >;
 };
 
 type RequiredKeys<Value extends Record<string, unknown>> = {
   [Key in keyof Value]-?: Record<string, never> extends Pick<Value, Key> ? never : Key;
 }[keyof Value];
-type ComponentProps<
+type ComponentJSXProps<
   Owner extends ComponentOwner,
   Name extends ComponentName<Owner>,
-> = ComponentInput<Owner, Name> & ComponentSlots<Owner, Name>;
+> = ComponentExternalProps<Owner, Name> & ComponentSlots<Owner, Name>;
 type ComponentRenderer<Owner extends ComponentOwner, Name extends ComponentName<Owner>> = [
-  RequiredKeys<ComponentProps<Owner, Name>>,
+  RequiredKeys<ComponentJSXProps<Owner, Name>>,
 ] extends [never]
-  ? (props?: ComponentProps<Owner, Name>) => Child
-  : (props: ComponentProps<Owner, Name>) => Child;
+  ? (props?: ComponentJSXProps<Owner, Name>) => ComponentChild<Owner>
+  : (props: ComponentJSXProps<Owner, Name>) => ComponentChild<Owner>;
 export type ComponentRenderers<Owner extends ComponentOwner> = {
   readonly [Name in ComponentName<Owner>]: ComponentRenderer<Owner, Name>;
 };
@@ -134,37 +145,34 @@ export type ComponentRenderScope<
   Owner extends ComponentOwner,
   Name extends ComponentName<Owner>,
 > = Readonly<{
-  input: ComponentInput<Owner, Name>;
+  props: ComponentExternalProps<Owner, Name>;
   process: ComponentProcess<Owner>;
   state: ComponentState<Owner, Name>;
   actions: BoundComponentActions<Owner, Name>;
   slots: ComponentSlots<Owner, Name>;
   components: ComponentComposition<Owner>;
-  parts: ComponentPartSurface<Owner, Name>;
+  elements: ComponentElementSurface<Owner, Name>;
 }>;
 
 export type ComponentStateInitializationScope<
-  Root extends ComponentOwner,
+  _Root extends ComponentOwner,
   Owner extends ComponentOwner,
   Name extends ComponentName<Owner>,
 > = Readonly<{
-  input: ComponentInput<Owner, Name>;
+  props: ComponentExternalProps<Owner, Name>;
   process: ComponentProcess<Owner>;
-  presentation: ComponentPresentationAppearance<Root, Owner, Name>;
 }>;
 
 export type ComponentActionScope<
-  Root extends ComponentOwner,
+  _Root extends ComponentOwner,
   Owner extends ComponentOwner,
   Name extends ComponentName<Owner>,
 > = Readonly<{
-  input: ComponentInput<Owner, Name>;
+  props: ComponentExternalProps<Owner, Name>;
   process: ComponentProcess<Owner>;
   capabilities: ComponentCapabilities<Owner>;
   state: Mutable<ComponentState<Owner, Name>>;
-  parameters: ComponentParameters<Owner, Name>;
-  presentation: ComponentPresentationAppearance<Root, Owner, Name>;
-  parts: ComponentPartSurface<Owner, Name>;
+  elements: ComponentElementSurface<Owner, Name>;
 }>;
 
 type ComponentActionDefinitions<
@@ -187,17 +195,16 @@ type ComponentActionField<
   : { readonly actions: ComponentActionDefinitions<Root, Owner, Name> };
 
 export type ComponentStartScope<
-  Root extends ComponentOwner,
+  _Root extends ComponentOwner,
   Owner extends ComponentOwner,
   Name extends ComponentName<Owner>,
 > = Readonly<{
-  input: ComponentInput<Owner, Name>;
+  props: ComponentExternalProps<Owner, Name>;
   process: ComponentProcess<Owner>;
   capabilities: ComponentCapabilities<Owner>;
+  state: ComponentState<Owner, Name>;
   actions: BoundComponentActions<Owner, Name>;
-  parameters: ComponentParameters<Owner, Name>;
-  presentation: ComponentPresentationAppearance<Root, Owner, Name>;
-  parts: ComponentPartSurface<Owner, Name>;
+  elements: ComponentElementSurface<Owner, Name>;
 }>;
 
 type ComponentInitialState<
@@ -217,7 +224,7 @@ export type ComponentDefinition<
           scope: ComponentStateInitializationScope<Root, Owner, Name>,
         ) => ComponentInitialState<Owner, Name>);
     start?(scope: ComponentStartScope<Root, Owner, Name>): ComponentStartResult;
-    view(scope: ComponentRenderScope<Root, Owner, Name>): Child;
+    view(scope: ComponentRenderScope<Root, Owner, Name>): ComponentChild<Owner>;
   } & ComponentActionField<Root, Owner, Name>
 >;
 
@@ -229,7 +236,7 @@ export type ComponentDefinitions<
 };
 
 export type RootComponentName<Root extends ComponentOwner> = {
-  [Name in ComponentName<Root>]: RequiredKeys<ComponentProps<Root, Name>> extends never
+  [Name in ComponentName<Root>]: RequiredKeys<ComponentJSXProps<Root, Name>> extends never
     ? Name
     : never;
 }[ComponentName<Root>];

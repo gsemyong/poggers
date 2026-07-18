@@ -5,11 +5,24 @@ import type { Application, Feature, Program, Server, WebMain } from "./applicati
 import {
   createProgramContributionInstance,
   createUIInstance,
+  RuntimeScope,
   startProgram,
   type ProgramAdapter,
 } from "./runtime";
 
 describe("Program runtime", () => {
+  test("disconnects owned producers synchronously when disposal begins", async () => {
+    const scope = new RuntimeScope();
+    let connected = true;
+    scope.add(() => {
+      connected = false;
+    });
+
+    const disposal = scope.dispose();
+    expect(connected).toBe(false);
+    await disposal;
+  });
+
   test("creates an isolated reactive UI state and action surface", async () => {
     const first = createUIInstance({
       state: { count: 0 },
@@ -543,7 +556,7 @@ describe("Program runtime", () => {
             Requires: { reader: Reader };
             State: { value: string };
             Actions: { refresh(): void };
-            Components: { Root: { Parts: { Root: "main" } } };
+            Components: { Root: { Elements: { Root: "main" } } };
           }
         >;
       };

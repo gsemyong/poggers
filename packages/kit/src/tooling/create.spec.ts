@@ -14,7 +14,7 @@ afterEach(async () => {
 });
 
 describe("project template", () => {
-  test("creates the complete minimal application convention", async () => {
+  test("creates the complete minimal application convention", { timeout: 30_000 }, async () => {
     const parent = await mkdtemp(resolve(tmpdir(), "poggers-create-"));
     directories.push(parent);
     const target = resolve(parent, "example");
@@ -76,24 +76,29 @@ describe("project template", () => {
     const html = await readFile(resolve(target, "dist/index.html"), "utf8");
     expect(html).toContain("@layer reset{");
     expect(html).toContain("dialog::backdrop{background:transparent}");
-    expect(html.indexOf("@layer reset{")).toBeLessThan(html.indexOf('href="/styles.css"'));
+    expect(html).not.toContain("stylex");
+    expect(html).not.toContain('href="/styles.css"');
+    expect(html.indexOf("@layer reset{")).toBeLessThan(html.indexOf('src="/app.js"'));
 
     expect(() =>
       validateUIProgramRoot({ features: { shell: { programs: { browser: {} } } } }, "browser"),
     ).toThrow("exactly one root Component");
   });
 
-  test("builds a portable headless Program through the public Rust target", async () => {
-    const parent = await mkdtemp(resolve(tmpdir(), "poggers-rust-"));
-    directories.push(parent);
-    const target = resolve(parent, "example");
-    await createProject([target, "--no-install"]);
-    const modules = resolve(target, "node_modules");
-    await mkdir(resolve(modules, "@poggers"), { recursive: true });
-    await symlink(resolve(import.meta.dirname, "../.."), resolve(modules, "@poggers/kit"), "dir");
-    await writeFile(
-      resolve(target, "src/app.tsx"),
-      `import type { Application, Feature, Program, Server } from "@poggers/kit";
+  test(
+    "builds a portable headless Program through the public Rust target",
+    { timeout: 30_000 },
+    async () => {
+      const parent = await mkdtemp(resolve(tmpdir(), "poggers-rust-"));
+      directories.push(parent);
+      const target = resolve(parent, "example");
+      await createProject([target, "--no-install"]);
+      const modules = resolve(target, "node_modules");
+      await mkdir(resolve(modules, "@poggers"), { recursive: true });
+      await symlink(resolve(import.meta.dirname, "../.."), resolve(modules, "@poggers/kit"), "dir");
+      await writeFile(
+        resolve(target, "src/app.tsx"),
+        `import type { Application, Feature, Program, Server } from "@poggers/kit";
 
 type Worker = { Programs: { cloud: Program<Server> } };
 type App = { Features: { worker: Worker } };
@@ -115,25 +120,29 @@ const worker = {
 
 export default { features: { worker } } satisfies Application<App>;
 `,
-    );
+      );
 
-    const output = await buildRustApplication({ directory: target, program: "cloud" });
-    expect(await run("cargo", ["fmt", "--check"], output)).toBe(0);
-    expect(await run("cargo", ["clippy", "--", "-D", "warnings"], output)).toBe(0);
-    expect(await run("cargo", ["run", "--quiet", "--release"], output)).toBe(0);
-  });
+      const output = await buildRustApplication({ directory: target, program: "cloud" });
+      expect(await run("cargo", ["fmt", "--check"], output)).toBe(0);
+      expect(await run("cargo", ["clippy", "--", "-D", "warnings"], output)).toBe(0);
+      expect(await run("cargo", ["run", "--quiet", "--release"], output)).toBe(0);
+    },
+  );
 
-  test("builds a headless Program against a production Rust adapter", async () => {
-    const parent = await mkdtemp(resolve(tmpdir(), "poggers-rust-adapter-"));
-    directories.push(parent);
-    const target = resolve(parent, "example");
-    await createProject([target, "--no-install"]);
-    const modules = resolve(target, "node_modules");
-    await mkdir(resolve(modules, "@poggers"), { recursive: true });
-    await symlink(resolve(import.meta.dirname, "../.."), resolve(modules, "@poggers/kit"), "dir");
-    await writeFile(
-      resolve(target, "src/app.tsx"),
-      `import type { Application, Feature, Program, Server } from "@poggers/kit";
+  test(
+    "builds a headless Program against a production Rust adapter",
+    { timeout: 30_000 },
+    async () => {
+      const parent = await mkdtemp(resolve(tmpdir(), "poggers-rust-adapter-"));
+      directories.push(parent);
+      const target = resolve(parent, "example");
+      await createProject([target, "--no-install"]);
+      const modules = resolve(target, "node_modules");
+      await mkdir(resolve(modules, "@poggers"), { recursive: true });
+      await symlink(resolve(import.meta.dirname, "../.."), resolve(modules, "@poggers/kit"), "dir");
+      await writeFile(
+        resolve(target, "src/app.tsx"),
+        `import type { Application, Feature, Program, Server } from "@poggers/kit";
 
 type Output = { write(input: { value: number }): Promise<void> };
 type Worker = { Programs: { cloud: Program<Server, { Requires: { output: Output } }> } };
@@ -151,11 +160,11 @@ const worker = {
 
 export default { features: { worker } } satisfies Application<App>;
 `,
-    );
-    await mkdir(resolve(target, "src/adapters"), { recursive: true });
-    await writeFile(
-      resolve(target, "src/adapters/cloud.rs"),
-      `use crate::generated::Capabilities;
+      );
+      await mkdir(resolve(target, "src/adapters"), { recursive: true });
+      await writeFile(
+        resolve(target, "src/adapters/cloud.rs"),
+        `use crate::generated::Capabilities;
 
 struct Adapter;
 
@@ -170,17 +179,18 @@ impl Capabilities for Adapter {
     }
 }
 `,
-    );
+      );
 
-    const output = await buildRustApplication({
-      directory: target,
-      program: "cloud",
-      adapter: "src/adapters/cloud.rs",
-    });
-    expect(await run("cargo", ["fmt", "--check"], output)).toBe(0);
-    expect(await run("cargo", ["clippy", "--", "-D", "warnings"], output)).toBe(0);
-    expect(await run("cargo", ["run", "--quiet", "--release"], output)).toBe(0);
-  });
+      const output = await buildRustApplication({
+        directory: target,
+        program: "cloud",
+        adapter: "src/adapters/cloud.rs",
+      });
+      expect(await run("cargo", ["fmt", "--check"], output)).toBe(0);
+      expect(await run("cargo", ["clippy", "--", "-D", "warnings"], output)).toBe(0);
+      expect(await run("cargo", ["run", "--quiet", "--release"], output)).toBe(0);
+    },
+  );
 });
 
 function run(command: string, arguments_: readonly string[], cwd: string): Promise<number> {

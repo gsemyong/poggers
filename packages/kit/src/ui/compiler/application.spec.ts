@@ -10,7 +10,7 @@ describe("component compiler", () => {
           components: {
             Counter: {
               state: { count: 0 },
-              view({ state, actions, parts: { Root } }) {
+              view({ state, actions, elements: { Root } }) {
                 return <Root onClick={actions.increment}>{state.count}</Root>;
               },
             },
@@ -31,7 +31,7 @@ describe("component compiler", () => {
     expect(() =>
       transformComponentSource(
         `export default { ui: { components: { Counter: {
-          view({ state, parts: { Root } }) {
+          view({ state, elements: { Root } }) {
             const disabled = state.count === 0;
             return <Root aria-disabled={disabled}>{state.count}</Root>;
           },

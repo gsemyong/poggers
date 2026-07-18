@@ -28,7 +28,7 @@ export type ChatFeature = {
         };
         Components: {
           Chat: {
-            Input: { openAbout(): void };
+            Props: { openAbout(): void };
             State: {
               draft: string;
             };
@@ -36,7 +36,7 @@ export type ChatFeature = {
               change(value: string): void;
               send(): Promise<void>;
             };
-            Parts: {
+            Elements: {
               Root: "main";
               Header: "header";
               Brand: "h1";
@@ -51,9 +51,9 @@ export type ChatFeature = {
             };
           };
           Message: {
-            Input: Message;
+            Props: Message;
             State: Message;
-            Parts: { Root: "article"; Role: "span"; Text: "p" };
+            Elements: { Root: "article"; Role: "span"; Text: "p" };
           };
         };
       }
@@ -146,7 +146,7 @@ export const chatFeature = {
               await process.send({ text });
             },
           },
-          view({ input, process, state, actions, components: { Message }, parts }) {
+          view({ props, process, state, actions, components: { Message }, elements }) {
             const {
               Root,
               Header,
@@ -159,7 +159,7 @@ export const chatFeature = {
               Send,
               About,
               Status,
-            } = parts;
+            } = elements;
             return (
               <Root>
                 <Header>
@@ -194,7 +194,7 @@ export const chatFeature = {
                   >
                     Send
                   </Send>
-                  <About type="button" {...createPress(input.openAbout)}>
+                  <About type="button" {...createPress(props.openAbout)}>
                     About this example
                   </About>
                   <Status aria-live="polite">{process.sending ? "Thinking" : "Ready"}</Status>
@@ -204,10 +204,10 @@ export const chatFeature = {
           },
         },
         Message: {
-          state({ input }) {
-            return input;
+          state({ props }) {
+            return props;
           },
-          view({ state, parts: { Root, Role, Text } }) {
+          view({ state, elements: { Root, Role, Text } }) {
             return (
               <Root data-role={state.role}>
                 <Role>{state.role === "user" ? "You" : "Assistant"}</Role>

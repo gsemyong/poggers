@@ -84,7 +84,7 @@ describe("semantic hot updates", () => {
     expect(second).toEqual(first);
   });
 
-  test("rejects incompatible Component state, visual units, parameters, and Parts", () => {
+  test("rejects incompatible Component state, visual units, callback Inputs, and Elements", () => {
     const before = manifest(record({}), [component()]);
 
     expect(
@@ -102,13 +102,13 @@ describe("semantic hot updates", () => {
     expect(
       isHotManifestCompatible(
         before,
-        manifest(record({}), [component({ parameters: record({ distance: stringType() }) })]),
+        manifest(record({}), [component({ propCallbacks: ["onDismiss"] })]),
       ),
     ).toBe(false);
     expect(
       isHotManifestCompatible(
         before,
-        manifest(record({}), [component({ parts: [{ name: "Root", element: "main" }] })]),
+        manifest(record({}), [component({ elements: [{ name: "Root", element: "main" }] })]),
       ),
     ).toBe(false);
   });
@@ -122,6 +122,13 @@ describe("semantic hot updates", () => {
     });
 
     expect(isHotManifestCompatible(before, manifest(record({}), [next]))).toBe(true);
+  });
+
+  test("rejects a platform change even when the Runtime name is unchanged", () => {
+    const before = manifest(record({}));
+    const changed = manifest(record({}), [], { name: "web-main", platform: "three" });
+
+    expect(isHotManifestCompatible(before, changed)).toBe(false);
   });
 });
 
@@ -149,21 +156,28 @@ function candidate(
   };
 }
 
-function manifest(state: TypeIR, components: readonly ComponentIR[] = []): HotManifest {
+function manifest(
+  state: TypeIR,
+  components: readonly ComponentIR[] = [],
+  runtime: Readonly<{ name: string; platform?: string }> = {
+    name: "web-main",
+    platform: "web",
+  },
+): HotManifest {
   return {
     revision: "test",
-    programs: [{ id: "feature/app/program/browser", runtime: "web-main", state, components }],
+    programs: [{ id: "feature/app/program/browser", runtime, state, components }],
   };
 }
 
 function component(overrides: Partial<ComponentIR> = {}): ComponentIR {
   return {
     name: "Drawer",
+    propCallbacks: [],
     state: record({ offset: numberType() }),
     actions: ["drag"],
-    parameters: record({ distance: numberType() }),
     visualValues: [{ name: "offset", kind: "length" }],
-    parts: [{ name: "Root", element: "section" }],
+    elements: [{ name: "Root", element: "section" }],
     implementation: { state: true, actions: true, start: false, view: true },
     ...overrides,
   };

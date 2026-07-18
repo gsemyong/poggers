@@ -31,17 +31,24 @@ export type AnimeDragParameters = {
   readonly cursor: false | { readonly onHover: string; readonly onGrab: string };
   readonly onGrab: (draggable: AnimeDraggable) => void;
   readonly onDrag: (draggable: AnimeDraggable) => void;
+  readonly onUpdate: (draggable: AnimeDraggable) => void;
   readonly onRelease: (draggable: AnimeDraggable) => void;
 };
 
-export type AnimeDragFactory = (target: object, parameters: AnimeDragParameters) => AnimeDraggable;
+export type AnimeDragFactory = (
+  target: HTMLElement,
+  parameters: AnimeDragParameters,
+) => AnimeDraggable;
 
 export function createAnimeDragDriver(
   factory: AnimeDragFactory = createDraggable as AnimeDragFactory,
 ): DragDriver {
   return {
     mount(trigger, options) {
-      const proxy = { x: 0, y: 0, width: 0, height: 0 };
+      const proxy = createDragProxy(trigger);
+      const alignProxy = () => alignDragProxy(proxy, trigger);
+      alignProxy();
+      trigger.addEventListener("pointerdown", alignProxy, true);
       let active = false;
       let disposed = false;
       let previousInline = 0;
@@ -111,7 +118,8 @@ export function createAnimeDragDriver(
           options.start?.();
           options.change(latest);
         },
-        onDrag(instance) {
+        onDrag() {},
+        onUpdate(instance) {
           if (!active || disposed) return;
           options.change(sample(instance));
         },
@@ -120,6 +128,7 @@ export function createAnimeDragDriver(
           latest = sample(instance);
           active = false;
           instance.stop();
+          resetDragPosition(instance, options.axis);
           options.release(latest);
         },
       });
@@ -129,11 +138,13 @@ export function createAnimeDragDriver(
           if (disposed || !active) return;
           active = false;
           draggable.stop();
+          resetDragPosition(draggable, options.axis);
           options.cancel?.();
         },
         refresh() {
           if (disposed) return;
           refreshBounds();
+          alignProxy();
           draggable.refresh();
         },
         dispose() {
@@ -144,6 +155,8 @@ export function createAnimeDragDriver(
             options.cancel?.();
           }
           draggable.revert();
+          trigger.removeEventListener("pointerdown", alignProxy, true);
+          proxy.remove();
         },
       };
     },
@@ -154,6 +167,34 @@ const animeDragDriver = createAnimeDragDriver();
 
 export function mountAnimeDrag(trigger: HTMLElement, options: DragOptions): () => void {
   return mountDrag(trigger, options, animeDragDriver);
+}
+
+function createDragProxy(trigger: HTMLElement): HTMLElement {
+  const document = trigger.ownerDocument;
+  if (!document?.body) {
+    throw new TypeError("Anime drag requires a trigger attached to a document.");
+  }
+  const proxy = document.createElement("span");
+  proxy.setAttribute("aria-hidden", "true");
+  proxy.setAttribute(
+    "style",
+    "position:fixed;inset:auto;opacity:0;pointer-events:none;contain:strict",
+  );
+  document.body.append(proxy);
+  return proxy;
+}
+
+function alignDragProxy(proxy: HTMLElement, trigger: HTMLElement): void {
+  const bounds = trigger.getBoundingClientRect();
+  proxy.style.left = `${finiteOr(bounds.left, 0)}px`;
+  proxy.style.top = `${finiteOr(bounds.top, 0)}px`;
+  proxy.style.width = `${Math.max(1, finiteOr(bounds.width, 1))}px`;
+  proxy.style.height = `${Math.max(1, finiteOr(bounds.height, 1))}px`;
+}
+
+function resetDragPosition(draggable: AnimeDraggable, axis: DragAxis): void {
+  if (axis !== "block") draggable.setX(0, true);
+  if (axis !== "inline") draggable.setY(0, true);
 }
 
 function emptyDragSample(): DragSample {

@@ -3,11 +3,62 @@ import { describe, expect, it } from "vitest";
 import { mountDrag, type DragDriver, type DragOptions, type DragSample } from "#ui/web/drag";
 import { createAnimeDragDriver, type AnimeDragFactory } from "#ui/web/drag.anime";
 import { createPress, createShortcut } from "#ui/web/interaction";
-import {
-  createVisualCoordinator,
-  type CompiledVisuals,
-  type VisualActionMode,
-} from "#ui/web/visual-runtime";
+
+function createDragTrigger() {
+  let appended: HTMLElement | undefined;
+  let removed = 0;
+  const attributes = new Map<string, string>();
+  const listeners = new Map<string, EventListener>();
+  const style: Record<string, string> = {};
+  let bounds = { left: 100, top: 250, width: 40, height: 20 };
+  const proxy = {
+    hidden: false,
+    style,
+    setAttribute(name: string, value: string) {
+      attributes.set(name, value);
+    },
+    getAttribute(name: string) {
+      return attributes.get(name) ?? null;
+    },
+    remove() {
+      removed++;
+    },
+  } as unknown as HTMLElement;
+  const trigger = {
+    addEventListener(type: string, listener: EventListenerOrEventListenerObject) {
+      listeners.set(type, listener as EventListener);
+    },
+    removeEventListener(type: string) {
+      listeners.delete(type);
+    },
+    getBoundingClientRect() {
+      return bounds;
+    },
+    ownerDocument: {
+      body: {
+        append(element: HTMLElement) {
+          appended = element;
+        },
+      },
+      createElement() {
+        return proxy;
+      },
+    },
+  } as unknown as HTMLElement;
+  return {
+    trigger,
+    proxy,
+    appended: () => appended,
+    removed: () => removed,
+    emit(type: string) {
+      listeners.get(type)?.({ type } as Event);
+    },
+    setBounds(next: typeof bounds) {
+      bounds = next;
+    },
+    style,
+  };
+}
 
 describe("web interaction toolkit", () => {
   it("activates mouse and pen on pointerdown while preserving touch and keyboard click", () => {
@@ -64,6 +115,50 @@ describe("web interaction toolkit", () => {
       preventDefault: () => prevented++,
     } as unknown as MouseEvent);
     expect(calls).toBe(4);
+  });
+
+  it("consumes the pointer click before a pointerdown render can retarget it", () => {
+    let capture: ((event: MouseEvent) => void) | undefined;
+    const ownerDocument = {
+      addEventListener(_type: string, listener: EventListenerOrEventListenerObject) {
+        capture = listener as (event: MouseEvent) => void;
+      },
+      removeEventListener() {
+        capture = undefined;
+      },
+    };
+    const target = {
+      disabled: false,
+      getAttribute: () => null,
+      ownerDocument,
+    };
+    let calls = 0;
+    const press = createPress(() => calls++);
+
+    press.onPointerDown({
+      button: 0,
+      pointerType: "mouse",
+      currentTarget: target,
+    } as unknown as PointerEvent);
+
+    let prevented = 0;
+    let stopped = 0;
+    capture?.({
+      detail: 1,
+      preventDefault: () => prevented++,
+      stopImmediatePropagation: () => stopped++,
+    } as unknown as MouseEvent);
+
+    expect(calls).toBe(1);
+    expect(prevented).toBe(1);
+    expect(stopped).toBe(1);
+
+    press.onClick({
+      detail: 0,
+      currentTarget: target,
+      preventDefault() {},
+    } as unknown as MouseEvent);
+    expect(calls).toBe(2);
   });
 
   it("maps the logical mod shortcut to Meta and Control", () => {
@@ -188,12 +283,15 @@ describe("web interaction toolkit", () => {
         return this;
       },
     };
-    const driver = createAnimeDragDriver((_, next) => {
+    let target: HTMLElement | undefined;
+    const driver = createAnimeDragDriver((nextTarget, next) => {
+      target = nextTarget;
       parameters = next;
       return instance as never;
     });
+    const drag = createDragTrigger();
     const releases: DragSample[] = [];
-    const mounted = driver.mount({} as HTMLElement, {
+    const mounted = driver.mount(drag.trigger, {
       axis: "block",
       bounds: () => ({ block: [0, 100] }),
       change() {},
@@ -202,15 +300,118 @@ describe("web interaction toolkit", () => {
 
     parameters?.onGrab?.(instance as never);
     parameters?.onDrag?.(instance as never);
+    parameters?.onUpdate?.(instance as never);
     parameters?.onRelease?.(instance as never);
     mounted.dispose();
 
     expect(setX).toBe(0);
-    expect(setY).toBe(1);
+    expect(setY).toBe(2);
     expect(releases).toHaveLength(1);
     expect(releases[0]).toMatchObject({ offset: 40, velocity: 0.72, progress: 0.4 });
     expect(stopped).toBe(1);
     expect(reverted).toBe(1);
+    expect(target).toBe(drag.proxy);
+    expect(drag.appended()).toBe(drag.proxy);
+    expect(drag.proxy.hidden).toBe(false);
+    expect(drag.proxy.getAttribute("aria-hidden")).toBe("true");
+    expect(drag.proxy.getAttribute("style")).toContain("position:fixed");
+    expect(drag.style).toMatchObject({
+      left: "100px",
+      top: "250px",
+      width: "40px",
+      height: "20px",
+    });
+    expect(drag.removed()).toBe(1);
+  });
+
+  it("samples Anime coordinates on its render update instead of its pre-render drag event", () => {
+    let parameters: NonNullable<Parameters<AnimeDragFactory>[1]> | undefined;
+    const changes: number[] = [];
+    const instance = {
+      x: 0,
+      y: 0,
+      angle: Math.PI / 2,
+      velocity: 0,
+      setX() {
+        return this;
+      },
+      setY() {
+        return this;
+      },
+      stop() {
+        return this;
+      },
+      refresh() {},
+      revert() {
+        return this;
+      },
+    };
+    const driver = createAnimeDragDriver((_, next) => {
+      parameters = next;
+      return instance as never;
+    });
+    const mounted = driver.mount(createDragTrigger().trigger, {
+      axis: "block",
+      bounds: () => ({ block: [0, 100] }),
+      change: (sample) => changes.push(sample.block),
+      release() {},
+    });
+
+    parameters?.onGrab(instance as never);
+    instance.y = 40;
+    parameters?.onDrag(instance as never);
+    expect(changes).toEqual([0]);
+    parameters?.onUpdate(instance as never);
+    expect(changes).toEqual([0, 40]);
+
+    mounted.dispose();
+  });
+
+  it("realigns the Anime proxy to a moved trigger before every drag", () => {
+    let parameters: NonNullable<Parameters<AnimeDragFactory>[1]> | undefined;
+    const instance = {
+      x: 0,
+      y: 0,
+      angle: 0,
+      velocity: 0,
+      setX() {
+        return this;
+      },
+      setY() {
+        return this;
+      },
+      stop() {
+        return this;
+      },
+      refresh() {},
+      revert() {
+        return this;
+      },
+    };
+    const drag = createDragTrigger();
+    const driver = createAnimeDragDriver((_, next) => {
+      parameters = next;
+      return instance as never;
+    });
+    const mounted = driver.mount(drag.trigger, {
+      axis: "block",
+      bounds: () => ({ block: [0, 500] }),
+      change() {},
+      release() {},
+    });
+
+    drag.setBounds({ left: 16, top: 454, width: 358, height: 24 });
+    drag.emit("pointerdown");
+    parameters?.onGrab(instance as never);
+
+    expect(drag.style).toMatchObject({
+      left: "16px",
+      top: "454px",
+      width: "358px",
+      height: "24px",
+    });
+
+    mounted.dispose();
   });
 
   it("measures Anime drag bounds once per gesture instead of once per sample", () => {
@@ -245,7 +446,7 @@ describe("web interaction toolkit", () => {
       parameters = next;
       return instance as never;
     });
-    const mounted = driver.mount({} as HTMLElement, {
+    const mounted = driver.mount(createDragTrigger().trigger, {
       axis: "block",
       bounds() {
         boundsReads++;
@@ -257,107 +458,14 @@ describe("web interaction toolkit", () => {
 
     expect(boundsReads).toBe(1);
     parameters?.onGrab(instance as never);
-    parameters?.onDrag(instance as never);
-    parameters?.onDrag(instance as never);
+    parameters?.onUpdate(instance as never);
+    parameters?.onUpdate(instance as never);
     expect(boundsReads).toBe(2);
     expect(updates).toBe(0);
 
     mounted.refresh();
     expect(boundsReads).toBe(3);
     mounted.dispose();
-  });
-
-  it("routes continuous drag updates without opening layout transactions", () => {
-    const original = globalThis.HTMLElement;
-    let geometryReads = 0;
-    class FakeElement {
-      readonly isConnected = true;
-      readonly ownerDocument = { defaultView: {} };
-      getBoundingClientRect() {
-        geometryReads++;
-        return { width: 390, height: 844 };
-      }
-      getAttribute() {
-        return null;
-      }
-    }
-    Object.defineProperty(globalThis, "HTMLElement", {
-      configurable: true,
-      value: FakeElement,
-    });
-    const root = new FakeElement() as unknown as HTMLElement;
-    const handle = new FakeElement() as unknown as HTMLElement;
-    let drag: DragOptions | undefined;
-    const calls: { readonly name: string; readonly mode: VisualActionMode }[] = [];
-    const compiled = {
-      demo: {
-        themes: { default: null },
-        motion: {},
-        themeMotion: {},
-        metrics: {},
-        themeMetrics: {},
-        components: { Drawer: {} },
-        parameters: {},
-        interactions: {
-          Drawer: [
-            {
-              type: "drag",
-              trigger: { $visual: "part", name: "Handle" },
-              axis: "block",
-              bounds: { block: [0, 100] },
-              start: { $visual: "event", name: "begin" },
-              change: { $visual: "event", name: "move" },
-              release: { $visual: "event", name: "finish" },
-              cancel: { $visual: "event", name: "cancel" },
-            },
-          ],
-        },
-        completions: {},
-      },
-    } as unknown as CompiledVisuals;
-    try {
-      const coordinator = createVisualCoordinator({
-        compiled,
-        component: "Drawer",
-        refs: { Root: root, Handle: handle },
-        mountDrag(_trigger, options) {
-          drag = options;
-          return () => {};
-        },
-        invokeAction(name, _args, mode) {
-          calls.push({ name, mode });
-        },
-      });
-      coordinator.update({
-        presentation: "demo",
-        theme: "default",
-        states: {},
-        process: {},
-        values: {},
-      });
-      expect(geometryReads).toBe(1);
-      expect(drag?.bounds()).toEqual({ block: [0, 100] });
-      expect(geometryReads).toBe(2);
-
-      drag?.start?.();
-      drag?.change(emptySample);
-      drag?.release(emptySample);
-      drag?.cancel?.();
-
-      expect(calls).toEqual([
-        { name: "begin", mode: "continuous" },
-        { name: "move", mode: "continuous" },
-        { name: "finish", mode: "continuous" },
-        { name: "cancel", mode: "continuous" },
-      ]);
-      coordinator.dispose();
-    } finally {
-      if (original) {
-        Object.defineProperty(globalThis, "HTMLElement", { configurable: true, value: original });
-      } else {
-        Reflect.deleteProperty(globalThis, "HTMLElement");
-      }
-    }
   });
 
   it("emits one terminal outcome per Anime drag lifetime and ignores stale callbacks", () => {
@@ -392,7 +500,7 @@ describe("web interaction toolkit", () => {
       parameters = next;
       return instance as never;
     });
-    const mounted = driver.mount({} as HTMLElement, {
+    const mounted = driver.mount(createDragTrigger().trigger, {
       axis: "block",
       bounds: () => ({ block: [0, 100] }),
       start: () => outcomes.push("start"),
@@ -414,17 +522,3 @@ describe("web interaction toolkit", () => {
     expect(reverted).toBe(1);
   });
 });
-
-const emptySample: DragSample = {
-  offset: 0,
-  velocity: 0,
-  progress: 0,
-  inline: 0,
-  block: 0,
-  deltaInline: 0,
-  deltaBlock: 0,
-  velocityInline: 0,
-  velocityBlock: 0,
-  progressInline: 0,
-  progressBlock: 0,
-};

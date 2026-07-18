@@ -26,7 +26,17 @@ import {
   unmountSceneElement,
   type SceneElementRegistration,
 } from "#ui/web/scene";
-import { prefersReducedMotion, type VirtualCollectionGeometry } from "#ui/web/visual-runtime";
+
+export type VirtualCollectionGeometry = {
+  readonly axis: "block" | "inline";
+  readonly estimate: number;
+  readonly gap: number;
+  readonly lanes: number;
+};
+
+function prefersReducedMotion(): boolean {
+  return typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
 
 export type Signal<T> = {
   (): T;
@@ -106,15 +116,31 @@ export function allocateSceneOwner(name: string): string {
 
 const virtualCollectionHosts = new WeakMap<
   HTMLElement,
-  () => VirtualCollectionGeometry | undefined
+  Signal<VirtualCollectionGeometry | undefined>
 >();
 const virtualCollectionOpenHandlers = new WeakMap<HTMLElement, () => void>();
 
 export function bindVirtualCollectionHost(
   element: HTMLElement,
-  read: () => VirtualCollectionGeometry | undefined,
+  geometry: VirtualCollectionGeometry,
 ): void {
-  virtualCollectionHosts.set(element, read);
+  const current =
+    virtualCollectionHosts.get(element) ??
+    runtimeSignal<VirtualCollectionGeometry | undefined>(undefined);
+  virtualCollectionHosts.set(element, current);
+  const previous = current();
+  if (previous && sameVirtualGeometry(previous, geometry)) return;
+  current(geometry);
+}
+
+export function unbindVirtualCollectionHost(element: HTMLElement): void {
+  virtualCollectionHosts.get(element)?.(undefined);
+}
+
+export function inspectVirtualCollectionHost(
+  element: HTMLElement,
+): VirtualCollectionGeometry | undefined {
+  return virtualCollectionHosts.get(element)?.();
 }
 
 export function runtimeSignal<T>(initialValue: T): Signal<T> {
@@ -642,19 +668,24 @@ type VirtualKeyedScopedNodes<Item> = KeyedScopedNodes<Item> & {
 function virtualFor<Items extends readonly unknown[]>(props: VirtualForProps<Items>): Child {
   const host = currentChildHost;
   if (!host) {
-    throw new Error("A virtual For must be the direct child of a rendered component part.");
+    throw new Error("A virtual For must be the direct child of a rendered Component Element.");
   }
-  const readGeometry = virtualCollectionHosts.get(host);
-  if (!readGeometry) {
-    throw new Error("The presentation must define collection geometry for a virtual For host.");
-  }
+  const readGeometry =
+    virtualCollectionHosts.get(host) ??
+    runtimeSignal<VirtualCollectionGeometry | undefined>(undefined);
+  virtualCollectionHosts.set(host, readGeometry);
 
   const space = document.createElement("div");
   space.style.position = "relative";
   space.style.flexShrink = "0";
   space.style.minInlineSize = "100%";
   let items = readSource(props.each);
-  let geometry = requiredVirtualGeometry(readGeometry());
+  let geometry: VirtualCollectionGeometry = {
+    axis: "block",
+    estimate: 1,
+    gap: 0,
+    lanes: 1,
+  };
   let keyed = new Map<ForKey, VirtualKeyedScopedNodes<Items[number]>>();
   const exiting = new Map<
     ForKey,
@@ -854,7 +885,13 @@ function virtualFor<Items extends readonly unknown[]>(props: VirtualForProps<Ite
   blockEffect(() => {
     const currentRevision = revision();
     const currentSourceVersion = sourceRevision();
-    const nextGeometry = requiredVirtualGeometry(readGeometry());
+    const nextGeometry = readGeometry();
+    if (!nextGeometry) {
+      clear();
+      space.style.removeProperty("block-size");
+      space.style.removeProperty("inline-size");
+      return;
+    }
     const geometryChanged = !sameVirtualGeometry(renderedGeometry, nextGeometry);
     geometry = nextGeometry;
 
@@ -985,12 +1022,18 @@ function virtualFor<Items extends readonly unknown[]>(props: VirtualForProps<Ite
 
   onMount(() => {
     mounted = true;
+    const geometryCheck = requestAnimationFrame(() => {
+      if (!disposed && items.length && !readGeometry()) {
+        throw new Error("The active presentation does not define virtual collection geometry.");
+      }
+    });
     const unmount = virtualizer._didMount();
     virtualCollectionOpenHandlers.set(host, handleCollectionOpen);
     virtualizer._willUpdate();
     schedule();
     return () => {
       mounted = false;
+      cancelAnimationFrame(geometryCheck);
       virtualCollectionOpenHandlers.delete(host);
       unmount();
     };
@@ -1004,14 +1047,6 @@ function virtualFor<Items extends readonly unknown[]>(props: VirtualForProps<Ite
   });
 
   return space;
-}
-
-function requiredVirtualGeometry(
-  geometry: VirtualCollectionGeometry | undefined,
-): VirtualCollectionGeometry {
-  if (!geometry)
-    throw new Error("The active presentation does not define virtual collection geometry.");
-  return geometry;
 }
 
 function sameVirtualGeometry(
@@ -1651,6 +1686,7 @@ export function mountDialog(
   let programmaticCloses = 0;
   let browserMode: false | "modal" | "nonmodal" = false;
   let releaseScrollLock: (() => void) | undefined;
+  let cancelPendingExit: (() => void) | undefined;
   const restoring = isHotRefresh();
 
   const suppressProgrammaticClose = (event: Event) => {
@@ -1670,8 +1706,23 @@ export function mountDialog(
     releaseScrollLock?.();
     releaseScrollLock = undefined;
   };
+  const cancelExit = () => {
+    cancelPendingExit?.();
+    cancelPendingExit = undefined;
+  };
   const show = (mode: "modal" | "nonmodal") => {
-    if (currentMode === mode && element.open) return;
+    cancelExit();
+    if (currentMode === mode && element.open) {
+      element.hidden = false;
+      setSceneElementVisible(element, true);
+      element.removeAttribute("aria-hidden");
+      element.removeAttribute("inert");
+      element.setAttribute("data-motion-state", "entered");
+      if (mode === "modal" && !element.contains(document.activeElement)) {
+        focusDialogDefault(element);
+      }
+      return;
+    }
     const entering = currentMode === false;
 
     if (element.open && browserMode === "modal") {
@@ -1738,9 +1789,12 @@ export function mountDialog(
         if (!element.contains(document.activeElement)) focusDialogDefault(element);
         element.setAttribute("data-motion-state", "entered");
       });
+    } else {
+      element.setAttribute("data-motion-state", "entered");
     }
   };
   const close = () => {
+    cancelExit();
     resetOpenMode();
     currentMode = false;
     element.removeAttribute("aria-hidden");
@@ -1750,8 +1804,40 @@ export function mountDialog(
     setSceneElementVisible(element, false);
     element.hidden = true;
   };
+  const beginClose = (currentRevision: number) => {
+    const lifecycle = element.getAttribute("data-motion-lifecycle") ?? "";
+    if (
+      prefersReducedMotion() ||
+      !lifecycle.includes("exit") ||
+      !lifecycle.includes("exit-finished") ||
+      element.hidden
+    ) {
+      close();
+      return;
+    }
+
+    cancelExit();
+    if (element.open && browserMode === "modal") show("nonmodal");
+    element.setAttribute("data-motion-state", "exiting");
+    element.setAttribute("aria-hidden", "true");
+    element.setAttribute("inert", "");
+    const finish = () => {
+      if (targetMode || currentRevision !== revision) return;
+      close();
+    };
+    const onMotionFinish = (event: Event) => {
+      if (event.target === element) finish();
+    };
+    element.addEventListener("poggersmotionfinish", onMotionFinish);
+    const timeout = setTimeout(finish, 2_000);
+    cancelPendingExit = () => {
+      element.removeEventListener("poggersmotionfinish", onMotionFinish);
+      clearTimeout(timeout);
+    };
+  };
 
   registerCleanup(() => {
+    cancelExit();
     resetOpenMode();
     currentMode = false;
   });
@@ -1784,7 +1870,7 @@ export function mountDialog(
       initialized = true;
       return;
     }
-    if (!targetMode && currentRevision === revision) close();
+    if (!targetMode && currentRevision === revision) beginClose(currentRevision);
   }, value);
 }
 

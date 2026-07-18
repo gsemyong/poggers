@@ -197,7 +197,10 @@ function extractProgram(
   const runtime = propertyType(checker, contract, "Runtime", value);
   if (!runtime) throw diagnostic(value, `Program ${JSON.stringify(name)} has no Runtime.`);
   const runtimeName = literalProperty(checker, runtime, "Name", value);
-  const platform = optionalLiteralProperty(checker, runtime, "Platform", value);
+  const platformContract = propertyType(checker, runtime, "Platform", value);
+  const platform = platformContract
+    ? literalProperty(checker, platformContract, "Name", value)
+    : undefined;
   const state = propertyType(checker, contract, "State", value);
   const actions = propertyType(checker, contract, "Actions", value);
   const components = propertyType(checker, contract, "Components", value);
@@ -251,26 +254,35 @@ function componentList(
   return sortedSymbols(type?.getProperties() ?? []).map((symbol) => {
     const location = symbol.valueDeclaration ?? at;
     const component = checker.getTypeOfSymbolAtLocation(symbol, location);
+    const props = propertyType(checker, component, "Props", location);
     const state = propertyType(checker, component, "State", location);
     const actions = propertyType(checker, component, "Actions", location);
-    const parameters = propertyType(checker, component, "Parameters", location);
-    const parts = propertyType(checker, component, "Parts", location);
+    const elements = propertyType(checker, component, "Elements", location);
     const implementation = values
       ? objectExpression(checker, resolveObjectMember(checker, values, symbol.getName()))
       : undefined;
     const stateMetadata = componentState(checker, state, location);
     return {
       name: symbol.getName(),
+      propCallbacks: sortedSymbols(props?.getProperties() ?? [])
+        .filter(
+          (field) =>
+            checker
+              .getNonNullableType(
+                checker.getTypeOfSymbolAtLocation(field, field.valueDeclaration ?? location),
+              )
+              .getCallSignatures().length,
+        )
+        .map((field) => field.getName()),
       state: stateMetadata.type,
       actions: sortedSymbols(actions?.getProperties() ?? []).map((action) => action.getName()),
-      parameters: parameters ? lowerType(checker, parameters, location) : emptyRecord(),
       visualValues: stateMetadata.visualValues,
-      parts: sortedSymbols(parts?.getProperties() ?? []).map((part) => ({
-        name: part.getName(),
+      elements: sortedSymbols(elements?.getProperties() ?? []).map((element) => ({
+        name: element.getName(),
         element: literalType(
-          checker.getTypeOfSymbolAtLocation(part, part.valueDeclaration ?? location),
-          part.valueDeclaration ?? location,
-          `Component part ${JSON.stringify(part.getName())}`,
+          checker.getTypeOfSymbolAtLocation(element, element.valueDeclaration ?? location),
+          element.valueDeclaration ?? location,
+          `Component Element ${JSON.stringify(element.getName())}`,
         ),
       })),
       implementation: {
@@ -637,6 +649,9 @@ function applicationContractNode(expression: ts.Expression): ts.TypeNode | undef
 function presentationNames(checker: ts.TypeChecker, contract: ts.Type, at: ts.Node): string[] {
   const presentations = propertyType(checker, contract, "Presentations", at);
   if (!presentations) return [];
+  if (presentations.flags & ts.TypeFlags.StringLiteral) {
+    return [(presentations as ts.StringLiteralType).value];
+  }
   if (presentations.isUnion()) {
     return presentations.types
       .filter((type): type is ts.StringLiteralType =>
@@ -671,23 +686,6 @@ function literalProperty(
     return (type as ts.StringLiteralType).value;
   }
   throw diagnostic(at, `${name} must be a string literal.`);
-}
-
-function optionalLiteralProperty(
-  checker: ts.TypeChecker,
-  owner: ts.Type,
-  name: string,
-  at: ts.Node,
-): string | undefined {
-  const type = propertyType(checker, owner, name, at);
-  if (!type) return undefined;
-  if (type.flags & ts.TypeFlags.StringLiteral) return (type as ts.StringLiteralType).value;
-  if (type.isUnion()) {
-    return type.types.find((item): item is ts.StringLiteralType =>
-      Boolean(item.flags & ts.TypeFlags.StringLiteral),
-    )?.value;
-  }
-  return undefined;
 }
 
 function primitive(name: "boolean" | "number" | "string" | "void"): TypeIR {

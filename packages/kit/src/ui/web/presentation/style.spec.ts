@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { WebPresentationDeclaration } from "../visual";
+import type { WebPresentationDeclaration } from "./language";
 import { translateWebPresentationStyle } from "./style";
 
 type TestTheme = {

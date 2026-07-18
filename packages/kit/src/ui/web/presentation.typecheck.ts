@@ -1,6 +1,10 @@
 import type { Program, WebMain } from "../../application";
 import type { VisualValue } from "../component.contract";
-import type { WebPresentation, WebPresentationDeclaration, WebPresentationTheme } from "./visual";
+import type {
+  WebPresentation,
+  WebPresentationDeclaration,
+  WebPresentationTokens,
+} from "./presentation/language";
 
 type Fixture = {
   Programs: {
@@ -18,7 +22,7 @@ type Fixture = {
               progress: VisualValue<"progress">;
             };
             Actions: { close(): void };
-            Parts: {
+            Elements: {
               Root: "main";
               Panel: "dialog";
               Backdrop: "div";
@@ -50,7 +54,7 @@ const theme = {
     close: { kind: "symbol", source: "close" },
     material: { kind: "shader", source: "frosted-panel" },
   },
-} as const satisfies WebPresentationTheme;
+} as const satisfies WebPresentationTokens;
 
 export const webPressurePresentation = ((tokens) => {
   const createControl = (pressed: boolean): WebPresentationDeclaration<typeof tokens> => ({
@@ -63,75 +67,72 @@ export const webPressurePresentation = ((tokens) => {
   });
 
   return {
-    components: {
-      Drawer: ({ state, platform, parts }) => {
-        const compact = platform.allocated.inlineSize < tokens.size.compact.value;
-        const closedOffset = Math.max(platform.allocated.blockSize, tokens.size.panel.value);
-        const panelOffset = state.dragging ? state.dragOffset : state.open ? 0 : closedOffset;
+    Drawer: ({ state, targets }) => {
+      const closedOffset = tokens.size.panel.value;
+      const panelOffset = state.dragging ? state.dragOffset : state.open ? 0 : closedOffset;
 
-        return {
-          Root: {
-            layout: { size: { inline: "fill", block: "fill" } },
-          },
-          Panel: {
-            layout: {
-              size: { inline: compact ? "fill" : tokens.size.panel },
-              position: {
-                kind: "fixed",
-                place: compact ? "block-end" : "center",
-                anchor: parts.Root,
-              },
-            },
-            shape: { radius: tokens.radius.panel },
-            paint: { fill: tokens.color.panel },
-            motion: {
-              identity: "drawer-panel",
-              translation: {
-                block: state.dragging
-                  ? panelOffset
-                  : {
-                      target: compact ? panelOffset : 0,
-                      transition: tokens.motion.sheet,
-                      velocity: state.dragVelocity,
-                    },
-              },
-              scale: {
-                target: compact ? 1 : state.open ? 1 : 0.97,
-                transition: tokens.motion.sheet,
-              },
-              presence: {
-                visible: state.open || state.dragging,
-                enter: { from: { opacity: 0, scale: 0.97 } },
-                exit: { to: { opacity: 0, block: closedOffset } },
-                transition: tokens.motion.sheet,
-                layout: "pop",
-              },
-              reduceMotion: "crossfade",
-            },
-            layers: [
-              {
-                id: "material",
-                placement: "background",
-                resource: tokens.resources.material,
-                uniforms: { intensity: state.progress },
-              },
-            ],
-          },
-          Backdrop: {
-            paint: { fill: tokens.color.overlay, opacity: state.open ? 1 : 0 },
-            motion: {
-              opacity: { target: state.open ? 1 : 0, transition: tokens.motion.fade },
-              presence: {
-                visible: state.open || state.dragging,
-                exit: { to: { opacity: 0 } },
-                transition: tokens.motion.fade,
-              },
+      return {
+        Root: {
+          layout: { size: { inline: "fill", block: "fill" } },
+        },
+        Panel: {
+          layout: {
+            size: { inline: tokens.size.panel },
+            position: {
+              kind: "fixed",
+              place: "center",
+              anchor: targets.Root,
             },
           },
-          Handle: createControl(state.pressed),
-          Icon: { resource: tokens.resources.close },
-        };
-      },
+          shape: { radius: tokens.radius.panel },
+          paint: { fill: tokens.color.panel },
+          motion: {
+            identity: "drawer-panel",
+            translation: {
+              block: state.dragging
+                ? panelOffset
+                : {
+                    target: panelOffset,
+                    transition: tokens.motion.sheet,
+                    velocity: state.dragVelocity,
+                  },
+            },
+            scale: {
+              target: state.open ? 1 : 0.97,
+              transition: tokens.motion.sheet,
+            },
+            presence: {
+              visible: state.open || state.dragging,
+              enter: { from: { opacity: 0, scale: 0.97 } },
+              exit: { to: { opacity: 0, block: closedOffset } },
+              transition: tokens.motion.sheet,
+              layout: "pop",
+            },
+            reduceMotion: "crossfade",
+          },
+          layers: [
+            {
+              id: "material",
+              placement: "background",
+              resource: tokens.resources.material,
+              uniforms: { intensity: state.progress },
+            },
+          ],
+        },
+        Backdrop: {
+          paint: { fill: tokens.color.overlay, opacity: state.open ? 1 : 0 },
+          motion: {
+            opacity: { target: state.open ? 1 : 0, transition: tokens.motion.fade },
+            presence: {
+              visible: state.open || state.dragging,
+              exit: { to: { opacity: 0 } },
+              transition: tokens.motion.fade,
+            },
+          },
+        },
+        Handle: createControl(state.pressed),
+        Icon: { resource: tokens.resources.close },
+      };
     },
   };
 }) satisfies WebPresentation<Fixture, typeof theme>;

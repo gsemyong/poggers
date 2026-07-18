@@ -64,12 +64,15 @@ describe("Poggers compiler frontend", () => {
     expect(reordered.programs.map(({ id }) => id)).toEqual(original.programs.map(({ id }) => id));
   });
 
-  test("extracts deterministic Component state, actions, visual units, Parts, and lifecycle", async () => {
+  test("extracts deterministic Component state, actions, visual units, Elements, and lifecycle", async () => {
     const ir = compileProduct(await fixture(componentProductSource()));
     const component = ir.programs[0]?.ui?.components[0];
 
+    expect(ir.programs[0]?.runtime).toEqual({ name: "web-main", platform: "web" });
+
     expect(component).toEqual({
       name: "Drawer",
+      propCallbacks: ["onDismiss"],
       state: record({
         dragOffset: numberType(),
         phase: {
@@ -81,9 +84,8 @@ describe("Poggers compiler frontend", () => {
         },
       }),
       actions: ["close", "open"],
-      parameters: record({ dismissDistance: numberType() }),
       visualValues: [{ name: "dragOffset", kind: "length" }],
-      parts: [
+      elements: [
         { name: "Root", element: "main" },
         { name: "Surface", element: "section" },
       ],
@@ -273,7 +275,8 @@ function command(executable: string, arguments_: readonly string[], cwd: string)
 
 function productSource(): string {
   return `
-type Runtime = { readonly Name: string; readonly Platform?: string };
+type Platform = { readonly Name: string };
+type Runtime = { readonly Name: string; readonly Platform?: Platform };
 type Program<R extends Runtime, C extends object = {}> = Readonly<C & { Runtime: R }>;
 type Feature<C> = unknown;
 type Application<C> = unknown;
@@ -330,7 +333,8 @@ export default {
 
 function componentProductSource(): string {
   return `
-type Runtime = { readonly Name: string; readonly Platform?: string };
+type Platform = { readonly Name: string };
+type Runtime = { readonly Name: string; readonly Platform?: Platform };
 type Program<R extends Runtime, C extends object = {}> = Readonly<C & { Runtime: R }>;
 type Feature<C> = unknown;
 type Application<C> = unknown;
@@ -339,17 +343,17 @@ type VisualValue<Kind extends string> = { readonly "poggers.visualValue": Kind }
 type Shell = {
   Programs: {
     browser: Program<
-      { Name: "web-main"; Platform: "web" },
+      { Name: "web-main"; Platform: { Name: "web" } },
       {
         Components: {
           Drawer: {
+            Props: { onDismiss?(): void; label: string };
             State: {
               phase: "closed" | "open";
               dragOffset: VisualValue<"length">;
             };
             Actions: { open(): void; close(): void };
-            Parameters: { dismissDistance: number };
-            Parts: { Root: "main"; Surface: "section" };
+            Elements: { Root: "main"; Surface: "section" };
           };
         };
       }

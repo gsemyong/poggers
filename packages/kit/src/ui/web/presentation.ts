@@ -1,17 +1,21 @@
 export { createWebPresentationAdapter } from "./presentation/adapter";
 export type { WebPresentationAdapterOptions } from "./presentation/adapter";
+export type { WebPlatform } from "./platform";
 export type {
   WebImageResource,
   WebMotionDeclaration,
   WebMotionTarget,
   WebMotionValue,
   WebPresentation,
-  WebPresentationContext,
+  WebPresentationCondition,
+  WebPresentationConditionDeclaration,
+  WebPresentationConditionRule,
   WebPresentationDeclaration,
   WebPresentationLanguage,
   WebPresentationResource,
-  WebPresentationTheme,
+  WebPresentationTokens,
   WebRenderLayer,
   WebShaderResource,
   WebSymbolResource,
-} from "./visual";
+  WebTargetCondition,
+} from "./presentation/language";

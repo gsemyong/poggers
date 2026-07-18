@@ -91,11 +91,11 @@ export type CapabilityIR = Readonly<{
 
 export type ComponentIR = Readonly<{
   name: string;
+  propCallbacks: readonly string[];
   state: TypeIR;
   actions: readonly string[];
-  parameters: TypeIR;
   visualValues: readonly Readonly<{ name: string; kind: string }>[];
-  parts: readonly Readonly<{ name: string; element: string }>[];
+  elements: readonly Readonly<{ name: string; element: string }>[];
   implementation: Readonly<{
     state: boolean;
     actions: boolean;

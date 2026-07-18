@@ -1,4 +1,7 @@
 import type { ComponentContract, ComponentDefinitions, RootComponentName } from "./ui/component";
+import type { PlatformContract, PlatformDefinition, PlatformPrimitiveName } from "./ui/platform";
+import type { PresentationRegistrationContract } from "./ui/presentation";
+import type { WebPlatform } from "./ui/web/platform";
 
 type Empty = Record<never, never>;
 type ActionRecord = Record<string, (...args: never[]) => unknown>;
@@ -9,11 +12,11 @@ type ProgramResourceResult = void | ProgramResource | PromiseLike<void | Program
 /** A semantic execution environment implemented by a target backend. */
 export type RuntimeContract = {
   readonly Name: string;
-  readonly Platform?: string;
+  readonly Platform?: PlatformContract;
 };
 
 export type Server = { readonly Name: "server" };
-export type WebMain = { readonly Name: "web-main"; readonly Platform: "web" };
+export type WebMain = { readonly Name: "web-main"; readonly Platform: WebPlatform };
 export type WebServiceWorker = { readonly Name: "web-service-worker" };
 
 export type ProgramContract = {
@@ -27,14 +30,36 @@ export type ProgramContract = {
 
 type HasUI<Contract> = [Extract<keyof Contract, UIKey>] extends [never] ? false : true;
 
+type ComponentPrimitiveNames<Contract> = [keyof ComponentsOf<Contract>] extends [never]
+  ? never
+  : ComponentsOf<Contract>[keyof ComponentsOf<Contract>] extends {
+        Elements: infer Elements extends Record<string, string>;
+      }
+    ? Elements[keyof Elements]
+    : never;
+
+type SupportsComponents<Runtime extends RuntimeContract, Contract> = Runtime extends {
+  Platform: infer Platform extends PlatformContract;
+}
+  ? Platform extends PlatformDefinition<Platform>
+    ? [ComponentPrimitiveNames<Contract>] extends [never]
+      ? true
+      : Exclude<ComponentPrimitiveNames<Contract>, PlatformPrimitiveName<Platform>> extends never
+        ? true
+        : false
+    : false
+  : false;
+
 /** Declares one product participant and the Runtime in which it executes. */
 export type Program<
   Runtime extends RuntimeContract,
   Contract extends Omit<ProgramContract, "Runtime"> = Empty,
 > =
   HasUI<Contract> extends true
-    ? Runtime extends { Platform: string }
-      ? Readonly<Contract & { Runtime: Runtime }>
+    ? Runtime extends { Platform: PlatformContract }
+      ? SupportsComponents<Runtime, Contract> extends true
+        ? Readonly<Contract & { Runtime: Runtime }>
+        : never
       : never
     : Readonly<Contract & { Runtime: Runtime }>;
 
@@ -67,6 +92,14 @@ type ProgramsOf<Contract> = Contract extends {
 }
   ? Value
   : Empty;
+type RuntimeOf<
+  Owner extends FeatureContract,
+  Name extends PropertyKey,
+> = Name extends keyof ProgramsOf<Owner>
+  ? ProgramsOf<Owner>[Name] extends { Runtime: infer Runtime extends RuntimeContract }
+    ? Runtime
+    : never
+  : never;
 type FeaturesOf<Contract> = Contract extends {
   Features: infer Value extends Record<string, FeatureContract>;
 }
@@ -112,10 +145,13 @@ export type UIActions<Owner extends FeatureContract> = ActionSurface<UIOf<Owner>
 
 /** Projects one named Program through a Feature tree for Components and Presentations. */
 export type ProgramOwner<Owner extends FeatureContract, Name extends PropertyKey> = Readonly<
-  DefinitionField<
-    "Requires",
-    Name extends keyof ProgramsOf<Owner> ? RequiresOf<ProgramsOf<Owner>[Name]> : Empty
-  > &
+  (Name extends keyof ProgramsOf<Owner>
+    ? { readonly Runtime: RuntimeOf<Owner, Name> }
+    : { readonly Runtime?: never }) &
+    DefinitionField<
+      "Requires",
+      Name extends keyof ProgramsOf<Owner> ? RequiresOf<ProgramsOf<Owner>[Name]> : Empty
+    > &
     DefinitionField<
       "Provides",
       Name extends keyof ProgramsOf<Owner> ? ProvidesOf<ProgramsOf<Owner>[Name]> : Empty
@@ -272,7 +308,11 @@ export type ApplicationPwa = Readonly<{
 type ApplicationPresentations<Contract extends ApplicationContract> = Contract extends {
   Presentations: unknown;
 }
-  ? { readonly presentations: Readonly<Record<PresentationName<Contract>, unknown>> }
+  ? {
+      readonly presentations: Readonly<
+        Record<PresentationName<Contract>, PresentationRegistrationContract>
+      >;
+    }
   : { readonly presentations?: never };
 
 type ProgramNamesIn<

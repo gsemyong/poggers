@@ -1,10 +1,11 @@
-import type { WebPresentationDeclaration, WebPresentationTheme } from "../visual";
+import { webFontFamily } from "./font";
+import type { FontAsset, WebPresentationDeclaration, WebPresentationTokens } from "./language";
 
 type UnknownRecord = Record<string, unknown>;
 export type WebStyleMap = Readonly<Record<string, string>>;
 
 /** Deterministically translates web presentation meaning into logical CSS properties. */
-export function translateWebPresentationStyle<Theme extends WebPresentationTheme>(
+export function translateWebPresentationStyle<Theme extends WebPresentationTokens>(
   declaration: Pick<WebPresentationDeclaration<Theme>, "layout" | "shape" | "paint" | "typography">,
 ): WebStyleMap {
   const styles: Record<string, string> = {};
@@ -211,10 +212,13 @@ function translatePaint(styles: Record<string, string>, paint: UnknownRecord): v
 
 function translateTypography(styles: Record<string, string>, typography: UnknownRecord): void {
   const font = record(typography.font);
-  const fallback = Array.isArray(font.fallback)
-    ? font.fallback.map((name) => fontFallback(String(name))).join(", ")
-    : undefined;
-  assign(styles, "fontFamily", fallback);
+  const families = [
+    webFontFamily(font as FontAsset),
+    ...(Array.isArray(font.fallback)
+      ? font.fallback.map((name) => fontFallback(String(name)))
+      : []),
+  ].filter((family): family is string => Boolean(family));
+  assign(styles, "fontFamily", families.map(cssFamily).join(", ") || undefined);
   assign(styles, "fontSize", length(typography.size));
   if (typeof typography.weight === "number") styles.fontWeight = String(typography.weight);
   if (typeof typography.line === "number") styles.lineHeight = String(typography.line);
@@ -467,6 +471,14 @@ function overflow(value: unknown): string | undefined {
 
 function fontFallback(value: string): string {
   return value === "ui-rounded" ? "ui-rounded" : value;
+}
+
+function cssFamily(value: string): string {
+  return /^(?:system-ui|ui-serif|ui-sans-serif|ui-monospace|ui-rounded|serif|sans-serif|monospace)$/u.test(
+    value,
+  )
+    ? value
+    : JSON.stringify(value);
 }
 
 function assign(target: Record<string, string>, property: string, value: string | undefined): void {
