@@ -386,11 +386,12 @@ export function createAnimeLayoutBackend(
   return {
     create(_key, root, initialChildren) {
       const layout = factory(root, initialChildren);
+      layout.record();
       let animation: PausableAnimation | undefined;
       let complete: (() => void) | undefined;
       let disposed = false;
       let revision = 0;
-      let captured = false;
+      let captured = true;
       return {
         capture() {
           if (disposed) return;
@@ -409,6 +410,8 @@ export function createAnimeLayoutBackend(
           const timing = animeTransitionTiming(transition, 0);
           if (timing.duration === 0) {
             layout.settle?.();
+            layout.record();
+            captured = true;
             const done = complete;
             complete = undefined;
             done?.();
@@ -420,6 +423,8 @@ export function createAnimeLayoutBackend(
             onComplete() {
               if (disposed || revision !== currentRevision) return;
               animation = undefined;
+              layout.record();
+              captured = true;
               const done = complete;
               complete = undefined;
               done?.();
@@ -430,6 +435,7 @@ export function createAnimeLayoutBackend(
           if (disposed || !animation) return;
           revision += 1;
           layout.record();
+          captured = true;
           animation = undefined;
           complete = undefined;
         },

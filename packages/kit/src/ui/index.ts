@@ -11,10 +11,12 @@ export type {
 export {
   createPress,
   createShortcut,
+  mountDrag,
   mountDialog,
   type DialogMode,
   type DragRelease,
   type DragSample,
+  type DragOptions,
   type PressBindings,
   type Shortcut,
   type ShortcutBinding,

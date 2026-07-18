@@ -649,7 +649,7 @@ describe("Anime retained layout adapter", () => {
     completions[0]?.();
     expect(calls).toEqual(["record", "animate", "record", "animate"]);
     completions[1]?.();
-    expect(calls).toEqual(["record", "animate", "record", "animate", "settled"]);
+    expect(calls).toEqual(["record", "animate", "record", "animate", "record", "settled"]);
     adapter.dispose();
     expect(calls.at(-1)).toBe("revert");
   });

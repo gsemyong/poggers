@@ -1,6 +1,11 @@
-import type { Presentation, Tokens } from "@poggers/kit/presentation";
+import type {
+  WebPresentation,
+  WebPresentationDeclaration,
+  WebPresentationTheme,
+} from "@poggers/kit/presentation/web";
 import type { App } from "src/app";
-const theme = {
+
+export const familyTheme = {
   color: {
     canvas: { l: 0.97, c: 0.003, h: 250 },
     panel: { l: 0.998, c: 0.002, h: 145 },
@@ -56,46 +61,43 @@ const theme = {
     press: { duration: 120, easing: "decelerate" },
   },
   z: { dialog: { kind: "z", value: 100 } },
-} satisfies Tokens;
-export const familyPresentation = (({ tokens, createRecipe, createMotion, interpolate }) => {
-  const createControl = createRecipe({
-    base: {
+} satisfies WebPresentationTheme;
+
+export const familyPresentation = ((tokens) => {
+  const createControl = (
+    declaration: WebPresentationDeclaration<typeof familyTheme>,
+  ): WebPresentationDeclaration<typeof familyTheme> =>
+    mergePresentation(
+      {
       paint: {
         cursor: "pointer",
         focusRing: { color: tokens.color.focus, width: 2, offset: 2 },
       },
       motion: {
-        transition: { transform: tokens.motion.press },
+        scale: { target: 1, transition: tokens.motion.press },
       },
-    },
-    variants: {
-      hovered: {
-        true: {
+      conditions: {
+        hovered: {
           paint: {
             brightness: 0.985,
           },
         },
-        false: {},
-      },
-      pressed: {
-        true: {
+        pressed: {
           motion: {
-            scale: 0.95,
+            scale: { target: 0.95, transition: tokens.motion.press },
           },
         },
-        false: {},
       },
-    },
-    defaults: { hovered: false, pressed: false },
-  });
+      },
+      declaration,
+    );
+
   return {
-    theme,
     components: {
       Visual: {
-        PresentationSwitch({ interaction }) {
+        PresentationSwitch() {
           return {
-            Root: [
-              {
+            Root: createControl({
                 layout: {
                   position: {
                     kind: "fixed",
@@ -113,68 +115,37 @@ export const familyPresentation = (({ tokens, createRecipe, createMotion, interp
                   stroke: { width: 1, line: "solid", color: tokens.color.triggerLine },
                 },
                 typography: { color: tokens.color.text, size: 13, weight: 500, line: 1 },
-              },
-              createControl({ hovered: interaction.hovered, pressed: interaction.pressed }),
-            ],
+              }),
           };
         },
-        Drawer({ state, actions, parts, interaction, geometry }) {
-          const open = state.phase.is("open").or(state.phase.is("opening"));
+        Drawer({ state, platform }) {
+          const open = state.open;
           const dragging = state.dragging;
-          const compact = geometry.inlineSize.isBelow(tokens.size.phone);
-          const dragOffset = dragging.choose(state.dragOffset, 0);
-          const surfaceOffset = open.choose(dragOffset, 700);
-          const sheet = createMotion({
-            target: surfaceOffset,
-            velocity: state.dragVelocity,
-            transition: dragging.choose(
-              "instant",
-              compact.choose(tokens.motion.sheet, tokens.motion.dialog),
-            ),
-            range: [0, 700],
-          });
-          const backdropOpacity = interpolate(sheet.progress, [0, 1], [1, 0]);
-          const pageScale = interpolate(sheet.progress, [0, 1], [0.96, 1]);
-          const pageRadius = interpolate<"radius">(sheet.progress, [0, 1], [18, 0]);
-          const dismissDistance = compact.choose(0.25, 1);
-          const dismissVelocity = compact.choose(0.48, 10);
-          const dragThreshold = 3;
-          const maxVelocity = 3;
-          const dragResistance = 1;
-          const control = createControl({
-            hovered: interaction.hovered,
-            pressed: interaction.pressed,
-          });
+          const compact = platform.allocated.inlineSize < tokens.size.phone.value;
+          const transition = compact ? tokens.motion.sheet : tokens.motion.dialog;
+          const closedOffset = Math.max(state.sheetHeight, platform.allocated.blockSize) + 32;
+          const dragProgress = Math.min(1, Math.max(0, state.dragProgress));
+          const sheet = dragging
+            ? state.dragOffset
+            : {
+                target: open ? 0 : compact ? closedOffset : 24,
+                velocity: state.dragVelocity,
+                transition,
+              };
+          const backdropOpacity = dragging
+            ? 1 - dragProgress
+            : { target: open ? 1 : 0, transition };
+          const pageScale = dragging
+            ? 0.96 + dragProgress * 0.04
+            : { target: open ? 0.96 : 1, transition };
+          const pageRadius = dragging
+            ? 18 * (1 - dragProgress)
+            : { target: open ? 18 : 0, transition };
           return {
-            parameters: {
-              dismissDistance,
-              dismissVelocity,
-            },
-            interactions: [
-              {
-                type: "drag",
-                trigger: parts.Handle,
-                axis: "block",
-                enabled: compact.and(open),
-                bounds: { block: [0, state.sheetHeight] },
-                threshold: dragThreshold,
-                maxVelocity,
-                resistance: dragResistance,
-                cursor: { idle: "grab", active: "grabbing" },
-                start: actions.startDragging,
-                change: actions.drag,
-                release: actions.releaseDragging,
-                cancel: actions.cancelDragging,
-              },
-            ],
-            completions: [
-              { when: state.phase.is("opening"), action: actions.finishOpening },
-              { when: state.phase.is("closing"), action: actions.finishClosing },
-            ],
             Root: {
               layout: {
                 overlay: { align: "center", distribute: "center" },
-                size: { block: { min: { viewport: { axis: "block", percent: 1 } } } },
+                size: { block: { min: { viewport: { axis: "block", percent: 100 } } } },
               },
               paint: {
                 fill: tokens.color.canvas,
@@ -192,14 +163,13 @@ export const familyPresentation = (({ tokens, createRecipe, createMotion, interp
                 item: { overlay: true },
               },
               shape: {
-                corners: { radius: pageRadius, continuity: 0.7 },
+                corners: { radius: 0, continuity: 0.7 },
                 clip: "content",
               },
               paint: { fill: tokens.color.canvas },
-              motion: { scale: pageScale, reduceMotion: "instant" },
+              motion: { scale: pageScale, radius: pageRadius, reduceMotion: "instant" },
             },
-            Trigger: [
-              {
+            Trigger: createControl({
                 shape: { radius: tokens.radius.round },
                 layout: {
                   flow: { axis: "inline", align: "center", distribute: "center" },
@@ -217,17 +187,25 @@ export const familyPresentation = (({ tokens, createRecipe, createMotion, interp
                   line: 1,
                   color: tokens.color.text,
                 },
-              },
-              control,
-            ],
+              }),
             Panel: {
               layout: {
                 overlay: { align: "end", distribute: "center" },
                 size: { inline: "fill", block: "fill" },
                 position: { kind: "fixed", inset: 0, layer: tokens.z.dialog },
-                scroll: { inline: "clip", block: "clip", overscroll: "none" },
+                  scroll: { inline: "clip", block: "clip", overscroll: "none" },
+                },
+                motion: {
+                  opacity: { target: open ? 1 : 0, transition },
+                  presence: {
+                    visible: open,
+                    enter: { from: { opacity: 0 } },
+                    exit: { to: { opacity: 0 } },
+                    transition,
+                  },
+                  reduceMotion: "crossfade",
+                },
               },
-            },
             Backdrop: {
               layout: {
                 size: { inline: "fill", block: "fill" },
@@ -235,10 +213,18 @@ export const familyPresentation = (({ tokens, createRecipe, createMotion, interp
               },
               paint: {
                 fill: tokens.color.overlay,
+              },
+              motion: {
                 opacity: backdropOpacity,
+                presence: {
+                  visible: open,
+                  enter: { from: { opacity: 0 } },
+                  exit: { to: { opacity: 0 } },
+                  transition,
+                },
               },
             },
-            Surface: [
+            Surface: mergePresentation(
               {
                 shape: { radius: tokens.radius.drawer, clip: "content" },
                 layout: {
@@ -255,11 +241,27 @@ export const familyPresentation = (({ tokens, createRecipe, createMotion, interp
                     block: sheet,
                   },
                   layout: tokens.motion.resize,
+                  opacity: { target: open ? 1 : 0, transition },
+                  scale: { target: open ? 1 : 0.96, transition },
+                  presence: {
+                    visible: open,
+                    enter: {
+                      from: compact
+                        ? { block: closedOffset }
+                        : { block: 24, opacity: 0, scale: 0.96 },
+                    },
+                    exit: {
+                      to: compact
+                        ? { block: closedOffset }
+                        : { block: 24, opacity: 0, scale: 0.96 },
+                    },
+                    transition,
+                  },
                   reduceMotion: "crossfade",
                 },
               },
-              {
-                when: compact,
+              compact
+                ? {
                 layout: {
                   size: { inline: "auto" },
                   item: { align: "end", distribute: "stretch" },
@@ -269,26 +271,24 @@ export const familyPresentation = (({ tokens, createRecipe, createMotion, interp
                     inset: { inline: tokens.space.sixteen, blockEnd: tokens.space.sixteen },
                   },
                 },
-              },
-            ],
-            Handle: [
-              {
-                when: compact,
+                  }
+                : {},
+            ),
+            Handle: compact
+              ? {
                 layout: {
                   flow: { axis: "inline", align: "center", distribute: "center" },
                   size: { inline: "fill", block: 24 },
                 },
                 paint: { cursor: "grab", select: "none" },
-              },
-              { when: compact.not(), layout: { display: "hidden" } },
-            ],
+                }
+              : { layout: { display: "hidden" } },
             HandleBar: {
               layout: { size: { inline: 36, block: 4 } },
               shape: { radius: tokens.radius.round },
               paint: { fill: tokens.color.triggerLine },
             },
-            Close: [
-              {
+            Close: createControl({
                 shape: { radius: tokens.radius.round },
                 layout: {
                   flow: { axis: "inline", align: "center", distribute: "center" },
@@ -305,9 +305,7 @@ export const familyPresentation = (({ tokens, createRecipe, createMotion, interp
                 paint: {
                   fill: tokens.color.control,
                 },
-              },
-              control,
-            ],
+              }),
             CloseIcon: {
               layout: {
                 size: { inline: tokens.size.closeIcon, block: tokens.size.closeIcon },
@@ -326,9 +324,10 @@ export const familyPresentation = (({ tokens, createRecipe, createMotion, interp
             },
             DefaultView: {
               motion: {
-                opacity: 1,
-                scale: 1,
+                opacity: { target: 1, transition: tokens.motion.content },
+                scale: { target: 1, transition: tokens.motion.content },
                 presence: {
+                  visible: "structure",
                   enter: {
                     from: { opacity: 0, scale: 0.96 },
                   },
@@ -336,10 +335,7 @@ export const familyPresentation = (({ tokens, createRecipe, createMotion, interp
                     to: { opacity: 0, scale: 0.96 },
                   },
                   layout: "pop",
-                },
-                transition: {
-                  opacity: tokens.motion.content,
-                  transform: tokens.motion.content,
+                  transition: tokens.motion.content,
                 },
                 reduceMotion: "crossfade",
               },
@@ -370,8 +366,7 @@ export const familyPresentation = (({ tokens, createRecipe, createMotion, interp
                 flow: { axis: "block", gap: tokens.space.twelve },
               },
             },
-            OptionButton: [
-              {
+            OptionButton: createControl({
                 shape: { radius: tokens.radius.control },
                 layout: {
                   flow: { axis: "inline", align: "center", gap: tokens.space.fifteen },
@@ -387,11 +382,8 @@ export const familyPresentation = (({ tokens, createRecipe, createMotion, interp
                   line: 1,
                   color: tokens.color.text,
                 },
-              },
-              control,
-            ],
-            DangerOption: [
-              {
+              }),
+            DangerOption: createControl({
                 shape: { radius: tokens.radius.control },
                 layout: {
                   flow: { axis: "inline", align: "center", gap: tokens.space.fifteen },
@@ -407,9 +399,7 @@ export const familyPresentation = (({ tokens, createRecipe, createMotion, interp
                   line: 1,
                   color: tokens.color.danger,
                 },
-              },
-              control,
-            ],
+              }),
             OptionIcon: {
               layout: {
                 size: { inline: tokens.size.optionIcon, block: tokens.size.optionIcon },
@@ -424,9 +414,10 @@ export const familyPresentation = (({ tokens, createRecipe, createMotion, interp
                 padding: { blockEnd: tokens.space.seven },
               },
               motion: {
-                opacity: 1,
-                scale: 1,
+                opacity: { target: 1, transition: tokens.motion.content },
+                scale: { target: 1, transition: tokens.motion.content },
                 presence: {
+                  visible: "structure",
                   enter: {
                     from: { opacity: 0, scale: 0.96 },
                   },
@@ -434,10 +425,7 @@ export const familyPresentation = (({ tokens, createRecipe, createMotion, interp
                     to: { opacity: 0, scale: 0.96 },
                   },
                   layout: "pop",
-                },
-                transition: {
-                  opacity: tokens.motion.content,
-                  transform: tokens.motion.content,
+                  transition: tokens.motion.content,
                 },
                 reduceMotion: "crossfade",
               },
@@ -533,8 +521,7 @@ export const familyPresentation = (({ tokens, createRecipe, createMotion, interp
                 },
               },
             },
-            SecondaryButton: [
-              {
+            SecondaryButton: createControl({
                 shape: { radius: tokens.radius.round },
                 layout: {
                   flow: { axis: "inline", align: "center", distribute: "center" },
@@ -549,11 +536,8 @@ export const familyPresentation = (({ tokens, createRecipe, createMotion, interp
                   line: 1,
                   color: tokens.color.text,
                 },
-              },
-              control,
-            ],
-            PrimaryButton: [
-              {
+              }),
+            PrimaryButton: createControl({
                 shape: { radius: tokens.radius.round },
                 layout: {
                   flow: {
@@ -573,11 +557,8 @@ export const familyPresentation = (({ tokens, createRecipe, createMotion, interp
                   line: 1,
                   color: tokens.color.white,
                 },
-              },
-              control,
-            ],
-            DangerButton: [
-              {
+              }),
+            DangerButton: createControl({
                 shape: { radius: tokens.radius.round },
                 layout: {
                   flow: { axis: "inline", align: "center", distribute: "center" },
@@ -592,9 +573,7 @@ export const familyPresentation = (({ tokens, createRecipe, createMotion, interp
                   line: 1,
                   color: tokens.color.white,
                 },
-              },
-              control,
-            ],
+              }),
             PrimaryIcon: {
               layout: {
                 size: { inline: 20, block: 19 },
@@ -609,4 +588,41 @@ export const familyPresentation = (({ tokens, createRecipe, createMotion, interp
       },
     },
   };
-}) satisfies Presentation<App, "family", typeof theme>;
+}) satisfies WebPresentation<App, typeof familyTheme>;
+
+function mergePresentation<Theme extends WebPresentationTheme>(
+  ...declarations: readonly WebPresentationDeclaration<Theme>[]
+): WebPresentationDeclaration<Theme> {
+  return declarations.reduce(
+    (result, declaration) => mergeRecords(result, declaration),
+    {} as WebPresentationDeclaration<Theme>,
+  );
+}
+
+function mergeRecords<Theme extends WebPresentationTheme>(
+  base: WebPresentationDeclaration<Theme>,
+  override: WebPresentationDeclaration<Theme>,
+): WebPresentationDeclaration<Theme> {
+  const result = { ...base } as Record<string, unknown>;
+  for (const [name, value] of Object.entries(override)) {
+    const current = result[name];
+    result[name] = isRecord(current) && isRecord(value) ? mergeObject(current, value) : value;
+  }
+  return result as WebPresentationDeclaration<Theme>;
+}
+
+function mergeObject(
+  base: Readonly<Record<string, unknown>>,
+  override: Readonly<Record<string, unknown>>,
+): Record<string, unknown> {
+  const result: Record<string, unknown> = { ...base };
+  for (const [name, value] of Object.entries(override)) {
+    const current = result[name];
+    result[name] = isRecord(current) && isRecord(value) ? mergeObject(current, value) : value;
+  }
+  return result;
+}
+
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}

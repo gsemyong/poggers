@@ -1,7 +1,11 @@
-import type { Presentation, Tokens } from "@poggers/kit/presentation";
+import type {
+  WebPresentation,
+  WebPresentationDeclaration,
+  WebPresentationTheme,
+} from "@poggers/kit/presentation/web";
 import type { App } from "src/app";
 
-const theme = {
+export const studioTheme = {
   color: {
     canvas: { l: 0.115, c: 0.012, h: 255 },
     panel: { l: 0.17, c: 0.014, h: 255 },
@@ -60,38 +64,35 @@ const theme = {
     press: { duration: 90, easing: "decelerate" },
   },
   z: { dialog: { kind: "z", value: 100 } },
-} satisfies Tokens;
+} satisfies WebPresentationTheme;
 
-export const studioPresentation = (({ tokens, createRecipe, createMotion, interpolate }) => {
-  const createControl = createRecipe({
-    base: {
+export const studioPresentation = ((tokens) => {
+  const createControl = (
+    declaration: WebPresentationDeclaration<typeof studioTheme>,
+  ): WebPresentationDeclaration<typeof studioTheme> =>
+    mergePresentation(
+      {
       paint: {
         cursor: "pointer",
         focusRing: { color: tokens.color.focus, width: 2, offset: 2 },
       },
-      motion: { transition: { opacity: tokens.motion.press, transform: tokens.motion.press } },
-    },
-    variants: {
-      hovered: {
-        true: { paint: { brightness: 1.16 } },
-        false: {},
+      motion: { scale: { target: 1, transition: tokens.motion.press } },
+      conditions: {
+        hovered: { paint: { brightness: 1.16 } },
+        pressed: {
+          motion: { scale: { target: 0.97, transition: tokens.motion.press } },
+        },
       },
-      pressed: {
-        true: { motion: { scale: 0.97 } },
-        false: {},
       },
-    },
-    defaults: { hovered: false, pressed: false },
-  });
+      declaration,
+    );
 
   return {
-    theme,
     components: {
       Visual: {
-        PresentationSwitch({ interaction }) {
+        PresentationSwitch() {
           return {
-            Root: [
-              {
+            Root: createControl({
                 layout: {
                   position: {
                     kind: "fixed",
@@ -112,69 +113,38 @@ export const studioPresentation = (({ tokens, createRecipe, createMotion, interp
                   line: 1,
                   transform: "uppercase",
                 },
-              },
-              createControl({ hovered: interaction.hovered, pressed: interaction.pressed }),
-            ],
+              }),
           };
         },
-        Drawer({ state, actions, parts, interaction, geometry }) {
-          const open = state.phase.is("open").or(state.phase.is("opening"));
+        Drawer({ state, platform }) {
+          const open = state.open;
           const dragging = state.dragging;
-          const compact = geometry.inlineSize.isBelow(tokens.size.phone);
-          const dragOffset = dragging.choose(state.dragOffset, 0);
-          const surfaceOffset = open.choose(dragOffset, 900);
-          const sheet = createMotion({
-            target: surfaceOffset,
-            velocity: state.dragVelocity,
-            transition: dragging.choose(
-              "instant",
-              compact.choose(tokens.motion.sheet, tokens.motion.dialog),
-            ),
-            range: [0, 900],
-          });
-          const backdropOpacity = interpolate(sheet.progress, [0, 1], [1, 0]);
-          const pageScale = interpolate(sheet.progress, [0, 1], [0.985, 1]);
-          const pageRadius = interpolate<"radius">(sheet.progress, [0, 1], [10, 0]);
-          const dismissDistance = compact.choose(0.34, 1);
-          const dismissVelocity = compact.choose(0.62, 10);
-          const dragThreshold = 5;
-          const maxVelocity = 2.4;
-          const dragResistance = 0.92;
-          const control = createControl({
-            hovered: interaction.hovered,
-            pressed: interaction.pressed,
-          });
+          const compact = platform.allocated.inlineSize < tokens.size.phone.value;
+          const transition = compact ? tokens.motion.sheet : tokens.motion.dialog;
+          const closedOffset = Math.max(state.sheetHeight, platform.allocated.blockSize) + 32;
+          const dragProgress = Math.min(1, Math.max(0, state.dragProgress));
+          const sheet = dragging
+            ? state.dragOffset
+            : {
+                target: open ? 0 : compact ? closedOffset : 18,
+                velocity: state.dragVelocity,
+                transition,
+              };
+          const backdropOpacity = dragging
+            ? 1 - dragProgress
+            : { target: open ? 1 : 0, transition };
+          const pageScale = dragging
+            ? 0.985 + dragProgress * 0.015
+            : { target: open ? 0.985 : 1, transition };
+          const pageRadius = dragging
+            ? 10 * (1 - dragProgress)
+            : { target: open ? 10 : 0, transition };
 
           return {
-            parameters: {
-              dismissDistance,
-              dismissVelocity,
-            },
-            interactions: [
-              {
-                type: "drag",
-                trigger: parts.Handle,
-                axis: "block",
-                enabled: compact.and(open),
-                bounds: { block: [0, state.sheetHeight] },
-                threshold: dragThreshold,
-                maxVelocity,
-                resistance: dragResistance,
-                cursor: { idle: "grab", active: "grabbing" },
-                start: actions.startDragging,
-                change: actions.drag,
-                release: actions.releaseDragging,
-                cancel: actions.cancelDragging,
-              },
-            ],
-            completions: [
-              { when: state.phase.is("opening"), action: actions.finishOpening },
-              { when: state.phase.is("closing"), action: actions.finishClosing },
-            ],
             Root: {
               layout: {
                 overlay: { align: "center", distribute: "center" },
-                size: { block: { min: { viewport: { axis: "block", percent: 1 } } } },
+                size: { block: { min: { viewport: { axis: "block", percent: 100 } } } },
               },
               paint: { fill: tokens.color.canvas },
               typography: {
@@ -190,14 +160,13 @@ export const studioPresentation = (({ tokens, createRecipe, createMotion, interp
                 item: { overlay: true },
               },
               shape: {
-                corners: { radius: pageRadius, continuity: 0.35 },
+                corners: { radius: 0, continuity: 0.35 },
                 clip: "content",
               },
               paint: { fill: tokens.color.canvas },
-              motion: { scale: pageScale, reduceMotion: "instant" },
+              motion: { scale: pageScale, radius: pageRadius, reduceMotion: "instant" },
             },
-            Trigger: [
-              {
+            Trigger: createControl({
                 layout: {
                   flow: { axis: "inline", align: "center", distribute: "center" },
                   size: { inline: "content", block: tokens.size.trigger },
@@ -216,10 +185,8 @@ export const studioPresentation = (({ tokens, createRecipe, createMotion, interp
                   line: 1,
                   transform: "uppercase",
                 },
-              },
-              control,
-            ],
-            Panel: [
+              }),
+            Panel: mergePresentation(
               {
                 layout: {
                   overlay: { align: "center", distribute: "center" },
@@ -227,12 +194,19 @@ export const studioPresentation = (({ tokens, createRecipe, createMotion, interp
                   position: { kind: "fixed", inset: 0, layer: tokens.z.dialog },
                   scroll: { inline: "clip", block: "clip", overscroll: "none" },
                 },
+                motion: {
+                  opacity: { target: open ? 1 : 0, transition },
+                  presence: {
+                    visible: open,
+                    enter: { from: { opacity: 0 } },
+                    exit: { to: { opacity: 0 } },
+                    transition,
+                  },
+                  reduceMotion: "crossfade",
+                },
               },
-              {
-                when: compact,
-                layout: { overlay: { align: "end", distribute: "center" } },
-              },
-            ],
+              compact ? { layout: { overlay: { align: "end", distribute: "center" } } } : {},
+            ),
             Backdrop: {
               layout: {
                 size: { inline: "fill", block: "fill" },
@@ -240,10 +214,18 @@ export const studioPresentation = (({ tokens, createRecipe, createMotion, interp
               },
               paint: {
                 fill: tokens.color.overlay,
+              },
+              motion: {
                 opacity: backdropOpacity,
+                presence: {
+                  visible: open,
+                  enter: { from: { opacity: 0 } },
+                  exit: { to: { opacity: 0 } },
+                  transition,
+                },
               },
             },
-            Surface: [
+            Surface: mergePresentation(
               {
                 layout: {
                   size: { inline: tokens.size.drawer },
@@ -262,37 +244,51 @@ export const studioPresentation = (({ tokens, createRecipe, createMotion, interp
                 motion: {
                   translation: { block: sheet },
                   layout: tokens.motion.resize,
+                  opacity: { target: open ? 1 : 0, transition },
+                  scale: { target: open ? 1 : 0.97, transition },
+                  presence: {
+                    visible: open,
+                    enter: {
+                      from: compact
+                        ? { block: closedOffset }
+                        : { block: 18, opacity: 0, scale: 0.97 },
+                    },
+                    exit: {
+                      to: compact
+                        ? { block: closedOffset }
+                        : { block: 18, opacity: 0, scale: 0.97 },
+                    },
+                    transition,
+                  },
                   reduceMotion: "crossfade",
                 },
               },
-              {
-                when: compact,
+              compact
+                ? {
                 layout: {
                   size: { inline: "auto" },
                   item: { align: "end", distribute: "stretch" },
                   margin: { inline: tokens.space.md, blockEnd: tokens.space.md },
                 },
                 shape: { corners: { radius: tokens.radius.panel, continuity: 0.75 } },
-              },
-            ],
-            Handle: [
-              {
-                when: compact,
+                  }
+                : {},
+            ),
+            Handle: compact
+              ? {
                 layout: {
                   flow: { axis: "inline", align: "center", distribute: "center" },
                   size: { inline: "fill", block: 24 },
                 },
                 paint: { cursor: "grab", select: "none" },
-              },
-              { when: compact.not(), layout: { display: "hidden" } },
-            ],
+                }
+              : { layout: { display: "hidden" } },
             HandleBar: {
               layout: { size: { inline: 44, block: 3 } },
               shape: { radius: tokens.radius.panel },
               paint: { fill: tokens.color.accent },
             },
-            Close: [
-              {
+            Close: createControl({
                 layout: {
                   flow: { axis: "inline", align: "center", distribute: "center" },
                   size: { inline: tokens.size.close, block: tokens.size.close },
@@ -307,9 +303,7 @@ export const studioPresentation = (({ tokens, createRecipe, createMotion, interp
                   fill: tokens.color.raised,
                   stroke: { width: 1, line: "solid", color: tokens.color.line },
                 },
-              },
-              control,
-            ],
+              }),
             CloseIcon: {
               layout: { size: { inline: tokens.size.closeIcon, block: tokens.size.closeIcon } },
             },
@@ -325,16 +319,14 @@ export const studioPresentation = (({ tokens, createRecipe, createMotion, interp
             },
             DefaultView: {
               motion: {
-                opacity: 1,
-                scale: 1,
+                opacity: { target: 1, transition: tokens.motion.content },
+                scale: { target: 1, transition: tokens.motion.content },
                 presence: {
+                  visible: "structure",
                   enter: { from: { opacity: 0, scale: 0.985 } },
                   exit: { to: { opacity: 0, scale: 0.985 } },
                   layout: "pop",
-                },
-                transition: {
-                  opacity: tokens.motion.content,
-                  transform: tokens.motion.content,
+                  transition: tokens.motion.content,
                 },
                 reduceMotion: "crossfade",
               },
@@ -360,19 +352,19 @@ export const studioPresentation = (({ tokens, createRecipe, createMotion, interp
                 transform: "uppercase",
               },
             },
-            OptionList: [
-              {
+            OptionList: compact
+              ? {
+                  layout: { flow: { axis: "block", gap: tokens.space.sm } },
+                }
+              : {
                 layout: {
                   grid: {
                     columns: [{ fraction: 1 }, { fraction: 1 }, { fraction: 1 }],
                     gap: tokens.space.sm,
                   },
                 },
-              },
-              { when: compact, layout: { flow: { axis: "block", gap: tokens.space.sm } } },
-            ],
-            OptionButton: [
-              {
+                },
+            OptionButton: createControl({
                 layout: {
                   flow: {
                     axis: "block",
@@ -395,11 +387,8 @@ export const studioPresentation = (({ tokens, createRecipe, createMotion, interp
                   line: 1.15,
                   align: "start",
                 },
-              },
-              control,
-            ],
-            DangerOption: [
-              {
+              }),
+            DangerOption: createControl({
                 layout: {
                   flow: {
                     axis: "block",
@@ -422,9 +411,7 @@ export const studioPresentation = (({ tokens, createRecipe, createMotion, interp
                   line: 1.15,
                   align: "start",
                 },
-              },
-              control,
-            ],
+              }),
             OptionIcon: {
               layout: {
                 size: { inline: tokens.size.optionIcon, block: tokens.size.optionIcon },
@@ -435,16 +422,14 @@ export const studioPresentation = (({ tokens, createRecipe, createMotion, interp
             DetailView: {
               layout: { padding: { blockEnd: tokens.space.sm } },
               motion: {
-                opacity: 1,
-                scale: 1,
+                opacity: { target: 1, transition: tokens.motion.content },
+                scale: { target: 1, transition: tokens.motion.content },
                 presence: {
+                  visible: "structure",
                   enter: { from: { opacity: 0, scale: 0.985 } },
                   exit: { to: { opacity: 0, scale: 0.985 } },
                   layout: "pop",
-                },
-                transition: {
-                  opacity: tokens.motion.content,
-                  transform: tokens.motion.content,
+                  transition: tokens.motion.content,
                 },
                 reduceMotion: "crossfade",
               },
@@ -502,8 +487,7 @@ export const studioPresentation = (({ tokens, createRecipe, createMotion, interp
                 margin: { blockStart: tokens.space.twoXl, inline: tokens.space.sm },
               },
             },
-            SecondaryButton: [
-              {
+            SecondaryButton: createControl({
                 layout: {
                   flow: { axis: "inline", align: "center", distribute: "center" },
                   size: { block: 44 },
@@ -520,11 +504,8 @@ export const studioPresentation = (({ tokens, createRecipe, createMotion, interp
                   line: 1,
                   transform: "uppercase",
                 },
-              },
-              control,
-            ],
-            PrimaryButton: [
-              {
+              }),
+            PrimaryButton: createControl({
                 layout: {
                   flow: {
                     axis: "inline",
@@ -543,11 +524,8 @@ export const studioPresentation = (({ tokens, createRecipe, createMotion, interp
                   line: 1,
                   transform: "uppercase",
                 },
-              },
-              control,
-            ],
-            DangerButton: [
-              {
+              }),
+            DangerButton: createControl({
                 layout: {
                   flow: { axis: "inline", align: "center", distribute: "center" },
                   size: { block: 44 },
@@ -561,9 +539,7 @@ export const studioPresentation = (({ tokens, createRecipe, createMotion, interp
                   line: 1,
                   transform: "uppercase",
                 },
-              },
-              control,
-            ],
+              }),
             PrimaryIcon: {
               layout: { size: { inline: 20, block: 19 }, margin: { inlineEnd: -4 } },
               paint: { media: { fit: "contain" } },
@@ -573,4 +549,41 @@ export const studioPresentation = (({ tokens, createRecipe, createMotion, interp
       },
     },
   };
-}) satisfies Presentation<App, "studio", typeof theme>;
+}) satisfies WebPresentation<App, typeof studioTheme>;
+
+function mergePresentation<Theme extends WebPresentationTheme>(
+  ...declarations: readonly WebPresentationDeclaration<Theme>[]
+): WebPresentationDeclaration<Theme> {
+  return declarations.reduce(
+    (result, declaration) => mergeRecords(result, declaration),
+    {} as WebPresentationDeclaration<Theme>,
+  );
+}
+
+function mergeRecords<Theme extends WebPresentationTheme>(
+  base: WebPresentationDeclaration<Theme>,
+  override: WebPresentationDeclaration<Theme>,
+): WebPresentationDeclaration<Theme> {
+  const result = { ...base } as Record<string, unknown>;
+  for (const [name, value] of Object.entries(override)) {
+    const current = result[name];
+    result[name] = isRecord(current) && isRecord(value) ? mergeObject(current, value) : value;
+  }
+  return result as WebPresentationDeclaration<Theme>;
+}
+
+function mergeObject(
+  base: Readonly<Record<string, unknown>>,
+  override: Readonly<Record<string, unknown>>,
+): Record<string, unknown> {
+  const result: Record<string, unknown> = { ...base };
+  for (const [name, value] of Object.entries(override)) {
+    const current = result[name];
+    result[name] = isRecord(current) && isRecord(value) ? mergeObject(current, value) : value;
+  }
+  return result;
+}
+
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}

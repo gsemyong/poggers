@@ -19,6 +19,7 @@ import type {
 } from "../component";
 
 declare const __POGGERS_HMR__: boolean;
+import { createWebPresentationAdapter } from "#ui/web/presentation/adapter";
 import {
   computed,
   bindVirtualCollectionHost,
@@ -37,6 +38,11 @@ import {
   type HotRenderState,
   type Signal,
 } from "#ui/web/runtime";
+import type {
+  WebPresentationDeclaration,
+  WebPresentationLanguage,
+  WebPresentationTheme,
+} from "#ui/web/visual";
 import {
   createVisualCoordinator,
   isCompiledVisualPresentation,
@@ -50,6 +56,8 @@ import {
   type VisualCoordinator,
   type CompiledVisuals,
 } from "#ui/web/visual-runtime";
+
+import type { PresentationAdapter } from "../presentation";
 
 export type ComponentRuntimeParts<Contract extends ApplicationContract> = {
   [Name in ComponentName<Contract>]?: {
@@ -75,6 +83,7 @@ export type ApplicationUI<Contract extends ApplicationContract> = Readonly<{
   renderRoot(): Child;
   captureHotState(): HotRenderState;
   updateCompiledVisuals(compiled: CompiledVisuals): boolean;
+  updatePresentations(presentations: Readonly<Record<string, unknown>>): boolean;
   dispose(): Promise<void>;
 }>;
 
@@ -161,7 +170,12 @@ export function createApplicationUI<Contract extends ApplicationContract>({
 }: CreateApplicationUIOptions<Contract>): ApplicationUI<Contract> {
   const runtimeApplication = application as RuntimeApplication;
   const compiled = { ...compiledVisuals } as Record<string, CompiledVisuals[string]>;
+  const authoredPresentations = {
+    ...presentations.presentations,
+  } as Record<string, unknown>;
   const visualRevision = signal(0);
+  const presentationRevision = signal(0);
+  const presentationAdapter = createWebPresentationAdapter<WebPresentationTheme>();
   const defaultPresentation = firstPresentation(presentations);
   const presentation = signal({
     presentation: defaultPresentation,
@@ -179,10 +193,10 @@ export function createApplicationUI<Contract extends ApplicationContract>({
   };
   const selectPresentation = (next: PresentationAppearance<Contract>) => {
     const name = String(next.presentation);
-    if (!(name in presentations.presentations)) {
+    if (!(name in authoredPresentations)) {
       throw new Error(`Unknown Presentation "${name}".`);
     }
-    if (!presentationSupportsTheme(compiled, name, next.theme)) {
+    if (!presentationSupportsTheme(compiled, authoredPresentations, name, next.theme)) {
       throw new Error(`Presentation "${name}" does not define theme "${next.theme}".`);
     }
     presentation(next);
@@ -219,6 +233,9 @@ export function createApplicationUI<Contract extends ApplicationContract>({
         config: runtimeParts[componentName] ?? { parts: {} },
         compiledVisuals: compiled,
         visualRevision,
+        authoredPresentations,
+        presentationRevision,
+        presentationAdapter,
         input: props,
         composition,
       })(props as Props);
@@ -254,6 +271,17 @@ export function createApplicationUI<Contract extends ApplicationContract>({
       for (const name of Object.keys(compiled)) delete compiled[name];
       Object.assign(compiled, next);
       visualRevision(visualRevision() + 1);
+      return true;
+    },
+    updatePresentations(next) {
+      if (
+        Object.keys(authoredPresentations).sort().join("\n") !== Object.keys(next).sort().join("\n")
+      ) {
+        return false;
+      }
+      for (const name of Object.keys(authoredPresentations)) delete authoredPresentations[name];
+      Object.assign(authoredPresentations, next);
+      presentationRevision(presentationRevision() + 1);
       return true;
     },
     async dispose() {
@@ -299,6 +327,12 @@ function createComponentInstance(
     config: RuntimeComponentConfig;
     compiledVisuals?: CompiledVisuals;
     visualRevision: () => number;
+    authoredPresentations: Readonly<Record<string, unknown>>;
+    presentationRevision: () => number;
+    presentationAdapter: PresentationAdapter<
+      WebPresentationLanguage<WebPresentationTheme>,
+      Element
+    >;
     input: RuntimeHookInput;
     composition: RuntimeComponentComposition;
   },
@@ -492,6 +526,18 @@ function createComponentInstance(
         visualCoordinator = coordinator;
       },
     });
+    mountAuthoredPresentationComponent({
+      componentName,
+      presentations: options.authoredPresentations,
+      presentationRevision: options.presentationRevision,
+      presentation: options.presentationName,
+      theme: options.themeName,
+      state: createPresentationState(services.process as Readonly<Record<string, unknown>>, state),
+      refs,
+      elements: partElements,
+      parts: Object.fromEntries(Object.keys(options.config.parts).map((name) => [name, { name }])),
+      adapter: options.presentationAdapter,
+    });
     if (definition.start) {
       onMount(() => {
         lifecycle.adopt(
@@ -678,6 +724,92 @@ function mountCompiledVisualComponent(options: {
   });
 }
 
+type RuntimePresentationComponent = (scope: {
+  readonly state: Readonly<Record<string, unknown>>;
+  readonly platform: Readonly<Record<string, unknown>>;
+  readonly parts: Readonly<Record<string, Readonly<{ name: string }>>>;
+}) => Readonly<Record<string, WebPresentationDeclaration<WebPresentationTheme>>>;
+
+function mountAuthoredPresentationComponent(options: {
+  componentName: string;
+  presentations: Readonly<Record<string, unknown>>;
+  presentationRevision: () => number;
+  presentation: () => string;
+  theme: () => string;
+  state: Readonly<Record<string, unknown>>;
+  refs: Readonly<Record<string, Element | null>>;
+  elements: Readonly<Record<string, ReadonlySet<Element>>>;
+  parts: Readonly<Record<string, Readonly<{ name: string }>>>;
+  adapter: PresentationAdapter<WebPresentationLanguage<WebPresentationTheme>, Element>;
+}): void {
+  onMount(() => {
+    const boundary = options.elements.Root?.values().next().value ?? options.refs.Root;
+    if (!(boundary instanceof Element)) return;
+    const targetSources = Object.fromEntries(
+      Object.keys(options.parts).map((name) => [
+        name,
+        () => {
+          const repeated = options.elements[name];
+          if (repeated?.size) return [...repeated].filter((element) => element.isConnected);
+          const first = options.refs[name];
+          return first?.isConnected ? [first] : [];
+        },
+      ]),
+    );
+    const session = options.adapter.create({ boundary, parts: targetSources });
+    const disposeEffect = effect(() => {
+      options.presentationRevision();
+      const definition = materializedPresentation(
+        options.presentations,
+        options.presentation(),
+        options.theme(),
+      );
+      if (!definition) return;
+      const component = presentationComponent(definition, options.componentName);
+      if (!component) {
+        session.commit({});
+        return;
+      }
+      session.commit(
+        component({
+          state: options.state,
+          platform: session.platform as Readonly<Record<string, unknown>>,
+          parts: options.parts,
+        }),
+      );
+    });
+    return () => {
+      disposeEffect();
+      session.dispose();
+    };
+  });
+}
+
+function materializedPresentation(
+  presentations: Readonly<Record<string, unknown>>,
+  presentation: string,
+  theme: string,
+): Readonly<Record<string, unknown>> | undefined {
+  const themes = record(presentations[presentation]);
+  const definition = record(themes[theme]);
+  return Object.keys(record(definition.components)).length ? definition : undefined;
+}
+
+function presentationComponent(
+  definition: Readonly<Record<string, unknown>>,
+  component: string,
+): RuntimePresentationComponent | undefined {
+  let components = record(definition.components);
+  const owner = componentOwner(component);
+  if (owner) {
+    for (const name of owner.split(".")) components = record(components[capitalize(name)]);
+  }
+  const separator = component.indexOf("/component/");
+  const name = separator < 0 ? component : component.slice(separator + "/component/".length);
+  const factory = components[name];
+  return typeof factory === "function" ? (factory as RuntimePresentationComponent) : undefined;
+}
+
 function materializeComponentState(
   source: Readonly<Record<string, unknown>>,
 ): Record<string, unknown> {
@@ -737,6 +869,34 @@ function readStateField(source: Record<string, unknown>, name: string): unknown 
   const descriptor = Object.getOwnPropertyDescriptor(source, name);
   if (!descriptor) return undefined;
   return typeof descriptor.get === "function" ? descriptor.get.call(source) : descriptor.value;
+}
+
+function createPresentationState(
+  process: Readonly<Record<string, unknown>>,
+  component: Readonly<Record<string, unknown>>,
+): Readonly<Record<string, unknown>> {
+  return new Proxy(Object.create(null) as Record<string, unknown>, {
+    get(_target, name) {
+      if (typeof name !== "string") return undefined;
+      if (name in component) return component[name];
+      const value = process[name];
+      return typeof value === "function" ? undefined : value;
+    },
+    ownKeys() {
+      return [
+        ...new Set([
+          ...Object.keys(process).filter((name) => typeof process[name] !== "function"),
+          ...Object.keys(component),
+        ]),
+      ];
+    },
+    getOwnPropertyDescriptor(_target, name) {
+      return typeof name === "string" &&
+        (name in component || (name in process && typeof process[name] !== "function"))
+        ? { enumerable: true, configurable: true }
+        : undefined;
+    },
+  });
 }
 
 function createComponentValuesObject(
@@ -1374,9 +1534,11 @@ function firstPresentation<Contract extends ApplicationContract>(
 
 function presentationSupportsTheme(
   compiled: CompiledVisuals | undefined,
+  authored: Readonly<Record<string, unknown>>,
   presentation: string,
   theme: string,
 ): boolean {
+  if (materializedPresentation(authored, presentation, theme)) return true;
   if (theme === "default") return true;
   return Object.hasOwn(compiled?.[presentation]?.themes ?? {}, theme);
 }
@@ -1399,6 +1561,12 @@ function updateRootTheme(theme: string) {
 
 function capitalize(value: string): string {
   return value.length === 0 ? value : value[0]!.toUpperCase() + value.slice(1);
+}
+
+function record(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
 }
 
 function mergeClassValue(left: unknown, right: unknown): () => string {

@@ -22,6 +22,7 @@ type App = {
         finishClosing(): void;
       };
       Parts: {
+        Root: "main";
         Trigger: "button";
         Surface: "section";
         Result: "button";
@@ -153,6 +154,7 @@ const tactile = (({ tokens, createRecipe, createMotion, interpolate }) => {
           range: [0, 1],
         });
         return {
+          Root: {},
           Trigger: {
             when: interaction.hovered,
             motion: { scale: 1.01 },

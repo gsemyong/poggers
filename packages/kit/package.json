@@ -21,6 +21,7 @@
     "src/ui/compiler/presentation.ts",
     "src/ui/compiler/stylex.ts",
     "src/ui/component.ts",
+    "src/ui/component.contract.ts",
     "src/ui/index.ts",
     "src/ui/presentation.ts",
     "src/ui/web/component.ts",
@@ -31,6 +32,9 @@
     "src/ui/web/jsx-runtime.ts",
     "src/ui/web/jsx-types.ts",
     "src/ui/web/motion.ts",
+    "src/ui/web/presentation.ts",
+    "src/ui/web/presentation/adapter.ts",
+    "src/ui/web/presentation/style.ts",
     "src/ui/web/runtime.ts",
     "src/ui/web/scene.ts",
     "src/ui/web/visual-runtime.ts",
@@ -72,6 +76,11 @@
       "poggers-source": "./src/ui/presentation.ts",
       "types": "./dist/src/ui/presentation.d.ts",
       "default": "./dist/src/ui/presentation.js"
+    },
+    "./presentation/web": {
+      "poggers-source": "./src/ui/web/presentation.ts",
+      "types": "./dist/src/ui/web/presentation.d.ts",
+      "default": "./dist/src/ui/web/presentation.js"
     },
     "./tsconfig": "./tsconfig.app.json"
   },

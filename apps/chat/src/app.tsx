@@ -1,7 +1,7 @@
 import type { Application, Feature, Program, WebMain } from "@poggers/kit";
 import { Show, createPress } from "@poggers/kit/ui";
 import { chatFeature, type ChatFeature } from "src/features/chat";
-import { paperPresentation } from "src/presentations/paper";
+import { paperPresentation, paperTheme } from "src/presentations/paper";
 
 type Route = "chat" | "about";
 
@@ -161,5 +161,5 @@ export default {
     display: "standalone",
   },
   features: { shell: shellFeature },
-  presentations: { paper: paperPresentation },
+  presentations: { paper: { default: paperPresentation(paperTheme) } },
 } satisfies Application<App>;

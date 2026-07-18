@@ -1,6 +1,8 @@
 import { mountDialog as mountRetainedDialog } from "#ui/web/runtime";
+import { mountAnimeDrag } from "#ui/web/drag.anime";
 
-export { type DragRelease, type DragSample } from "#ui/web/drag";
+export type { DragOptions, DragRelease, DragSample } from "#ui/web/drag";
+import type { DragOptions } from "#ui/web/drag";
 
 export type PressBindings = {
   readonly onPointerDown: (event: PointerEvent) => void;
@@ -21,6 +23,11 @@ export type DialogMode = false | "modal" | "nonmodal";
 
 export function mountDialog(element: HTMLDialogElement, readMode: () => DialogMode): void {
   mountRetainedDialog(element, readMode);
+}
+
+export function mountDrag(element: HTMLElement, options: DragOptions): Disposable {
+  const dispose = mountAnimeDrag(element, options);
+  return { [Symbol.dispose]: dispose };
 }
 
 export function createPress(activate: () => void): PressBindings {

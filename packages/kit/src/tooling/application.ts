@@ -19,12 +19,7 @@ import { compileProduct } from "../compiler/frontend";
 import { createHotManifest } from "../compiler/hot";
 import { serializeProductIR, type ProductIR } from "../compiler/ir";
 import { transformComponentSource } from "../ui/compiler/application";
-import {
-  analyzeVisualContract,
-  bundleVisualFontAssets,
-  materializeVisualPresentation,
-} from "../ui/compiler/presentation";
-import { generateVisualStylexModule } from "../ui/compiler/stylex";
+import { analyzeVisualContract } from "../ui/compiler/presentation";
 
 export type ApplicationPaths = Readonly<{
   directory: string;
@@ -193,19 +188,14 @@ async function prepareApplication(
   const application = await loadApplication(paths, work);
   validateUIProgramRoot(application, contract.uiProgram);
   const authored = record(application.presentations);
-  const materialized = await Promise.all(
-    contract.presentations.map(async (presentation) => {
-      const source = authored[presentation.name];
-      if (!source) throw new Error(`Application is missing Presentation "${presentation.name}".`);
-      return bundleVisualFontAssets(
-        materializeVisualPresentation(presentation.name, source, contract.surface, presentation),
-        presentation.location.file,
-      );
-    }),
-  );
+  for (const presentation of contract.presentations) {
+    if (!authored[presentation.name]) {
+      throw new Error(`Application is missing Presentation "${presentation.name}".`);
+    }
+  }
 
   const visualModule = resolve(work, "visual.generated.stylex.ts");
-  await writeIfChanged(visualModule, generateVisualStylexModule(materialized));
+  await writeIfChanged(visualModule, "export const compiledVisuals = {};\n");
   const candidate = resolve(work, "application.generated.ts");
   await writeIfChanged(
     candidate,
@@ -216,7 +206,6 @@ async function prepareApplication(
       visualModule,
       program: contract.uiProgram,
       components: contract.surface.components,
-      presentations: contract.presentations.map(({ name }) => name),
       hotManifest: createHotManifest(ir),
       updateKind,
     }),
@@ -268,6 +257,10 @@ function kitAliases() {
       find: "@poggers/kit/jsx-runtime",
       replacement: resolve(ui, `web/jsx-runtime${extension}`),
     },
+    {
+      find: "@poggers/kit/presentation/web",
+      replacement: resolve(ui, `web/presentation${extension}`),
+    },
     { find: "@poggers/kit/presentation", replacement: resolve(ui, `presentation${extension}`) },
     { find: "@poggers/kit/ui", replacement: resolve(ui, `index${extension}`) },
     { find: /^@poggers\/kit$/, replacement: resolve(kit, `index${extension}`) },
@@ -299,9 +292,7 @@ function componentTransformPlugin(source: string): Plugin {
       const id = cleanId(rawId);
       if (!id.startsWith(source) || !/\.[cm]?[jt]sx?$/.test(id)) return;
       return {
-        code: transformComponentSource(code, id, {
-          stripPresentations: basename(id) === "app.tsx" || basename(id) === "app.ts",
-        }),
+        code: transformComponentSource(code, id),
         map: null,
       };
     },
@@ -358,10 +349,7 @@ function visualContractPlugin(paths: ApplicationPaths, work: string): Plugin {
         for (const module of [...visualModules, ...candidateModules]) {
           context.server.moduleGraph.invalidateModule(module);
         }
-        modules =
-          prepared.updateKind === "full"
-            ? [...new Set([...context.modules, ...candidateModules])]
-            : candidateModules;
+        modules = [...new Set([...context.modules, ...candidateModules])];
       } catch (error) {
         context.server.config.logger.error(error instanceof Error ? error.message : String(error));
         modules = [];
@@ -419,11 +407,9 @@ function candidateSource(input: {
   visualModule: string;
   program: string;
   components: unknown;
-  presentations: readonly string[];
   hotManifest: unknown;
   updateKind: "full" | "presentation";
 }): string {
-  const presentationMap = Object.fromEntries(input.presentations.map((name) => [name, {}]));
   return `import application from ${JSON.stringify(input.application)};
 import { createApplicationUI } from ${JSON.stringify(input.componentRuntime)};
 import { render } from ${JSON.stringify(input.renderer)};
@@ -432,6 +418,7 @@ import { compiledVisuals } from ${JSON.stringify(input.visualModule)};
 export const manifest = ${JSON.stringify(input.hotManifest)};
 export const updateKind = ${JSON.stringify(input.updateKind)};
 export { compiledVisuals };
+export const presentations = application.presentations ?? {};
 
 export async function activate(root, previous = {}) {
   const hotState = {
@@ -446,7 +433,7 @@ export async function activate(root, previous = {}) {
   const ui = createApplicationUI({
     application,
     program: ${JSON.stringify(input.program)},
-    presentations: { presentations: ${JSON.stringify(presentationMap)} },
+    presentations: { presentations },
     components: ${JSON.stringify(input.components)},
     compiledVisuals,
     hotState,
@@ -502,6 +489,7 @@ const coordinator = import.meta.hot?.data.coordinator ?? new HotUpdateCoordinato
 const apply = async (candidate) => {
   if (
     candidate.updateKind === "presentation" &&
+    coordinator.value?.updatePresentations(candidate.presentations) &&
     coordinator.value?.updateCompiledVisuals(candidate.compiledVisuals)
   ) {
     return;

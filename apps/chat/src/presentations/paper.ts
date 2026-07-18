@@ -1,7 +1,7 @@
-import type { Presentation, Tokens } from "@poggers/kit/presentation";
+import type { WebPresentation, WebPresentationTheme } from "@poggers/kit/presentation/web";
 import type { App } from "src/app";
 
-const theme = {
+export const paperTheme = {
   color: {
     canvas: { l: 0.97, c: 0.012, h: 88 },
     panel: { l: 0.995, c: 0.006, h: 88 },
@@ -10,7 +10,6 @@ const theme = {
     line: { l: 0.87, c: 0.018, h: 82 },
     accent: { l: 0.56, c: 0.16, h: 35 },
     accentText: { l: 0.99, c: 0.004, h: 88 },
-    focus: { l: 0.62, c: 0.16, h: 35 },
   },
   space: {
     xs: { kind: "space", value: 6 },
@@ -42,197 +41,144 @@ const theme = {
   motion: {
     control: { duration: 120, easing: "decelerate" },
   },
-} satisfies Tokens;
+} as const satisfies WebPresentationTheme;
 
-export const paperPresentation = (({ tokens, createRecipe }) => {
-  const createControl = createRecipe({
-    base: {
-      paint: {
-        cursor: "pointer",
-        focusRing: { color: tokens.color.focus, width: 2, offset: 2 },
-      },
-      motion: { transition: { opacity: tokens.motion.control, transform: tokens.motion.control } },
-    },
-    variants: {
-      hovered: { true: { paint: { brightness: 0.96 } }, false: {} },
-      pressed: { true: { motion: { scale: 0.97 } }, false: {} },
-      disabled: { true: { paint: { opacity: 0.45, cursor: "default" } }, false: {} },
-    },
-    defaults: { hovered: false, pressed: false, disabled: false },
-  });
-  const createMessage = createRecipe({
-    base: {
-      shape: { radius: tokens.radius.message },
-      layout: {
-        flow: { axis: "block", gap: tokens.space.xs },
-        size: { inline: { max: tokens.size.message } },
-        padding: { block: tokens.space.sm, inline: tokens.space.md },
-      },
-      paint: {
-        fill: tokens.color.panel,
-        stroke: { width: 1, line: "solid", color: tokens.color.line },
-      },
-    },
-    variants: {
-      role: {
-        user: { paint: { fill: tokens.color.canvas } },
-        assistant: {},
-      },
-    },
-  });
-
-  return {
-    theme,
-    components: {
-      Shell: {
-        Shell: () => ({
-          Root: {
-            layout: {
-              flow: { axis: "block" },
-              size: { block: { min: { viewport: { axis: "block", percent: 1 } } } },
-            },
-            paint: { fill: tokens.color.canvas },
-            typography: { font: tokens.font.body, color: tokens.color.text },
+export const paperPresentation = ((tokens) => ({
+  components: {
+    Shell: {
+      Shell: () => ({
+        Root: {
+          layout: {
+            flow: { axis: "block" },
+            size: { block: { min: { viewport: { axis: "block", percent: 100 } } } },
           },
-          Navigation: {
-            layout: {
-              flow: { axis: "inline", align: "center", gap: tokens.space.xs },
-              padding: { block: tokens.space.sm, inline: tokens.space.lg },
-            },
-            paint: {
-              fill: tokens.color.panel,
-              stroke: { width: 1, line: "solid", color: tokens.color.line },
-            },
+          paint: { fill: tokens.color.canvas },
+          typography: { font: tokens.font.body, color: tokens.color.text },
+        },
+        Navigation: {
+          layout: {
+            flow: { axis: "inline", align: "center", gap: tokens.space.xs },
+            padding: { block: tokens.space.sm, inline: tokens.space.lg },
           },
-          ChatLink: {
-            shape: { radius: tokens.radius.control },
-            layout: { size: { block: 36 }, padding: { inline: tokens.space.md } },
-            paint: {
-              fill: tokens.color.canvas,
-              cursor: "pointer",
-              focusRing: { color: tokens.color.focus, width: 2, offset: 1 },
-            },
-            typography: { color: tokens.color.text, weight: 650 },
+          paint: {
+            fill: tokens.color.panel,
+            stroke: { width: 1, line: "solid", color: tokens.color.line },
           },
-          AboutLink: {
-            shape: { radius: tokens.radius.control },
-            layout: { size: { block: 36 }, padding: { inline: tokens.space.md } },
-            paint: {
-              fill: tokens.color.canvas,
-              cursor: "pointer",
-              focusRing: { color: tokens.color.focus, width: 2, offset: 1 },
-            },
-            typography: { color: tokens.color.text, weight: 650 },
+        },
+        ChatLink: {
+          shape: { radius: tokens.radius.control },
+          layout: { size: { block: 36 }, padding: { inline: tokens.space.md } },
+          paint: { fill: tokens.color.canvas, cursor: "pointer" },
+          typography: { color: tokens.color.text, weight: 650 },
+        },
+        AboutLink: {
+          shape: { radius: tokens.radius.control },
+          layout: { size: { block: 36 }, padding: { inline: tokens.space.md } },
+          paint: { fill: tokens.color.canvas, cursor: "pointer" },
+          typography: { color: tokens.color.text, weight: 650 },
+        },
+        Content: { layout: { item: { flex: { grow: 1, shrink: 1, basis: 0 } } } },
+        About: {
+          layout: {
+            flow: { axis: "block", gap: tokens.space.md },
+            size: { inline: { max: tokens.size.content } },
+            padding: { block: tokens.space.xl, inline: tokens.space.lg },
           },
-          Content: { layout: { item: { flex: { grow: 1, shrink: 1, basis: 0 } } } },
-          About: {
-            layout: {
-              flow: { axis: "block", gap: tokens.space.md },
-              size: { inline: { max: tokens.size.content } },
-              padding: { block: tokens.space.xl, inline: tokens.space.lg },
+        },
+        AboutTitle: { typography: { size: 26, weight: 720, line: 1.1 } },
+        AboutText: { typography: { color: tokens.color.muted, line: 1.55, wrap: "pretty" } },
+      }),
+      Chat: {
+        Chat({ state, platform }) {
+          const compact = platform.allocated.inlineSize < 560;
+          return {
+            Root: {
+              layout: {
+                flow: { axis: "block", gap: tokens.space.lg },
+                size: { inline: { max: tokens.size.content }, block: "fill" },
+                padding: { block: tokens.space.xl, inline: tokens.space.lg },
+              },
             },
-          },
-          AboutTitle: { typography: { size: 26, weight: 720, line: 1.1 } },
-          AboutText: { typography: { color: tokens.color.muted, line: 1.55, wrap: "pretty" } },
-        }),
-        Chat: {
-          Chat({ process, interaction, geometry }) {
-            const compact = geometry.inlineSize.isBelow(560);
-            return {
-              Root: {
-                layout: {
-                  flow: { axis: "block", gap: tokens.space.lg },
-                  size: { inline: { max: tokens.size.content }, block: "fill" },
-                  padding: { block: tokens.space.xl, inline: tokens.space.lg },
+            Header: { layout: { flow: { axis: "block", gap: tokens.space.xs } } },
+            Brand: { typography: { size: 26, weight: 720, line: 1.1 } },
+            Summary: {
+              typography: { color: tokens.color.muted, line: 1.5, wrap: "pretty" },
+            },
+            Messages: {
+              layout: {
+                flow: { axis: "block", gap: tokens.space.md },
+                item: { flex: { grow: 1, shrink: 1, basis: 0 } },
+                scroll: { block: "auto", overscroll: "contain" },
+              },
+            },
+            Empty: { typography: { color: tokens.color.muted } },
+            Composer: {
+              layout: {
+                grid: {
+                  columns: compact
+                    ? [{ fraction: 1 }]
+                    : [{ minmax: [0, { fraction: 1 }] }, "content"],
+                  align: "end",
+                  gap: tokens.space.sm,
                 },
               },
-              Header: {
-                layout: { flow: { axis: "block", gap: tokens.space.xs } },
+            },
+            Input: {
+              shape: { radius: tokens.radius.control },
+              layout: {
+                size: { inline: "fill", block: { min: tokens.size.input } },
+                padding: tokens.space.md,
               },
-              Brand: { typography: { size: 26, weight: 720, line: 1.1 } },
-              Summary: { typography: { color: tokens.color.muted, line: 1.5, wrap: "pretty" } },
-              Messages: {
-                layout: {
-                  flow: { axis: "block", gap: tokens.space.md },
-                  item: { flex: { grow: 1, shrink: 1, basis: 0 } },
-                  scroll: { block: "auto", overscroll: "contain" },
-                },
+              paint: {
+                fill: tokens.color.panel,
+                stroke: { width: 1, line: "solid", color: tokens.color.line },
+                shadow: tokens.shadow.surface,
               },
-              Empty: { typography: { color: tokens.color.muted } },
-              Composer: [
-                {
-                  layout: {
-                    grid: {
-                      columns: [{ minmax: [0, { fraction: 1 }] }, "content"],
-                      align: "end",
-                      gap: tokens.space.sm,
-                    },
-                  },
-                },
-                {
-                  when: compact,
-                  layout: { grid: { columns: [{ fraction: 1 }], gap: tokens.space.sm } },
-                },
-              ],
-              Input: {
-                shape: { radius: tokens.radius.control },
-                layout: {
-                  size: { inline: "fill", block: { min: tokens.size.input } },
-                  padding: tokens.space.md,
-                },
-                paint: {
-                  fill: tokens.color.panel,
-                  stroke: { width: 1, line: "solid", color: tokens.color.line },
-                  shadow: tokens.shadow.surface,
-                  focusRing: { color: tokens.color.focus, width: 2, offset: 1 },
-                },
-                typography: { line: 1.45, color: tokens.color.text },
+              typography: { line: 1.45, color: tokens.color.text },
+            },
+            Send: {
+              shape: { radius: tokens.radius.control },
+              layout: { size: { block: 44 }, padding: { inline: tokens.space.md } },
+              paint: {
+                fill: tokens.color.accent,
+                cursor: state.sending || state.draft.trim().length === 0 ? "default" : "pointer",
+                opacity: state.sending || state.draft.trim().length === 0 ? 0.45 : 1,
               },
-              Send: [
-                {
-                  shape: { radius: tokens.radius.control },
-                  layout: { size: { block: 44 }, padding: { inline: tokens.space.md } },
-                  paint: { fill: tokens.color.accent },
-                  typography: { color: tokens.color.accentText, weight: 700 },
-                },
-                createControl({
-                  hovered: interaction.hovered,
-                  pressed: interaction.pressed,
-                  disabled: interaction.disabled,
-                }),
-              ],
-              About: [
-                {
-                  layout: { size: { block: 36 }, padding: { inline: tokens.space.sm } },
-                  paint: { fill: tokens.color.panel },
-                  typography: { color: tokens.color.muted, size: 12, weight: 650 },
-                },
-                createControl({
-                  hovered: interaction.hovered,
-                  pressed: interaction.pressed,
-                  disabled: false,
-                }),
-              ],
-              Status: [
-                {
-                  layout: { item: { grid: { column: 1 } } },
-                  typography: { font: tokens.font.label, size: 11, color: tokens.color.muted },
-                },
-                { when: process.sending, paint: { opacity: 0.72 } },
-              ],
-            };
-          },
-          Message({ state }) {
-            return {
-              Root: createMessage({ role: state.role }),
-              Role: {
-                typography: { font: tokens.font.label, size: 11, color: tokens.color.accent },
+              typography: { color: tokens.color.accentText, weight: 700 },
+            },
+            About: {
+              layout: { size: { block: 36 }, padding: { inline: tokens.space.sm } },
+              paint: { fill: tokens.color.panel, cursor: "pointer" },
+              typography: { color: tokens.color.muted, size: 12, weight: 650 },
+            },
+            Status: {
+              layout: { item: { grid: { column: 1 } } },
+              paint: { opacity: state.sending ? 0.72 : 1 },
+              typography: { font: tokens.font.label, size: 11, color: tokens.color.muted },
+            },
+          };
+        },
+        Message({ state }) {
+          return {
+            Root: {
+              shape: { radius: tokens.radius.message },
+              layout: {
+                flow: { axis: "block", gap: tokens.space.xs },
+                size: { inline: { max: tokens.size.message } },
+                padding: { block: tokens.space.sm, inline: tokens.space.md },
               },
-              Text: { typography: { line: 1.55, wrap: "pretty" } },
-            };
-          },
+              paint: {
+                fill: state.role === "user" ? tokens.color.canvas : tokens.color.panel,
+                stroke: { width: 1, line: "solid", color: tokens.color.line },
+              },
+            },
+            Role: {
+              typography: { font: tokens.font.label, size: 11, color: tokens.color.accent },
+            },
+            Text: { typography: { line: 1.55, wrap: "pretty" } },
+          };
         },
       },
     },
-  };
-}) satisfies Presentation<App, "paper", typeof theme>;
+  },
+})) satisfies WebPresentation<App, typeof paperTheme>;

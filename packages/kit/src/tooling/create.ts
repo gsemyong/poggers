@@ -83,7 +83,7 @@ function template(name: string, version: string): Record<string, string> {
 }
 `,
     "src/app.tsx": `import type { Application, Feature, Program, WebMain } from "@poggers/kit";
-import type { Presentation } from "@poggers/kit/presentation";
+import type { WebPresentation, WebPresentationTheme } from "@poggers/kit/presentation/web";
 
 export type App = {
   Features: { shell: ShellFeature };
@@ -103,22 +103,23 @@ type ShellFeature = {
   };
 };
 
-const clean = (() => ({
-  theme: {},
+const theme = {} as const satisfies WebPresentationTheme;
+
+const clean = ((_) => ({
   components: {
     Shell: {
       Application: () => ({
         Root: {
           layout: {
             flow: { axis: "block", align: "center", distribute: "center" },
-            size: { block: { min: { viewport: { axis: "block", percent: 1 } } } },
+            size: { block: { min: { viewport: { axis: "block", percent: 100 } } } },
           },
         },
         Title: { typography: { size: 32, weight: 600, color: "current" } },
       }),
     },
   },
-})) satisfies Presentation<App, "clean">;
+})) satisfies WebPresentation<App, typeof theme>;
 
 const shellFeature = {
   programs: {
@@ -142,7 +143,7 @@ const shellFeature = {
 export default {
   metadata: { name: ${JSON.stringify(name)} },
   features: { shell: shellFeature },
-  presentations: { clean },
+  presentations: { clean: { default: clean(theme) } },
 } satisfies Application<App>;
 `,
   };

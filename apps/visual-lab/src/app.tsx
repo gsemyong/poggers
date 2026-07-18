@@ -4,12 +4,11 @@ import {
   createPress,
   type DragRelease,
   type DragSample,
-  mountDialog,
+  mountDrag,
   type PresentationControl,
-  type VisualValue,
 } from "@poggers/kit/ui";
-import { familyPresentation } from "src/presentations/family";
-import { studioPresentation } from "src/presentations/studio";
+import { familyPresentation, familyTheme } from "src/presentations/family";
+import { studioPresentation, studioTheme } from "src/presentations/studio";
 
 const svg = (markup: string) => `data:image/svg+xml,${encodeURIComponent(markup)}`;
 
@@ -68,13 +67,13 @@ type VisualFeature = {
           };
           Drawer: {
             State: {
-              phase: "closed" | "opening" | "open" | "closing";
+              open: boolean;
               view: "default" | "key" | "phrase" | "remove";
               dragging: boolean;
-              dragOffset: VisualValue<"length">;
+              dragOffset: number;
               dragVelocity: number;
-              dragProgress: VisualValue<"progress">;
-              sheetHeight: VisualValue<"size">;
+              dragProgress: number;
+              sheetHeight: number;
             };
             Actions: {
               open(): void;
@@ -89,12 +88,6 @@ type VisualFeature = {
               releaseDragging(release: DragRelease): void;
               cancelDragging(): void;
               measure(height: number): void;
-              finishOpening(): void;
-              finishClosing(): void;
-            };
-            Parameters: {
-              dismissDistance: number;
-              dismissVelocity: number;
             };
             Parts: {
               Root: "main";
@@ -165,7 +158,7 @@ const visualFeature = {
         },
         Drawer: {
           state: {
-            phase: "closed",
+            open: false,
             view: "default",
             dragging: false,
             dragOffset: 0,
@@ -175,22 +168,29 @@ const visualFeature = {
           },
           actions: {
             open({ state }) {
-              if (state.phase === "open" || state.phase === "opening") return;
-              state.phase = "opening";
+              if (state.open) return;
+              state.open = true;
               state.view = "default";
+              state.dragging = false;
+              state.dragOffset = 0;
+              state.dragVelocity = 0;
+              state.dragProgress = 0;
             },
             close({ state }) {
-              if (state.phase === "closed" || state.phase === "closing") return;
+              if (!state.open) return;
               state.dragging = false;
-              state.phase = "closing";
+              state.open = false;
             },
             toggle({ state }) {
-              if (state.phase === "closed" || state.phase === "closing") {
-                state.phase = "opening";
+              if (!state.open) {
+                state.open = true;
                 state.view = "default";
+                state.dragOffset = 0;
+                state.dragVelocity = 0;
+                state.dragProgress = 0;
               } else {
                 state.dragging = false;
-                state.phase = "closing";
+                state.open = false;
               }
             },
             back({ state }) {
@@ -213,14 +213,11 @@ const visualFeature = {
               state.dragVelocity = sample.velocityBlock;
               state.dragProgress = sample.progressBlock;
             },
-            releaseDragging({ state, parameters }, release) {
+            releaseDragging({ state }, release) {
               state.dragging = false;
               state.dragVelocity = release.velocity;
-              if (
-                release.progress >= parameters.dismissDistance ||
-                release.velocity >= parameters.dismissVelocity
-              ) {
-                state.phase = "closing";
+              if (release.progress >= 0.28 || release.velocity >= 0.5) {
+                state.open = false;
               } else {
                 state.dragOffset = 0;
                 state.dragProgress = 0;
@@ -235,27 +232,52 @@ const visualFeature = {
             measure({ state }, height) {
               state.sheetHeight = Math.max(1, height);
             },
-            finishOpening({ state }) {
-              if (state.phase === "opening") state.phase = "open";
-            },
-            finishClosing({ state }) {
-              if (state.phase !== "closing") return;
-              state.phase = "closed";
-              state.dragging = false;
-              state.dragOffset = 0;
-              state.dragVelocity = 0;
-              state.dragProgress = 0;
-            },
           },
-          start({ actions, parts: { Surface, Viewport } }) {
+          start({ actions, parts: { Handle, Surface, Viewport } }) {
+            const handle = Handle.element;
             const surface = Surface.element;
             const viewport = Viewport.element;
-            if (!(surface instanceof HTMLElement) || !(viewport instanceof HTMLElement)) return;
-            const measure = () => actions.measure(surface.scrollHeight);
-            const observer = new ResizeObserver(measure);
+            if (
+              !(handle instanceof HTMLElement) ||
+              !(surface instanceof HTMLElement) ||
+              !(viewport instanceof HTMLElement)
+            ) {
+              return;
+            }
+            let sheetHeight = Math.max(1, surface.scrollHeight);
+            let measureFrame: number | undefined;
+            const measure = () => {
+              sheetHeight = Math.max(1, surface.scrollHeight);
+              actions.measure(sheetHeight);
+            };
+            const observer = new ResizeObserver(() => {
+              if (measureFrame !== undefined) return;
+              measureFrame = requestAnimationFrame(() => {
+                measureFrame = undefined;
+                measure();
+              });
+            });
             observer.observe(viewport);
             measure();
-            return { [Symbol.dispose]: () => observer.disconnect() };
+            const drag = mountDrag(handle, {
+              axis: "block",
+              bounds: () => ({ block: [0, sheetHeight] }),
+              threshold: 3,
+              maxVelocity: 3,
+              resistance: 1,
+              cursor: { idle: "grab", active: "grabbing" },
+              start: actions.startDragging,
+              change: actions.drag,
+              release: actions.releaseDragging,
+              cancel: actions.cancelDragging,
+            });
+            return {
+              [Symbol.dispose]() {
+                observer.disconnect();
+                if (measureFrame !== undefined) cancelAnimationFrame(measureFrame);
+                drag[Symbol.dispose]();
+              },
+            };
           },
           view({
             state,
@@ -305,7 +327,7 @@ const visualFeature = {
                     type="button"
                     aria-controls="family-drawer"
                     aria-haspopup="dialog"
-                    aria-expanded={state.phase === "open" || state.phase === "opening"}
+                    aria-expanded={state.open}
                     {...createPress(actions.open)}
                   >
                     Try it out
@@ -313,15 +335,6 @@ const visualFeature = {
                 </Page>
 
                 <Panel
-                  ref={(dialog) =>
-                    mountDialog(dialog, () =>
-                      state.phase === "closed"
-                        ? false
-                        : state.phase === "closing"
-                          ? "nonmodal"
-                          : "modal",
-                    )
-                  }
                   id="family-drawer"
                   aria-label="Wallet options"
                   onCancel={(event) => {
@@ -481,5 +494,8 @@ const visualFeature = {
 export default {
   metadata: { name: "Family Drawer" },
   features: { visual: visualFeature },
-  presentations: { family: familyPresentation, studio: studioPresentation },
+  presentations: {
+    family: { default: familyPresentation(familyTheme) },
+    studio: { default: studioPresentation(studioTheme) },
+  },
 } satisfies Application<App>;

@@ -10,11 +10,13 @@ import type {
   ComponentActionArgs,
   ComponentActions,
   ComponentName,
+  ComponentOwner,
   ComponentParameters,
   ComponentPartName,
   ComponentState,
   ComponentStateKinds,
 } from "../component";
+import type { Presentation as CorePresentation, PresentationPartReference } from "../presentation";
 
 type AnyRecord = Record<string, unknown>;
 type Empty = Record<never, never>;
@@ -116,11 +118,9 @@ type ValueRefOfKind<Values, Kind extends VisualValueKind> = Values[keyof Values]
 
 type TokenRefOfGroup<Tokens, Group extends VisualTokenGroup> =
   | VisualTokenRef<Group>
-  | (Tokens extends unknown
-      ? Group extends keyof Tokens
-        ? Tokens[Group] extends AnyRecord
-          ? Tokens[Group][keyof Tokens[Group]]
-          : never
+  | (Group extends keyof Tokens
+      ? NonNullable<Tokens[Group]> extends infer Values extends object
+        ? Values[keyof Values]
         : never
       : never);
 
@@ -705,6 +705,8 @@ export type MotionTargetVisual<Tokens = Empty, Values = Empty> = {
 };
 
 export type MotionVisual<Tokens = Empty, Values = Empty> = {
+  /** Stable identity is only needed when motion crosses structural Part boundaries. */
+  readonly identity?: string;
   readonly opacity?: MotionTargetVisual<Tokens, Values>["opacity"];
   readonly translation?: {
     readonly inline?: MotionTargetVisual<Tokens, Values>["inline"];
@@ -716,12 +718,14 @@ export type MotionVisual<Tokens = Empty, Values = Empty> = {
   readonly scaleBlock?: MotionTargetVisual<Tokens, Values>["scaleBlock"];
   readonly rotate?: MotionTargetVisual<Tokens, Values>["rotate"];
   readonly presence?: {
+    readonly visible?: boolean;
     readonly enter?: {
       readonly from: MotionTargetVisual<Tokens, Values>;
     };
     readonly exit?: {
       readonly to: MotionTargetVisual<Tokens, Values>;
     };
+    readonly transition?: MotionRef<Tokens> | "instant";
     readonly layout?: "preserve" | "pop";
   };
   readonly transition?: Partial<Record<"opacity" | "transform", MotionRef<Tokens>>>;
@@ -1097,3 +1101,136 @@ export type Presentation<
   Name extends VisualPresentationName<Spec>,
   TokenSet extends Tokens = PresentationTokens<Spec, Name>,
 > = PresentationFactory<Spec, Name, TokenSet>;
+
+export type WebPresentationContext = Readonly<{
+  allocated: Readonly<{
+    inlineSize: number;
+    blockSize: number;
+  }>;
+  preferences: Readonly<{
+    reducedMotion: boolean;
+    moreContrast: boolean;
+    forcedColors: boolean;
+    dark: boolean;
+  }>;
+  input: Readonly<{
+    hover: boolean;
+    finePointer: boolean;
+    coarsePointer: boolean;
+  }>;
+}>;
+
+export type WebImageResource = Readonly<{
+  kind: "image";
+  source: string;
+  density?: number;
+}>;
+
+export type WebSymbolResource = Readonly<{
+  kind: "symbol";
+  source: string;
+}>;
+
+export type WebShaderResource = Readonly<{
+  kind: "shader";
+  source: string;
+}>;
+
+export type WebPresentationResource = WebImageResource | WebSymbolResource | WebShaderResource;
+
+export type WebPresentationTheme = Tokens &
+  Readonly<{
+    resources?: Readonly<Record<string, WebPresentationResource>>;
+  }>;
+
+type WebThemeResource<Theme extends WebPresentationTheme> = NonNullable<
+  Theme["resources"]
+>[keyof NonNullable<Theme["resources"]>];
+
+export type WebRenderLayer<Theme extends WebPresentationTheme> = Readonly<{
+  id: string;
+  placement: "background" | "overlay";
+  visual?: VisualFragment<Theme>;
+  resource?: WebThemeResource<Theme>;
+  uniforms?: Readonly<Record<string, number | readonly number[]>>;
+}>;
+
+type WebPositionVisual<Theme extends WebPresentationTheme> = NonNullable<
+  LayoutVisual<Theme>["position"]
+> &
+  Readonly<{
+    anchor?: PresentationPartReference;
+  }>;
+
+export type WebMotionTarget<Theme extends WebPresentationTheme> = Readonly<{
+  target: number;
+  transition: "instant" | TokenRefOfGroup<Theme, "motion">;
+  velocity?: number;
+}>;
+
+export type WebMotionValue<Theme extends WebPresentationTheme> = number | WebMotionTarget<Theme>;
+
+export type WebMotionDeclaration<Theme extends WebPresentationTheme> = Readonly<{
+  identity?: string;
+  opacity?: WebMotionValue<Theme>;
+  translation?: Readonly<{
+    inline?: WebMotionValue<Theme>;
+    block?: WebMotionValue<Theme>;
+    depth?: WebMotionValue<Theme>;
+  }>;
+  scale?: WebMotionValue<Theme>;
+  scaleInline?: WebMotionValue<Theme>;
+  scaleBlock?: WebMotionValue<Theme>;
+  rotate?: WebMotionValue<Theme>;
+  radius?: WebMotionValue<Theme>;
+  layout?: "instant" | TokenRefOfGroup<Theme, "motion">;
+  presence?: Readonly<{
+    visible: boolean | "structure";
+    enter?: Readonly<{ from: MotionTargetVisual<Theme> }>;
+    exit?: Readonly<{ to: MotionTargetVisual<Theme> }>;
+    transition?: "instant" | TokenRefOfGroup<Theme, "motion">;
+    layout?: "preserve" | "pop";
+  }>;
+  reduceMotion?: "instant" | "crossfade";
+}>;
+
+type WebPresentationFragment<Theme extends WebPresentationTheme> = Omit<
+  VisualFragment<Theme>,
+  "layout" | "motion"
+> &
+  Readonly<{
+    layout?: Omit<LayoutVisual<Theme>, "position"> & {
+      readonly position?: WebPositionVisual<Theme>;
+    };
+    motion?: WebMotionDeclaration<Theme>;
+    resource?: WebThemeResource<Theme>;
+    layers?: readonly WebRenderLayer<Theme>[];
+  }>;
+
+export type WebPresentationCondition = "hovered" | "pressed" | "focusVisible" | "disabled";
+
+/** A target-local visual override driven by native web state. */
+export type WebPresentationConditionDeclaration<Theme extends WebPresentationTheme> =
+  WebPresentationFragment<Theme>;
+
+/** The complete semantic visual declaration understood by the web adapter. */
+export type WebPresentationDeclaration<Theme extends WebPresentationTheme> =
+  WebPresentationFragment<Theme> &
+    Readonly<{
+      conditions?: Readonly<
+        Partial<
+          Record<WebPresentationCondition, WebPresentationConditionDeclaration<Theme>>
+        >
+      >;
+    }>;
+
+export type WebPresentationLanguage<Theme extends WebPresentationTheme> = {
+  readonly Context: WebPresentationContext;
+  readonly Declaration: WebPresentationDeclaration<Theme>;
+};
+
+/** A web Presentation uses the generic outer grammar and the web declaration algebra. */
+export type WebPresentation<
+  Root extends ComponentOwner,
+  Theme extends WebPresentationTheme,
+> = CorePresentation<Root, WebPresentationLanguage<Theme>, Theme>;
