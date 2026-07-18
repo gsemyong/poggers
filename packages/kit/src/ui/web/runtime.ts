@@ -16,24 +16,6 @@ import {
   setActiveSub as alienSetActiveSub,
 } from "alien-signals";
 
-import type {
-  ActorOf,
-  App,
-  AppNavigation,
-  AppScreen,
-  AppSpec,
-  Client,
-  Submission,
-  CommandSpec,
-  JsonValue,
-  NavigationName,
-  NavigationParams,
-  ResourceSpec,
-  SyncMeta,
-} from "#kernel/app";
-import { connect as connectClient, type ConnectOpts } from "#substrate/client";
-import { scopeId } from "#substrate/protocol";
-import { submissionFrom } from "#substrate/submission";
 import type { Child } from "#ui/web/jsx-types";
 import {
   adoptSceneChildren,
@@ -45,96 +27,6 @@ import {
   type SceneElementRegistration,
 } from "#ui/web/scene";
 import { prefersReducedMotion, type VirtualCollectionGeometry } from "#ui/web/visual-runtime";
-
-type ResourceName<Spec extends AppSpec> = Extract<keyof Spec["Resources"], string>;
-
-type HookName<Name extends string> = `use${Capitalize<Name>}`;
-
-type ResourceFor<
-  Spec extends AppSpec,
-  Resource extends ResourceName<Spec>,
-> = Spec["Resources"][Resource] extends ResourceSpec ? Spec["Resources"][Resource] : never;
-
-type InputFor<Command> = Command extends {
-  Input: infer Input extends Record<string, unknown>;
-}
-  ? Input
-  : never;
-
-type ErrorFor<Command> = Command extends { Error: infer Error } ? Error : never;
-
-type ViewShape<Spec extends AppSpec, Resource extends ResourceName<Spec>> = {
-  readonly [View in keyof ResourceFor<Spec, Resource>["Views"]]: ResourceFor<
-    Spec,
-    Resource
-  >["Views"][View];
-};
-
-type CommandShape<Spec extends AppSpec, Resource extends ResourceName<Spec>> = {
-  [Command in keyof ResourceFor<Spec, Resource>["Commands"]]: (
-    input: ResourceFor<Spec, Resource>["Commands"][Command] extends CommandSpec
-      ? InputFor<ResourceFor<Spec, Resource>["Commands"][Command]>
-      : never,
-  ) => Submission<
-    ResourceFor<Spec, Resource>["Commands"][Command] extends CommandSpec
-      ? ErrorFor<ResourceFor<Spec, Resource>["Commands"][Command]>
-      : never
-  >;
-};
-
-type RawResourceHandle<Spec extends AppSpec, Resource extends ResourceName<Spec>> = {
-  [View in keyof ResourceFor<Spec, Resource>["Views"]]: ResourceFor<Spec, Resource>["Views"][View];
-} & {
-  [Command in keyof ResourceFor<Spec, Resource>["Commands"]]: (
-    input: ResourceFor<Spec, Resource>["Commands"][Command] extends CommandSpec
-      ? InputFor<ResourceFor<Spec, Resource>["Commands"][Command]>
-      : never,
-  ) => Submission<unknown>;
-} & {
-  readonly sync: SyncMeta;
-  setPresence?(value: unknown): void;
-  subscribe(fn: (scope: Record<string, unknown>) => void): () => void;
-};
-
-type NativePresenceShape<Spec extends AppSpec, Resource extends ResourceName<Spec>> =
-  ResourceFor<Spec, Resource> extends { Presence: infer Presence }
-    ? { setPresence(value: Presence): void }
-    : {};
-
-export type NativeResource<Spec extends AppSpec, Resource extends ResourceName<Spec>> = ViewShape<
-  Spec,
-  Resource
-> &
-  CommandShape<Spec, Resource> & {
-    readonly sync: SyncMeta;
-  } & NativePresenceShape<Spec, Resource>;
-
-export type NativeUIHooks<Spec extends AppSpec> = {
-  [Resource in ResourceName<Spec> as HookName<Resource>]: (
-    key: ResourceFor<Spec, Resource>["Key"],
-  ) => NativeResource<Spec, Resource>;
-} & {
-  useResource: <Resource extends ResourceName<Spec>>(
-    resource: Resource,
-    key: ResourceFor<Spec, Resource>["Key"],
-  ) => NativeResource<Spec, Resource>;
-};
-
-export type NativeAppApi<Spec extends AppSpec> = NativeUIHooks<Spec> & {
-  readonly screen: Signal<AppScreen<Spec>>;
-  readonly nav: AppNavigation<Spec>;
-  useScreen(): AppScreen<Spec>;
-};
-
-export type NativeAppRuntime<Spec extends AppSpec> = {
-  readonly api: NativeAppApi<Spec>;
-  start(connect?: ConnectOpts | (() => Promise<Client<Spec>>)): Promise<void>;
-  dispose(): void;
-};
-
-export type DefineUIProps<Spec extends AppSpec> = {
-  connect?: ConnectOpts | (() => Promise<Client<Spec>>);
-};
 
 export type Signal<T> = {
   (): T;
@@ -160,10 +52,21 @@ export type Props = Record<string, unknown> & {
 export type Component<P extends object = Record<string, never>> = (props: P) => Child;
 
 export type HotRenderState = {
+  focus?: Readonly<{
+    path: readonly number[];
+    selectionEnd?: number | null;
+    selectionStart?: number | null;
+    selectionDirection?: "backward" | "forward" | "none" | null;
+  }>;
   keyed?: Record<string, unknown>;
+  programs?: Record<string, Record<string, unknown>>;
   scroll?: Record<string, { left: number; top: number }>;
   values?: unknown[];
   mounted?: boolean;
+};
+
+export type RenderDisposer = (() => void) & {
+  capture(): HotRenderState;
 };
 
 type Owner = {
@@ -272,16 +175,6 @@ export function untrack<T>(fn: () => T): T {
   }
 }
 
-function runtimeEffect(fn: () => void | (() => void)): () => void {
-  const activeSub = alienGetActiveSub();
-  alienSetActiveSub(undefined);
-  try {
-    return alienEffect(fn);
-  } finally {
-    alienSetActiveSub(activeSub);
-  }
-}
-
 export function onMount(fn: () => void | (() => void)): void {
   if (currentLifecycleScope) {
     currentLifecycleScope.mounts.push(fn);
@@ -301,57 +194,10 @@ export function onCleanup(fn: () => void): void {
   registerCleanup(fn);
 }
 
-export function defineUI<Spec extends AppSpec, Props extends object = Record<string, never>>(
-  app: App<Spec>,
-  setup: (hooks: NativeUIHooks<Spec>) => (props: Props) => Child,
-) {
-  const runtime = createNativeRuntime(app);
-  const hooks = createNativeHooks(app, runtime);
-  const Inner = setup(hooks);
-
-  function DefinedUI(
-    { connect, ...props }: Props & DefineUIProps<Spec> = {} as Props & DefineUIProps<Spec>,
-  ) {
-    runtime.start(connect);
-    return Inner(props as Props);
-  }
-
-  Object.defineProperty(DefinedUI, "poggersUiRuntime", {
-    value: "native",
-    enumerable: false,
-  });
-
-  return DefinedUI;
-}
-
-export function createNativeAppRuntime<Spec extends AppSpec>(
-  app: App<Spec>,
-): NativeAppRuntime<Spec> {
-  const runtime = createNativeRuntime(app);
-  const hooks = createNativeHooks(app, runtime);
-  const navigation = createNavigation(app);
-  const api = {
-    ...hooks,
-    screen: navigation.screen,
-    nav: navigation.nav,
-    useScreen() {
-      return navigation.screen();
-    },
-  } as NativeAppApi<Spec>;
-
-  return {
-    api,
-    start: runtime.start,
-    dispose() {
-      navigation.dispose();
-      runtime.dispose();
-    },
-  };
-}
-
-export function render(child: Child, root: Element, hotState?: HotRenderState): () => void {
+export function render(child: Child, root: Element, hotState?: HotRenderState): RenderDisposer {
   const hotRefresh = Boolean(hotState?.mounted);
   const hotScroll = hotState?.scroll;
+  const hotFocus = hotState?.focus;
   if (hotState) hotState.mounted = true;
   const scene = new PresenceScene<Element>();
   const owner: Owner = {
@@ -368,9 +214,12 @@ export function render(child: Child, root: Element, hotState?: HotRenderState): 
     sceneSequence: 0,
   };
   const previousOwner = currentOwner;
+  const previousNodes = [...root.childNodes];
+  let mountedNodes: Node[] = [];
   currentOwner = owner;
   try {
-    root.replaceChildren(...toNodes(resolveChild(child)));
+    mountedNodes = toNodes(resolveChild(child));
+    root.replaceChildren(...mountedNodes);
     while (owner.mounts.length) {
       for (const mount of owner.mounts.splice(0)) {
         const cleanup = mount();
@@ -378,28 +227,85 @@ export function render(child: Child, root: Element, hotState?: HotRenderState): 
       }
     }
     if (hotRefresh && hotScroll) restoreHotScroll(root, hotScroll);
+    if (hotRefresh && hotFocus) restoreHotFocus(root, hotFocus);
+  } catch (error) {
+    owner.disposed = true;
+    for (const cleanup of owner.cleanups.splice(0).reverse()) cleanup();
+    owner.scene.dispose();
+    owner.mounts.length = 0;
+    root.replaceChildren(...previousNodes);
+    throw error;
   } finally {
     currentOwner = previousOwner;
   }
 
-  return () => {
+  const capture = () => {
+    const state = owner.hotState ?? {};
+    if (!owner.hotState) return state;
+    const captured = new Map(owner.signals.map((current) => [current, readHotSignal(current)]));
+    state.scroll = captureHotScroll(root);
+    state.focus = captureHotFocus(root);
+    state.values = owner.signals.map((current) => captured.get(current));
+    state.keyed = Object.fromEntries(
+      owner.signalKeys.flatMap((key, index) =>
+        key ? ([[key, captured.get(owner.signals[index]!)]] as const) : [],
+      ),
+    );
+    return state;
+  };
+  const dispose = () => {
     if (owner.disposed) return;
     owner.disposed = true;
-    if (owner.hotState) {
-      const captured = new Map(owner.signals.map((current) => [current, readHotSignal(current)]));
-      owner.hotState.scroll = captureHotScroll(root);
-      owner.hotState.values = owner.signals.map((current) => captured.get(current));
-      owner.hotState.keyed = Object.fromEntries(
-        owner.signalKeys.flatMap((key, index) =>
-          key ? ([[key, captured.get(owner.signals[index]!)]] as const) : [],
-        ),
-      );
-    }
-    for (const cleanup of owner.cleanups.splice(0)) cleanup();
+    capture();
+    for (const cleanup of owner.cleanups.splice(0).reverse()) cleanup();
     owner.scene.dispose();
     owner.mounts.length = 0;
-    root.replaceChildren();
+    for (const node of mountedNodes) {
+      if (node.parentNode === root) root.removeChild(node);
+    }
   };
+  return Object.assign(dispose, { capture });
+}
+
+function captureHotFocus(root: Element): HotRenderState["focus"] {
+  const active = root.ownerDocument?.activeElement;
+  if (!active || !root.contains(active)) return undefined;
+  const path: number[] = [];
+  for (let current: Element | null = active; current && current !== root;) {
+    const parent: Element | null = current.parentElement;
+    if (!parent) return undefined;
+    path.push([...parent.children].indexOf(current));
+    current = parent;
+  }
+  const input = active as HTMLInputElement | HTMLTextAreaElement;
+  return {
+    path: path.reverse(),
+    ...(typeof input.selectionStart === "number"
+      ? {
+          selectionStart: input.selectionStart,
+          selectionEnd: input.selectionEnd,
+          selectionDirection: input.selectionDirection,
+        }
+      : {}),
+  };
+}
+
+function restoreHotFocus(root: Element, focus: NonNullable<HotRenderState["focus"]>): void {
+  let current: Element = root;
+  for (const index of focus.path) {
+    const child = current.children.item(index);
+    if (!child) return;
+    current = child;
+  }
+  if (!(current instanceof HTMLElement)) return;
+  current.focus({ preventScroll: true });
+  if (typeof focus.selectionStart === "number" && "setSelectionRange" in current) {
+    (current as HTMLInputElement | HTMLTextAreaElement).setSelectionRange(
+      focus.selectionStart,
+      focus.selectionEnd ?? focus.selectionStart,
+      focus.selectionDirection ?? undefined,
+    );
+  }
 }
 
 function readHotSignal(current: Signal<unknown>): unknown {
@@ -740,7 +646,7 @@ function virtualFor<Items extends readonly unknown[]>(props: VirtualForProps<Ite
   }
   const readGeometry = virtualCollectionHosts.get(host);
   if (!readGeometry) {
-    throw new Error("The preset must define collection geometry for a virtual For host.");
+    throw new Error("The presentation must define collection geometry for a virtual For host.");
   }
 
   const space = document.createElement("div");
@@ -1103,7 +1009,8 @@ function virtualFor<Items extends readonly unknown[]>(props: VirtualForProps<Ite
 function requiredVirtualGeometry(
   geometry: VirtualCollectionGeometry | undefined,
 ): VirtualCollectionGeometry {
-  if (!geometry) throw new Error("The active preset does not define virtual collection geometry.");
+  if (!geometry)
+    throw new Error("The active presentation does not define virtual collection geometry.");
   return geometry;
 }
 
@@ -1744,6 +1651,7 @@ export function mountDialog(
   let programmaticCloses = 0;
   let browserMode: false | "modal" | "nonmodal" = false;
   let releaseScrollLock: (() => void) | undefined;
+  const restoring = isHotRefresh();
 
   const suppressProgrammaticClose = (event: Event) => {
     if (programmaticCloses === 0) return;
@@ -1800,6 +1708,12 @@ export function mountDialog(
       if (mode === "modal") element.showModal();
       else element.show();
     } catch {
+      if (mode === "modal" && restoring) {
+        releaseScrollLock ??= retainDocumentScrollLock(element.ownerDocument ?? document);
+        requestPresenceFrame(() => {
+          if (targetMode === mode && element.isConnected) show(mode);
+        });
+      }
       return;
     }
     browserMode = mode;
@@ -1854,9 +1768,12 @@ export function mountDialog(
         initialized = true;
         return;
       }
-      requestPresenceFrame(() => {
-        if (targetMode === mode && element.isConnected) show(mode);
-      });
+      if (restoring) show(mode);
+      else {
+        requestPresenceFrame(() => {
+          if (targetMode === mode && element.isConnected) show(mode);
+        });
+      }
       initialized = true;
       return;
     }
@@ -2105,359 +2022,6 @@ function createScopedNodes(readNodes: () => Child): ScopedNodes {
       for (const cleanup of scope.cleanups.splice(0)) cleanup();
     },
   };
-}
-
-type NativeRuntime<Spec extends AppSpec> = ReturnType<typeof createNativeRuntime<Spec>>;
-
-function createNativeRuntime<Spec extends AppSpec>(app: App<Spec>) {
-  let started = false;
-  let disposed = false;
-  let clientPromise: Promise<Client<Spec>> | null = null;
-  const client = runtimeSignal<Client<Spec> | null>(null);
-  const resources = new Map<string, NativeResourceState<Spec, ResourceName<Spec>>>();
-
-  function start(connect?: ConnectOpts | (() => Promise<Client<Spec>>)): Promise<void> {
-    if (disposed) return Promise.reject(new Error("Cannot start a disposed native app runtime."));
-    if (started) return clientPromise?.then(() => undefined) ?? Promise.resolve();
-    started = true;
-    if (!connect) return Promise.resolve();
-
-    clientPromise = Promise.resolve(
-      typeof connect === "function" ? connect() : connectClient(app, connect),
-    )
-      .then((nextClient) => {
-        if (disposed) {
-          nextClient.dispose();
-          return nextClient;
-        }
-        client(nextClient);
-        return nextClient;
-      })
-      .catch((error) => {
-        for (const resource of resources.values()) {
-          resource.sync({ ...resource.sync(), syncing: false, stale: true, error: String(error) });
-        }
-        throw error;
-      });
-    return clientPromise.then(() => undefined);
-  }
-
-  function resource<Resource extends ResourceName<Spec>>(
-    resourceName: Resource,
-    key: ResourceFor<Spec, Resource>["Key"],
-  ) {
-    if (disposed) throw new Error("Cannot access a disposed native app runtime.");
-    const id = scopeId(resourceName, key as JsonValue);
-    const existing = resources.get(id);
-    if (existing) return existing.handle as NativeResource<Spec, Resource>;
-
-    const state = createNativeResourceState(app, client, clientPromise, resourceName, key);
-    resources.set(id, state as NativeResourceState<Spec, ResourceName<Spec>>);
-    return state.handle;
-  }
-
-  function dispose() {
-    if (disposed) return;
-    disposed = true;
-    for (const resource of resources.values()) resource.dispose();
-    resources.clear();
-    const readyClient = client();
-    client(null);
-    readyClient?.dispose();
-    clientPromise = null;
-  }
-
-  return { start, resource, dispose };
-}
-
-type NativeResourceState<Spec extends AppSpec, Resource extends ResourceName<Spec>> = {
-  handle: NativeResource<Spec, Resource>;
-  sync: Signal<SyncMeta>;
-  dispose(): void;
-};
-
-function createNativeResourceState<Spec extends AppSpec, Resource extends ResourceName<Spec>>(
-  app: App<Spec>,
-  client: Signal<Client<Spec> | null>,
-  clientPromise: Promise<Client<Spec>> | null,
-  resource: Resource,
-  key: ResourceFor<Spec, Resource>["Key"],
-): NativeResourceState<Spec, Resource> {
-  const resourceDef = app.def.resources[resource];
-  const actor = { id: "local" } as ActorOf<Spec>;
-  const localState = app.createState(resource);
-  const views: Record<string, Signal<unknown>> = {};
-  const viewValues: Record<string, unknown> = {};
-  const sync = runtimeSignal<SyncMeta>({ cursor: 0, syncing: true, stale: true, error: null });
-  const syncValue = reactiveValue(() => sync());
-
-  for (const viewName of Object.keys(resourceDef.views ?? {})) {
-    const initialView = cloneViewValue(readLocalView(app, resource, key, localState, viewName));
-    views[viewName] = runtimeSignal(initialView);
-    if (isReactiveObject(initialView)) {
-      viewValues[viewName] = reactiveValue(() => views[viewName]!());
-    }
-  }
-
-  const commands: Record<string, (...args: unknown[]) => Submission<string>> = {};
-  for (const commandName of Object.keys(resourceDef.commands ?? {})) {
-    commands[commandName] = (...args: unknown[]) => {
-      const result = (async () => {
-        applyLocalCommand(app, resource, key, localState, actor, commandName, args, views);
-        const readyClient =
-          client() ?? (clientPromise ? await clientPromise.catch(() => null) : null);
-        const remote = readyClient?.[resource]?.(key as never) as RawResourceHandle<
-          Spec,
-          Resource
-        > | null;
-        const command = remote?.[commandName as keyof typeof remote] as
-          | ((...args: unknown[]) => Submission<string>)
-          | undefined;
-        if (typeof command !== "function") return { ok: true } as const;
-        return command(...args);
-      })();
-      return submissionFrom<string>(result);
-    };
-  }
-
-  const handle = new Proxy(Object.create(null), {
-    get(_target, prop: string) {
-      if (prop === "sync") return syncValue;
-      if (prop === "setPresence" && Object.prototype.hasOwnProperty.call(resourceDef, "presence")) {
-        return (value: unknown) => {
-          const publish = (readyClient: Client<Spec> | null) => {
-            const remote = readyClient?.[resource]?.(key as never) as
-              | RawResourceHandle<Spec, Resource>
-              | undefined;
-            remote?.setPresence?.(value);
-          };
-          const readyClient = client();
-          if (readyClient) publish(readyClient);
-          else if (clientPromise) void clientPromise.then(publish, () => undefined);
-        };
-      }
-      const command = commands[prop];
-      if (command) return command;
-      if (prop in viewValues) return viewValues[prop];
-      const view = views[prop];
-      if (view) return view();
-      return undefined;
-    },
-  }) as NativeResource<Spec, Resource>;
-
-  const dispose = runtimeEffect(() => {
-    const readyClient = client();
-    if (!readyClient) return;
-
-    const remote = readyClient[resource]?.(key as never) as RawResourceHandle<Spec, Resource>;
-    if (!remote) return;
-
-    const update = () => {
-      for (const viewName of Object.keys(views)) {
-        views[viewName]!(cloneViewValue(remote[viewName as keyof typeof remote]));
-      }
-      sync(remote.sync);
-    };
-
-    update();
-    return remote.subscribe(update);
-  });
-
-  return { handle, sync, dispose };
-}
-
-function createNativeHooks<Spec extends AppSpec>(
-  app: App<Spec>,
-  runtime: NativeRuntime<Spec>,
-): NativeUIHooks<Spec> {
-  const hooks: Record<string, unknown> = {
-    useResource: runtime.resource,
-  };
-
-  for (const resource of Object.keys(app.def.resources)) {
-    hooks[`use${capitalize(resource)}`] = (key: JsonValue) =>
-      runtime.resource(resource as ResourceName<Spec>, key as never);
-  }
-
-  return hooks as NativeUIHooks<Spec>;
-}
-
-function createNavigation<Spec extends AppSpec>(app: App<Spec>) {
-  const entries = Object.entries((app.def.navigation ?? { home: "/" }) as Record<string, string>);
-  const fallback = entries[0] ?? ["home", "/"];
-  const screen = runtimeSignal<AppScreen<Spec>>(parseScreen());
-  const nav: Record<string, unknown> = {};
-
-  for (const [name, pattern] of entries) {
-    nav[name] = (params: Record<string, unknown> = {}) => {
-      const path = pathFor(pattern, params);
-      if (typeof history !== "undefined") {
-        history.pushState({ poggersScreen: name }, "", path);
-      }
-      screen({
-        name,
-        params: params as NavigationParams<Spec, NavigationName<Spec>>,
-      } as AppScreen<Spec>);
-    };
-  }
-
-  const handlePopState = () => {
-    screen(parseScreen());
-  };
-  if (typeof addEventListener !== "undefined") {
-    addEventListener("popstate", handlePopState);
-  }
-
-  const dispose = () => {
-    if (typeof removeEventListener !== "undefined") {
-      removeEventListener("popstate", handlePopState);
-    }
-  };
-
-  function parseScreen(): AppScreen<Spec> {
-    const pathname = typeof location === "undefined" ? "/" : location.pathname;
-    for (const [name, pattern] of entries) {
-      const params = matchPath(pattern, pathname);
-      if (params) {
-        return {
-          name,
-          params,
-        } as AppScreen<Spec>;
-      }
-    }
-    return {
-      name: fallback[0],
-      params: {},
-    } as AppScreen<Spec>;
-  }
-
-  return {
-    screen,
-    nav: nav as AppNavigation<Spec>,
-    dispose,
-  };
-}
-
-function pathFor(pattern: string, params: Record<string, unknown>): string {
-  return pattern.replace(/:([A-Za-z0-9_]+)/g, (_, name: string) => {
-    const value = params[name];
-    if (value == null) {
-      throw new Error(`Missing navigation param "${name}" for path "${pattern}".`);
-    }
-    return encodeURIComponent(String(value));
-  });
-}
-
-function matchPath(pattern: string, pathname: string): Record<string, string> | null {
-  const patternParts = splitPath(pattern);
-  const pathParts = splitPath(pathname);
-  if (patternParts.length !== pathParts.length) return null;
-
-  const params: Record<string, string> = {};
-  for (let index = 0; index < patternParts.length; index++) {
-    const patternPart = patternParts[index]!;
-    const pathPart = pathParts[index]!;
-    if (patternPart.startsWith(":")) {
-      params[patternPart.slice(1)] = decodeURIComponent(pathPart);
-      continue;
-    }
-    if (patternPart !== pathPart) return null;
-  }
-  return params;
-}
-
-function splitPath(path: string): string[] {
-  return path.replace(/\/+$/g, "").split("/").filter(Boolean);
-}
-
-function applyLocalCommand<Spec extends AppSpec, Resource extends ResourceName<Spec>>(
-  app: App<Spec>,
-  resource: Resource,
-  key: ResourceFor<Spec, Resource>["Key"],
-  state: unknown,
-  actor: ActorOf<Spec>,
-  command: string,
-  args: unknown[],
-  views: Record<string, Signal<unknown>>,
-) {
-  const events: Array<{
-    id: string;
-    seq: number;
-    at: number;
-    actor: ActorOf<Spec>;
-    name: string;
-    payload: unknown;
-  }> = [];
-  let commandError: { error: string; data?: unknown } | null = null;
-
-  app.runCommand(
-    resource,
-    state,
-    actor,
-    key,
-    command,
-    args,
-    (event) => events.push(event),
-    (error, data) => {
-      commandError = { error, data };
-    },
-  );
-
-  if (commandError) return;
-
-  for (const event of events) {
-    app.applyEvent(resource, state as never, event, app.def.version);
-  }
-
-  for (const viewName of Object.keys(views)) {
-    views[viewName]!(cloneViewValue(readLocalView(app, resource, key, state, viewName)));
-  }
-}
-
-function cloneViewValue<T>(value: T): T {
-  if (value == null || typeof value !== "object") return value;
-  try {
-    return structuredClone(value);
-  } catch {
-    if (Array.isArray(value)) return value.slice() as T;
-    return { ...(value as Record<string, unknown>) } as T;
-  }
-}
-
-function isReactiveObject(value: unknown): value is object {
-  return value != null && typeof value === "object";
-}
-
-function readLocalView<Spec extends AppSpec, Resource extends ResourceName<Spec>>(
-  app: App<Spec>,
-  resource: Resource,
-  key: ResourceFor<Spec, Resource>["Key"],
-  state: unknown,
-  viewName: string,
-) {
-  const view = (
-    app.def.resources[resource].views as unknown as
-      | Record<
-          string,
-          (input: {
-            state: unknown;
-            actor: ActorOf<Spec> | null;
-            sessions: readonly unknown[];
-            key: ResourceFor<Spec, Resource>["Key"];
-          }) => unknown
-        >
-      | undefined
-  )?.[viewName];
-  return view?.({
-    state,
-    actor: null,
-    sessions: [],
-    key,
-  });
-}
-
-function capitalize(value: string): string {
-  return value.length === 0 ? value : value[0]!.toUpperCase() + value.slice(1);
 }
 
 export type {

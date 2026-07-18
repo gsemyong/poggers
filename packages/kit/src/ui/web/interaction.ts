@@ -1,6 +1,6 @@
 import { mountDialog as mountRetainedDialog } from "#ui/web/runtime";
 
-export { type DragRelease } from "#ui/web/drag";
+export { type DragRelease, type DragSample } from "#ui/web/drag";
 
 export type PressBindings = {
   readonly onPointerDown: (event: PointerEvent) => void;

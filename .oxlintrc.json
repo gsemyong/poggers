@@ -14,63 +14,9 @@
   },
   "overrides": [
     {
-      "files": ["packages/kit/src/**/*.{ts,tsx}", "packages/kit/scripts/**/*.ts"],
-      "rules": {
-        "import/no-cycle": ["error", { "ignoreTypes": false }]
-      }
-    },
-    {
-      "files": ["packages/kit/src/kernel/**/*.{ts,tsx}"],
-      "rules": {
-        "no-restricted-imports": [
-          "error",
-          {
-            "patterns": [
-              "#host/*",
-              "#substrate/*",
-              "#testing/*",
-              "#tooling/*",
-              "#ui/*",
-              "!#ui/web/jsx-types"
-            ]
-          }
-        ]
-      }
-    },
-    {
-      "files": ["packages/kit/src/substrate/**/*.{ts,tsx}"],
-      "rules": {
-        "no-restricted-imports": [
-          "error",
-          { "patterns": ["#host/*", "#testing/*", "#tooling/*", "#ui/*"] }
-        ]
-      }
-    },
-    {
       "files": ["packages/kit/src/ui/**/*.{ts,tsx}"],
       "rules": {
-        "no-restricted-imports": ["error", { "patterns": ["#host/*", "#testing/*", "#tooling/*"] }]
-      }
-    },
-    {
-      "files": ["packages/kit/src/host/**/*.{ts,tsx}"],
-      "rules": {
-        "no-restricted-imports": ["error", { "patterns": ["#testing/*", "#tooling/*"] }]
-      }
-    },
-    {
-      "files": ["packages/kit/src/testing/**/*.{ts,tsx}"],
-      "rules": {
-        "no-restricted-imports": [
-          "error",
-          { "patterns": ["#host/*", "#testing/*", "#tooling/*", "#ui/*"] }
-        ]
-      }
-    },
-    {
-      "files": ["packages/kit/src/**/*.spec.{ts,tsx}", "packages/kit/src/**/*.typecheck.{ts,tsx}"],
-      "rules": {
-        "no-restricted-imports": "off"
+        "no-restricted-imports": ["error", { "patterns": ["**/tooling/**"] }]
       }
     }
   ],

@@ -1,31 +1,37 @@
 # Poggers
 
-Poggers is a batteries-included TypeScript framework for local-first
-applications. The repository contains one framework package and five maintained
-applications.
+Poggers is a small TypeScript product language and fine-grained UI framework.
+Applications compose reusable Features into Runtime-tagged Programs with
+explicit Capabilities, platform Components, and complete Presentations. A
+Process is one running instance of a Program, not an authored state container.
 
 ## Develop
 
 ```sh
-bun install
-bun run dev:chat
-bun run dev:site
-bun run dev:visual-lab
+nub install --frozen-lockfile
+nub run dev:chat
+nub run dev:visual-lab
 ```
 
 Run the complete repository gate with:
 
 ```sh
-bun run check
-bun run build
+nub run check
+nub run build
 ```
 
-The framework package is `@poggers/kit`. Create an application with
-`bunx @poggers/kit create`.
+The framework package is `@poggers/kit`. Create an application with:
+
+```sh
+nub x @poggers/kit create my-app
+```
+
+The generated project contains one `src/app.tsx`, the complete TypeScript and
+lint configuration, and no generated declaration files.
 
 ## Documentation
 
-- [Architecture](docs/architecture.md): product vocabulary, source ownership,
-  public boundaries, substrate semantics, and verification policy.
-- [Component API](docs/component-api.md): the normative State, Actions,
-  hierarchy, task, Preset, and lifecycle contract.
+- [Architecture](docs/architecture.md) defines the maintained product model,
+  ownership boundaries, package surface, and verification policy.
+- [Portable runtime plan](docs/portable-product-runtime-plan.md) records the
+  active implementation gates and evidence.

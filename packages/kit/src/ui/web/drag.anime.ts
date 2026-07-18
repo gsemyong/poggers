@@ -16,7 +16,6 @@ export type AnimeDraggable = {
   readonly velocity: number;
   setX(value: number, muteCallbacks?: boolean): unknown;
   setY(value: number, muteCallbacks?: boolean): unknown;
-  update(): unknown;
   stop(): unknown;
   refresh(): unknown;
   revert(): unknown;
@@ -48,9 +47,11 @@ export function createAnimeDragDriver(
       let previousInline = 0;
       let previousBlock = 0;
       let latest = emptyDragSample();
-      const bounds = () => normalizedDragBounds(options.bounds());
+      let currentBounds = normalizedDragBounds(options.bounds());
+      const refreshBounds = () => {
+        currentBounds = normalizedDragBounds(options.bounds());
+      };
       const sample = (draggable: AnimeDraggable): DragSample => {
-        const currentBounds = bounds();
         const inline = clamp(draggable.x, ...currentBounds.inline);
         const block = clamp(draggable.y, ...currentBounds.block);
         const velocityInline = Math.cos(draggable.angle) * draggable.velocity;
@@ -83,11 +84,11 @@ export function createAnimeDragDriver(
         x:
           options.axis === "block"
             ? false
-            : { modifier: (value) => clamp(value, ...bounds().inline) },
+            : { modifier: (value) => clamp(value, ...currentBounds.inline) },
         y:
           options.axis === "inline"
             ? false
-            : { modifier: (value) => clamp(value, ...bounds().block) },
+            : { modifier: (value) => clamp(value, ...currentBounds.block) },
         dragThreshold: Math.max(0, finiteOr(options.threshold, 3)),
         maxVelocity: Math.max(0, finiteOr(options.maxVelocity, 3)),
         dragSpeed: Math.max(0, finiteOr(options.resistance, 1)),
@@ -100,18 +101,18 @@ export function createAnimeDragDriver(
               },
         onGrab(instance) {
           if (disposed) return;
+          refreshBounds();
           active = true;
           previousInline = 0;
           previousBlock = 0;
           if (options.axis !== "block") instance.setX(0, true);
           if (options.axis !== "inline") instance.setY(0, true);
           latest = emptyDragSample();
-          options.change(latest);
           options.start?.();
+          options.change(latest);
         },
         onDrag(instance) {
           if (!active || disposed) return;
-          instance.update();
           options.change(sample(instance));
         },
         onRelease(instance) {
@@ -131,7 +132,9 @@ export function createAnimeDragDriver(
           options.cancel?.();
         },
         refresh() {
-          if (!disposed) draggable.refresh();
+          if (disposed) return;
+          refreshBounds();
+          draggable.refresh();
         },
         dispose() {
           if (disposed) return;

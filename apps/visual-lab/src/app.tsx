@@ -1,14 +1,15 @@
-import type { AppDef as AppDefinition } from "@poggers/kit";
+import type { Application, Feature, Program, WebMain } from "@poggers/kit";
 import {
   Show,
   createPress,
   type DragRelease,
+  type DragSample,
   mountDialog,
+  type PresentationControl,
   type VisualValue,
-  type Writable,
 } from "@poggers/kit/ui";
-import { familyPreset } from "src/presets/family";
-import { studioPreset } from "src/presets/studio";
+import { familyPresentation } from "src/presentations/family";
+import { studioPresentation } from "src/presentations/studio";
 
 const svg = (markup: string) => `data:image/svg+xml,${encodeURIComponent(markup)}`;
 
@@ -46,484 +47,439 @@ const familyIcons = {
 } as const;
 
 export type App = {
-  Resources: {};
-  Components: {
-    PresetSwitch: {
-      State: { preset: "family" | "studio"; label: "Family" | "Studio" };
-      Phases: "active" | "switching";
-      Tasks: {
-        switch: { Input: "family" | "studio"; Output: void; Error: never };
-      };
-      Actions: { toggle(): void };
-      Parts: { Root: "button" };
-    };
-    Drawer: {
-      Context: { sheetHeight: number };
-      Phases:
-        | "closed"
-        | "open"
-        | "open.view"
-        | "open.view.default"
-        | "open.view.key"
-        | "open.view.phrase"
-        | "open.view.remove"
-        | "open.gesture"
-        | "open.gesture.idle"
-        | "open.gesture.dragging"
-        | "closing"
-        | "closing.default"
-        | "closing.key"
-        | "closing.phrase"
-        | "closing.remove";
-      State: {
-        opened: boolean;
-        dragging: boolean;
-        dialog: false | "modal" | "nonmodal";
-        defaultVisible: boolean;
-        keyVisible: boolean;
-        phraseVisible: boolean;
-        removeVisible: boolean;
-        dragOffset: Writable<VisualValue<"length">>;
-        dragVelocity: Writable<number>;
-        dragProgress: Writable<VisualValue<"progress">>;
-        sheetHeight: VisualValue<"size">;
-      };
-      Actions: {
-        open(): void;
-        close(): void;
-        toggle(): void;
-        back(): void;
-        showKey(): void;
-        showPhrase(): void;
-        showRemove(): void;
-        startDragging(): void;
-        releaseDragging(release: DragRelease): void;
-        cancelDragging(): void;
-        measure(height: number): void;
-      };
-      Parameters: {
-        dismissDistance: number;
-        dismissVelocity: number;
-      };
-      Parts: {
-        Root: "main";
-        Page: "section";
-        Trigger: "button";
-        Panel: "dialog";
-        Backdrop: "div";
-        Surface: "section";
-        Handle: "div";
-        HandleBar: "div";
-        Close: "button";
-        CloseIcon: "img";
-        Viewport: "div";
-        DefaultView: "section";
-        DefaultHeader: "header";
-        DefaultTitle: "h2";
-        OptionList: "div";
-        OptionButton: "button";
-        DangerOption: "button";
-        OptionIcon: "img";
-        DetailView: "section";
-        DetailBody: "div";
-        ViewHeader: "header";
-        ViewIcon: "img";
-        ViewTitle: "h2";
-        ViewDescription: "p";
-        AdviceList: "ul";
-        AdviceItem: "li";
-        AdviceIcon: "img";
-        Actions: "div";
-        DangerActions: "div";
-        SecondaryButton: "button";
-        PrimaryButton: "button";
-        DangerButton: "button";
-        PrimaryIcon: "img";
-      };
-    };
-  };
-  Styles: { Presets: "family" | "studio" };
+  Features: { visual: VisualFeature };
+  Presentations: "family" | "studio";
 };
 
-export default {
-  version: 1,
-  app: { name: "Family Drawer" },
-  components: {
-    PresetSwitch: {
-      state: ({ appearance }) => ({
-        preset: appearance.preset,
-        label: appearance.preset === "family" ? "Studio" : "Family",
-      }),
-      machine: {
-        initial: "active",
-        phases: {
-          active: { on: { toggle: "switching" } },
-          switching: {
-            task: { run: "switch", input: ({ state }) => state.preset, done: "active" },
-          },
-        },
-        tasks: {
-          switch({ setAppearance, value }) {
-            setAppearance({
-              preset: value === "family" ? "studio" : "family",
-              theme: "default",
-            });
-          },
-        },
-      },
-      view({ state, actions, parts: { Root } }) {
-        return (
-          <Root type="button" {...createPress(actions.toggle)}>
-            {state.label}
-          </Root>
-        );
-      },
-    },
-    Drawer: {
-      machine: {
-        context: { sheetHeight: 1 },
-        initial: "closed",
-        on: {
-          measure: {
-            update: (_scope, height) => ({ sheetHeight: Math.max(1, height) }),
-          },
-        },
-        phases: {
-          closed: { on: { open: "open", toggle: "open" } },
-          open: {
-            type: "parallel",
-            phases: {
-              view: {
-                initial: "open.view.default",
-                phases: {
-                  default: {
-                    on: {
-                      showKey: "open.view.key",
-                      showPhrase: "open.view.phrase",
-                      showRemove: "open.view.remove",
-                      close: "closing.default",
-                      toggle: "closing.default",
-                      releaseDragging: [
-                        {
-                          allow: ({ parameters }, release) =>
-                            release.progress >= parameters.dismissDistance ||
-                            release.velocity >= parameters.dismissVelocity,
-                          target: "closing.default",
-                        },
-                        {},
-                      ],
-                    },
-                  },
-                  key: {
-                    on: {
-                      back: "open.view.default",
-                      close: "closing.key",
-                      toggle: "closing.key",
-                      releaseDragging: [
-                        {
-                          allow: ({ parameters }, release) =>
-                            release.progress >= parameters.dismissDistance ||
-                            release.velocity >= parameters.dismissVelocity,
-                          target: "closing.key",
-                        },
-                        {},
-                      ],
-                    },
-                  },
-                  phrase: {
-                    on: {
-                      back: "open.view.default",
-                      close: "closing.phrase",
-                      toggle: "closing.phrase",
-                      releaseDragging: [
-                        {
-                          allow: ({ parameters }, release) =>
-                            release.progress >= parameters.dismissDistance ||
-                            release.velocity >= parameters.dismissVelocity,
-                          target: "closing.phrase",
-                        },
-                        {},
-                      ],
-                    },
-                  },
-                  remove: {
-                    on: {
-                      back: "open.view.default",
-                      close: "closing.remove",
-                      toggle: "closing.remove",
-                      releaseDragging: [
-                        {
-                          allow: ({ parameters }, release) =>
-                            release.progress >= parameters.dismissDistance ||
-                            release.velocity >= parameters.dismissVelocity,
-                          target: "closing.remove",
-                        },
-                        {},
-                      ],
-                    },
-                  },
-                },
-              },
-              gesture: {
-                initial: "open.gesture.idle",
-                phases: {
-                  idle: { on: { startDragging: "open.gesture.dragging" } },
-                  dragging: {
-                    on: {
-                      releaseDragging: "open.gesture.idle",
-                      cancelDragging: "open.gesture.idle",
-                    },
-                  },
-                },
-              },
+type VisualFeature = {
+  Programs: {
+    browser: Program<
+      WebMain,
+      {
+        Requires: { presentation: PresentationControl<App> };
+        Components: {
+          PresentationSwitch: {
+            State: {
+              presentation: "family" | "studio";
+              label: "Family" | "Studio";
+            };
+            Actions: { toggle(): void };
+            Parts: { Root: "button" };
+          };
+          Drawer: {
+            State: {
+              phase: "closed" | "opening" | "open" | "closing";
+              view: "default" | "key" | "phrase" | "remove";
+              dragging: boolean;
+              dragOffset: VisualValue<"length">;
+              dragVelocity: number;
+              dragProgress: VisualValue<"progress">;
+              sheetHeight: VisualValue<"size">;
+            };
+            Actions: {
+              open(): void;
+              close(): void;
+              toggle(): void;
+              back(): void;
+              showKey(): void;
+              showPhrase(): void;
+              showRemove(): void;
+              startDragging(): void;
+              drag(sample: DragSample): void;
+              releaseDragging(release: DragRelease): void;
+              cancelDragging(): void;
+              measure(height: number): void;
+              finishOpening(): void;
+              finishClosing(): void;
+            };
+            Parameters: {
+              dismissDistance: number;
+              dismissVelocity: number;
+            };
+            Parts: {
+              Root: "main";
+              Page: "section";
+              Trigger: "button";
+              Panel: "dialog";
+              Backdrop: "div";
+              Surface: "section";
+              Handle: "div";
+              HandleBar: "div";
+              Close: "button";
+              CloseIcon: "img";
+              Viewport: "div";
+              DefaultView: "section";
+              DefaultHeader: "header";
+              DefaultTitle: "h2";
+              OptionList: "div";
+              OptionButton: "button";
+              DangerOption: "button";
+              OptionIcon: "img";
+              DetailView: "section";
+              DetailBody: "div";
+              ViewHeader: "header";
+              ViewIcon: "img";
+              ViewTitle: "h2";
+              ViewDescription: "p";
+              AdviceList: "ul";
+              AdviceItem: "li";
+              AdviceIcon: "img";
+              Actions: "div";
+              DangerActions: "div";
+              SecondaryButton: "button";
+              PrimaryButton: "button";
+              DangerButton: "button";
+              PrimaryIcon: "img";
+            };
+          };
+        };
+      }
+    >;
+  };
+};
+
+const visualFeature = {
+  programs: {
+    browser: {
+      components: {
+        PresentationSwitch: {
+          state: ({ presentation }) => ({
+            presentation: presentation.presentation,
+            label: presentation.presentation === "family" ? "Studio" : "Family",
+          }),
+          actions: {
+            toggle({ state, capabilities }) {
+              const presentation = state.presentation === "family" ? "studio" : "family";
+              state.presentation = presentation;
+              state.label = presentation === "family" ? "Studio" : "Family";
+              capabilities.presentation.select({ presentation, theme: "default" });
             },
           },
-          closing: {
-            initial: "closing.default",
-            settle: { phase: "exit", done: "closed", cancelled: "open" },
-            on: { open: "open", toggle: "open" },
-            phases: { default: {}, key: {}, phrase: {}, remove: {} },
+          view({ state, actions, parts: { Root } }) {
+            return (
+              <Root type="button" {...createPress(actions.toggle)}>
+                {state.label}
+              </Root>
+            );
+          },
+        },
+        Drawer: {
+          state: {
+            phase: "closed",
+            view: "default",
+            dragging: false,
+            dragOffset: 0,
+            dragVelocity: 0,
+            dragProgress: 0,
+            sheetHeight: 1,
+          },
+          actions: {
+            open({ state }) {
+              if (state.phase === "open" || state.phase === "opening") return;
+              state.phase = "opening";
+              state.view = "default";
+            },
+            close({ state }) {
+              if (state.phase === "closed" || state.phase === "closing") return;
+              state.dragging = false;
+              state.phase = "closing";
+            },
+            toggle({ state }) {
+              if (state.phase === "closed" || state.phase === "closing") {
+                state.phase = "opening";
+                state.view = "default";
+              } else {
+                state.dragging = false;
+                state.phase = "closing";
+              }
+            },
+            back({ state }) {
+              state.view = "default";
+            },
+            showKey({ state }) {
+              state.view = "key";
+            },
+            showPhrase({ state }) {
+              state.view = "phrase";
+            },
+            showRemove({ state }) {
+              state.view = "remove";
+            },
+            startDragging({ state }) {
+              state.dragging = true;
+            },
+            drag({ state }, sample) {
+              state.dragOffset = sample.block;
+              state.dragVelocity = sample.velocityBlock;
+              state.dragProgress = sample.progressBlock;
+            },
+            releaseDragging({ state, parameters }, release) {
+              state.dragging = false;
+              state.dragVelocity = release.velocity;
+              if (
+                release.progress >= parameters.dismissDistance ||
+                release.velocity >= parameters.dismissVelocity
+              ) {
+                state.phase = "closing";
+              } else {
+                state.dragOffset = 0;
+                state.dragProgress = 0;
+              }
+            },
+            cancelDragging({ state }) {
+              state.dragging = false;
+              state.dragOffset = 0;
+              state.dragVelocity = 0;
+              state.dragProgress = 0;
+            },
+            measure({ state }, height) {
+              state.sheetHeight = Math.max(1, height);
+            },
+            finishOpening({ state }) {
+              if (state.phase === "opening") state.phase = "open";
+            },
+            finishClosing({ state }) {
+              if (state.phase !== "closing") return;
+              state.phase = "closed";
+              state.dragging = false;
+              state.dragOffset = 0;
+              state.dragVelocity = 0;
+              state.dragProgress = 0;
+            },
+          },
+          start({ actions, parts: { Surface, Viewport } }) {
+            const surface = Surface.element;
+            const viewport = Viewport.element;
+            if (!(surface instanceof HTMLElement) || !(viewport instanceof HTMLElement)) return;
+            const measure = () => actions.measure(surface.scrollHeight);
+            const observer = new ResizeObserver(measure);
+            observer.observe(viewport);
+            measure();
+            return { [Symbol.dispose]: () => observer.disconnect() };
+          },
+          view({
+            state,
+            actions,
+            components: { PresentationSwitch },
+            parts: {
+              Root,
+              Page,
+              Trigger,
+              Panel,
+              Backdrop,
+              Surface,
+              Handle,
+              HandleBar,
+              Close,
+              CloseIcon,
+              Viewport,
+              DefaultView,
+              DefaultHeader,
+              DefaultTitle,
+              OptionList,
+              OptionButton,
+              DangerOption,
+              OptionIcon,
+              DetailView,
+              DetailBody,
+              ViewHeader,
+              ViewIcon,
+              ViewTitle,
+              ViewDescription,
+              AdviceList,
+              AdviceItem,
+              AdviceIcon,
+              Actions,
+              DangerActions,
+              SecondaryButton,
+              PrimaryButton,
+              DangerButton,
+              PrimaryIcon,
+            },
+          }) {
+            return (
+              <Root>
+                <Page>
+                  <PresentationSwitch />
+                  <Trigger
+                    type="button"
+                    aria-controls="family-drawer"
+                    aria-haspopup="dialog"
+                    aria-expanded={state.phase === "open" || state.phase === "opening"}
+                    {...createPress(actions.open)}
+                  >
+                    Try it out
+                  </Trigger>
+                </Page>
+
+                <Panel
+                  ref={(dialog) =>
+                    mountDialog(dialog, () =>
+                      state.phase === "closed"
+                        ? false
+                        : state.phase === "closing"
+                          ? "nonmodal"
+                          : "modal",
+                    )
+                  }
+                  id="family-drawer"
+                  aria-label="Wallet options"
+                  onCancel={(event) => {
+                    event.preventDefault();
+                    actions.close();
+                  }}
+                >
+                  <Backdrop aria-hidden onPointerDown={actions.close} />
+                  <Surface>
+                    <Handle aria-hidden>
+                      <HandleBar />
+                    </Handle>
+                    <Close
+                      autofocus
+                      type="button"
+                      aria-label="Close drawer"
+                      {...createPress(actions.close)}
+                    >
+                      <CloseIcon src={familyIcons.close} alt="" aria-hidden />
+                    </Close>
+
+                    <Viewport>
+                      <Show when={state.view === "default"}>
+                        <DefaultView>
+                          <DefaultHeader>
+                            <DefaultTitle>Options</DefaultTitle>
+                          </DefaultHeader>
+                          <OptionList>
+                            <OptionButton type="button" {...createPress(actions.showKey)}>
+                              <OptionIcon src={familyIcons.lock} alt="" aria-hidden />
+                              View Private Key
+                            </OptionButton>
+                            <OptionButton type="button" {...createPress(actions.showPhrase)}>
+                              <OptionIcon src={familyIcons.phrase} alt="" aria-hidden />
+                              View Recovery Phrase
+                            </OptionButton>
+                            <DangerOption type="button" {...createPress(actions.showRemove)}>
+                              <OptionIcon src={familyIcons.warning} alt="" aria-hidden />
+                              Remove Wallet
+                            </DangerOption>
+                          </OptionList>
+                        </DefaultView>
+                      </Show>
+
+                      <Show when={state.view === "key"}>
+                        <DetailView>
+                          <DetailBody>
+                            <ViewHeader>
+                              <ViewIcon src={familyIcons.recovery} alt="" aria-hidden />
+                              <ViewTitle>Private Key</ViewTitle>
+                              <ViewDescription>
+                                Your Private Key is the key used to back up your wallet. Keep it
+                                secret and secure at all times.
+                              </ViewDescription>
+                            </ViewHeader>
+                            <AdviceList>
+                              <AdviceItem>
+                                <AdviceIcon src={familyIcons.shield} alt="" aria-hidden />
+                                Keep your private key safe
+                              </AdviceItem>
+                              <AdviceItem>
+                                <AdviceIcon src={familyIcons.pass} alt="" aria-hidden />
+                                Don’t share it with anyone else
+                              </AdviceItem>
+                              <AdviceItem>
+                                <AdviceIcon src={familyIcons.banned} alt="" aria-hidden />
+                                If you lose it, we can’t recover it
+                              </AdviceItem>
+                            </AdviceList>
+                          </DetailBody>
+                          <Actions>
+                            <SecondaryButton type="button" {...createPress(actions.back)}>
+                              Cancel
+                            </SecondaryButton>
+                            <PrimaryButton type="button" {...createPress(actions.back)}>
+                              <PrimaryIcon src={familyIcons.faceId} alt="" aria-hidden />
+                              Reveal
+                            </PrimaryButton>
+                          </Actions>
+                        </DetailView>
+                      </Show>
+
+                      <Show when={state.view === "phrase"}>
+                        <DetailView>
+                          <DetailBody>
+                            <ViewHeader>
+                              <ViewIcon src={familyIcons.recovery} alt="" aria-hidden />
+                              <ViewTitle>Secret Recovery Phrase</ViewTitle>
+                              <ViewDescription>
+                                Your Secret Recovery Phrase is the key used to back up your wallet.
+                                Keep it secret at all times.
+                              </ViewDescription>
+                            </ViewHeader>
+                            <AdviceList>
+                              <AdviceItem>
+                                <AdviceIcon src={familyIcons.shield} alt="" aria-hidden />
+                                Keep your Secret Phrase safe
+                              </AdviceItem>
+                              <AdviceItem>
+                                <AdviceIcon src={familyIcons.pass} alt="" aria-hidden />
+                                Don’t share it with anyone else
+                              </AdviceItem>
+                              <AdviceItem>
+                                <AdviceIcon src={familyIcons.banned} alt="" aria-hidden />
+                                If you lose it, we can’t recover it
+                              </AdviceItem>
+                            </AdviceList>
+                          </DetailBody>
+                          <Actions>
+                            <SecondaryButton type="button" {...createPress(actions.back)}>
+                              Cancel
+                            </SecondaryButton>
+                            <PrimaryButton type="button" {...createPress(actions.back)}>
+                              <PrimaryIcon src={familyIcons.faceId} alt="" aria-hidden />
+                              Reveal
+                            </PrimaryButton>
+                          </Actions>
+                        </DetailView>
+                      </Show>
+
+                      <Show when={state.view === "remove"}>
+                        <DetailView>
+                          <DetailBody>
+                            <ViewHeader>
+                              <ViewIcon src={familyIcons.danger} alt="" aria-hidden />
+                              <ViewTitle>Are you sure?</ViewTitle>
+                              <ViewDescription>
+                                You haven’t backed up your wallet yet. If you remove it, you could
+                                lose access forever. We suggest tapping and backing up your wallet
+                                first with a valid recovery method.
+                              </ViewDescription>
+                            </ViewHeader>
+                          </DetailBody>
+                          <DangerActions>
+                            <SecondaryButton type="button" {...createPress(actions.back)}>
+                              Cancel
+                            </SecondaryButton>
+                            <DangerButton type="button" {...createPress(actions.back)}>
+                              Continue
+                            </DangerButton>
+                          </DangerActions>
+                        </DetailView>
+                      </Show>
+                    </Viewport>
+                  </Surface>
+                </Panel>
+              </Root>
+            );
           },
         },
       },
-      state({ context, active }) {
-        const includes = (phase: (typeof active)[number]) => active.includes(phase);
-        const defaultVisible = includes("open.view.default") || includes("closing.default");
-        return {
-          opened: includes("open"),
-          dragging: includes("open.gesture.dragging"),
-          dialog: includes("closed") ? false : includes("closing") ? "nonmodal" : "modal",
-          defaultVisible,
-          keyVisible: includes("open.view.key") || includes("closing.key"),
-          phraseVisible: includes("open.view.phrase") || includes("closing.phrase"),
-          removeVisible: includes("open.view.remove") || includes("closing.remove"),
-          dragOffset: 0,
-          dragVelocity: 0,
-          dragProgress: 0,
-          sheetHeight: context.sheetHeight,
-        };
-      },
-      view({
-        state,
-        actions,
-        components: { PresetSwitch },
-        parts: {
-          Root,
-          Page,
-          Trigger,
-          Panel,
-          Backdrop,
-          Surface,
-          Handle,
-          HandleBar,
-          Close,
-          CloseIcon,
-          Viewport,
-          DefaultView,
-          DefaultHeader,
-          DefaultTitle,
-          OptionList,
-          OptionButton,
-          DangerOption,
-          OptionIcon,
-          DetailView,
-          DetailBody,
-          ViewHeader,
-          ViewIcon,
-          ViewTitle,
-          ViewDescription,
-          AdviceList,
-          AdviceItem,
-          AdviceIcon,
-          Actions,
-          DangerActions,
-          SecondaryButton,
-          PrimaryButton,
-          DangerButton,
-          PrimaryIcon,
-        },
-      }) {
-        const measureSurface = (surface: HTMLElement) => {
-          const measure = () => {
-            actions.measure(surface.getBoundingClientRect().height);
-          };
-          const observer = new ResizeObserver(measure);
-          observer.observe(surface);
-          measure();
-          return () => observer.disconnect();
-        };
-
-        return (
-          <Root>
-            <Page>
-              <PresetSwitch />
-              <Trigger
-                type="button"
-                aria-controls="family-drawer"
-                aria-haspopup="dialog"
-                aria-expanded={state.dialog === "modal"}
-                {...createPress(actions.open)}
-              >
-                Try it out
-              </Trigger>
-            </Page>
-
-            <Panel
-              ref={(dialog) => mountDialog(dialog, () => state.dialog)}
-              id="family-drawer"
-              aria-label="Wallet options"
-              onCancel={(event) => {
-                event.preventDefault();
-                actions.close();
-              }}
-            >
-              <Backdrop aria-hidden onPointerDown={actions.close} />
-              <Surface ref={measureSurface}>
-                <Handle aria-hidden>
-                  <HandleBar />
-                </Handle>
-                <Close
-                  autofocus
-                  type="button"
-                  aria-label="Close drawer"
-                  {...createPress(actions.close)}
-                >
-                  <CloseIcon src={familyIcons.close} alt="" aria-hidden />
-                </Close>
-
-                <Viewport>
-                  <Show when={state.defaultVisible}>
-                    <DefaultView>
-                      <DefaultHeader>
-                        <DefaultTitle>Options</DefaultTitle>
-                      </DefaultHeader>
-                      <OptionList>
-                        <OptionButton type="button" {...createPress(actions.showKey)}>
-                          <OptionIcon src={familyIcons.lock} alt="" aria-hidden />
-                          View Private Key
-                        </OptionButton>
-                        <OptionButton type="button" {...createPress(actions.showPhrase)}>
-                          <OptionIcon src={familyIcons.phrase} alt="" aria-hidden />
-                          View Recovery Phase
-                        </OptionButton>
-                        <DangerOption type="button" {...createPress(actions.showRemove)}>
-                          <OptionIcon src={familyIcons.warning} alt="" aria-hidden />
-                          Remove Wallet
-                        </DangerOption>
-                      </OptionList>
-                    </DefaultView>
-                  </Show>
-
-                  <Show when={state.keyVisible}>
-                    <DetailView>
-                      <DetailBody>
-                        <ViewHeader>
-                          <ViewIcon src={familyIcons.recovery} alt="" aria-hidden />
-                          <ViewTitle>Private Key</ViewTitle>
-                          <ViewDescription>
-                            Your Private Key is the key used to back up your wallet. Keep it secret
-                            and secure at all times.
-                          </ViewDescription>
-                        </ViewHeader>
-                        <AdviceList>
-                          <AdviceItem>
-                            <AdviceIcon src={familyIcons.shield} alt="" aria-hidden />
-                            Keep your private key safe
-                          </AdviceItem>
-                          <AdviceItem>
-                            <AdviceIcon src={familyIcons.pass} alt="" aria-hidden />
-                            Don’t share it with anyone else
-                          </AdviceItem>
-                          <AdviceItem>
-                            <AdviceIcon src={familyIcons.banned} alt="" aria-hidden />
-                            If you lose it, we can’t recover it
-                          </AdviceItem>
-                        </AdviceList>
-                      </DetailBody>
-                      <Actions>
-                        <SecondaryButton type="button" {...createPress(actions.back)}>
-                          Cancel
-                        </SecondaryButton>
-                        <PrimaryButton type="button" {...createPress(actions.back)}>
-                          <PrimaryIcon src={familyIcons.faceId} alt="" aria-hidden />
-                          Reveal
-                        </PrimaryButton>
-                      </Actions>
-                    </DetailView>
-                  </Show>
-
-                  <Show when={state.phraseVisible}>
-                    <DetailView>
-                      <DetailBody>
-                        <ViewHeader>
-                          <ViewIcon src={familyIcons.recovery} alt="" aria-hidden />
-                          <ViewTitle>Secret Recovery Phrase</ViewTitle>
-                          <ViewDescription>
-                            Your Secret Recovery Phrase is the key used to back up your wallet. Keep
-                            it secret at all times.
-                          </ViewDescription>
-                        </ViewHeader>
-                        <AdviceList>
-                          <AdviceItem>
-                            <AdviceIcon src={familyIcons.shield} alt="" aria-hidden />
-                            Keep your Secret Phrase safe
-                          </AdviceItem>
-                          <AdviceItem>
-                            <AdviceIcon src={familyIcons.pass} alt="" aria-hidden />
-                            Don’t share it with anyone else
-                          </AdviceItem>
-                          <AdviceItem>
-                            <AdviceIcon src={familyIcons.banned} alt="" aria-hidden />
-                            If you lose it, we can’t recover it
-                          </AdviceItem>
-                        </AdviceList>
-                      </DetailBody>
-                      <Actions>
-                        <SecondaryButton type="button" {...createPress(actions.back)}>
-                          Cancel
-                        </SecondaryButton>
-                        <PrimaryButton type="button" {...createPress(actions.back)}>
-                          <PrimaryIcon src={familyIcons.faceId} alt="" aria-hidden />
-                          Reveal
-                        </PrimaryButton>
-                      </Actions>
-                    </DetailView>
-                  </Show>
-
-                  <Show when={state.removeVisible}>
-                    <DetailView>
-                      <DetailBody>
-                        <ViewHeader>
-                          <ViewIcon src={familyIcons.danger} alt="" aria-hidden />
-                          <ViewTitle>Are you sure?</ViewTitle>
-                          <ViewDescription>
-                            You haven’t backed up your wallet yet. If you remove it, you could lose
-                            access forever. We suggest tapping and backing up your wallet first with
-                            a valid recovery method.
-                          </ViewDescription>
-                        </ViewHeader>
-                      </DetailBody>
-                      <DangerActions>
-                        <SecondaryButton type="button" {...createPress(actions.back)}>
-                          Cancel
-                        </SecondaryButton>
-                        <DangerButton type="button" {...createPress(actions.back)}>
-                          Continue
-                        </DangerButton>
-                      </DangerActions>
-                    </DetailView>
-                  </Show>
-                </Viewport>
-              </Surface>
-            </Panel>
-          </Root>
-        );
-      },
+      root: "Drawer",
     },
   },
-  styles: {
-    defaultPreset: "family",
-    presets: { family: familyPreset, studio: studioPreset },
-  },
-  root: "Drawer",
-} satisfies AppDefinition<App>;
+} satisfies Feature<VisualFeature>;
+
+export default {
+  metadata: { name: "Family Drawer" },
+  features: { visual: visualFeature },
+  presentations: { family: familyPresentation, studio: studioPresentation },
+} satisfies Application<App>;

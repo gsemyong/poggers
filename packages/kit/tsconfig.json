@@ -1,5 +1,8 @@
 {
   "extends": "./tsconfig.app.json",
-  "compilerOptions": { "customConditions": ["poggers-source"] },
+  "compilerOptions": {
+    "customConditions": ["poggers-source"],
+    "types": ["node"]
+  },
   "include": ["src/**/*.ts", "src/**/*.tsx", "scripts/**/*.ts"]
 }

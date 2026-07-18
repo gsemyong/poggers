@@ -1,7 +1,7 @@
 import { props as stylexProps } from "@stylexjs/stylex";
 import { animate, createAnimatable, createScope } from "animejs";
 
-import type { DragOptions, DragSample } from "#ui/web/drag";
+import type { DragOptions } from "#ui/web/drag";
 import { mountAnimeDrag as mountDrag } from "#ui/web/drag.anime";
 import {
   createAnimeMotionBackend,
@@ -390,7 +390,7 @@ export type CompiledVisualPart = {
   readonly collection?: unknown;
 };
 
-export type CompiledVisualPreset = {
+export type CompiledVisualPresentation = {
   readonly themes: Readonly<Record<string, CompiledVisualStyle | null>>;
   readonly motion: Readonly<Record<string, unknown>>;
   readonly themeMotion: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
@@ -401,15 +401,17 @@ export type CompiledVisualPreset = {
   readonly components: Readonly<Record<string, Readonly<Record<string, CompiledVisualPart>>>>;
   readonly parameters: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
   readonly interactions: Readonly<Record<string, readonly unknown[]>>;
+  readonly completions: Readonly<Record<string, readonly unknown[]>>;
 };
 
 export type CompiledVisualStyle = unknown;
 
-export type CompiledVisuals = Readonly<Record<string, CompiledVisualPreset>>;
+export type CompiledVisuals = Readonly<Record<string, CompiledVisualPresentation>>;
 
 export type VisualPartRuntimeContext = {
   readonly theme: string;
   readonly states?: Readonly<Record<string, boolean>>;
+  readonly process?: Readonly<Record<string, unknown>>;
   readonly values: Readonly<Record<string, unknown>>;
   readonly interaction?: Readonly<Record<string, unknown>>;
   readonly geometry?: Readonly<Record<string, unknown>>;
@@ -419,15 +421,23 @@ export type VisualPartRuntimeContext = {
 };
 
 export type VisualCoordinatorSnapshot = {
-  readonly preset: string;
+  readonly presentation: string;
   readonly theme: string;
   readonly states: Readonly<Record<string, boolean>>;
+  readonly process: Readonly<Record<string, unknown>>;
   readonly values: Readonly<Record<string, unknown>>;
 };
 
+export type VisualActionMode = "continuous" | "discrete";
+
+export type VisualActionInvoker = (
+  name: string,
+  args: readonly unknown[],
+  mode: VisualActionMode,
+) => unknown;
+
 export type VisualCoordinator = {
   update(snapshot: VisualCoordinatorSnapshot): void;
-  settle(phase: "enter" | "exit", state: string, signal: AbortSignal): Promise<void>;
   captureLayouts(): void;
   animateLayouts(): void;
   dispose(): void;
@@ -435,12 +445,12 @@ export type VisualCoordinator = {
 
 export function visualPartPresence(
   compiled: CompiledVisuals,
-  presetName: string,
+  presentationName: string,
   componentName: string,
   partName: string,
 ): { readonly lifecycle: string; readonly layout?: "preserve" | "pop" } | undefined {
   const presence = record(
-    record(compiled[presetName]?.components[componentName]?.[partName]?.motion).presence,
+    record(compiled[presentationName]?.components[componentName]?.[partName]?.motion).presence,
   );
   if (!Object.keys(presence).length) return;
   const layout = presence.layout === "pop" ? "pop" : "preserve";
@@ -467,16 +477,16 @@ export type VisualMotionTarget = {
 
 export function visualPartAttributes(
   compiled: CompiledVisuals,
-  presetName: string,
+  presentationName: string,
   componentName: string,
   partName: string,
   context: VisualPartRuntimeContext,
 ) {
-  const preset = compiled[presetName];
-  const part = preset?.components[componentName]?.[partName];
-  if (!preset || !part) return {};
+  const presentation = compiled[presentationName];
+  const part = presentation?.components[componentName]?.[partName];
+  if (!presentation || !part) return {};
   const styles: Array<CompiledVisualStyle | null | undefined> = [];
-  if (partName === "Root") styles.push(preset.themes[context.theme]);
+  if (partName === "Root") styles.push(presentation.themes[context.theme]);
   for (const entry of part.always) styles.push(resolveEntry(entry, context));
   for (const conditional of part.conditions) {
     if (visualConditionMatches(conditional.when, context)) {
@@ -488,11 +498,11 @@ export function visualPartAttributes(
 
 export function visualPartDependencies(
   compiled: CompiledVisuals,
-  presetName: string,
+  presentationName: string,
   componentName: string,
   partName: string,
 ): ReadonlySet<string> {
-  const part = compiled[presetName]?.components[componentName]?.[partName];
+  const part = compiled[presentationName]?.components[componentName]?.[partName];
   const dependencies = new Set<string>();
   if (!part) return dependencies;
   for (const entry of part.always) collectExpressionDependencies(entry.values, dependencies);
@@ -506,14 +516,14 @@ export function visualPartDependencies(
 
 export function visualPartMotionTargets(
   compiled: CompiledVisuals,
-  presetName: string,
+  presentationName: string,
   componentName: string,
   partName: string,
   context: VisualPartRuntimeContext,
 ): readonly VisualMotionTarget[] {
-  const preset = compiled[presetName];
-  const part = preset?.components[componentName]?.[partName];
-  if (!preset || !part) return [];
+  const presentation = compiled[presentationName];
+  const part = presentation?.components[componentName]?.[partName];
+  if (!presentation || !part) return [];
   const motion = record(part.motion);
   const presence = record(motion.presence);
   const target = {
@@ -538,7 +548,7 @@ export function visualPartMotionTargets(
     const evaluated = evaluateVisualExpression(
       expression,
       context,
-      preset,
+      presentation,
       derivedFrom.length ? "rendered" : "target",
     );
     const value = typeof evaluated === "number" ? evaluated : Number(evaluated);
@@ -549,10 +559,10 @@ export function visualPartMotionTargets(
     const transitionReference = evaluateVisualExpression(
       transitionExpression,
       context,
-      preset,
+      presentation,
       "target",
     );
-    const driver = motionDriver(preset, context.theme, transitionReference);
+    const driver = motionDriver(presentation, context.theme, transitionReference);
     const reducedDriver =
       reduced &&
       (reduceMotion === "instant" || (reduceMotion === "crossfade" && domain !== "opacity"))
@@ -596,18 +606,18 @@ function motionExpressionSources(value: unknown, sources = new Set<string>()): r
 
 function visualPartLayoutTransition(
   compiled: CompiledVisuals,
-  presetName: string,
+  presentationName: string,
   componentName: string,
   partName: string,
   context: VisualPartRuntimeContext,
 ): MotionTransition | undefined {
-  const preset = compiled[presetName];
-  const part = preset?.components[componentName]?.[partName];
-  if (!preset || !part) return;
+  const presentation = compiled[presentationName];
+  const part = presentation?.components[componentName]?.[partName];
+  if (!presentation || !part) return;
   const reference = record(part.motion).layout;
   if (reference == null) return;
   if (context.environment?.reducedMotion === true) return "instant";
-  return retainedTransition(motionDriver(preset, context.theme, reference));
+  return retainedTransition(motionDriver(presentation, context.theme, reference));
 }
 
 const motionTargetProperties = new Set([
@@ -644,30 +654,78 @@ export type VirtualCollectionGeometry = {
 
 export function visualPartCollection(
   compiled: CompiledVisuals,
-  presetName: string,
+  presentationName: string,
   componentName: string,
   partName: string,
   theme: string,
 ): VirtualCollectionGeometry | undefined {
-  const preset = compiled[presetName];
-  const source = record(preset?.components[componentName]?.[partName]?.collection);
-  if (!preset || !Object.keys(source).length) return;
+  const presentation = compiled[presentationName];
+  const source = record(presentation?.components[componentName]?.[partName]?.collection);
+  if (!presentation || !Object.keys(source).length) return;
   return {
     axis: source.axis === "inline" ? "inline" : "block",
-    estimate: Math.max(1, collectionMetric(preset, theme, source.estimate)),
-    gap: Math.max(0, collectionMetric(preset, theme, source.gap)),
+    estimate: Math.max(1, collectionMetric(presentation, theme, source.estimate)),
+    gap: Math.max(0, collectionMetric(presentation, theme, source.gap)),
     lanes: Math.max(1, Math.floor(finite(source.lanes, 1))),
   };
 }
 
-export function isCompiledVisualPreset(compiled: CompiledVisuals | undefined, preset: string) {
-  return Boolean(compiled?.[preset]);
+export function isCompiledVisualPresentation(
+  compiled: CompiledVisuals | undefined,
+  presentation: string,
+) {
+  return Boolean(compiled?.[presentation]);
 }
 
 type VisualAnimationScope = {
   execute<Value>(callback: () => Value): Value;
   revert(): unknown;
 };
+
+export type VisualCompletionIntent = Readonly<{
+  key: string;
+  signature: string;
+  action: string;
+  settlements: readonly PromiseLike<unknown>[];
+}>;
+
+/** Keeps semantic completion attached to only the latest visual trajectory. */
+export function createVisualCompletionCoordinator(invoke: (action: string) => void): Readonly<{
+  update(intents: readonly VisualCompletionIntent[]): void;
+  dispose(): void;
+}> {
+  const runs = new Map<string, { signature: string; controller: AbortController }>();
+  let disposed = false;
+
+  return {
+    update(intents) {
+      if (disposed) return;
+      const active = new Set(intents.map(({ key }) => key));
+      for (const [key, run] of runs) {
+        if (active.has(key)) continue;
+        run.controller.abort();
+        runs.delete(key);
+      }
+      for (const intent of intents) {
+        const current = runs.get(intent.key);
+        if (current?.signature === intent.signature) continue;
+        current?.controller.abort();
+        const controller = new AbortController();
+        runs.set(intent.key, { signature: intent.signature, controller });
+        void Promise.allSettled(intent.settlements).then(() => {
+          if (disposed || controller.signal.aborted) return;
+          invoke(intent.action);
+        });
+      }
+    },
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      for (const run of runs.values()) run.controller.abort();
+      runs.clear();
+    },
+  };
+}
 
 export function createVisualCoordinator(options: {
   readonly compiled: CompiledVisuals;
@@ -676,8 +734,7 @@ export function createVisualCoordinator(options: {
   readonly elements?: Readonly<Record<string, ReadonlySet<Element>>>;
   readonly suppressInitialEnter?: boolean;
   readonly onMotionChange?: (source: string, value: number) => void;
-  readonly values?: Record<string, unknown>;
-  readonly actions?: Readonly<Record<string, unknown>>;
+  readonly invokeAction?: VisualActionInvoker;
   readonly onParametersChange?: (parameters: Readonly<Record<string, unknown>>) => void;
   readonly mountDrag?: typeof mountDrag;
 }): VisualCoordinator {
@@ -686,6 +743,7 @@ export function createVisualCoordinator(options: {
   let scope: VisualAnimationScope | undefined;
   let observedGeometryRoot: HTMLElement | undefined;
   let geometryObserver: ResizeObserver | undefined;
+  let geometryFrame: number | undefined;
   let presenceObserver: MutationObserver | undefined;
   let presenceRevision = 0;
   const interactionMounts = new Map<
@@ -752,15 +810,15 @@ export function createVisualCoordinator(options: {
     }
     renderMotionValue(binding, value);
     if (!binding.source) return;
-    const preset = snapshot ? options.compiled[snapshot.preset] : undefined;
-    if (!preset) return;
+    const presentation = snapshot ? options.compiled[snapshot.presentation] : undefined;
+    if (!presentation) return;
     for (const derived of derivedMotionBindings.values()) {
       if (!derived.sources.includes(binding.source) || !derived.element.isConnected) continue;
       const next = Number(
         evaluateVisualExpression(
           derived.expression,
           runtimeContext(derived.element),
-          preset,
+          presentation,
           "rendered",
         ),
       );
@@ -833,7 +891,20 @@ export function createVisualCoordinator(options: {
   let layoutObserver: MutationObserver | undefined;
   let layoutTransaction = 0;
   let projectedLayoutTransaction = 0;
-  const snapshotWaiters = new Set<(disposed: boolean) => void>();
+  const settlementIdentities = new WeakMap<object, number>();
+  let nextSettlementIdentity = 0;
+  const settlementIdentity = (settlement: PromiseLike<unknown>) => {
+    const value = settlement as object;
+    let identity = settlementIdentities.get(value);
+    if (identity === undefined) {
+      identity = nextSettlementIdentity++;
+      settlementIdentities.set(value, identity);
+    }
+    return identity;
+  };
+  const completionCoordinator = createVisualCompletionCoordinator((action) => {
+    options.invokeAction?.(action, [], "discrete");
+  });
   const installDrag = options.mountDrag ?? mountDrag;
   const elementsFor = (part: string): readonly Element[] => {
     const elements = options.elements?.[part];
@@ -852,20 +923,37 @@ export function createVisualCoordinator(options: {
     return scope;
   };
 
-  const runtimeContext = (element?: HTMLElement): VisualPartRuntimeContext => {
-    const current = snapshot;
+  type RuntimeGeometry = Readonly<{ inlineSize: number; blockSize: number }>;
+  let cachedRuntimeGeometry: RuntimeGeometry | undefined;
+  const readRuntimeGeometry = (): RuntimeGeometry => {
     const root = elementsFor("Root")[0];
     const rectangle =
       root instanceof HTMLElement && typeof root.getBoundingClientRect === "function"
         ? root.getBoundingClientRect()
         : undefined;
     return {
+      inlineSize: rectangle?.width ?? 0,
+      blockSize: rectangle?.height ?? 0,
+    };
+  };
+  const withRuntimeGeometry = <Value>(run: () => Value): Value => {
+    const previous = cachedRuntimeGeometry;
+    cachedRuntimeGeometry ??= readRuntimeGeometry();
+    try {
+      return run();
+    } finally {
+      cachedRuntimeGeometry = previous;
+    }
+  };
+
+  const runtimeContext = (element?: HTMLElement): VisualPartRuntimeContext => {
+    const current = snapshot;
+    return {
       theme: current?.theme ?? "default",
+      states: current?.states,
+      process: current?.process,
       values: current?.values ?? {},
-      geometry: {
-        inlineSize: rectangle?.width ?? 0,
-        blockSize: rectangle?.height ?? 0,
-      },
+      geometry: cachedRuntimeGeometry ?? readRuntimeGeometry(),
       environment: visualEnvironment(),
       motion: Object.fromEntries(motionValues),
       presence:
@@ -877,28 +965,28 @@ export function createVisualCoordinator(options: {
     };
   };
 
-  const resolvePresetContract = () => {
+  const resolvePresentationContract = () => {
     const current = snapshot;
     if (!current || disposed) return;
-    const preset = options.compiled[current.preset];
-    if (!preset) return;
+    const presentation = options.compiled[current.presentation];
+    if (!presentation) return;
     const context = runtimeContext();
     const resolvedParameters = Object.fromEntries(
-      Object.entries(preset.parameters?.[options.component] ?? {}).map(([name, value]) => [
+      Object.entries(presentation.parameters?.[options.component] ?? {}).map(([name, value]) => [
         name,
-        evaluateVisualExpression(value, context, preset, "rendered"),
+        evaluateVisualExpression(value, context, presentation, "rendered"),
       ]),
     );
     options.onParametersChange?.(resolvedParameters);
 
-    const interactions = preset.interactions?.[options.component] ?? [];
+    const interactions = presentation.interactions?.[options.component] ?? [];
     const next = new Set<number>();
     interactions.forEach((rawInteraction, index) => {
       const interaction = record(rawInteraction);
       if (interaction.type !== "drag") return;
       const enabled =
         interaction.enabled === undefined ||
-        Boolean(evaluateVisualExpression(interaction.enabled, context, preset, "rendered"));
+        Boolean(evaluateVisualExpression(interaction.enabled, context, presentation, "rendered"));
       if (!enabled) return;
       const triggerName = visualReferenceName(interaction.trigger, "part");
       const trigger = triggerName ? elementsFor(triggerName)[0] : undefined;
@@ -907,36 +995,24 @@ export function createVisualCoordinator(options: {
       const configuration = {
         axis:
           interaction.axis === "inline" || interaction.axis === "both" ? interaction.axis : "block",
-        threshold: visualNumber(interaction.threshold, context, preset, 3),
-        maxVelocity: visualNumber(interaction.maxVelocity, context, preset, 3),
-        resistance: visualNumber(interaction.resistance, context, preset, 1),
+        threshold: visualNumber(interaction.threshold, context, presentation, 3),
+        maxVelocity: visualNumber(interaction.maxVelocity, context, presentation, 3),
+        resistance: visualNumber(interaction.resistance, context, presentation, 1),
         cursor: interaction.cursor,
         start: visualReferenceName(interaction.start, "event"),
+        change: visualReferenceName(interaction.change, "event"),
         release: visualReferenceName(interaction.release, "event"),
         cancel: visualReferenceName(interaction.cancel, "event"),
-        output: Object.fromEntries(
-          Object.entries(record(interaction.output)).map(([sample, reference]) => [
-            sample,
-            visualValueName(reference),
-          ]),
-        ),
       };
-      const signature = JSON.stringify([current.preset, triggerName, configuration]);
+      const signature = JSON.stringify([current.presentation, triggerName, configuration]);
       const mounted = interactionMounts.get(index);
       if (mounted?.signature === signature && mounted.trigger === trigger) {
         next.add(index);
         return;
       }
       mounted?.dispose();
-      const write = (sample: DragSample) => {
-        for (const [sampleName, valueName] of Object.entries(configuration.output)) {
-          if (!valueName || !(sampleName in sample) || !options.values) continue;
-          options.values[valueName] = sample[sampleName as keyof DragSample];
-        }
-      };
-      const event = (name: string | undefined, ...args: unknown[]) => {
-        const handler = name ? options.actions?.[name] : undefined;
-        if (typeof handler === "function") Reflect.apply(handler, undefined, args);
+      const event = (name: string | undefined, mode: VisualActionMode, ...args: unknown[]) => {
+        if (name) options.invokeAction?.(name, args, mode);
       };
       const dragOptions: DragOptions = {
         axis:
@@ -950,13 +1026,15 @@ export function createVisualCoordinator(options: {
           const range = (value: unknown): readonly [number, number] | undefined => {
             if (!Array.isArray(value) || value.length !== 2) return;
             return [
-              visualNumber(value[0], live, preset, 0),
-              visualNumber(value[1], live, preset, 0),
+              visualNumber(value[0], live, presentation, 0),
+              visualNumber(value[1], live, presentation, 0),
             ];
           };
+          const inline = range(dragBounds.inline);
+          const block = range(dragBounds.block);
           return {
-            ...(range(dragBounds.inline) ? { inline: range(dragBounds.inline) } : {}),
-            ...(range(dragBounds.block) ? { block: range(dragBounds.block) } : {}),
+            ...(inline ? { inline } : {}),
+            ...(block ? { block } : {}),
           };
         },
         threshold: configuration.threshold,
@@ -968,13 +1046,12 @@ export function createVisualCoordinator(options: {
             : typeof configuration.cursor === "object" && configuration.cursor
               ? (configuration.cursor as { readonly idle: string; readonly active: string })
               : undefined,
-        start: () => event(configuration.start),
-        change: write,
+        start: () => event(configuration.start, "continuous"),
+        change: (sample) => event(configuration.change, "continuous", sample),
         release(sample) {
-          write(sample);
-          event(configuration.release, sample);
+          event(configuration.release, "continuous", sample);
         },
-        cancel: () => event(configuration.cancel),
+        cancel: () => event(configuration.cancel, "continuous"),
       };
       interactionMounts.set(index, {
         signature,
@@ -1016,20 +1093,21 @@ export function createVisualCoordinator(options: {
       // which is the exact point where FLIP inversion must be installed.
       layoutGraph.flush();
       projectedLayoutTransaction = layoutTransaction;
+      reconcileCompletions();
     }
   };
 
   const reconcileLayouts = () => {
     const current = snapshot;
     if (!current || disposed) return;
-    const preset = options.compiled[current.preset];
-    if (!preset) return;
+    const presentation = options.compiled[current.presentation];
+    if (!presentation) return;
     const context = runtimeContext();
     const nextKeys = new Set<string>();
-    for (const partName of Object.keys(preset.components[options.component] ?? {})) {
+    for (const partName of Object.keys(presentation.components[options.component] ?? {})) {
       const transition = visualPartLayoutTransition(
         options.compiled,
-        current.preset,
+        current.presentation,
         options.component,
         partName,
         context,
@@ -1068,18 +1146,18 @@ export function createVisualCoordinator(options: {
   const reconcileMotionTargets = () => {
     const current = snapshot;
     if (!current || disposed) return;
-    const preset = options.compiled[current.preset];
-    if (!preset) return;
+    const presentation = options.compiled[current.presentation];
+    if (!presentation) return;
     const nextKeys = new Set<string>();
     const nextDerivedKeys = new Set<string>();
     const settlements: Promise<unknown>[] = [];
-    for (const part of Object.keys(preset.components[options.component] ?? {})) {
+    for (const part of Object.keys(presentation.components[options.component] ?? {})) {
       for (const element of elementsFor(part)) {
         if (!(element instanceof HTMLElement)) continue;
         const context = runtimeContext(element);
         const targets = visualPartMotionTargets(
           options.compiled,
-          current.preset,
+          current.presentation,
           options.component,
           part,
           context,
@@ -1140,7 +1218,7 @@ export function createVisualCoordinator(options: {
             const settlement = channel.target(
               translated.value,
               transition,
-              motionVelocityForTarget(target, context, preset),
+              motionVelocityForTarget(target, context, presentation),
             );
             motionSettlementByKey.set(key, settlement);
             settlements.push(settlement);
@@ -1186,39 +1264,34 @@ export function createVisualCoordinator(options: {
     }
   };
 
-  const settle = async (phase: "enter" | "exit", state: string, signal: AbortSignal) => {
-    if (disposed || signal.aborted) throw signal.reason;
-    await waitForStateSnapshot(state, signal);
+  const reconcileCompletions = () => {
+    const current = snapshot;
+    if (!current || disposed) return;
+    const presentation = options.compiled[current.presentation];
+    if (!presentation) return;
+    const context = runtimeContext();
+    const settlements = [...motionSettlements, ...layoutSettlements];
+    const settlementSignature = settlements.map(settlementIdentity);
+    const intents: VisualCompletionIntent[] = [];
+    for (const [index, rawCompletion] of (
+      presentation.completions?.[options.component] ?? []
+    ).entries()) {
+      const completion = record(rawCompletion);
+      if (!evaluateVisualExpression(completion.when, context, presentation, "rendered")) {
+        continue;
+      }
+      const action = visualReferenceName(completion.action, "event");
+      if (!action) continue;
+      intents.push({
+        key: `${current.presentation}:${index}`,
+        signature: JSON.stringify([current.presentation, index, action, settlementSignature]),
+        action,
+        settlements,
+      });
+    }
     motionGraph.flush();
     layoutGraph.flush();
-    await abortableSettlement(Promise.all([...motionSettlements, ...layoutSettlements]), signal);
-  };
-
-  const waitForStateSnapshot = (state: string, signal: AbortSignal): Promise<void> => {
-    if (snapshot?.states[state] === true) return Promise.resolve();
-    return new Promise((resolve, reject) => {
-      const check = (coordinatorDisposed: boolean) => {
-        if (coordinatorDisposed) {
-          cleanup();
-          reject(new DOMException("Visual coordinator disposed", "AbortError"));
-          return;
-        }
-        if (snapshot?.states[state] !== true) return;
-        cleanup();
-        resolve();
-      };
-      const abort = () => {
-        cleanup();
-        reject(signal.reason ?? new DOMException("Settlement aborted", "AbortError"));
-      };
-      const cleanup = () => {
-        snapshotWaiters.delete(check);
-        signal.removeEventListener("abort", abort);
-      };
-      snapshotWaiters.add(check);
-      signal.addEventListener("abort", abort, { once: true });
-      if (signal.aborted) abort();
-    });
+    completionCoordinator.update(intents);
   };
 
   const observeGeometry = () => {
@@ -1227,10 +1300,18 @@ export function createVisualCoordinator(options: {
     geometryObserver?.disconnect();
     observedGeometryRoot = root;
     const ResizeObserverClass = root.ownerDocument?.defaultView?.ResizeObserver;
+    const view = root.ownerDocument?.defaultView;
     geometryObserver = ResizeObserverClass
       ? new ResizeObserverClass(() => {
-          resolvePresetContract();
-          reconcileMotionTargets();
+          if (geometryFrame !== undefined) view?.cancelAnimationFrame(geometryFrame);
+          geometryFrame = view?.requestAnimationFrame(() => {
+            geometryFrame = undefined;
+            if (disposed) return;
+            withRuntimeGeometry(() => {
+              resolvePresentationContract();
+              reconcileMotionTargets();
+            });
+          });
         })
       : undefined;
     geometryObserver?.observe(root);
@@ -1256,14 +1337,15 @@ export function createVisualCoordinator(options: {
   return {
     update(next) {
       snapshot = next;
-      for (const check of snapshotWaiters) check(false);
-      observeGeometry();
-      observePresence();
-      resolvePresetContract();
-      reconcileMotionTargets();
-      reconcileLayouts();
+      withRuntimeGeometry(() => {
+        observeGeometry();
+        observePresence();
+        resolvePresentationContract();
+        reconcileMotionTargets();
+        reconcileLayouts();
+        reconcileCompletions();
+      });
     },
-    settle,
     captureLayouts() {
       if (disposed) return;
       layoutTransaction += 1;
@@ -1278,6 +1360,7 @@ export function createVisualCoordinator(options: {
         for (const key of layoutKeys) projectLayout(key);
         layoutGraph.flush();
         projectedLayoutTransaction = transaction;
+        reconcileCompletions();
       };
       if (typeof requestAnimationFrame === "function") requestAnimationFrame(animate);
       else setTimeout(animate, 0);
@@ -1285,10 +1368,13 @@ export function createVisualCoordinator(options: {
     dispose() {
       if (disposed) return;
       disposed = true;
-      for (const check of snapshotWaiters) check(true);
-      snapshotWaiters.clear();
+      completionCoordinator.dispose();
       geometryObserver?.disconnect();
       geometryObserver = undefined;
+      if (geometryFrame !== undefined) {
+        observedGeometryRoot?.ownerDocument.defaultView?.cancelAnimationFrame(geometryFrame);
+        geometryFrame = undefined;
+      }
       observedGeometryRoot = undefined;
       presenceObserver?.disconnect();
       presenceObserver = undefined;
@@ -1328,22 +1414,13 @@ function visualReferenceName(value: unknown, kind: "event" | "part"): string | u
     : undefined;
 }
 
-function visualValueName(value: unknown): string | undefined {
-  const reference = record(value);
-  return reference.$visual === "expression" &&
-    reference.source === "value" &&
-    typeof reference.name === "string"
-    ? reference.name
-    : undefined;
-}
-
 function visualNumber(
   value: unknown,
   context: VisualPartRuntimeContext,
-  preset: CompiledVisualPreset,
+  presentation: CompiledVisualPresentation,
   fallback: number,
 ): number {
-  const resolved = Number(evaluateVisualExpression(value, context, preset, "rendered"));
+  const resolved = Number(evaluateVisualExpression(value, context, presentation, "rendered"));
   return Number.isFinite(resolved) ? resolved : fallback;
 }
 
@@ -1396,13 +1473,13 @@ export function normalizeRenderedMotionValue(
 function motionVelocityForTarget(
   target: VisualMotionTarget,
   context: VisualPartRuntimeContext,
-  preset: CompiledVisualPreset,
+  presentation: CompiledVisualPresentation,
 ): { readonly velocity?: number } | undefined {
   if (target.property !== "inline" && target.property !== "block") return;
   const authored = evaluateVisualExpression(
     record(target.expression).velocity,
     context,
-    preset,
+    presentation,
     "target",
   );
   if (typeof authored === "number" && Number.isFinite(authored)) {
@@ -1434,21 +1511,29 @@ function clearMotionBinding(
   else binding.element.style.removeProperty("transform");
 }
 
-function motionDriver(preset: CompiledVisualPreset, theme: string, reference: unknown): unknown {
+function motionDriver(
+  presentation: CompiledVisualPresentation,
+  theme: string,
+  reference: unknown,
+): unknown {
   const name = record(reference).name;
   if (typeof name !== "string") return;
-  return preset.themeMotion[theme]?.[name] ?? preset.motion[name];
+  return presentation.themeMotion[theme]?.[name] ?? presentation.motion[name];
 }
 
-function collectionMetric(preset: CompiledVisualPreset, theme: string, value: unknown): number {
+function collectionMetric(
+  presentation: CompiledVisualPresentation,
+  theme: string,
+  value: unknown,
+): number {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   const reference = record(value);
   const group = typeof reference.group === "string" ? reference.group : undefined;
   const name = typeof reference.name === "string" ? reference.name : undefined;
   if (reference.$visual !== "token" || !group || !name) return 0;
   return finite(
-    preset.themeMetrics?.[theme]?.[group]?.[name],
-    finite(preset.metrics?.[group]?.[name], 0),
+    presentation.themeMetrics?.[theme]?.[group]?.[name],
+    finite(presentation.metrics?.[group]?.[name], 0),
   );
 }
 
@@ -1470,14 +1555,14 @@ function resolveEntry(
 function evaluateVisualExpression(
   value: unknown,
   context: VisualPartRuntimeContext,
-  preset?: CompiledVisualPreset,
+  presentation?: CompiledVisualPresentation,
   mode: "rendered" | "target" = "rendered",
 ): unknown {
   if (!value || typeof value !== "object" || Array.isArray(value)) return value;
   const expression = value as Record<string, unknown>;
-  if (expression.$visual === "token" && preset) {
+  if (expression.$visual === "token" && presentation) {
     if (expression.group === "motion") return value;
-    return collectionMetric(preset, context.theme, expression);
+    return collectionMetric(presentation, context.theme, expression);
   }
   if (expression.$visual !== "expression") return value;
   if (
@@ -1486,15 +1571,18 @@ function evaluateVisualExpression(
     typeof expression.name === "string"
   ) {
     if (mode === "target") {
-      return evaluateVisualExpression(expression.target, context, preset, "target");
+      return evaluateVisualExpression(expression.target, context, presentation, "target");
     }
     const rendered = context.motion?.[expression.name];
     return typeof rendered === "number" && Number.isFinite(rendered)
       ? rendered
-      : evaluateVisualExpression(expression.target, context, preset, "target");
+      : evaluateVisualExpression(expression.target, context, presentation, "target");
   }
   if (expression.source === "value" && typeof expression.name === "string") {
     return context.values[expression.name];
+  }
+  if (expression.source === "process" && typeof expression.name === "string") {
+    return context.process?.[expression.name];
   }
   if (
     expression.source === "state" &&
@@ -1514,34 +1602,36 @@ function evaluateVisualExpression(
   }
   const operation = expression.operation;
   if (operation === "not") {
-    return !evaluateVisualExpression(expression.value, context, preset, mode);
+    return !evaluateVisualExpression(expression.value, context, presentation, mode);
   }
   if (operation === "and" || operation === "or") {
     const values = Array.isArray(expression.values) ? expression.values : [];
     return operation === "and"
-      ? values.every((item) => Boolean(evaluateVisualExpression(item, context, preset, mode)))
-      : values.some((item) => Boolean(evaluateVisualExpression(item, context, preset, mode)));
+      ? values.every((item) => Boolean(evaluateVisualExpression(item, context, presentation, mode)))
+      : values.some((item) => Boolean(evaluateVisualExpression(item, context, presentation, mode)));
   }
   if (operation === "choose") {
-    return evaluateVisualExpression(expression.condition, context, preset, mode)
-      ? evaluateVisualExpression(expression.truthy, context, preset, mode)
-      : evaluateVisualExpression(expression.falsy, context, preset, mode);
+    return evaluateVisualExpression(expression.condition, context, presentation, mode)
+      ? evaluateVisualExpression(expression.truthy, context, presentation, mode)
+      : evaluateVisualExpression(expression.falsy, context, presentation, mode);
   }
   if (operation === "interpolate") {
-    const current = Number(evaluateVisualExpression(expression.value, context, preset, mode));
+    const current = Number(evaluateVisualExpression(expression.value, context, presentation, mode));
     const input = numberList(expression.input);
     const output = numberList(expression.output);
     return interpolateValue(current, input, output);
   }
   if (operation === "motion-progress") {
-    const current = Number(evaluateVisualExpression(expression.motion, context, preset, mode));
+    const current = Number(
+      evaluateVisualExpression(expression.motion, context, presentation, mode),
+    );
     const range = numberList(expression.range);
     if (!Number.isFinite(current) || range.length !== 2 || range[0] === range[1]) return 0;
     return Math.max(0, Math.min(1, (current - range[0]!) / (range[1]! - range[0]!)));
   }
   if (["equal", "above", "at-least", "below", "at-most"].includes(String(operation))) {
-    const left = evaluateVisualExpression(expression.left, context, preset, mode);
-    const right = evaluateVisualExpression(expression.right, context, preset, mode);
+    const left = evaluateVisualExpression(expression.left, context, presentation, mode);
+    const right = evaluateVisualExpression(expression.right, context, presentation, mode);
     if (operation === "equal") return Object.is(left, right);
     const a = Number(left);
     const b = Number(right);
@@ -1611,25 +1701,6 @@ function commonAncestor(elements: readonly Element[]): HTMLElement | undefined {
     candidate = candidate.parentElement;
   }
   return;
-}
-
-function abortableSettlement(settlement: Promise<unknown>, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const abort = () =>
-      reject(signal.reason ?? new DOMException("Settlement aborted", "AbortError"));
-    signal.addEventListener("abort", abort, { once: true });
-    void settlement.then(
-      () => {
-        signal.removeEventListener("abort", abort);
-        resolve();
-      },
-      (error) => {
-        signal.removeEventListener("abort", abort);
-        reject(error);
-      },
-    );
-    if (signal.aborted) abort();
-  });
 }
 
 export function prefersReducedMotion(): boolean {

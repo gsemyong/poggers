@@ -1,14 +1,15 @@
 {
   "compilerOptions": {
-    "lib": ["ES2022", "DOM"],
+    "lib": ["ES2024", "ESNext.Disposable", "DOM"],
     "target": "ESNext",
     "module": "Preserve",
     "moduleDetection": "force",
     "jsx": "react-jsx",
     "jsxImportSource": "@poggers/kit",
     "allowImportingTsExtensions": true,
-    "types": ["bun"],
+    "types": [],
     "moduleResolution": "bundler",
+    "customConditions": ["poggers-source"],
     "paths": { "src/*": ["${configDir}/src/*"] },
     "verbatimModuleSyntax": true,
     "noEmit": true,
@@ -18,10 +19,5 @@
     "noUncheckedIndexedAccess": true,
     "noImplicitOverride": true
   },
-  "include": [
-    "${configDir}/src/**/*.ts",
-    "${configDir}/src/**/*.tsx",
-    "${configDir}/src/**/*.d.ts"
-  ],
-  "exclude": ["${configDir}/src/migrations/**/*.ts"]
+  "include": ["${configDir}/src/**/*.ts", "${configDir}/src/**/*.tsx", "${configDir}/src/**/*.d.ts"]
 }

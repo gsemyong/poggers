@@ -1,4 +1,6 @@
-import { describe, expect, it } from "bun:test";
+import { setTimeout as delay } from "node:timers/promises";
+
+import { describe, expect, it } from "vitest";
 
 import {
   createAnimeMotionBackend,
@@ -24,6 +26,7 @@ import {
   type LayoutChannelAdapter,
 } from "#ui/web/motion";
 import {
+  createVisualCompletionCoordinator,
   createRootLayoutController,
   normalizeRenderedMotionValue,
   visualPartPresence,
@@ -31,6 +34,67 @@ import {
   type CompiledVisuals,
   type VisualPartRuntimeContext,
 } from "#ui/web/visual-runtime";
+
+describe("visual completion coordination", () => {
+  it("fires only the latest retargeted completion exactly once", async () => {
+    const actions: string[] = [];
+    const coordinator = createVisualCompletionCoordinator((action) => actions.push(action));
+    let settleFirst!: () => void;
+    let settleSecond!: () => void;
+    const first = new Promise<void>((resolve) => (settleFirst = resolve));
+    const second = new Promise<void>((resolve) => (settleSecond = resolve));
+
+    coordinator.update([
+      { key: "closing", signature: "first", action: "finishClosing", settlements: [first] },
+    ]);
+    coordinator.update([
+      { key: "closing", signature: "second", action: "finishClosing", settlements: [second] },
+    ]);
+    coordinator.update([
+      { key: "closing", signature: "second", action: "finishClosing", settlements: [second] },
+    ]);
+
+    settleFirst();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(actions).toEqual([]);
+
+    settleSecond();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(actions).toEqual(["finishClosing"]);
+    coordinator.dispose();
+  });
+
+  it("cancels completion when semantic intent disappears or its owner disposes", async () => {
+    const actions: string[] = [];
+    const coordinator = createVisualCompletionCoordinator((action) => actions.push(action));
+    let settle!: () => void;
+    const pending = new Promise<void>((resolve) => (settle = resolve));
+
+    coordinator.update([
+      { key: "opening", signature: "open", action: "finishOpening", settlements: [pending] },
+    ]);
+    coordinator.update([]);
+    settle();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(actions).toEqual([]);
+
+    coordinator.update([
+      {
+        key: "closing",
+        signature: "close",
+        action: "finishClosing",
+        settlements: [Promise.resolve()],
+      },
+    ]);
+    coordinator.dispose();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(actions).toEqual([]);
+  });
+});
 
 class TestScheduler implements MotionScheduler {
   #callbacks = new Map<number, (time: number) => void>();
@@ -318,10 +382,10 @@ describe("retained motion graph", () => {
   it("rejects competing owners for the same property channel", () => {
     const { backend } = createBackend();
     const graph = new RetainedMotionGraph(backend, new TestScheduler());
-    graph.channel("menu/Surface:transform", "preset", 0);
+    graph.channel("menu/Surface:transform", "presentation", 0);
 
     expect(() => graph.channel("menu/Surface:transform", "gesture", 0)).toThrow(
-      'Motion channel "menu/Surface:transform" is owned by "preset"',
+      'Motion channel "menu/Surface:transform" is owned by "presentation"',
     );
   });
 
@@ -463,8 +527,8 @@ describe("retained layout graph", () => {
     const root = {} as HTMLElement;
     const firstChild = {} as HTMLElement;
     const secondChild = {} as HTMLElement;
-    graph.register("results", "preset", root, [firstChild]);
-    graph.register("results", "preset", root, [firstChild]);
+    graph.register("results", "presentation", root, [firstChild]);
+    graph.register("results", "presentation", root, [firstChild]);
     expect(reads().creates).toBe(1);
     expect(() => graph.register("results", "other", root, [])).toThrow("conflicting ownership");
 
@@ -483,7 +547,7 @@ describe("retained layout graph", () => {
     const scheduler = new TestScheduler();
     const { backend, projects, reads } = fixture();
     const graph = new RetainedLayoutGraph(backend, scheduler);
-    graph.register("results", "preset", {} as HTMLElement, []);
+    graph.register("results", "presentation", {} as HTMLElement, []);
     const first = graph.project("results", [{} as HTMLElement], { duration: 200 });
     scheduler.advance();
     const second = graph.project("results", [{} as HTMLElement], { duration: 200 });
@@ -518,7 +582,7 @@ describe("retained layout graph", () => {
       },
       scheduler,
     );
-    graph.register("results", "preset", {} as HTMLElement, []);
+    graph.register("results", "presentation", {} as HTMLElement, []);
     const first = graph.project("results", [{} as HTMLElement], { duration: 180 });
     scheduler.advance();
     const second = graph.project("results", [{} as HTMLElement], { duration: 180 });
@@ -530,7 +594,7 @@ describe("retained layout graph", () => {
 });
 
 describe("Anime retained layout adapter", () => {
-  it("does not capture or restore preset-owned visual channels", () => {
+  it("does not capture or restore presentation-owned visual channels", () => {
     const properties = new Set(["opacity", "color", "width"]);
     const recordedProperties = new Set(["opacity", "backgroundColor", "display", "height"]);
     const controller = {
@@ -719,7 +783,7 @@ describe("Anime retained motion adapter", () => {
       transition: { spring: { mass: 1, stiffness: 520, damping: 38 } },
       settled() {},
     });
-    await Bun.sleep(32);
+    await delay(32);
 
     expect(renders[0]).toBe(44);
     expect(Math.min(...renders)).toBeGreaterThanOrEqual(44);

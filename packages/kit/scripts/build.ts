@@ -1,9 +1,15 @@
-import { rm } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { access, glob, readFile, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 
-const packageDir = resolve(import.meta.dir, "..");
+import { build } from "vite";
+
+const packageDir = resolve(import.meta.dirname, "..");
 const distDir = resolve(packageDir, "dist");
-const packageJson = await Bun.file(resolve(packageDir, "package.json")).json();
+const packageJson = JSON.parse(await readFile(resolve(packageDir, "package.json"), "utf8")) as {
+  exports: Record<string, unknown>;
+  bin?: Record<string, unknown>;
+};
 const targets = [
   ...Object.values(packageJson.exports).flatMap((entry) =>
     typeof entry === "object" && entry && "default" in entry ? [entry.default] : [],
@@ -18,17 +24,22 @@ const entrypoints = [
       .filter(isBuildTarget)
       .map((target) => resolve(packageDir, target.slice("./dist/".length).replace(/\.js$/, ".ts"))),
   ),
+  resolve(packageDir, "src/ui/web/component.ts"),
+  resolve(packageDir, "src/ui/web/runtime.ts"),
+  resolve(packageDir, "src/compiler/hot.ts"),
 ];
 for (const entrypoint of entrypoints) {
-  if (!(await Bun.file(entrypoint).exists())) {
+  try {
+    await access(entrypoint);
+  } catch {
     throw new Error(`Missing source for public entry ${entrypoint}.`);
   }
 }
 
 await rm(distDir, { force: true, recursive: true });
-const declarations = Bun.spawn(
+const declarationCode = await run(
+  resolve(packageDir, "node_modules/typescript/bin/tsc"),
   [
-    resolve(packageDir, "node_modules/typescript/bin/tsc"),
     "-p",
     "tsconfig.json",
     "--declaration",
@@ -42,27 +53,46 @@ const declarations = Bun.spawn(
     "--pretty",
     "false",
   ],
-  { cwd: packageDir, stdin: "inherit", stdout: "inherit", stderr: "inherit" },
+  packageDir,
 );
-if ((await declarations.exited) !== 0) process.exit(1);
+if (declarationCode !== 0) process.exit(1);
 
 for (const pattern of ["**/*.spec.d.ts", "**/*.typecheck.d.ts"]) {
-  for await (const file of new Bun.Glob(pattern).scan({ cwd: distDir, onlyFiles: true })) {
+  for await (const file of glob(pattern, { cwd: distDir })) {
     await rm(resolve(distDir, file));
   }
 }
 await rm(resolve(distDir, "scripts"), { force: true, recursive: true });
 
-const build = await Bun.build({
-  entrypoints,
-  outdir: distDir,
+await build({
+  configFile: false,
   root: packageDir,
-  target: "bun",
-  format: "esm",
-  splitting: true,
-  packages: "external",
+  resolve: { alias: { "#ui": resolve(packageDir, "src/ui") } },
+  build: {
+    emptyOutDir: false,
+    minify: false,
+    outDir: distDir,
+    rollupOptions: {
+      external: (id) =>
+        !id.startsWith(".") && !id.startsWith("/") && !id.startsWith("\0") && !id.startsWith("#"),
+      input: entrypoints,
+      preserveEntrySignatures: "strict",
+      output: {
+        entryFileNames: "[name].js",
+        format: "es",
+        preserveModules: true,
+        preserveModulesRoot: packageDir,
+      },
+    },
+    sourcemap: false,
+    target: "node24",
+  },
 });
-if (!build.success) {
-  for (const log of build.logs) console.error(log);
-  process.exit(1);
+
+function run(command: string, arguments_: readonly string[], cwd: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, arguments_, { cwd, stdio: "inherit" });
+    child.once("error", reject);
+    child.once("exit", (code) => resolve(code ?? 1));
+  });
 }

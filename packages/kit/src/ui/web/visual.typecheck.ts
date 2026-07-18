@@ -1,15 +1,11 @@
-import type { VisualValue } from "#kernel/app";
-import type { Preset } from "#ui/web/visual";
+import type { DragRelease, DragSample } from "#ui/web/interaction";
+import type { Presentation } from "#ui/web/visual";
+
+import type { VisualValue } from "../component";
 
 type App = {
-  Resources: {};
   Components: {
     CommandMenu: {
-      Context: {
-        phase: "closed" | "open" | "dragging";
-        selected: string | undefined;
-      };
-      Phases: "closed" | "open" | "open.dragging";
       State: {
         phase: "closed" | "open" | "dragging";
         open: boolean;
@@ -18,6 +14,13 @@ type App = {
         dragOffset: VisualValue<"length">;
         dragProgress: VisualValue<"progress">;
       };
+      Actions: {
+        startDragging(): void;
+        drag(sample: DragSample): void;
+        release(release: DragRelease): void;
+        cancelDragging(): void;
+        finishClosing(): void;
+      };
       Parts: {
         Trigger: "button";
         Surface: "section";
@@ -25,19 +28,17 @@ type App = {
       };
     };
   };
-  Styles: {
-    Presets: {
-      tactile: {
-        Tokens: {
-          color: "surface" | "text" | "separator";
-          size: "compact";
-          radius: "panel" | "sheet";
-          stroke: "hairline";
-          shadow: "lifted";
-          motion: "dialog" | "settle";
-        };
-        Themes: "default" | "dark";
+  Presentations: {
+    tactile: {
+      Tokens: {
+        color: "surface" | "text" | "separator";
+        size: "compact";
+        radius: "panel" | "sheet";
+        stroke: "hairline";
+        shadow: "lifted";
+        motion: "dialog" | "settle";
       };
+      Themes: "default" | "dark";
     };
   };
 };
@@ -124,11 +125,11 @@ const tactile = (({ tokens, createRecipe, createMotion, interpolate }) => {
     components: {
       CommandMenu(scope) {
         const opening = scope.state.open;
-        // @ts-expect-error Presets receive only declared semantic State.
+        // @ts-expect-error Presentations receive only declared semantic State.
         void scope.state.opening;
-        // @ts-expect-error Presets receive no mutable component context.
+        // @ts-expect-error Presentations receive no mutable component context.
         void scope.context;
-        const { state, interaction, geometry, environment } = scope;
+        const { state, actions, parts, interaction, geometry, environment } = scope;
         void opening;
         // @ts-expect-error Geometric comparisons accept numeric and metric operands, not colors.
         geometry.inlineSize.isBelow(tokens.color.surface);
@@ -147,7 +148,7 @@ const tactile = (({ tokens, createRecipe, createMotion, interpolate }) => {
         });
         createMotion({
           target: 0,
-          // @ts-expect-error Motion transitions accept only this preset's motion tokens.
+          // @ts-expect-error Motion transitions accept only this presentation's motion tokens.
           transition: tokens.color.surface,
           range: [0, 1],
         });
@@ -176,12 +177,25 @@ const tactile = (({ tokens, createRecipe, createMotion, interpolate }) => {
               opacity: interpolate(sheet.progress, [0, 1], [1, 0.6]),
             },
           },
+          interactions: [
+            {
+              type: "drag",
+              trigger: parts.Surface,
+              axis: "block",
+              bounds: { block: [0, 700] },
+              start: actions.startDragging,
+              change: actions.drag,
+              release: actions.release,
+              cancel: actions.cancelDragging,
+            },
+          ],
+          completions: [{ when: state.phase.is("closed"), action: actions.finishClosing }],
           gestures: {},
         };
       },
     },
   };
-  // @ts-expect-error Gesture recognition is declared as a typed preset interaction.
-}) satisfies Preset<App, "tactile">;
+  // @ts-expect-error Gesture recognition is declared as a typed presentation interaction.
+}) satisfies Presentation<App, "tactile">;
 
 void tactile;

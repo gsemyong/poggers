@@ -1,236 +1,192 @@
-import { expect, test } from "bun:test";
-import { spawnSync } from "node:child_process";
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  readdirSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { spawn } from "node:child_process";
+import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { resolve } from "node:path";
 
-const root = resolve(import.meta.dir, "../../../..");
-const publicPackages = ["kit"] as const;
+import { afterEach, describe, expect, test } from "vitest";
 
-function run(command: string, args: readonly string[], cwd: string): string {
-  const result = spawnSync(command, args, { cwd, encoding: "utf8" });
-  if (result.status !== 0) {
-    throw new Error(
-      `${command} ${args.join(" ")} failed in ${cwd}\n${result.stdout}\n${result.stderr}`,
+import { buildApplication, buildRustApplication, validateUIProgramRoot } from "./application";
+import { createProject } from "./create";
+
+const directories: string[] = [];
+afterEach(async () => {
+  await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true })));
+});
+
+describe("project template", () => {
+  test("creates the complete minimal application convention", async () => {
+    const parent = await mkdtemp(resolve(tmpdir(), "poggers-create-"));
+    directories.push(parent);
+    const target = resolve(parent, "example");
+    await createProject([target, "--no-install"]);
+
+    expect(await readFile(resolve(target, "src/app.tsx"), "utf8")).toContain(
+      "satisfies Application<App>",
     );
-  }
-  return result.stdout;
-}
-
-test("browser builds exclude server-only modules", () => {
-  const fixture = mkdtempSync(join(tmpdir(), "poggers-browser-graph-"));
-  try {
-    const chatOutput = join(fixture, "chat");
-    run(
-      "bun",
-      [
-        join(root, "packages/kit/src/tooling/cli.ts"),
-        "bundle",
-        join(root, "apps/chat"),
-        "--outdir",
-        chatOutput,
-      ],
-      root,
-    );
-    const chatBundle = readFileSync(join(chatOutput, "browser.entry.js"), "utf8");
-    expect(chatBundle).toContain('"@feature/chat/component/Composer"');
-    expect(chatBundle).toContain('"@feature/chat/component/ChatLayout"');
-    expect(chatBundle).not.toMatch(
-      /node:fs|node:crypto|deepseek|streamText|\bzod\b|cel-js|not a valid CEL|parseCel/,
-    );
-  } finally {
-    rmSync(fixture, { recursive: true, force: true });
-  }
-}, 15_000);
-
-test("the published kit installs, typechecks, executes, and scaffolds independently", () => {
-  const fixture = mkdtempSync(join(tmpdir(), "poggers-distribution-"));
-  const packed = join(fixture, "packed");
-  const consumer = join(fixture, "consumer");
-  const scaffold = join(fixture, "scaffold");
-  mkdirSync(packed);
-  mkdirSync(consumer);
-
-  try {
-    for (const packageName of publicPackages) {
-      run("bun", ["pm", "pack", "--destination", packed], join(root, "packages", packageName));
-    }
-    const archives = readdirSync(packed).filter((name) => name.endsWith(".tgz"));
-    expect(archives).toHaveLength(1);
-
-    for (const archive of archives) {
-      const listing = run("tar", ["-tzf", join(packed, archive)], fixture);
-      expect(listing).not.toMatch(/(?:\.spec|\.typecheck)\.d\.ts$/m);
-      expect(listing).not.toMatch(/(?:\.spec|\.typecheck)\.tsx?$/m);
-      expect(listing).toContain("package/src/tooling/cli.ts");
-      expect(listing).toContain("package/src/index.ts");
-      const destination = join(fixture, basename(archive, ".tgz"));
-      mkdirSync(destination);
-      run("tar", ["-xzf", join(packed, archive), "-C", destination], fixture);
-      const declarations = readdirSync(join(destination, "package", "dist"), {
-        recursive: true,
-      }).filter((name): name is string => typeof name === "string" && name.endsWith(".d.ts"));
-      const declarationText = declarations
-        .map((name) => readFileSync(join(destination, "package", "dist", name), "utf8"))
-        .join("\n");
-      expect(declarationText).not.toMatch(/\/Users\//);
-    }
-
-    const archive = (name: string) =>
-      `file:${join(packed, archives.find((value) => value.startsWith(`poggers-${name}-`)) ?? "")}`;
-    writeFileSync(
-      join(consumer, "package.json"),
-      JSON.stringify({
-        name: "poggers-packed-consumer",
-        private: true,
-        type: "module",
-        dependencies: {
-          "@poggers/kit": archive("kit"),
-        },
-      }),
-    );
-    writeFileSync(
-      join(consumer, "tsconfig.json"),
-      JSON.stringify({
-        compilerOptions: {
-          lib: ["ES2022", "DOM"],
-          target: "ESNext",
-          module: "Preserve",
-          moduleResolution: "bundler",
-          verbatimModuleSyntax: true,
-          strict: true,
-          noEmit: true,
-        },
-        include: ["index.ts"],
-      }),
-    );
-    writeFileSync(
-      join(consumer, "index.ts"),
-      `import type { AppDef, Submission, FeatureDef } from "@poggers/kit";
-import { defineApp, testFeature } from "@poggers/kit/testing";
-import { createPress } from "@poggers/kit/ui";
-import type { PresetsDefinition } from "@poggers/kit/preset";
-
-type CounterFeature = {
-  Resources: {
-    counters: {
-      Key: string;
-      State: { count: number };
-      Events: { incremented: { by: number } };
-      Views: { count: number };
-      Commands: { increment: { Input: { by: number }; Event: "incremented" } };
+    const packageJson = JSON.parse(await readFile(resolve(target, "package.json"), "utf8")) as {
+      scripts: Record<string, string>;
     };
-  };
-  Components: {};
-  API: {
-    counter(id: string): {
-      readonly count: number;
-      increment(input: { by: number }): Submission;
+    expect(Object.keys(packageJson.scripts)).toEqual([
+      "dev",
+      "build",
+      "typecheck",
+      "test",
+      "lint",
+      "fmt",
+      "check",
+    ]);
+    expect(await readFile(resolve(target, ".gitignore"), "utf8")).not.toContain("app.d.ts");
+    expect(
+      await run(
+        resolve(import.meta.dirname, "../../../../node_modules/.bin/oxfmt"),
+        ["--check", "."],
+        target,
+      ),
+    ).toBe(0);
+
+    const modules = resolve(target, "node_modules");
+    await mkdir(resolve(modules, "@poggers"), { recursive: true });
+    await symlink(resolve(import.meta.dirname, "../.."), resolve(modules, "@poggers/kit"), "dir");
+
+    expect(
+      await run(
+        resolve(import.meta.dirname, "../../../../node_modules/.bin/tsc"),
+        ["-p", "tsconfig.json"],
+        target,
+      ),
+    ).toBe(0);
+
+    await buildApplication({ directory: target, outdir: "dist" });
+    await expect(access(resolve(target, "dist/app.js"))).resolves.toBeUndefined();
+    const manifest = JSON.parse(
+      await readFile(resolve(target, "dist/product.ir.json"), "utf8"),
+    ) as {
+      version: number;
+      features: readonly { id: string }[];
+      programs: readonly { id: string; runtime: { name: string }; ui?: unknown }[];
     };
-  };
-};
+    expect(manifest.version).toBe(1);
+    expect(manifest.features.map(({ id }) => id)).toEqual(["feature/shell"]);
+    expect(manifest.programs).toHaveLength(1);
+    expect(manifest.programs[0]).toMatchObject({
+      id: "feature/shell/program/browser",
+      runtime: { name: "web-main" },
+      ui: { root: "Application" },
+    });
+    const html = await readFile(resolve(target, "dist/index.html"), "utf8");
+    expect(html).toContain("@layer reset{");
+    expect(html).toContain("dialog::backdrop{background:transparent}");
+    expect(html.indexOf("@layer reset{")).toBeLessThan(html.indexOf('href="/styles.css"'));
 
-type ConsumerApp = {
-  Actor: { id: string };
-  Resources: {};
-  Features: { primary: CounterFeature; secondary: CounterFeature };
-  API: { total(id: string): number };
-};
+    expect(() =>
+      validateUIProgramRoot({ features: { shell: { programs: { browser: {} } } } }, "browser"),
+    ).toThrow("exactly one root Component");
+  });
 
-const counter = {
-  resources: {
-    counters: {
-      state: { count: 0 },
-      events: {
-        incremented({ state, payload }) {
-          state.count += payload.by;
-        },
-      },
-      views: { count: ({ state }) => state.count },
-      commands: {
-        increment(context, { by }) {
-          context.event.incremented({ by });
-        },
+  test("builds a portable headless Program through the public Rust target", async () => {
+    const parent = await mkdtemp(resolve(tmpdir(), "poggers-rust-"));
+    directories.push(parent);
+    const target = resolve(parent, "example");
+    await createProject([target, "--no-install"]);
+    const modules = resolve(target, "node_modules");
+    await mkdir(resolve(modules, "@poggers"), { recursive: true });
+    await symlink(resolve(import.meta.dirname, "../.."), resolve(modules, "@poggers/kit"), "dir");
+    await writeFile(
+      resolve(target, "src/app.tsx"),
+      `import type { Application, Feature, Program, Server } from "@poggers/kit";
+
+type Worker = { Programs: { cloud: Program<Server> } };
+type App = { Features: { worker: Worker } };
+
+const worker = {
+  programs: {
+    cloud: {
+      start() {
+        const values = [1, 2, 3];
+        let total = 0;
+        for (const value of values) {
+          total += value;
+        }
+        if (total !== 6) return;
       },
     },
   },
-  features: {},
-  api: ({ resources }) => ({
-    counter(id) {
-      const resource = resources.counters(id);
-      return {
-        get count() {
-          return resource.count;
-        },
-        increment: resource.increment,
-      };
-    },
-  }),
-  components: {},
-} satisfies FeatureDef<ConsumerApp, CounterFeature>;
+} satisfies Feature<Worker>;
 
-const app = defineApp<ConsumerApp>({
-  version: 1,
-  resources: {},
-  features: { primary: counter, secondary: counter },
-  api: ({ features }) => ({
-    total: (id) => features.primary.counter(id).count + features.secondary.counter(id).count,
-  }),
-});
-
-type PublicSurface =
-  | AppDef<{ Resources: Record<string, never> }>
-  | PresetsDefinition<{ Resources: Record<string, never>; Styles: { Presets: string } }>;
-void (null as unknown as PublicSurface);
-if (typeof createPress !== "function") throw new Error("Packed runtime import failed.");
-
-const fixture = await testFeature(app, "primary", { actor: { id: "consumer" } });
-const mounted = fixture.api.counter("packed");
-const receipt = await mounted.increment({ by: 3 });
-if (!receipt.ok || mounted.count !== 3) throw new Error("Packed Feature execution failed.");
-await fixture.dispose();
+export default { features: { worker } } satisfies Application<App>;
 `,
     );
 
-    run("bun", ["install"], consumer);
-    run(join(root, "node_modules/.bin/tsc"), ["-p", "tsconfig.json"], consumer);
-    run("bun", ["run", "index.ts"], consumer);
+    const output = await buildRustApplication({ directory: target, program: "cloud" });
+    expect(await run("cargo", ["fmt", "--check"], output)).toBe(0);
+    expect(await run("cargo", ["clippy", "--", "-D", "warnings"], output)).toBe(0);
+    expect(await run("cargo", ["run", "--quiet", "--release"], output)).toBe(0);
+  });
 
-    run(
-      "bun",
-      [
-        join(root, "packages/kit/src/tooling/cli.ts"),
-        "create",
-        scaffold,
-        "--no-install",
-        "--kit-version",
-        archive("kit"),
-      ],
-      root,
+  test("builds a headless Program against a production Rust adapter", async () => {
+    const parent = await mkdtemp(resolve(tmpdir(), "poggers-rust-adapter-"));
+    directories.push(parent);
+    const target = resolve(parent, "example");
+    await createProject([target, "--no-install"]);
+    const modules = resolve(target, "node_modules");
+    await mkdir(resolve(modules, "@poggers"), { recursive: true });
+    await symlink(resolve(import.meta.dirname, "../.."), resolve(modules, "@poggers/kit"), "dir");
+    await writeFile(
+      resolve(target, "src/app.tsx"),
+      `import type { Application, Feature, Program, Server } from "@poggers/kit";
+
+type Output = { write(input: { value: number }): Promise<void> };
+type Worker = { Programs: { cloud: Program<Server, { Requires: { output: Output } }> } };
+type App = { Features: { worker: Worker } };
+
+const worker = {
+  programs: {
+    cloud: {
+      async start({ capabilities }) {
+        await capabilities.output.write({ value: 42 });
+      },
+    },
+  },
+} satisfies Feature<Worker>;
+
+export default { features: { worker } } satisfies Application<App>;
+`,
     );
-    run("bun", ["install"], scaffold);
-    run("bun", ["run", "fmt"], scaffold);
-    run("bun", ["run", "check"], scaffold);
-    run("bun", ["run", "build"], scaffold);
-    expect(readFileSync(join(scaffold, "tsconfig.json"), "utf8")).toContain(
-      '"extends": "@poggers/kit/tsconfig"',
+    await mkdir(resolve(target, "src/adapters"), { recursive: true });
+    await writeFile(
+      resolve(target, "src/adapters/cloud.rs"),
+      `use crate::generated::Capabilities;
+
+struct Adapter;
+
+pub fn create() -> impl Capabilities {
+    Adapter
+}
+
+impl Capabilities for Adapter {
+    fn output_write(&self, input: (f64,)) -> impl std::future::Future<Output = Result<(), String>> {
+        println!("value:{}", input.0);
+        std::future::ready(Ok(()))
+    }
+}
+`,
     );
-    expect(readFileSync(join(scaffold, "src/app.tsx"), "utf8")).toContain(
-      "satisfies AppDefinition<App>",
-    );
-    expect(readFileSync(join(scaffold, "src/features/counter.tsx"), "utf8")).toContain(
-      "satisfies FeatureDef<App, CounterFeature>",
-    );
-    expect(existsSync(join(scaffold, "src/types.ts"))).toBe(false);
-  } finally {
-    rmSync(fixture, { recursive: true, force: true });
-  }
-}, 60_000);
+
+    const output = await buildRustApplication({
+      directory: target,
+      program: "cloud",
+      adapter: "src/adapters/cloud.rs",
+    });
+    expect(await run("cargo", ["fmt", "--check"], output)).toBe(0);
+    expect(await run("cargo", ["clippy", "--", "-D", "warnings"], output)).toBe(0);
+    expect(await run("cargo", ["run", "--quiet", "--release"], output)).toBe(0);
+  });
+});
+
+function run(command: string, arguments_: readonly string[], cwd: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, arguments_, { cwd, stdio: "inherit" });
+    child.once("error", reject);
+    child.once("exit", (code) => resolve(code ?? 1));
+  });
+}

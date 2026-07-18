@@ -1,4 +1,7 @@
-import { validateVisualTokenUsage, type MaterializedVisualPreset } from "#ui/compiler/preset";
+import {
+  validateVisualTokenUsage,
+  type MaterializedVisualPresentation,
+} from "#ui/compiler/presentation";
 
 type RawCode = { readonly $code: string };
 type CodeValue = string | number | boolean | null | RawCode | CodeValue[] | CodeObject;
@@ -91,23 +94,25 @@ const visualStyleKeys = new Set([
   "decor",
 ]);
 
-export function generateVisualStylexModule(presets: readonly MaterializedVisualPreset[]): string {
+export function generateVisualStylexModule(
+  presentations: readonly MaterializedVisualPresentation[],
+): string {
   const declarations: string[] = ['import * as stylex from "@stylexjs/stylex";', ""];
-  const presetEntries: string[] = [];
+  const presentationEntries: string[] = [];
 
-  declarations.push(fontRuntimeSource(presets), "");
+  declarations.push(fontRuntimeSource(presentations), "");
 
-  for (const preset of [...presets].sort((a, b) => a.name.localeCompare(b.name))) {
-    const id = identifier(preset.name);
+  for (const presentation of [...presentations].sort((a, b) => a.name.localeCompare(b.name))) {
+    const id = identifier(presentation.name);
     const varsName = `${id}Vars`;
     declarations.push(
-      `export const ${varsName} = stylex.defineVars(${printCode(tokenVariableDefinitions(preset))});`,
+      `export const ${varsName} = stylex.defineVars(${printCode(tokenVariableDefinitions(presentation))});`,
       "",
     );
 
     const themeReferences: Record<string, RawCode | null> = { default: null };
-    for (const [themeName, themeValue] of Object.entries(preset.themes)) {
-      const overrides = themeVariableDefinitions(preset, themeName, themeValue);
+    for (const [themeName, themeValue] of Object.entries(presentation.themes)) {
+      const overrides = themeVariableDefinitions(presentation, themeName, themeValue);
       if (!Object.keys(overrides).length || themeName === "default") {
         themeReferences[themeName] = null;
         continue;
@@ -121,29 +126,31 @@ export function generateVisualStylexModule(presets: readonly MaterializedVisualP
     }
 
     const componentPlans: Record<string, ComponentPlan> = {};
-    for (const [componentName, parts] of Object.entries(preset.components)) {
-      const plan = planComponent(preset, componentName, parts, varsName);
+    for (const [componentName, parts] of Object.entries(presentation.components)) {
+      const plan = planComponent(presentation, componentName, parts, varsName);
       componentPlans[componentName] = plan;
       declarations.push(stylexCreateSource(plan), "");
     }
-    validateVisualTokenUsage(preset.name, preset.tokens, preset.themes, {
-      components: preset.components,
-      parameters: preset.parameters,
-      interactions: preset.interactions,
+    validateVisualTokenUsage(presentation.name, presentation.tokens, presentation.themes, {
+      components: presentation.components,
+      parameters: presentation.parameters,
+      interactions: presentation.interactions,
+      completions: presentation.completions,
     });
 
-    presetEntries.push(
-      `${JSON.stringify(preset.name)}: ${printCode({
+    presentationEntries.push(
+      `${JSON.stringify(presentation.name)}: ${printCode({
         themes: themeReferences as unknown as CodeObject,
-        motion: recordAt(preset.tokens.motion) as CodeObject,
-        themeMotion: themeMotionDefinitions(preset),
-        metrics: metricDefinitions(preset),
-        themeMetrics: themeMetricDefinitions(preset),
-        fonts: fontDefinitions(preset),
-        themeFonts: themeFontDefinitions(preset),
-        containers: preset.containers as CodeObject,
-        parameters: preset.parameters as CodeObject,
-        interactions: preset.interactions as unknown as CodeObject,
+        motion: recordAt(presentation.tokens.motion) as CodeObject,
+        themeMotion: themeMotionDefinitions(presentation),
+        metrics: metricDefinitions(presentation),
+        themeMetrics: themeMetricDefinitions(presentation),
+        fonts: fontDefinitions(presentation),
+        themeFonts: themeFontDefinitions(presentation),
+        containers: presentation.containers as CodeObject,
+        parameters: presentation.parameters as CodeObject,
+        interactions: presentation.interactions as unknown as CodeObject,
+        completions: presentation.completions as unknown as CodeObject,
         components: raw(componentManifestSource(componentPlans)),
       })}`,
     );
@@ -151,28 +158,28 @@ export function generateVisualStylexModule(presets: readonly MaterializedVisualP
 
   declarations.push(
     "export const compiledVisuals = {",
-    ...presetEntries.map((entry) => `  ${entry},`),
+    ...presentationEntries.map((entry) => `  ${entry},`),
     "};",
     "",
   );
   return declarations.join("\n");
 }
 
-function tokenVariableDefinitions(preset: MaterializedVisualPreset): CodeObject {
+function tokenVariableDefinitions(presentation: MaterializedVisualPresentation): CodeObject {
   const result: Record<string, CodeValue> = {};
-  for (const [group, values] of Object.entries(preset.tokens)) {
+  for (const [group, values] of Object.entries(presentation.tokens)) {
     if (group === "motion") {
       for (const [name, value] of Object.entries(values)) {
-        validateMotionTokenDefinition(value, `${preset.name}.tokens.motion.${name}`);
+        validateMotionTokenDefinition(value, `${presentation.name}.tokens.motion.${name}`);
       }
       continue;
     }
     for (const [name, value] of Object.entries(values)) {
       result[tokenVariableName(group, name)] = tokenDefinitionCode(
         group,
-        unwrapMetricToken(resolveTokenAlias(preset, group, name, value), group),
-        `${preset.name}.tokens.${group}.${name}`,
-        preset,
+        unwrapMetricToken(resolveTokenAlias(presentation, group, name, value), group),
+        `${presentation.name}.tokens.${group}.${name}`,
+        presentation,
       );
     }
   }
@@ -180,44 +187,47 @@ function tokenVariableDefinitions(preset: MaterializedVisualPreset): CodeObject 
 }
 
 function themeVariableDefinitions(
-  preset: MaterializedVisualPreset,
+  presentation: MaterializedVisualPresentation,
   themeName: string,
   themeValue: unknown,
 ): CodeObject {
   const result: Record<string, CodeValue> = {};
   const theme = recordAt(themeValue);
   for (const [group, values] of Object.entries(theme)) {
-    if (!(group in preset.tokens)) {
-      throw new Error(`${preset.name}.themes contains unknown token group ${group}.`);
+    if (!(group in presentation.tokens)) {
+      throw new Error(`${presentation.name}.themes contains unknown token group ${group}.`);
     }
     if (group === "motion") continue;
     for (const [name, value] of Object.entries(recordAt(values))) {
-      if (!(name in recordAt(preset.tokens[group]))) {
-        throw new Error(`${preset.name}.themes contains unknown token ${group}.${name}.`);
+      if (!(name in recordAt(presentation.tokens[group]))) {
+        throw new Error(`${presentation.name}.themes contains unknown token ${group}.${name}.`);
       }
       result[tokenVariableName(group, name)] = tokenDefinitionCode(
         group,
-        unwrapMetricToken(resolveTokenAlias(preset, group, name, value, theme), group),
-        `${preset.name}.themes.${themeName}.${group}.${name}`,
-        preset,
+        unwrapMetricToken(resolveTokenAlias(presentation, group, name, value, theme), group),
+        `${presentation.name}.themes.${themeName}.${group}.${name}`,
+        presentation,
       );
     }
   }
   return result;
 }
 
-function themeMotionDefinitions(preset: MaterializedVisualPreset): CodeObject {
+function themeMotionDefinitions(presentation: MaterializedVisualPresentation): CodeObject {
   const result: Record<string, CodeValue> = {};
-  for (const [themeName, value] of Object.entries(preset.themes)) {
+  for (const [themeName, value] of Object.entries(presentation.themes)) {
     const motion = recordAt(recordAt(value).motion);
     if (Object.keys(motion).length) {
       for (const [name, driver] of Object.entries(motion)) {
-        if (!(name in recordAt(preset.tokens.motion))) {
+        if (!(name in recordAt(presentation.tokens.motion))) {
           throw new Error(
-            `${preset.name}.themes.${themeName}.motion contains unknown token ${name}.`,
+            `${presentation.name}.themes.${themeName}.motion contains unknown token ${name}.`,
           );
         }
-        validateMotionTokenDefinition(driver, `${preset.name}.themes.${themeName}.motion.${name}`);
+        validateMotionTokenDefinition(
+          driver,
+          `${presentation.name}.themes.${themeName}.motion.${name}`,
+        );
       }
       result[themeName] = motion as CodeObject;
     }
@@ -227,15 +237,15 @@ function themeMotionDefinitions(preset: MaterializedVisualPreset): CodeObject {
 
 const metricGroups = new Set(["space", "size", "radius", "blur", "z"]);
 
-function metricDefinitions(preset: MaterializedVisualPreset): CodeObject {
+function metricDefinitions(presentation: MaterializedVisualPresentation): CodeObject {
   const metrics: Record<string, CodeValue> = {};
-  for (const [group, values] of Object.entries(preset.tokens)) {
+  for (const [group, values] of Object.entries(presentation.tokens)) {
     if (!metricGroups.has(group)) continue;
     const resolved: Record<string, CodeValue> = {};
     for (const [name, value] of Object.entries(values)) {
       resolved[name] = numberAt(
-        unwrapMetricToken(resolveTokenAlias(preset, group, name, value), group),
-        `${preset.name}.tokens.${group}.${name}`,
+        unwrapMetricToken(resolveTokenAlias(presentation, group, name, value), group),
+        `${presentation.name}.tokens.${group}.${name}`,
       );
     }
     metrics[group] = resolved;
@@ -243,9 +253,9 @@ function metricDefinitions(preset: MaterializedVisualPreset): CodeObject {
   return metrics;
 }
 
-function themeMetricDefinitions(preset: MaterializedVisualPreset): CodeObject {
+function themeMetricDefinitions(presentation: MaterializedVisualPresentation): CodeObject {
   const themes: Record<string, CodeValue> = {};
-  for (const [themeName, rawTheme] of Object.entries(preset.themes)) {
+  for (const [themeName, rawTheme] of Object.entries(presentation.themes)) {
     const theme = recordAt(rawTheme);
     const metrics: Record<string, CodeValue> = {};
     for (const [group, rawValues] of Object.entries(theme)) {
@@ -253,8 +263,8 @@ function themeMetricDefinitions(preset: MaterializedVisualPreset): CodeObject {
       const values: Record<string, CodeValue> = {};
       for (const [name, value] of Object.entries(recordAt(rawValues))) {
         values[name] = numberAt(
-          unwrapMetricToken(resolveTokenAlias(preset, group, name, value, theme), group),
-          `${preset.name}.themes.${themeName}.${group}.${name}`,
+          unwrapMetricToken(resolveTokenAlias(presentation, group, name, value, theme), group),
+          `${presentation.name}.themes.${themeName}.${group}.${name}`,
         );
       }
       metrics[group] = values;
@@ -264,21 +274,21 @@ function themeMetricDefinitions(preset: MaterializedVisualPreset): CodeObject {
   return themes;
 }
 
-function fontDefinitions(preset: MaterializedVisualPreset): CodeObject {
+function fontDefinitions(presentation: MaterializedVisualPresentation): CodeObject {
   const fonts: Record<string, CodeValue> = {};
-  for (const [name, value] of Object.entries(recordAt(preset.tokens.font))) {
-    fonts[name] = resolveTokenAlias(preset, "font", name, value) as CodeObject;
+  for (const [name, value] of Object.entries(recordAt(presentation.tokens.font))) {
+    fonts[name] = resolveTokenAlias(presentation, "font", name, value) as CodeObject;
   }
   return fonts;
 }
 
-function themeFontDefinitions(preset: MaterializedVisualPreset): CodeObject {
+function themeFontDefinitions(presentation: MaterializedVisualPresentation): CodeObject {
   const themes: Record<string, CodeValue> = {};
-  for (const [themeName, rawTheme] of Object.entries(preset.themes)) {
+  for (const [themeName, rawTheme] of Object.entries(presentation.themes)) {
     const theme = recordAt(rawTheme);
     const fonts: Record<string, CodeValue> = {};
     for (const [name, value] of Object.entries(recordAt(theme.font))) {
-      fonts[name] = resolveTokenAlias(preset, "font", name, value, theme) as CodeObject;
+      fonts[name] = resolveTokenAlias(presentation, "font", name, value, theme) as CodeObject;
     }
     if (Object.keys(fonts).length) themes[themeName] = fonts;
   }
@@ -289,7 +299,7 @@ function tokenDefinitionCode(
   group: string,
   value: unknown,
   path: string,
-  preset: MaterializedVisualPreset,
+  presentation: MaterializedVisualPresentation,
 ): CodeValue {
   switch (group) {
     case "color":
@@ -310,7 +320,7 @@ function tokenDefinitionCode(
     case "shadow":
       return shadowLiteral(value, path);
     case "font":
-      return fontLiteral(value, path, preset);
+      return fontLiteral(value, path, presentation);
     default:
       throw new Error(`Unknown visual token group ${JSON.stringify(group)}.`);
   }
@@ -326,7 +336,7 @@ function unwrapMetricToken(value: unknown, group: string): unknown {
 }
 
 function resolveTokenAlias(
-  preset: MaterializedVisualPreset,
+  presentation: MaterializedVisualPresentation,
   group: string,
   name: string,
   value: unknown,
@@ -335,17 +345,18 @@ function resolveTokenAlias(
 ): unknown {
   const alias = recordAt(value).token;
   if (typeof alias !== "string") return value;
-  assertKnownKeys(recordAt(value), ["token"], `${preset.name}.tokens.${group}.${name}`);
+  assertKnownKeys(recordAt(value), ["token"], `${presentation.name}.tokens.${group}.${name}`);
   const key = `${group}.${name}`;
-  if (seen.has(key)) throw new Error(`${preset.name} contains a circular token alias at ${key}.`);
+  if (seen.has(key))
+    throw new Error(`${presentation.name} contains a circular token alias at ${key}.`);
   seen.add(key);
   const themedGroup = recordAt(theme[group]);
-  const baseGroup = recordAt(preset.tokens[group]);
+  const baseGroup = recordAt(presentation.tokens[group]);
   const target = alias in themedGroup ? themedGroup[alias] : baseGroup[alias];
   if (target == null) {
-    throw new Error(`${preset.name} token ${key} aliases unknown token ${group}.${alias}.`);
+    throw new Error(`${presentation.name} token ${key} aliases unknown token ${group}.${alias}.`);
   }
-  return resolveTokenAlias(preset, group, alias, target, theme, seen);
+  return resolveTokenAlias(presentation, group, alias, target, theme, seen);
 }
 
 function validateMotionTokenDefinition(value: unknown, path: string): void {
@@ -418,21 +429,21 @@ function validateMotionTokenDefinition(value: unknown, path: string): void {
 }
 
 function planComponent(
-  preset: MaterializedVisualPreset,
+  presentation: MaterializedVisualPresentation,
   component: string,
   parts: Readonly<Record<string, Readonly<Record<string, unknown>>>>,
   varsName: string,
 ): ComponentPlan {
-  const stylesName = `${identifier(preset.name)}${identifier(component, true)}Styles`;
+  const stylesName = `${identifier(presentation.name)}${identifier(component, true)}Styles`;
   const entries: StyleEntry[] = [];
   const plans: Record<string, PartPlan> = {};
   const resolvedParts = Object.fromEntries(
     Object.entries(parts).map(([partName, source]) => [
       partName,
-      resolvePart(recordAt(source), `${preset.name}.${component}.${partName}`, preset),
+      resolvePart(recordAt(source), `${presentation.name}.${component}.${partName}`, presentation),
     ]),
   ) as Record<string, ResolvedPart>;
-  const anchorNames = collectAnchorNames(preset.name, component, resolvedParts);
+  const anchorNames = collectAnchorNames(presentation.name, component, resolvedParts);
   const hasContainers = Object.values(resolvedParts).some(partUsesContainer);
 
   for (const [partName, part] of Object.entries(resolvedParts)) {
@@ -444,15 +455,15 @@ function planComponent(
       baseExtra,
       motionTransitionStyle(
         cssTransitionDomains(recordAt(part.motion)),
-        preset,
-        `${preset.name}.${component}.${partName}`,
+        presentation,
+        `${presentation.name}.${component}.${partName}`,
       ),
     );
     const base = createStyleEntry(
       `${partName}_base`,
       baseSource,
       {
-        path: `${preset.name}.${component}.${partName}`,
+        path: `${presentation.name}.${component}.${partName}`,
         varsName,
         component,
         anchorNames,
@@ -473,7 +484,7 @@ function planComponent(
         const wrappers: string[] = [];
         const predicates: RuntimePredicate[] = [];
         for (const leaf of branch) {
-          const wrapper = staticConditionWrapper(leaf, preset);
+          const wrapper = staticConditionWrapper(leaf, presentation);
           if (wrapper) {
             wrappers.push(wrapper);
             continue;
@@ -481,7 +492,7 @@ function planComponent(
           const predicate = runtimePredicate(leaf);
           if (!predicate) {
             throw new Error(
-              `${preset.name}.${component}.${partName}.when[${index}] cannot be lowered.`,
+              `${presentation.name}.${component}.${partName}.when[${index}] cannot be lowered.`,
             );
           }
           predicates.push(predicate);
@@ -490,7 +501,7 @@ function planComponent(
           key,
           apply,
           {
-            path: `${preset.name}.${component}.${partName}.when[${index}]`,
+            path: `${presentation.name}.${component}.${partName}.when[${index}]`,
             varsName,
             component,
             anchorNames,
@@ -541,12 +552,12 @@ function cssTransitionDomains(motion: Record<string, unknown>): Record<string, u
 
 function validatePartShape(
   part: Record<string, unknown>,
-  preset: MaterializedVisualPreset,
+  presentation: MaterializedVisualPresentation,
   path: string,
 ): void {
   assertKnownKeys(part, [...visualStyleKeys, "use", "when", "motion", "collection"], path);
-  validateMotionShape(part.motion, preset, `${path}.motion`);
-  validateCollectionShape(part.collection, preset, `${path}.collection`);
+  validateMotionShape(part.motion, presentation, `${path}.motion`);
+  validateCollectionShape(part.collection, presentation, `${path}.collection`);
   if (part.when == null) return;
   if (!Array.isArray(part.when)) throw new Error(`${path}.when must be an array.`);
   const selectors = [
@@ -610,7 +621,11 @@ function validateConditionSelector(condition: Record<string, unknown>, path: str
   }
 }
 
-function validateMotionShape(value: unknown, preset: MaterializedVisualPreset, path: string): void {
+function validateMotionShape(
+  value: unknown,
+  presentation: MaterializedVisualPresentation,
+  path: string,
+): void {
   if (value == null) return;
   const motion = requiredRecord(value, path);
   assertKnownKeys(motion, ["target", "presence", "transition", "layout", "reduceMotion"], path);
@@ -642,10 +657,10 @@ function validateMotionShape(value: unknown, preset: MaterializedVisualPreset, p
     const transition = requiredRecord(motion.transition, `${path}.transition`);
     assertKnownKeys(transition, Object.keys(transitionProperties), `${path}.transition`);
     for (const [domain, reference] of Object.entries(transition)) {
-      motionToken(preset, reference, `${path}.transition.${domain}`);
+      motionToken(presentation, reference, `${path}.transition.${domain}`);
     }
   }
-  if (motion.layout != null) motionToken(preset, motion.layout, `${path}.layout`);
+  if (motion.layout != null) motionToken(presentation, motion.layout, `${path}.layout`);
   if (motion.reduceMotion != null) {
     enumAt(motion.reduceMotion, ["instant", "crossfade"], `${path}.reduceMotion`);
   }
@@ -661,15 +676,15 @@ function numberInRange(value: unknown, minimum: number, maximum: number, path: s
 
 function validateCollectionShape(
   value: unknown,
-  preset: MaterializedVisualPreset,
+  presentation: MaterializedVisualPresentation,
   path: string,
 ): void {
   if (value == null) return;
   const collection = requiredRecord(value, path);
   assertKnownKeys(collection, ["axis", "estimate", "gap", "lanes"], path);
   if (collection.axis != null) enumAt(collection.axis, ["block", "inline"], `${path}.axis`);
-  metricAt(collection.estimate, preset, ["size", "space"], `${path}.estimate`);
-  if (collection.gap != null) metricAt(collection.gap, preset, ["space"], `${path}.gap`);
+  metricAt(collection.estimate, presentation, ["size", "space"], `${path}.estimate`);
+  if (collection.gap != null) metricAt(collection.gap, presentation, ["space"], `${path}.gap`);
   if (collection.lanes != null) {
     const lanes = numberAt(collection.lanes, `${path}.lanes`);
     if (!Number.isInteger(lanes) || lanes < 1) throw new Error(`${path}.lanes must be positive.`);
@@ -678,7 +693,7 @@ function validateCollectionShape(
 
 function metricAt(
   value: unknown,
-  preset: MaterializedVisualPreset,
+  presentation: MaterializedVisualPresentation,
   groups: readonly string[],
   path: string,
 ): number | unknown {
@@ -689,24 +704,28 @@ function metricAt(
     typeof reference.group !== "string" ||
     !groups.includes(reference.group) ||
     typeof reference.name !== "string" ||
-    !(reference.name in recordAt(preset.tokens[reference.group]))
+    !(reference.name in recordAt(presentation.tokens[reference.group]))
   ) {
     throw new Error(`${path} must be a number or ${groups.join("/")} token.`);
   }
   return value;
 }
 
-function motionToken(preset: MaterializedVisualPreset, value: unknown, path: string): unknown {
+function motionToken(
+  presentation: MaterializedVisualPresentation,
+  value: unknown,
+  path: string,
+): unknown {
   const reference = requiredRecord(value, path);
   if (
     reference.$visual !== "token" ||
     reference.group !== "motion" ||
     typeof reference.name !== "string" ||
-    !(reference.name in recordAt(preset.tokens.motion))
+    !(reference.name in recordAt(presentation.tokens.motion))
   ) {
     throw new Error(`${path} must reference a motion token.`);
   }
-  return recordAt(preset.tokens.motion)[reference.name];
+  return recordAt(presentation.tokens.motion)[reference.name];
 }
 
 const transitionProperties: Readonly<Record<string, readonly string[]>> = {
@@ -716,7 +735,7 @@ const transitionProperties: Readonly<Record<string, readonly string[]>> = {
 
 function motionTransitionStyle(
   value: unknown,
-  preset: MaterializedVisualPreset,
+  presentation: MaterializedVisualPresentation,
   path: string,
 ): Record<string, CodeValue> {
   const transition = recordAt(value);
@@ -726,7 +745,7 @@ function motionTransitionStyle(
     const properties = transitionProperties[domain];
     if (!properties)
       throw new Error(`${path}.motion.transition contains unknown domain ${domain}.`);
-    const driver = motionToken(preset, reference, `${path}.motion.transition.${domain}`);
+    const driver = motionToken(presentation, reference, `${path}.motion.transition.${domain}`);
     for (const property of properties) {
       const current = owners.get(property);
       if (current && JSON.stringify(current.driver) !== JSON.stringify(driver)) {
@@ -2113,7 +2132,7 @@ function childPath(context: LoweringContext, suffix: string): LoweringContext {
 function resolvePart(
   rawSource: Record<string, unknown>,
   path: string,
-  preset: MaterializedVisualPreset,
+  presentation: MaterializedVisualPresentation,
   ancestors: ReadonlySet<object> = new Set(),
 ): ResolvedPart {
   let source = rawSource;
@@ -2124,7 +2143,7 @@ function resolvePart(
   }
   source = normalizeSemanticPart(source, path);
   if (ancestors.has(source)) throw new Error(`${path}.use contains a cycle.`);
-  validatePartShape(source, preset, path);
+  validatePartShape(source, presentation, path);
   const nextAncestors = new Set(ancestors).add(source);
   const uses = Array.isArray(source.use) ? source.use : source.use == null ? [] : [source.use];
   let base: Record<string, unknown> = {};
@@ -2135,7 +2154,7 @@ function resolvePart(
     const resolved = resolvePart(
       requiredRecord(use, `${path}.use[${index}]`),
       `${path}.use[${index}]`,
-      preset,
+      presentation,
       nextAncestors,
     );
     base = deepMerge(base, resolved.base);
@@ -2684,34 +2703,35 @@ function expressionBranches(
 
 function staticConditionWrapper(
   leaf: ConditionLeaf,
-  preset: MaterializedVisualPreset,
+  presentation: MaterializedVisualPresentation,
 ): string | undefined {
   let wrapper: string | undefined;
   if (leaf.selector === "native") wrapper = nativeSelector(leaf.value);
   else if (leaf.selector === "container") {
     const name = stringAt(leaf.value, "when.container");
-    const definition = recordAt(preset.containers[name]);
+    const definition = recordAt(presentation.containers[name]);
     if (!Object.keys(definition).length) {
-      throw new Error(`${preset.name} references unknown container ${JSON.stringify(name)}.`);
+      throw new Error(`${presentation.name} references unknown container ${JSON.stringify(name)}.`);
     }
-    wrapper = `@container ${containerQuery(definition, `${preset.name}.containers.${name}`)}`;
+    wrapper = `@container ${containerQuery(definition, `${presentation.name}.containers.${name}`)}`;
   } else if (leaf.selector === "preference") wrapper = preferenceQuery(leaf.value);
   else if (leaf.selector === "capability") wrapper = capabilityQuery(leaf.value);
-  else if (leaf.selector === "expression") wrapper = staticExpressionWrapper(leaf.value, preset);
+  else if (leaf.selector === "expression")
+    wrapper = staticExpressionWrapper(leaf.value, presentation);
   else if (
     leaf.selector !== "active" &&
     leaf.selector !== "state" &&
     leaf.selector !== "input" &&
     leaf.selector !== "theme"
   ) {
-    throw new Error(`${preset.name} contains an unknown visual condition.`);
+    throw new Error(`${presentation.name} contains an unknown visual condition.`);
   }
   return wrapper && leaf.not ? negateStaticWrapper(wrapper) : wrapper;
 }
 
 function staticExpressionWrapper(
   value: unknown,
-  preset: MaterializedVisualPreset,
+  presentation: MaterializedVisualPresentation,
 ): string | undefined {
   const expression = requiredRecord(value, "when.expression");
   if (expression.source === "interaction") {
@@ -2747,7 +2767,7 @@ function staticExpressionWrapper(
     const left = requiredRecord(expression.left, "when.expression.left");
     if (left.source !== "geometry") return;
     const right = expression.right;
-    const length = expressionMetric(right, preset);
+    const length = expressionMetric(right, presentation);
     const axis = left.name === "blockSize" ? "block-size" : "inline-size";
     const operator: Record<string, string> = {
       below: "<",
@@ -2760,7 +2780,7 @@ function staticExpressionWrapper(
   return;
 }
 
-function expressionMetric(value: unknown, preset: MaterializedVisualPreset): number {
+function expressionMetric(value: unknown, presentation: MaterializedVisualPresentation): number {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   const reference = requiredRecord(value, "condition metric");
   if (
@@ -2770,7 +2790,7 @@ function expressionMetric(value: unknown, preset: MaterializedVisualPreset): num
   ) {
     throw new Error("A geometry condition must compare with a metric token or number.");
   }
-  const token = recordAt(preset.tokens[reference.group])[reference.name];
+  const token = recordAt(presentation.tokens[reference.group])[reference.name];
   const definition = requiredRecord(token, `tokens.${reference.group}.${reference.name}`);
   return numberAt(definition.value, `tokens.${reference.group}.${reference.name}.value`);
 }
@@ -2853,7 +2873,7 @@ function containerQuery(value: Record<string, unknown>, path: string): string {
 }
 
 function collectAnchorNames(
-  preset: string,
+  presentation: string,
   component: string,
   parts: Readonly<Record<string, ResolvedPart>>,
 ): Record<string, string> {
@@ -2864,10 +2884,10 @@ function collectAnchorNames(
       if (typeof anchor.part !== "string") continue;
       if (!(anchor.part in parts)) {
         throw new Error(
-          `${preset}.${component} references unknown anchor part ${JSON.stringify(anchor.part)}.`,
+          `${presentation}.${component} references unknown anchor part ${JSON.stringify(anchor.part)}.`,
         );
       }
-      result[anchor.part] = `--${kebab(preset)}-${kebab(component)}-${kebab(anchor.part)}`;
+      result[anchor.part] = `--${kebab(presentation)}-${kebab(component)}-${kebab(anchor.part)}`;
     }
   }
   return result;
@@ -3033,29 +3053,35 @@ function strokeTokenLiteral(value: unknown, path: string): string {
   return `${lengthLiteral(stroke.width, `${path}.width`)} ${strokeLine(stroke.line ?? "solid", `${path}.line`)} ${colorLiteral(stroke.color, `${path}.color`)}`;
 }
 
-function fontLiteral(value: unknown, path: string, preset: MaterializedVisualPreset): string {
+function fontLiteral(
+  value: unknown,
+  path: string,
+  presentation: MaterializedVisualPresentation,
+): string {
   const font = requiredRecord(value, path);
   assertKnownKeys(font, ["asset", "features"], path);
   const name = stringAt(font.asset, `${path}.asset`);
-  const asset = fontAsset(preset, name, fontAssetSourcePath(preset.name, name));
-  const families = asset.sources.length ? [fontFamilyName(preset.name, name)] : [];
+  const asset = fontAsset(presentation, name, fontAssetSourcePath(presentation.name, name));
+  const families = asset.sources.length ? [fontFamilyName(presentation.name, name)] : [];
   families.push(...asset.fallback);
   return families.map((family) => JSON.stringify(family)).join(", ");
 }
 
-function fontRuntimeSource(presets: readonly MaterializedVisualPreset[]): string {
+function fontRuntimeSource(presentations: readonly MaterializedVisualPresentation[]): string {
   const rules: string[] = [];
   const preloads = new Set<string>();
-  for (const preset of [...presets].sort((left, right) => left.name.localeCompare(right.name))) {
-    for (const name of Object.keys(preset.assets.fonts).sort()) {
-      const path = fontAssetSourcePath(preset.name, name);
-      const asset = fontAsset(preset, name, path);
+  for (const presentation of [...presentations].sort((left, right) =>
+    left.name.localeCompare(right.name),
+  )) {
+    for (const name of Object.keys(presentation.assets.fonts).sort()) {
+      const path = fontAssetSourcePath(presentation.name, name);
+      const asset = fontAsset(presentation, name, path);
       for (const [index, source] of asset.sources.entries()) {
         const weight = Array.isArray(source.weight)
           ? `${source.weight[0]} ${source.weight[1]}`
           : String(source.weight);
         rules.push(
-          `@font-face{font-family:${JSON.stringify(fontFamilyName(preset.name, name))};src:url(${JSON.stringify(source.file)}) format(${JSON.stringify(source.format)});font-weight:${weight};font-style:${source.style};font-display:${asset.display}${source.unicodeRange ? `;unicode-range:${source.unicodeRange}` : ""}}`,
+          `@font-face{font-family:${JSON.stringify(fontFamilyName(presentation.name, name))};src:url(${JSON.stringify(source.file)}) format(${JSON.stringify(source.format)});font-weight:${weight};font-style:${source.style};font-display:${asset.display}${source.unicodeRange ? `;unicode-range:${source.unicodeRange}` : ""}}`,
         );
         if (source.preload) preloads.add(source.file);
         void index;
@@ -3091,19 +3117,19 @@ if (typeof document !== "undefined") {
 }`;
 }
 
-function fontFamilyName(preset: string, asset: string): string {
-  return `poggers-${preset.replaceAll(/[^a-zA-Z0-9_-]/g, "-")}-${asset.replaceAll(/[^a-zA-Z0-9_-]/g, "-")}`;
+function fontFamilyName(presentation: string, asset: string): string {
+  return `poggers-${presentation.replaceAll(/[^a-zA-Z0-9_-]/g, "-")}-${asset.replaceAll(/[^a-zA-Z0-9_-]/g, "-")}`;
 }
 
-function fontAssetSourcePath(preset: string, name: string): string {
+function fontAssetSourcePath(presentation: string, name: string): string {
   const separator = name.indexOf("::");
   return separator < 0
-    ? `${preset}.theme.font.${name}`
-    : `${preset}.themes.${name.slice(0, separator)}.font.${name.slice(separator + 2)}`;
+    ? `${presentation}.theme.font.${name}`
+    : `${presentation}.themes.${name.slice(0, separator)}.font.${name.slice(separator + 2)}`;
 }
 
 function fontAsset(
-  preset: MaterializedVisualPreset,
+  presentation: MaterializedVisualPresentation,
   name: string,
   path: string,
 ): {
@@ -3118,7 +3144,7 @@ function fontAsset(
     unicodeRange?: string;
   }>;
 } {
-  const asset = requiredRecord(preset.assets.fonts[name], path);
+  const asset = requiredRecord(presentation.assets.fonts[name], path);
   assertKnownKeys(asset, ["sources", "fallback", "display"], path);
   const fallback = arrayAt(asset.fallback, `${path}.fallback`).map((value, index) =>
     stringAt(value, `${path}.fallback[${index}]`),

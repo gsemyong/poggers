@@ -1,43 +1,47 @@
+import type { DragRelease, DragSample } from "#ui/web/drag";
+
 import type {
-  AppSpec,
+  ApplicationContract as AppSpec,
+  FeatureContract as FeatureSpec,
+  PresentationName,
+  UIState,
+} from "../../application";
+import type {
   ComponentActionArgs,
   ComponentActions,
   ComponentName,
   ComponentParameters,
   ComponentPartName,
   ComponentState,
-  ComponentWritableState,
   ComponentStateKinds,
-  FeatureChildrenOf,
-  FeatureRuntimeSpec,
-  FeatureSpec,
-  PresetName,
-} from "#kernel/app";
-import type { DragRelease } from "#ui/web/drag";
+} from "../component";
 
 type AnyRecord = Record<string, unknown>;
 type Empty = Record<never, never>;
 
-type StylesOf<Spec extends AppSpec> = Spec extends {
-  Styles: infer Styles extends AnyRecord;
+type PresentationsOf<Spec extends AppSpec> = Spec extends {
+  Presentations: infer Presentations;
 }
-  ? Styles
+  ? Presentations
+  : "default";
+
+type FeatureChildrenOf<Feature extends FeatureSpec> = Feature extends {
+  Features: infer Features extends Record<string, FeatureSpec>;
+}
+  ? Features
   : Empty;
 
-type PresetsOf<Spec extends AppSpec> =
-  StylesOf<Spec> extends {
-    Presets: infer Presets;
-  }
-    ? Presets
-    : "default";
+type FeatureRuntimeSpec<App extends AppSpec, Feature extends FeatureSpec> = Feature & {
+  Presentations: App extends { Presentations: infer Presentations } ? Presentations : "default";
+};
 
-export type VisualPresetName<Spec extends AppSpec> = PresetName<Spec>;
+export type VisualPresentationName<Spec extends AppSpec> = PresentationName<Spec>;
 
-type PresetContract<Spec extends AppSpec, Name extends VisualPresetName<Spec>> =
-  PresetsOf<Spec> extends AnyRecord
-    ? Name extends keyof PresetsOf<Spec>
-      ? PresetsOf<Spec>[Name] extends AnyRecord
-        ? PresetsOf<Spec>[Name]
+type PresentationContract<Spec extends AppSpec, Name extends VisualPresentationName<Spec>> =
+  PresentationsOf<Spec> extends AnyRecord
+    ? Name extends keyof PresentationsOf<Spec>
+      ? PresentationsOf<Spec>[Name] extends AnyRecord
+        ? PresentationsOf<Spec>[Name]
         : Empty
       : Empty
     : Empty;
@@ -57,8 +61,8 @@ export type VisualTokenGroup =
 
 export type VisualTokenContract = Partial<Record<VisualTokenGroup, string>>;
 
-type TokenContractFor<Spec extends AppSpec, Name extends VisualPresetName<Spec>> =
-  PresetContract<Spec, Name> extends {
+type TokenContractFor<Spec extends AppSpec, Name extends VisualPresentationName<Spec>> =
+  PresentationContract<Spec, Name> extends {
     Tokens: infer Contract extends VisualTokenContract;
   }
     ? Contract
@@ -288,7 +292,7 @@ type ThemeValue<Value> = Value extends number
         ? { readonly [Key in keyof Value]?: ThemeValue<Value[Key]> }
         : Value;
 
-export type PresetTokens<Spec extends AppSpec, Name extends VisualPresetName<Spec>> = {
+export type PresentationTokens<Spec extends AppSpec, Name extends VisualPresentationName<Spec>> = {
   readonly [Group in keyof TokenContractFor<Spec, Name> & VisualTokenGroup]: {
     readonly [Token in NamesForGroup<TokenContractFor<Spec, Name>, Group>]: VisualTokenDefinition<
       TokenContractFor<Spec, Name>,
@@ -297,7 +301,7 @@ export type PresetTokens<Spec extends AppSpec, Name extends VisualPresetName<Spe
   };
 };
 
-export type VisualTokenRefs<Spec extends AppSpec, Name extends VisualPresetName<Spec>> = {
+export type VisualTokenRefs<Spec extends AppSpec, Name extends VisualPresentationName<Spec>> = {
   readonly [Group in keyof TokenContractFor<Spec, Name> & VisualTokenGroup]: {
     readonly [Token in NamesForGroup<
       TokenContractFor<Spec, Name>,
@@ -306,7 +310,10 @@ export type VisualTokenRefs<Spec extends AppSpec, Name extends VisualPresetName<
   };
 };
 
-export type PresetTokenRefs<Spec extends AppSpec, Name extends VisualPresetName<Spec>> = {
+export type PresentationTokenRefs<
+  Spec extends AppSpec,
+  Name extends VisualPresentationName<Spec>,
+> = {
   readonly [Group in keyof TokenContractFor<Spec, Name> & VisualTokenGroup]: {
     readonly [Token in NamesForGroup<TokenContractFor<Spec, Name>, Group>]: VisualTokenRef<
       Group,
@@ -759,6 +766,7 @@ declare const visualRecipeResult: unique symbol;
 
 export type VisualExpression<Value> = {
   readonly [visualExpression]: Value;
+  is(value: Value): VisualConditionValue;
 };
 
 export type VisualConditionValue = VisualExpression<boolean> & {
@@ -788,11 +796,15 @@ export type VisualNumberExpression<Kind extends VisualValueKind = "number"> =
       isEqual(value: VisualNumberOperand): VisualConditionValue;
     };
 
-type ReactiveValue<Value> = Value extends boolean
+type ReactiveValue<Value> = [Value] extends [boolean]
   ? VisualConditionValue
-  : Value extends number
+  : [Value] extends [number]
     ? VisualNumberExpression
     : VisualExpression<Value>;
+
+type ProcessScopeState<Spec extends FeatureSpec> = {
+  readonly [Name in keyof UIState<Spec>]: ReactiveValue<UIState<Spec>[Name]>;
+};
 
 type ComponentScopeState<Spec extends AppSpec, Component extends ComponentName<Spec>> = {
   readonly [Name in keyof ComponentState<Spec, Component>]: Name extends keyof ComponentStateKinds<
@@ -826,19 +838,7 @@ type ComponentActionReferenceForArgs<
     : never;
 }[keyof ComponentActions<Spec, Component>];
 
-type ComponentWritableStateReferences<
-  Spec extends AppSpec,
-  Component extends ComponentName<Spec>,
-> = {
-  readonly [Name in keyof ComponentWritableState<
-    Spec,
-    Component
-  >]: Name extends keyof ComponentStateKinds<Spec, Component>
-    ? VisualNumberExpression<ComponentStateKinds<Spec, Component>[Name] & VisualValueKind>
-    : ReactiveValue<ComponentWritableState<Spec, Component>[Name]>;
-};
-
-type PresetDragInteraction<Spec extends AppSpec, Component extends ComponentName<Spec>> = {
+type PresentationDragInteraction<Spec extends AppSpec, Component extends ComponentName<Spec>> = {
   readonly type: "drag";
   readonly trigger: VisualPartReference<ComponentPartName<Spec, Component>>;
   readonly axis: "inline" | "block" | "both";
@@ -857,50 +857,30 @@ type PresetDragInteraction<Spec extends AppSpec, Component extends ComponentName
   readonly maxVelocity?: number | VisualNumberExpression<VisualValueKind>;
   readonly resistance?: number | VisualNumberExpression<VisualValueKind>;
   readonly cursor?: { readonly idle: string; readonly active: string } | false;
-  readonly output: {
-    readonly inline?: ComponentWritableStateReferences<
-      Spec,
-      Component
-    >[keyof ComponentWritableStateReferences<Spec, Component>];
-    readonly block?: ComponentWritableStateReferences<
-      Spec,
-      Component
-    >[keyof ComponentWritableStateReferences<Spec, Component>];
-    readonly velocityInline?: ComponentWritableStateReferences<
-      Spec,
-      Component
-    >[keyof ComponentWritableStateReferences<Spec, Component>];
-    readonly velocityBlock?: ComponentWritableStateReferences<
-      Spec,
-      Component
-    >[keyof ComponentWritableStateReferences<Spec, Component>];
-    readonly progressInline?: ComponentWritableStateReferences<
-      Spec,
-      Component
-    >[keyof ComponentWritableStateReferences<Spec, Component>];
-    readonly progressBlock?: ComponentWritableStateReferences<
-      Spec,
-      Component
-    >[keyof ComponentWritableStateReferences<Spec, Component>];
-  };
   readonly start?: ComponentActionReferenceForArgs<Spec, Component, readonly []>;
+  readonly change: ComponentActionReferenceForArgs<Spec, Component, readonly [DragSample]>;
   readonly release: ComponentActionReferenceForArgs<Spec, Component, readonly [DragRelease]>;
   readonly cancel?: ComponentActionReferenceForArgs<Spec, Component, readonly []>;
 };
 
-type PresetParameterValue<Value> = Value extends number
+type PresentationCompletion<Spec extends AppSpec, Component extends ComponentName<Spec>> = {
+  readonly when: VisualConditionValue;
+  readonly action: ComponentActionReferenceForArgs<Spec, Component, readonly []>;
+};
+
+type PresentationParameterValue<Value> = Value extends number
   ? Value | VisualNumberExpression
   : Value extends boolean
     ? Value | VisualConditionValue
     : Value | VisualExpression<Value>;
 
-type PresetParameterResult<Spec extends AppSpec, Component extends ComponentName<Spec>> = [
+type PresentationParameterResult<Spec extends AppSpec, Component extends ComponentName<Spec>> = [
   keyof ComponentParameters<Spec, Component>,
 ] extends [never]
   ? { readonly parameters?: never }
   : {
       readonly parameters: {
-        readonly [Name in keyof ComponentParameters<Spec, Component>]: PresetParameterValue<
+        readonly [Name in keyof ComponentParameters<Spec, Component>]: PresentationParameterValue<
           ComponentParameters<Spec, Component>[Name]
         >;
       };
@@ -1024,10 +1004,10 @@ type CreateMotion<TokenSet extends Tokens> = <Kind extends VisualValueKind = "nu
   readonly range: readonly [number, number];
 }) => VisualMotionExpression<Kind>;
 
-export type PresetFactoryContract<
+export type PresentationFactoryContract<
   Spec extends AppSpec,
-  Name extends VisualPresetName<Spec>,
-  TokenSet extends Tokens = PresetTokens<Spec, Name>,
+  Name extends VisualPresentationName<Spec>,
+  TokenSet extends Tokens = PresentationTokens<Spec, Name>,
 > = {
   readonly tokens: TokenRefsFor<TokenSet>;
   readonly createRecipe: CreateRecipe<RecipeFragment<TokenSet>>;
@@ -1049,12 +1029,17 @@ type ComponentVisualResult<
         | null
         | undefined
       )[];
-} & PresetParameterResult<Spec, Component> & {
-    readonly interactions?: readonly PresetDragInteraction<Spec, Component>[];
+} & PresentationParameterResult<Spec, Component> & {
+    readonly interactions?: readonly PresentationDragInteraction<Spec, Component>[];
+    readonly completions?: readonly PresentationCompletion<Spec, Component>[];
     readonly gestures?: never;
   };
 
-export type PresetComponentScope<Spec extends AppSpec, Component extends ComponentName<Spec>> = {
+export type PresentationComponentScope<
+  Spec extends AppSpec,
+  Component extends ComponentName<Spec>,
+> = {
+  readonly process: ProcessScopeState<Spec>;
   readonly state: ComponentScopeState<Spec, Component>;
   readonly actions: {
     readonly [Action in keyof ComponentActions<Spec, Component>]: VisualActionReference<
@@ -1069,56 +1054,46 @@ export type PresetComponentScope<Spec extends AppSpec, Component extends Compone
   readonly environment: VisualEnvironmentScope;
 };
 
-export type PresetFactoryResult<
+export type PresentationFactoryResult<
   Spec extends AppSpec,
-  Name extends VisualPresetName<Spec>,
-  TokenSet extends Tokens = PresetTokens<Spec, Name>,
+  Name extends VisualPresentationName<Spec>,
+  TokenSet extends Tokens = PresentationTokens<Spec, Name>,
 > = {
   readonly theme: TokenSet;
   readonly themes?: Readonly<Record<string, ThemeValue<TokenSet>>>;
-  readonly components: PresetComponentFactories<Spec, TokenSet>;
-} & PresetFeatureChildren<Spec, Spec, TokenSet>;
+  readonly components: PresentationComponentTree<Spec, Spec, TokenSet>;
+};
 
-type PresetComponentFactories<Spec extends AppSpec, TokenSet extends Tokens> = {
+type PresentationComponentFactories<Spec extends AppSpec, TokenSet extends Tokens> = {
   readonly [Component in ComponentName<Spec>]: (
-    scope: PresetComponentScope<Spec, Component>,
+    scope: PresentationComponentScope<Spec, Component>,
   ) => ComponentVisualResult<Spec, Component, TokenSet>;
 };
 
-type PresetFeatureNode<
+type PresentationComponentTree<
   App extends AppSpec,
-  Feature extends FeatureSpec,
+  Owner extends FeatureSpec,
   TokenSet extends Tokens,
-> = {
-  readonly components: PresetComponentFactories<FeatureRuntimeSpec<App, Feature>, TokenSet>;
-} & PresetFeatureChildren<App, Feature, TokenSet>;
+> = PresentationComponentFactories<FeatureRuntimeSpec<App, Owner>, TokenSet> & {
+  readonly [Name in keyof FeatureChildrenOf<Owner> as Capitalize<
+    Extract<Name, string>
+  >]: PresentationComponentTree<
+    App,
+    Extract<FeatureChildrenOf<Owner>[Name], FeatureSpec>,
+    TokenSet
+  >;
+};
 
-type PresetFeatureChildren<
-  App extends AppSpec,
-  Feature extends FeatureSpec,
-  TokenSet extends Tokens,
-> = keyof FeatureChildrenOf<Feature> extends never
-  ? { readonly features?: never }
-  : {
-      readonly features: {
-        readonly [Name in keyof FeatureChildrenOf<Feature>]: PresetFeatureNode<
-          App,
-          Extract<FeatureChildrenOf<Feature>[Name], FeatureSpec>,
-          TokenSet
-        >;
-      };
-    };
-
-export type PresetFactory<
+export type PresentationFactory<
   Spec extends AppSpec,
-  Name extends VisualPresetName<Spec>,
-  TokenSet extends Tokens = PresetTokens<Spec, Name>,
+  Name extends VisualPresentationName<Spec>,
+  TokenSet extends Tokens = PresentationTokens<Spec, Name>,
 > = (
-  contract: PresetFactoryContract<Spec, Name, TokenSet>,
-) => PresetFactoryResult<Spec, Name, TokenSet>;
+  contract: PresentationFactoryContract<Spec, Name, TokenSet>,
+) => PresentationFactoryResult<Spec, Name, TokenSet>;
 
-export type Preset<
+export type Presentation<
   Spec extends AppSpec,
-  Name extends VisualPresetName<Spec>,
-  TokenSet extends Tokens = PresetTokens<Spec, Name>,
-> = PresetFactory<Spec, Name, TokenSet>;
+  Name extends VisualPresentationName<Spec>,
+  TokenSet extends Tokens = PresentationTokens<Spec, Name>,
+> = PresentationFactory<Spec, Name, TokenSet>;

@@ -7,24 +7,27 @@
   ],
   "type": "module",
   "scripts": {
-    "typecheck": "turbo run typecheck",
+    "typecheck": "nub run -r --if-present typecheck",
     "fmt": "oxfmt",
     "fmt:check": "oxfmt --check",
     "lint": "oxlint .",
-    "test": "turbo run test",
-    "build": "turbo run build",
-    "dev:chat": "bun run --filter @poggers/chat dev",
-    "dev:data-flow": "bun run --filter @poggers/data-flow dev",
-    "dev:site": "bun run --filter @poggers/site dev",
-    "dev:visual-lab": "bun run --filter @poggers/visual-lab dev",
-    "check": "bun run typecheck && bun run lint && bun run fmt:check && bun run test"
+    "test": "nub run -r --if-present test",
+    "build": "nub run -r --if-present build",
+    "dev:chat": "nub run --filter @poggers/chat dev",
+    "dev:visual-lab": "nub run --filter @poggers/visual-lab dev",
+    "check": "nub run typecheck && nub run lint && nub run fmt:check && nub run test"
   },
   "devDependencies": {
-    "@types/bun": "^1.3.14",
     "oxfmt": "^0.58.0",
     "oxlint": "^1.73.0",
-    "turbo": "^2.10.4",
     "typescript": "^7.0.2"
   },
-  "packageManager": "bun@1.3.14"
+  "devEngines": {
+    "packageManager": {
+      "name": "nub",
+      "version": "^0.4.13",
+      "onFail": "warn"
+    }
+  },
+  "packageManager": "nub@0.4.13"
 }

@@ -1,49 +1,28 @@
 import { endBatch, startBatch } from "alien-signals";
 
-import {
-  defineApp,
-  type ActorOf,
-  type App,
-  type AppDef,
-  type AppNavigation,
-  type AppScreen,
-  type AppSpec,
-  type Client,
-  type ComponentInput,
-  type ComponentName,
-  type ComponentRenderScope,
-  type ComponentState,
-  type FeatureAPIOf,
-  type ResourceFor,
-  type ResourceName,
-  type UISignal,
-} from "#kernel/app";
-import {
-  featureComponentName,
-  featureResourceName,
-  type InstantiatedFeatureAPIs,
-} from "#kernel/feature";
-import type { ConnectOpts } from "#substrate/client";
-import {
-  createComponentActor,
-  type ComponentActor,
-  type StatechartDefinition,
-  type StatechartNode,
-  type StatechartSnapshot,
-  type StatechartSettlementDriver,
-  type StatechartTask,
-  type StatechartTransitions,
-} from "#ui/machine.xstate";
-import type { PresetAppearance, PresetName, PresetThemeName } from "#ui/preset";
 import { PresenceScene } from "#ui/web/scene";
+
+import type { Application, ApplicationContract } from "../../application";
+import {
+  createProgramContributionInstance,
+  RuntimeScope,
+  scopeCapabilities,
+  type ProgramAddress,
+  type ProgramContributionInstance,
+} from "../../runtime";
+import type {
+  ComponentInput,
+  ComponentName,
+  ComponentState,
+  PresentationAppearance,
+  PresentationName,
+} from "../component";
 
 declare const __POGGERS_HMR__: boolean;
 import {
   computed,
   bindVirtualCollectionHost,
   allocateSceneOwner,
-  captureSignalOnHotRefresh,
-  createNativeAppRuntime,
   currentPresenceScene,
   currentStructuralKey,
   effect,
@@ -51,333 +30,275 @@ import {
   jsx,
   onCleanup,
   onMount,
-  reactiveValue,
   signal,
-  untrack,
   type Child,
   type Component,
-  type NativeResource,
   type Props,
+  type HotRenderState,
   type Signal,
 } from "#ui/web/runtime";
 import {
   createVisualCoordinator,
-  isCompiledVisualPreset,
+  isCompiledVisualPresentation,
   registerVisualHover,
   visualPartAttributes,
   visualPartCollection,
   visualPartDependencies,
   visualPartPresence,
+  type VisualActionMode,
+  type VisualActionInvoker,
   type VisualCoordinator,
   type CompiledVisuals,
 } from "#ui/web/visual-runtime";
 
-type HookName<Name extends string> = `use${Capitalize<Name>}`;
-
-const STATE_CHANGED_ACTION = "@poggers/state.changed";
-
-export type ComponentRuntimeParts<Spec extends AppSpec> = {
-  [Component in ComponentName<Spec>]?: {
+export type ComponentRuntimeParts<Contract extends ApplicationContract> = {
+  [Name in ComponentName<Contract>]?: {
     readonly parts: Record<string, string>;
     readonly state?: readonly {
-      readonly name: keyof ComponentState<Spec, Component> & string;
-      readonly writable?: boolean;
+      readonly name: keyof ComponentState<Contract, Name> & string;
     }[];
-    readonly inputCallbacks?: readonly (keyof ComponentInput<Spec, Component> & string)[];
+    readonly inputCallbacks?: readonly (keyof ComponentInput<Contract, Name> & string)[];
   };
 };
 
-export type ApiHooks<Spec extends AppSpec> = {
-  [Resource in ResourceName<Spec> as HookName<Resource>]: (
-    key: ResourceFor<Spec, Resource>["Key"],
-  ) => NativeResource<Spec, Resource>;
-} & {
-  useResource: <Resource extends ResourceName<Spec>>(
-    resource: Resource,
-    key: ResourceFor<Spec, Resource>["Key"],
-  ) => NativeResource<Spec, Resource>;
-  readonly screen: UISignal<AppScreen<Spec>>;
-  readonly nav: AppNavigation<Spec>;
-  useScreen(): AppScreen<Spec>;
-};
+export type PresentationsDefinition<Contract extends ApplicationContract> = Readonly<{
+  defaultPresentation?: PresentationName<Contract>;
+  presentations: Partial<Record<PresentationName<Contract>, unknown>>;
+}>;
 
-export type StylesDef<Spec extends AppSpec> = {
-  readonly defaultPreset?: PresetName<Spec>;
-  readonly presets: Partial<Record<PresetName<Spec>, unknown>>;
-};
+export type ApplicationUI<Contract extends ApplicationContract> = Readonly<{
+  process: Readonly<Record<string, unknown>>;
+  features: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
+  presentation: Signal<PresentationAppearance<Contract>>;
+  setPresentation(appearance: PresentationAppearance<Contract>): void;
+  components: RuntimeComponentComposition["components"];
+  renderRoot(): Child;
+  captureHotState(): HotRenderState;
+  updateCompiledVisuals(compiled: CompiledVisuals): boolean;
+  dispose(): Promise<void>;
+}>;
 
-export type StyleControls<Spec extends AppSpec> = {
-  readonly appearance: Signal<PresetAppearance<Spec>>;
-  useAppearance(): PresetAppearance<Spec>;
-  setAppearance(appearance: PresetAppearance<Spec>): void;
-};
-
-export type AppHooks<Spec extends AppSpec> = ApiHooks<Spec> &
-  StyleControls<Spec> & {
-    readonly api: Readonly<FeatureAPIOf<Spec>>;
-    readonly components: {
-      readonly [Component in ComponentName<Spec>]: ComponentRenderScope<
-        Spec,
-        Component
-      >["components"][Component];
-    };
-    start(connect?: ConnectOpts | (() => Promise<Client<Spec>>)): Promise<void>;
-    dispose(): void;
-    renderRoot(): Child;
-  };
-
-export type AppInput<Spec extends AppSpec> = App<Spec> | AppDef<Spec>;
-
-export type CreateHooksOpts<Spec extends AppSpec> = {
-  app: AppInput<Spec>;
-  styles: StylesDef<Spec>;
-  components?: ComponentRuntimeParts<Spec>;
+export type CreateApplicationUIOptions<Contract extends ApplicationContract> = Readonly<{
+  application: Application<Contract>;
+  program: string;
+  presentations: PresentationsDefinition<Contract>;
+  components?: ComponentRuntimeParts<Contract>;
   compiledVisuals?: CompiledVisuals;
-  dependencyGroups?: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
-};
+  hotState?: HotRenderState;
+  resolveCapabilities?(address: ProgramAddress): Readonly<Record<string, unknown>>;
+}>;
 
 type RuntimeComponentConfig = {
   parts: Record<string, string>;
-  state?: readonly { readonly name: string; readonly writable?: boolean }[];
+  state?: readonly { readonly name: string }[];
   inputCallbacks?: readonly string[];
 };
 
 type RuntimeComponentParts = Record<string, RuntimeComponentConfig>;
-
 type RuntimeHookInput = Record<string, unknown>;
+type RuntimeFeature = Readonly<{
+  programs?: Readonly<Record<string, RuntimeProgramDefinition>>;
+  features?: Readonly<Record<string, RuntimeFeature>>;
+}>;
+type RuntimeApplication = Readonly<{
+  features?: Readonly<Record<string, RuntimeFeature>>;
+}>;
+
+type RuntimeProgramDefinition = Readonly<{
+  start?: (scope: Record<string, unknown>) => unknown;
+  state?: Readonly<Record<string, unknown>>;
+  actions?: Readonly<
+    Record<string, (scope: Record<string, unknown>, ...args: readonly unknown[]) => unknown>
+  >;
+  components?: Readonly<Record<string, RuntimeComponentDefinition>>;
+  root?: string;
+}>;
 
 type RuntimeComponentDefinition = {
-  state?: (scope: RuntimeComponentStateScope) => Record<string, unknown>;
-  machine?: {
-    context?: Record<string, unknown>;
-    initial?: string;
-    on?: Readonly<Record<string, StatechartTransitions>>;
-    phases?: Readonly<Record<string, RuntimeComponentPhaseNode>>;
-    tasks?: Record<string, StatechartTask>;
-  };
+  state?:
+    | Readonly<Record<string, unknown>>
+    | ((scope: RuntimeComponentStateScope) => Readonly<Record<string, unknown>>);
+  actions?: Readonly<
+    Record<string, (scope: Record<string, unknown>, ...args: readonly unknown[]) => unknown>
+  >;
+  start?: (scope: Record<string, unknown>) => unknown;
   view?: (scope: RuntimeComponentRenderScope) => Child;
-};
-
-type RuntimeComponentPhaseNode = Omit<StatechartNode, "states"> & {
-  readonly phases?: Readonly<Record<string, RuntimeComponentPhaseNode>>;
 };
 
 type RuntimeComponentStateScope = {
   readonly input: Record<string, unknown>;
-  readonly api: Readonly<Record<string, unknown>>;
-  readonly appearance: Readonly<Record<string, unknown>>;
-  readonly screen: unknown;
-  readonly context: Readonly<Record<string, unknown>>;
-  readonly phase: unknown;
-  readonly active: readonly string[];
-  readonly parameters: Readonly<Record<string, unknown>>;
-};
-
-type RuntimeMachineState = {
-  readonly paths: readonly string[];
-  readonly value: unknown;
-  readonly active: readonly string[];
-  readonly done: boolean;
-  readonly output: unknown;
-  readonly error: unknown;
-  matches(path: string): boolean;
-  can(event: string, ...args: readonly unknown[]): boolean;
-  subscribe(observer: (state: RuntimeMachineState) => void): () => void;
+  readonly process: Readonly<Record<string, unknown>>;
+  readonly presentation: Readonly<Record<string, unknown>>;
 };
 
 type RuntimeComponentComposition = {
   readonly components: Record<string, (props?: RuntimeHookInput) => Child>;
-  readonly componentGroups: Readonly<
-    Record<string, Record<string, (props?: RuntimeHookInput) => Child>>
-  >;
-  readonly featureComponents: Readonly<Record<string, Record<string, unknown>>>;
-  readonly dependencyGroups: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
-  readonly api: Readonly<Record<string, unknown>>;
-  readonly apis: InstantiatedFeatureAPIs;
-  readonly navigation: Record<string, (...args: unknown[]) => void>;
-  readonly screen: () => unknown;
-  readonly featureNavigation: Readonly<
-    Record<
-      string,
-      {
-        readonly actions: Record<string, (...args: unknown[]) => void>;
-        readonly destinations: Readonly<Record<string, string>>;
-      }
-    >
-  >;
+  readonly componentGroups: Record<string, Record<string, (props?: RuntimeHookInput) => Child>>;
+  readonly componentNamespaces: Record<string, Record<string, unknown>>;
+  readonly surfaces: Record<string, Readonly<Record<string, unknown>>>;
+  readonly capabilities: Record<string, Readonly<Record<string, unknown>>>;
+  readonly lifecycles: Set<RuntimeScope>;
 };
 
 type RuntimeComponentRenderScope = {
+  readonly input: Readonly<Record<string, unknown>>;
+  readonly process: Readonly<Record<string, unknown>>;
   readonly state: Readonly<Record<string, unknown>>;
   readonly actions: Record<string, (...args: unknown[]) => void>;
   readonly slots: Record<string, unknown>;
   readonly parts: Record<string, Component<Props>>;
-  readonly components: RuntimeComponentComposition["components"];
-  readonly features: Record<string, unknown>;
+  readonly components: Record<string, unknown>;
 };
 
-export function createHooks<Spec extends AppSpec>({
-  app,
-  styles,
+export function createApplicationUI<Contract extends ApplicationContract>({
+  application,
+  program,
+  presentations,
   components,
   compiledVisuals,
-  dependencyGroups = {},
-}: CreateHooksOpts<Spec>): AppHooks<Spec> {
-  const runtimeApp = normalizeAppInput(app);
-  const runtime = createNativeAppRuntime(runtimeApp);
-  const defaultPreset = firstPreset(styles) as PresetName<Spec>;
-  const appearance = signal({
-    preset: defaultPreset,
+  hotState,
+  resolveCapabilities,
+}: CreateApplicationUIOptions<Contract>): ApplicationUI<Contract> {
+  const runtimeApplication = application as RuntimeApplication;
+  const compiled = { ...compiledVisuals } as Record<string, CompiledVisuals[string]>;
+  const visualRevision = signal(0);
+  const defaultPresentation = firstPresentation(presentations);
+  const presentation = signal({
+    presentation: defaultPresentation,
     theme: "default",
-  } as PresetAppearance<Spec>);
-  const preset = () => appearance().preset;
-  const themeName = () => appearance().theme as PresetThemeName<Spec>;
-  updateRootPreset(preset());
+  } as PresentationAppearance<Contract>);
+  const presentationName = () => String(presentation().presentation);
+  const themeName = () => presentation().theme;
   const runtimeParts = normalizeRuntimeParts(components);
-  const selectAppearance = (nextAppearance: PresetAppearance<Spec>) => {
-    const nextPreset = String(nextAppearance.preset);
-    const nextTheme = String(nextAppearance.theme);
-    if (!(nextPreset in styles.presets)) {
-      throw new Error(`Unknown Poggers preset "${nextPreset}".`);
-    }
-    if (!presetSupportsTheme(compiledVisuals, nextPreset, nextTheme)) {
-      throw new Error(`Poggers preset "${nextPreset}" does not define theme "${nextTheme}".`);
-    }
-    appearance(nextAppearance);
-    updateRootPreset(nextPreset);
-    updateRootTheme(nextTheme);
-  };
-  const hooks: Record<string, unknown> = {
-    ...(runtime.api as Record<string, unknown>),
-    appearance,
-    useAppearance() {
-      return appearance();
-    },
-    setAppearance: selectAppearance,
-    start: runtime.start,
-    dispose: runtime.dispose,
-  };
-
-  const componentRenderers = Object.create(null) as RuntimeComponentComposition["components"];
-  const allResources = Object.create(null) as Record<
-    string,
-    (key: unknown) => Record<string, unknown>
-  >;
-  for (const resourceName of Object.keys(runtimeApp.def.resources)) {
-    allResources[resourceName] = (key) =>
-      createDynamicResource(() => runtime.api.useResource(resourceName as never, key as never));
-  }
-  const apis = runtimeApp.createAPIs({
-    actor: { id: "local" } as ActorOf<Spec>,
-    resolveResource(path, name) {
-      return allResources[path ? featureResourceName(path, name) : name];
-    },
-  });
-  hooks.api = apis.api;
-  const componentGroups: Record<string, Record<string, (props?: RuntimeHookInput) => Child>> = {
+  const renderers: Record<string, (props?: RuntimeHookInput) => Child> = Object.create(null);
+  const componentGroups: RuntimeComponentComposition["componentGroups"] = {
     "": Object.create(null),
   };
-  const featureComponents: Record<string, Record<string, unknown>> = { "": Object.create(null) };
+  const componentNamespaces: RuntimeComponentComposition["componentNamespaces"] = {
+    "": Object.create(null),
+  };
+  const selectPresentation = (next: PresentationAppearance<Contract>) => {
+    const name = String(next.presentation);
+    if (!(name in presentations.presentations)) {
+      throw new Error(`Unknown Presentation "${name}".`);
+    }
+    if (!presentationSupportsTheme(compiled, name, next.theme)) {
+      throw new Error(`Presentation "${name}" does not define theme "${next.theme}".`);
+    }
+    presentation(next);
+    updateRootPresentation(name);
+    updateRootTheme(next.theme);
+  };
+  const programUI = createProgramUI(
+    runtimeApplication,
+    program,
+    (address) => ({
+      ...resolveCapabilities?.(address),
+      presentation: { select: selectPresentation },
+    }),
+    hotState,
+  );
   const composition: RuntimeComponentComposition = {
     components: componentGroups[""]!,
     componentGroups,
-    featureComponents,
-    dependencyGroups,
-    api: apis.api,
-    apis,
-    navigation: runtime.api.nav as RuntimeComponentComposition["navigation"],
-    screen: runtime.api.useScreen,
-    featureNavigation: collectFeatureNavigation(
-      runtimeApp.def.features as unknown as Record<string, RuntimeFeatureNavigation> | undefined,
-      runtime.api.nav as RuntimeComponentComposition["navigation"],
-    ),
+    componentNamespaces,
+    surfaces: programUI.surfaces,
+    capabilities: programUI.capabilities,
+    lifecycles: new Set(),
   };
 
-  for (const componentName of collectComponentNames(runtimeApp, runtimeParts)) {
-    componentRenderers[componentName] = (props: RuntimeHookInput = {}) => {
-      const instance = createComponentInstance(componentName, {
-        app: runtimeApp,
-        appearance,
-        setAppearance(nextAppearance) {
-          selectAppearance(nextAppearance as PresetAppearance<Spec>);
-        },
-        preset,
+  for (const componentName of collectComponentNames(runtimeApplication, program, runtimeParts)) {
+    renderers[componentName] = (props: RuntimeHookInput = {}) =>
+      createComponentInstance(componentName, {
+        application: runtimeApplication,
+        program,
+        presentation: () => presentation() as Readonly<Record<string, unknown>>,
+        setPresentation: (next) => selectPresentation(next as PresentationAppearance<Contract>),
+        presentationName,
         themeName,
         config: runtimeParts[componentName] ?? { parts: {} },
-        compiledVisuals,
+        compiledVisuals: compiled,
+        visualRevision,
         input: props,
         composition,
-      });
-      return instance(props as Props);
-    };
+      })(props as Props);
   }
-  for (const [name, renderer] of Object.entries(componentRenderers)) {
+
+  for (const [name, renderer] of Object.entries(renderers)) {
     if (!name.startsWith("@feature/")) componentGroups[""]![name] = renderer;
   }
-  featureComponents[""] = collectFeatureComponentScopes(
-    runtimeApp.def.features as unknown as Record<string, RuntimeFeatureComposition> | undefined,
-    componentRenderers,
+  componentNamespaces[""] = collectFeatureComponentScopes(
+    runtimeApplication.features,
+    program,
+    renderers,
     componentGroups,
-    featureComponents,
+    componentNamespaces,
   );
-  hooks.components = componentGroups[""];
+  updateRootPresentation(defaultPresentation);
 
-  hooks.renderRoot = () => {
-    const rootName = runtimeApp.def.root;
-    if (typeof rootName !== "string") {
-      throw new Error("App definition must select a root component by name.");
-    }
-    const component = componentRenderers[rootName];
-    if (!component) throw new Error(`Unknown Poggers root component "${rootName}".`);
-    return component();
+  return {
+    process: programUI.surface,
+    features: programUI.features,
+    presentation,
+    setPresentation: selectPresentation,
+    components: componentGroups[""]!,
+    renderRoot() {
+      const rootName = collectProgramRoots(runtimeApplication, program);
+      const root = renderers[rootName];
+      if (!root) throw new Error(`Unknown root Component "${rootName}".`);
+      return root();
+    },
+    captureHotState: programUI.captureHotState,
+    updateCompiledVisuals(next) {
+      if (compiledCollectionShape(compiled) !== compiledCollectionShape(next)) return false;
+      for (const name of Object.keys(compiled)) delete compiled[name];
+      Object.assign(compiled, next);
+      visualRevision(visualRevision() + 1);
+      return true;
+    },
+    async dispose() {
+      const componentResults = await Promise.allSettled(
+        [...composition.lifecycles].map((lifecycle) => lifecycle.dispose()),
+      );
+      const errors = componentResults.flatMap((result) =>
+        result.status === "rejected" ? [result.reason] : [],
+      );
+      try {
+        await programUI.dispose();
+      } catch (error) {
+        errors.push(error);
+      }
+      if (errors.length === 1) throw errors[0];
+      if (errors.length > 1) throw new AggregateError(errors, "Application UI disposal failed.");
+    },
   };
-
-  return hooks as AppHooks<Spec>;
 }
 
-function createDynamicResource(
-  readResource: () => Record<string, unknown>,
-): Record<string, unknown> {
-  return new Proxy(Object.create(null), {
-    get(_target, prop) {
-      const value = Reflect.get(readResource(), prop);
-      if (typeof value !== "function") return value;
-      return (...args: unknown[]) => {
-        const current = Reflect.get(readResource(), prop);
-        return typeof current === "function" ? current(...args) : undefined;
-      };
-    },
-    has(_target, prop) {
-      return prop in readResource();
-    },
-    ownKeys() {
-      return Reflect.ownKeys(readResource());
-    },
-    getOwnPropertyDescriptor(_target, prop) {
-      if (!(prop in readResource())) return undefined;
-      return { enumerable: true, configurable: true };
-    },
-  });
+function compiledCollectionShape(compiled: CompiledVisuals): string {
+  const collections: string[] = [];
+  for (const [presentation, definition] of Object.entries(compiled)) {
+    for (const [component, parts] of Object.entries(definition.components)) {
+      for (const [part, visual] of Object.entries(parts)) {
+        if (visual.collection !== undefined)
+          collections.push(`${presentation}.${component}.${part}`);
+      }
+    }
+  }
+  return collections.sort().join("\n");
 }
 
-function normalizeAppInput<Spec extends AppSpec>(app: AppInput<Spec>): App<Spec> {
-  return isRuntimeApp(app) ? app : defineApp(app as AppDef<Spec>);
-}
-
-function isRuntimeApp<Spec extends AppSpec>(app: AppInput<Spec>): app is App<Spec> {
-  return Boolean((app as App<Spec>).def?.resources);
-}
-
-function createComponentInstance<Spec extends AppSpec>(
+function createComponentInstance(
   componentName: string,
   options: {
-    app: App<Spec>;
-    appearance: () => { readonly preset: string; readonly theme: string };
-    setAppearance: (appearance: { readonly preset: string; readonly theme: string }) => void;
-    preset: () => string;
+    application: RuntimeApplication;
+    program: string;
+    presentation: () => Readonly<Record<string, unknown>>;
+    setPresentation: (appearance: Readonly<Record<string, unknown>>) => void;
+    presentationName: () => string;
     themeName: () => string;
     config: RuntimeComponentConfig;
     compiledVisuals?: CompiledVisuals;
+    visualRevision: () => number;
     input: RuntimeHookInput;
     composition: RuntimeComponentComposition;
   },
@@ -399,23 +320,14 @@ function createComponentInstance<Spec extends AppSpec>(
       },
     });
   }
-  const componentEntry = resolveComponentDefinition(options.app, componentName);
+  const componentEntry = resolveComponentDefinition(
+    options.application,
+    options.program,
+    componentName,
+  );
   const definition =
     componentEntry && typeof componentEntry === "object"
       ? (componentEntry as RuntimeComponentDefinition)
-      : undefined;
-  const machine = definition?.machine;
-  const statechartDefinition = machine?.phases
-    ? {
-        initial: machine.initial,
-        on: machine.on,
-        states: adaptComponentPhases(machine.phases),
-      }
-    : machine?.on
-      ? {
-          initial: "active",
-          states: { active: { on: machine.on } },
-        }
       : undefined;
   const signals = Object.create(null) as Record<string, Signal<unknown>>;
   const refs = Object.create(null) as Record<string, Element | null>;
@@ -423,14 +335,19 @@ function createComponentInstance<Spec extends AppSpec>(
   const sharedScene = currentPresenceScene();
   const scene = sharedScene ?? new PresenceScene<Element>();
   const sceneOwner = allocateSceneOwner(componentName);
-  const context = createContextObject(signals);
-  const initialContext = cloneComponentContext(machine?.context ?? {});
-
-  for (const [name, value] of Object.entries(initialContext)) {
-    signals[name] = signal(value, `component:${componentName}:context:${name}`);
-  }
-
-  const actions = Object.create(null) as Record<string, (...args: unknown[]) => void>;
+  const owner = componentOwner(componentName) ?? "";
+  const lifecycle = new RuntimeScope();
+  options.composition.lifecycles.add(lifecycle);
+  let lifecycleDisposal: Promise<void> | undefined;
+  const disposeLifecycle = () => {
+    lifecycleDisposal ??= lifecycle.dispose().finally(() => {
+      options.composition.lifecycles.delete(lifecycle);
+    });
+    return lifecycleDisposal;
+  };
+  let visualCoordinator: VisualCoordinator | undefined;
+  const capabilities = scopeCapabilities(options.composition.capabilities[owner] ?? {}, lifecycle);
+  const actions = Object.create(null) as Record<string, (...args: unknown[]) => unknown>;
   const parameterSignals = Object.create(null) as Record<string, Signal<unknown>>;
   const parameters = new Proxy(Object.create(null) as Record<string, unknown>, {
     get(_target, name) {
@@ -462,81 +379,19 @@ function createComponentInstance<Spec extends AppSpec>(
       endBatch();
     }
   };
-  const refreshSnapshot =
-    statechartDefinition && (typeof __POGGERS_HMR__ === "undefined" || __POGGERS_HMR__)
-      ? signal<unknown | undefined>(undefined, `component:${componentName}:statechart`)
-      : undefined;
   const services = componentServices({ ...options, componentName, parameters });
-  const machineStateSignal = signal<RuntimeMachineState>(
-    createStaticState(),
-    `component:${componentName}:machine`,
-  );
-  const stateScope = Object.assign(pickServices(services, ["api", "appearance", "screen"]), {
+  const stateScope = Object.assign(pickServices(services, ["process", "presentation"]), {
     input,
-    context,
-    parameters,
   }) as RuntimeComponentStateScope;
-  Object.defineProperties(stateScope, {
-    phase: { enumerable: true, get: () => machineStateSignal().value },
-    active: { enumerable: true, get: () => machineStateSignal().active },
-  });
-  const readStateSource = definition?.state
-    ? computed(() => asRecord(definition.state!(stateScope)))
-    : () => ({});
-  const stateNames =
-    options.config.state?.map(({ name }) => name) ??
-    Object.keys(Object.getOwnPropertyDescriptors(untrack(readStateSource)));
-  const writableStateNames = new Set(
-    options.config.state?.filter(({ writable }) => writable).map(({ name }) => name) ?? [],
-  );
-  const stateRuntime = createReactiveState(
-    componentName,
-    readStateSource,
-    stateNames,
-    writableStateNames,
-  );
+  const stateSource =
+    typeof definition?.state === "function" ? definition.state(stateScope) : definition?.state;
+  const initialState = materializeComponentState(stateSource ?? {});
+  const stateNames = options.config.state?.map(({ name }) => name) ?? Object.keys(initialState);
+  for (const name of stateNames) {
+    signals[name] = signal(initialState[name], `component:${componentName}:state:${name}`);
+  }
+  const stateRuntime = createComponentState(signals, stateNames, () => lifecycle.active);
   const state = stateRuntime.read;
-  const settlement = createSettlementPort(componentName);
-  const actor = statechartDefinition
-    ? createRestoredComponentActor(
-        {
-          id: componentName,
-          definition: statechartDefinition,
-          input,
-          context: { ...context },
-          tasks: machine?.tasks,
-          settle: settlement.wait,
-          services: { state, parameters },
-          taskServices: Object.assign(
-            pickServices(services, [
-              "api",
-              "appearance",
-              "setAppearance",
-              "navigation",
-              "dependencies",
-            ]),
-            { state },
-          ),
-        },
-        untrack(() => refreshSnapshot?.()),
-      )
-    : undefined;
-  const actorController = actor
-    ? createActorController(componentName, actor, signals, refreshSnapshot)
-    : undefined;
-  if (actor && refreshSnapshot) {
-    captureSignalOnHotRefresh(refreshSnapshot, actor.getRefreshSnapshot);
-  }
-  const machineState = actorController?.state ?? machineStateSignal();
-  machineStateSignal(machineState);
-
-  if (actor && statechartDefinition) {
-    for (const name of collectStatechartEventNames(statechartDefinition)) {
-      actions[name] = (...args: unknown[]) =>
-        settlement.transition(() => actor.send(name, ...args));
-    }
-  }
-
   const visualState = createComponentValuesObject(stateNames, (name) => state[name]);
   const motionSignals = Object.create(null) as Record<string, Signal<number | undefined>>;
   const visualMotion = new Proxy(Object.create(null) as Record<string, number | undefined>, {
@@ -550,15 +405,45 @@ function createComponentInstance<Spec extends AppSpec>(
   });
   const parts = Object.create(null) as Record<string, Component<Props>>;
 
+  const actionScope = Object.assign(pickServices(services, ["process", "presentation"]), {
+    input,
+    capabilities,
+    state: stateRuntime.mutable,
+    parameters,
+    parts,
+  });
+  const invokeAction = (
+    name: string,
+    args: readonly unknown[],
+    mode: VisualActionMode = "discrete",
+  ) => {
+    const implementation = definition?.actions?.[name];
+    if (typeof implementation !== "function") return;
+    if (mode === "discrete") visualCoordinator?.captureLayouts();
+    try {
+      return lifecycle.action(() =>
+        Reflect.apply(implementation, undefined, [actionScope, ...args]),
+      );
+    } finally {
+      if (mode === "discrete") visualCoordinator?.animateLayouts();
+    }
+  };
+  for (const [name, implementation] of Object.entries(definition?.actions ?? {})) {
+    if (typeof implementation === "function") {
+      actions[name] = (...args: unknown[]) => invokeAction(name, args);
+    }
+  }
+
   for (const [partName, elementName] of Object.entries(options.config.parts)) {
     parts[partName] = createComponentPartComponent(componentName, partName, elementName, {
       refs,
       partElements,
-      state: machineState,
+      process: services.process as Readonly<Record<string, unknown>>,
       values: visualState,
       motion: visualMotion,
       compiledVisuals: options.compiledVisuals,
-      preset: options.preset,
+      visualRevision: options.visualRevision,
+      presentation: options.presentationName,
       themeName: options.themeName,
       scene,
       sceneOwner,
@@ -587,16 +472,15 @@ function createComponentInstance<Spec extends AppSpec>(
     mountCompiledVisualComponent({
       componentName,
       compiledVisuals: options.compiledVisuals,
-      preset: options.preset,
+      visualRevision: options.visualRevision,
+      presentation: options.presentationName,
       themeName: options.themeName,
-      state: machineState,
+      process: services.process as Readonly<Record<string, unknown>>,
       visualValues: visualState,
-      writableValues: stateRuntime.writable,
       refs,
       partElements,
       suppressInitialEnter,
-      settlement,
-      actions,
+      invokeAction,
       onParametersChange: updateParameters,
       onMotionChange(source, value) {
         (motionSignals[source] ??= signal(
@@ -604,42 +488,27 @@ function createComponentInstance<Spec extends AppSpec>(
           `component:${componentName}:motion:${source}`,
         ))(value);
       },
+      onCoordinator(coordinator) {
+        visualCoordinator = coordinator;
+      },
     });
-    if (actorController) {
+    if (definition.start) {
       onMount(() => {
-        actorController.start();
-        let disposed = false;
-        let scheduled = false;
-        const scheduleStateMicrostep = () => {
-          if (scheduled) return;
-          scheduled = true;
-          queueMicrotask(() => {
-            scheduled = false;
-            if (disposed) return;
-            settlement.transition(() => actor?.send(STATE_CHANGED_ACTION));
-          });
-        };
-        const stopStateBridges = stateNames.map((name) => {
-          let initialized = false;
-          let previous: unknown;
-          return effect(() => {
-            const current = readStateField(readStateSource(), name);
-            if (!initialized) {
-              initialized = true;
-              previous = current;
-              return;
-            }
-            if (Object.is(previous, current)) return;
-            previous = current;
-            scheduleStateMicrostep();
-          });
-        });
-        return () => {
-          disposed = true;
-          for (const stop of stopStateBridges) stop();
-          actorController.dispose();
-        };
+        lifecycle.adopt(
+          definition.start?.(
+            Object.assign(pickServices(services, ["process", "presentation"]), {
+              input,
+              capabilities,
+              actions,
+              parameters,
+              parts,
+            }),
+          ),
+        );
+        return () => void disposeLifecycle();
       });
+    } else {
+      onMount(() => () => void disposeLifecycle());
     }
     onMount(() => () => {
       for (const partName of Object.keys(refs)) refs[partName] = null;
@@ -647,11 +516,12 @@ function createComponentInstance<Spec extends AppSpec>(
       if (!sharedScene) scene.dispose();
     });
     const renderScope: RuntimeComponentRenderScope = {
+      input,
+      process: services.process as Readonly<Record<string, unknown>>,
       state,
       actions,
       slots,
       parts,
-      features: featureComponentsForComponent(componentName, options.composition),
       components: componentsForComponent(componentName, options.composition),
     };
     return definition.view(renderScope);
@@ -660,86 +530,22 @@ function createComponentInstance<Spec extends AppSpec>(
   return renderComponent;
 }
 
-function adaptComponentPhases(
-  phases: Readonly<Record<string, RuntimeComponentPhaseNode>>,
-): Readonly<Record<string, StatechartNode>> {
-  return Object.fromEntries(
-    Object.entries(phases).map(([name, node]) => {
-      const { phases: children, ...definition } = node;
-      return [
-        name,
-        children ? { ...definition, states: adaptComponentPhases(children) } : definition,
-      ];
-    }),
-  );
-}
-
 function componentServices(options: {
   componentName: string;
-  appearance: () => { readonly preset: string; readonly theme: string };
-  setAppearance: (appearance: { readonly preset: string; readonly theme: string }) => void;
+  presentation: () => Readonly<Record<string, unknown>>;
+  setPresentation: (appearance: Readonly<Record<string, unknown>>) => void;
   composition: RuntimeComponentComposition;
   parameters: Readonly<Record<string, unknown>>;
 }): Readonly<Record<string, unknown>> {
   const services = {
-    setAppearance: options.setAppearance,
-    navigation: componentNavigation(options.componentName, options.composition),
-    api: featureAPIForComponent(options.componentName, options.composition),
-    dependencies: dependenciesForComponent(options.componentName, options.composition),
+    setPresentation: options.setPresentation,
+    process: options.composition.surfaces[componentOwner(options.componentName) ?? ""] ?? {},
   } as Record<string, unknown>;
   Object.defineProperties(services, {
-    appearance: { enumerable: true, get: options.appearance },
-    screen: {
-      enumerable: true,
-      get: () => componentScreen(options.componentName, options.composition),
-    },
+    presentation: { enumerable: true, get: options.presentation },
     parameters: { enumerable: true, get: () => options.parameters },
   });
   return services;
-}
-
-type RuntimeFeatureNavigation = {
-  readonly navigation?: Readonly<Record<string, string>>;
-  readonly features?: Readonly<Record<string, RuntimeFeatureNavigation>>;
-};
-
-function collectFeatureNavigation(
-  features: Readonly<Record<string, RuntimeFeatureNavigation>> | undefined,
-  application: RuntimeComponentComposition["navigation"],
-): RuntimeComponentComposition["featureNavigation"] {
-  const result: Record<
-    string,
-    {
-      actions: Record<string, (...args: unknown[]) => void>;
-      destinations: Readonly<Record<string, string>>;
-    }
-  > = {};
-  const visit = (
-    children: Readonly<Record<string, RuntimeFeatureNavigation>>,
-    parent: string,
-  ): void => {
-    for (const name of Object.keys(children).sort()) {
-      const feature = children[name];
-      if (!feature) continue;
-      const path = parent ? `${parent}.${name}` : name;
-      const destinations = Object.freeze({ ...feature.navigation });
-      const actions = Object.fromEntries(
-        Object.entries(destinations).map(([local, destination]) => {
-          const navigate = application[destination];
-          if (!navigate) {
-            throw new Error(
-              `Feature ${path} navigation ${local} maps to unknown application destination ${destination}.`,
-            );
-          }
-          return [local, navigate];
-        }),
-      );
-      result[path] = { actions, destinations };
-      if (feature.features) visit(feature.features, path);
-    }
-  };
-  if (features) visit(features, "");
-  return result;
 }
 
 function componentOwner(component: string): string | undefined {
@@ -748,24 +554,20 @@ function componentOwner(component: string): string | undefined {
   return separator < 0 ? undefined : component.slice("@feature/".length, separator);
 }
 
-type RuntimeFeatureComposition = {
-  readonly components?: Readonly<Record<string, unknown>>;
-  readonly features?: Readonly<Record<string, RuntimeFeatureComposition>>;
-};
+function featureComponentName(path: string, component: string): string {
+  return `@feature/${path}/component/${component}`;
+}
 
-function resolveComponentDefinition<Spec extends AppSpec>(
-  app: App<Spec>,
+function resolveComponentDefinition(
+  application: RuntimeApplication,
+  program: string,
   component: string,
 ): unknown {
   const owner = componentOwner(component);
-  if (!owner) {
-    return (app.def.components as Readonly<Record<string, unknown>> | undefined)?.[component];
-  }
+  if (!owner) return undefined;
 
-  let feature: RuntimeFeatureComposition | undefined;
-  let features = app.def.features as
-    | Readonly<Record<string, RuntimeFeatureComposition>>
-    | undefined;
+  let feature: RuntimeFeature | undefined;
+  let features = application.features;
   for (const name of owner.split(".")) {
     feature = features?.[name];
     if (!feature) return undefined;
@@ -773,15 +575,16 @@ function resolveComponentDefinition<Spec extends AppSpec>(
   }
 
   const separator = component.indexOf("/component/");
-  const name = separator < 0 ? component : component.slice(separator + "/component/".length);
-  return feature?.components?.[name];
+  const name = component.slice(separator + "/component/".length);
+  return feature?.programs?.[program]?.components?.[name];
 }
 
 function collectFeatureComponentScopes(
-  features: Readonly<Record<string, RuntimeFeatureComposition>> | undefined,
+  features: Readonly<Record<string, RuntimeFeature>> | undefined,
+  program: string,
   renderers: RuntimeComponentComposition["components"],
-  componentGroups: Record<string, Record<string, (props?: RuntimeHookInput) => Child>>,
-  featureComponents: Record<string, Record<string, unknown>>,
+  componentGroups: RuntimeComponentComposition["componentGroups"],
+  componentNamespaces: RuntimeComponentComposition["componentNamespaces"],
   parent = "",
 ): Record<string, unknown> {
   const result: Record<string, unknown> = Object.create(null);
@@ -789,29 +592,27 @@ function collectFeatureComponentScopes(
     const feature = features?.[name];
     if (!feature) continue;
     const path = parent ? `${parent}.${name}` : name;
-    const localComponents: Record<string, (props?: RuntimeHookInput) => Child> =
-      Object.create(null);
-    for (const component of Object.keys(feature.components ?? {}).sort()) {
+    const local: Record<string, (props?: RuntimeHookInput) => Child> = Object.create(null);
+    for (const component of Object.keys(feature.programs?.[program]?.components ?? {}).sort()) {
       const renderer = renderers[featureComponentName(path, component)];
-      if (!renderer)
-        throw new Error(`Missing renderer for Feature component ${path}.${component}.`);
-      localComponents[component] = renderer;
+      if (!renderer) throw new Error(`Missing renderer for Component ${path}.${component}.`);
+      local[component] = renderer;
     }
     const children = collectFeatureComponentScopes(
       feature.features,
+      program,
       renderers,
       componentGroups,
-      featureComponents,
+      componentNamespaces,
       path,
     );
     for (const child of Object.keys(children)) {
-      if (child in localComponents) {
-        throw new Error(`Feature ${path} uses ${child} as both a component and child Feature.`);
-      }
+      if (child in local) throw new Error(`Component namespace collision at ${path}.${child}.`);
     }
-    componentGroups[path] = localComponents;
-    featureComponents[path] = children;
-    result[name] = Object.assign(Object.create(null), localComponents, children);
+    const scope = Object.assign(Object.create(null), local, children);
+    componentGroups[path] = local;
+    componentNamespaces[path] = scope;
+    result[capitalize(name)] = scope;
   }
   return result;
 }
@@ -819,74 +620,30 @@ function collectFeatureComponentScopes(
 function componentsForComponent(
   component: string,
   composition: RuntimeComponentComposition,
-): RuntimeComponentComposition["components"] {
-  return composition.componentGroups[componentOwner(component) ?? ""] ?? {};
-}
-
-function featureComponentsForComponent(
-  component: string,
-  composition: RuntimeComponentComposition,
 ): Record<string, unknown> {
-  return composition.featureComponents[componentOwner(component) ?? ""] ?? {};
-}
-
-function componentNavigation(
-  component: string,
-  composition: RuntimeComponentComposition,
-): Record<string, (...args: unknown[]) => void> {
-  const owner = componentOwner(component);
-  return owner ? (composition.featureNavigation[owner]?.actions ?? {}) : composition.navigation;
-}
-
-function componentScreen(component: string, composition: RuntimeComponentComposition): unknown {
-  const owner = componentOwner(component);
-  if (!owner) return composition.screen();
-  const current = composition.screen();
-  if (!current || typeof current !== "object") return null;
-  const name = (current as { readonly name?: unknown }).name;
-  if (typeof name !== "string") return null;
-  const destinations = composition.featureNavigation[owner]?.destinations ?? {};
-  const local = Object.entries(destinations).find(([, destination]) => destination === name)?.[0];
-  return local ? { ...(current as Record<string, unknown>), name: local } : null;
-}
-
-function featureAPIForComponent(
-  component: string,
-  composition: RuntimeComponentComposition,
-): Readonly<Record<string, unknown>> {
-  const path = componentOwner(component);
-  if (!path) return composition.api;
-  let current = composition.apis;
-  for (const segment of path.split(".")) {
-    const child = current.features[segment];
-    if (!child) throw new Error(`Missing semantic API for Feature ${path}.`);
-    current = child;
-  }
-  return current.api;
-}
-
-function dependenciesForComponent(
-  component: string,
-  composition: RuntimeComponentComposition,
-): Readonly<Record<string, unknown>> {
-  return composition.dependencyGroups[componentOwner(component) ?? "application"] ?? {};
+  const owner = componentOwner(component) ?? "";
+  return Object.assign(
+    Object.create(null),
+    composition.componentGroups[owner] ?? {},
+    composition.componentNamespaces[owner] ?? {},
+  );
 }
 
 function mountCompiledVisualComponent(options: {
   componentName: string;
   compiledVisuals?: CompiledVisuals;
-  preset: () => string;
+  visualRevision: () => number;
+  presentation: () => string;
   themeName: () => string;
-  state: RuntimeMachineState;
+  process: Readonly<Record<string, unknown>>;
   visualValues: Record<string, unknown>;
-  writableValues: Record<string, unknown>;
   refs: Record<string, Element | null>;
   partElements: Record<string, Set<Element>>;
   suppressInitialEnter: boolean;
-  settlement: SettlementPort;
-  actions: Readonly<Record<string, unknown>>;
+  invokeAction: VisualActionInvoker;
   onParametersChange(parameters: Readonly<Record<string, unknown>>): void;
   onMotionChange(source: string, value: number): void;
+  onCoordinator(coordinator: VisualCoordinator | undefined): void;
 }) {
   if (!options.compiledVisuals) return;
   onMount(() => {
@@ -897,236 +654,44 @@ function mountCompiledVisualComponent(options: {
       elements: options.partElements,
       suppressInitialEnter: options.suppressInitialEnter,
       onMotionChange: options.onMotionChange,
-      actions: options.actions,
-      values: options.writableValues,
+      invokeAction: options.invokeAction,
       onParametersChange: options.onParametersChange,
     });
-    const detachSettlement = options.settlement.attach(coordinator);
+    options.onCoordinator(coordinator);
     const disposeEffect = effect(() => {
-      const preset = options.preset();
-      if (!isCompiledVisualPreset(options.compiledVisuals, preset)) return;
+      options.visualRevision();
+      const presentation = options.presentation();
+      if (!isCompiledVisualPresentation(options.compiledVisuals, presentation)) return;
       coordinator.update({
-        preset,
+        presentation,
         theme: options.themeName(),
-        states: Object.fromEntries(
-          options.state.paths.map((path) => [path, options.state.matches(path)]),
-        ),
+        states: {},
+        process: options.process,
         values: options.visualValues,
       });
     });
     return () => {
-      detachSettlement();
+      options.onCoordinator(undefined);
       disposeEffect();
       coordinator.dispose();
     };
   });
 }
 
-type SettlementPort = {
-  readonly wait: StatechartSettlementDriver;
-  attach(coordinator: VisualCoordinator): () => void;
-  transition(run: () => void): void;
-};
-
-function createSettlementPort(component: string): SettlementPort {
-  let coordinator: VisualCoordinator | undefined;
-  const wait: StatechartSettlementDriver = ({ phase, state, signal }) => {
-    if (!coordinator) {
-      throw new Error(`Component ${component} requested visual settlement before it mounted.`);
-    }
-    return coordinator.settle(phase, state, signal);
-  };
-  return {
-    wait,
-    attach(next) {
-      if (coordinator && coordinator !== next) {
-        throw new Error(`Component ${component} mounted more than one visual coordinator.`);
-      }
-      coordinator = next;
-      return () => {
-        if (coordinator === next) coordinator = undefined;
-      };
-    },
-    transition(run) {
-      coordinator?.captureLayouts();
-      run();
-      coordinator?.animateLayouts();
-    },
-  };
-}
-
-function cloneComponentContext(context: Record<string, unknown>): Record<string, unknown> {
-  try {
-    return structuredClone(context);
-  } catch {
-    return { ...context };
-  }
-}
-
-function createActorController(
-  componentName: string,
-  actor: ComponentActor,
-  contextSignals: Record<string, Signal<unknown>>,
-  refreshSnapshot: Signal<unknown | undefined> | undefined,
-): { state: RuntimeMachineState; start: () => void; dispose: () => void } {
-  const initial = actor.getSnapshot();
-  const activeSignals = Object.fromEntries(
-    actor.paths.map((path) => [
-      path,
-      signal(initial.matches(path), `component:${componentName}:state:${path}`),
+function materializeComponentState(
+  source: Readonly<Record<string, unknown>>,
+): Record<string, unknown> {
+  const state = Object.fromEntries(
+    Object.keys(Object.getOwnPropertyDescriptors(source)).map((name) => [
+      name,
+      readStateField(source, name),
     ]),
-  ) as Record<string, Signal<boolean>>;
-  const value = signal(initial.value, `component:${componentName}:state:value`);
-  const lifecycle = signal(initial.status, `component:${componentName}:state:lifecycle`);
-  const output = signal(initial.output, `component:${componentName}:state:output`);
-  const error = signal(initial.error, `component:${componentName}:state:error`);
-  const version = signal(0, `component:${componentName}:state:version`);
-  const observers = new Set<(state: RuntimeMachineState) => void>();
-
-  const project = (snapshot: StatechartSnapshot) => {
-    startBatch();
-    try {
-      const nextKeys = new Set(Object.keys(snapshot.context));
-      for (const [name, next] of Object.entries(snapshot.context)) {
-        const current = contextSignals[name];
-        if (!current) {
-          contextSignals[name] = signal(next, `component:${componentName}:context:${name}`);
-        } else if (!Object.is(current(), next)) {
-          current(next);
-        }
-      }
-      for (const [name, current] of Object.entries(contextSignals)) {
-        if (!nextKeys.has(name) && current() !== undefined) current(undefined);
-      }
-      for (const [path, current] of Object.entries(activeSignals)) {
-        const next = snapshot.matches(path);
-        if (current() !== next) current(next);
-      }
-      if (!Object.is(value(), snapshot.value)) value(snapshot.value);
-      if (lifecycle() !== snapshot.status) lifecycle(snapshot.status);
-      if (!Object.is(output(), snapshot.output)) output(snapshot.output);
-      if (!Object.is(error(), snapshot.error)) error(snapshot.error);
-      version(version() + 1);
-    } finally {
-      endBatch();
-    }
-    for (const observer of observers) observer(state);
-  };
-  const unsubscribe = actor.subscribe(project);
-  let disposed = false;
-  const state: RuntimeMachineState = {
-    paths: actor.paths,
-    get value() {
-      return value();
-    },
-    get active() {
-      return actor.paths.filter((path) => activeSignals[path]?.() ?? false);
-    },
-    get done() {
-      return lifecycle() === "done";
-    },
-    get output() {
-      return output();
-    },
-    get error() {
-      return error();
-    },
-    matches(path) {
-      return activeSignals[path]?.() ?? false;
-    },
-    can(event, ...args) {
-      version();
-      return actor.getSnapshot().can(event, ...args);
-    },
-    subscribe(observer) {
-      observer(state);
-      observers.add(observer);
-      return () => observers.delete(observer);
-    },
-  };
-
-  return {
-    state,
-    start() {
-      if (disposed) return;
-      actor.start();
-    },
-    dispose() {
-      if (disposed) return;
-      disposed = true;
-      observers.clear();
-      refreshSnapshot?.(actor.getRefreshSnapshot());
-      unsubscribe();
-      actor.stop();
-    },
-  };
-}
-
-function createRestoredComponentActor(
-  options: Parameters<typeof createComponentActor>[0],
-  snapshot: unknown,
-): ComponentActor {
-  if (snapshot === undefined) return createComponentActor(options);
+  );
   try {
-    return createComponentActor({ ...options, refreshSnapshot: snapshot });
-  } catch (error) {
-    console.warn("Poggers could not restore a component statechart after hot refresh.", error);
-    return createComponentActor(options);
+    return structuredClone(state);
+  } catch {
+    return state;
   }
-}
-
-function createStaticState(): RuntimeMachineState {
-  return {
-    paths: ["active"],
-    value: "active",
-    active: ["active"],
-    done: false,
-    output: undefined,
-    error: undefined,
-    matches(path) {
-      return path === "active";
-    },
-    can() {
-      return false;
-    },
-    subscribe(observer) {
-      observer(this);
-      return () => {};
-    },
-  };
-}
-
-function collectStatechartEventNames(statechart: StatechartDefinition): string[] {
-  const names = new Set<string>();
-  const visit = (node: StatechartDefinition | StatechartNode) => {
-    for (const name of Object.keys(node.on ?? {})) names.add(name);
-    for (const child of Object.values(node.states ?? {})) visit(child);
-  };
-  visit(statechart);
-  return [...names];
-}
-
-function createContextObject(signals: Record<string, Signal<unknown>>): Record<string, unknown> {
-  return new Proxy(Object.create(null), {
-    get(_target, prop: string) {
-      if (typeof prop !== "string") return undefined;
-      return signals[prop]?.();
-    },
-    set(_target, prop: string, value: unknown) {
-      if (typeof prop !== "string") return false;
-      void value;
-      throw new TypeError(
-        "Component context is readonly. Return a context patch from a transition instead.",
-      );
-    },
-    ownKeys() {
-      return Reflect.ownKeys(signals);
-    },
-    getOwnPropertyDescriptor(_target, prop: string) {
-      if (prop in signals) return { enumerable: true, configurable: true };
-      return undefined;
-    },
-  });
 }
 
 function pickServices(
@@ -1141,54 +706,31 @@ function pickServices(
   return selected;
 }
 
-function createReactiveState(
-  component: string,
-  source: () => Record<string, unknown>,
+function createComponentState(
+  signals: Readonly<Record<string, Signal<unknown>>>,
   names: readonly string[],
-  writableNames: ReadonlySet<string>,
+  active: () => boolean,
 ): {
   readonly read: Readonly<Record<string, unknown>>;
-  readonly writable: Record<string, unknown>;
+  readonly mutable: Record<string, unknown>;
 } {
   const read = Object.create(null) as Record<string, unknown>;
-  const writable = Object.create(null) as Record<string, unknown>;
-  const initialSource = untrack(source);
+  const mutable = Object.create(null) as Record<string, unknown>;
 
   for (const name of names) {
-    const readSourceValue = () => {
-      return readStateField(source(), name);
-    };
-
-    if (writableNames.has(name)) {
-      const descriptor = Object.getOwnPropertyDescriptor(initialSource, name);
-      const initial = descriptor
-        ? typeof descriptor.get === "function"
-          ? descriptor.get.call(initialSource)
-          : descriptor.value
-        : undefined;
-      const value = signal(initial, `component:${component}:state:${name}`);
-      Object.defineProperty(read, name, { enumerable: true, get: value });
-      Object.defineProperty(writable, name, {
-        enumerable: true,
-        get: value,
-        set: value,
-      });
-      continue;
-    }
-
-    const value = computed(readSourceValue);
-    const initial = value();
-    const reactive =
-      initial != null && typeof initial === "object" ? reactiveValue(value) : undefined;
-    Object.defineProperty(read, name, {
+    const value = signals[name];
+    if (!value) continue;
+    Object.defineProperty(read, name, { enumerable: true, get: value });
+    Object.defineProperty(mutable, name, {
       enumerable: true,
-      get() {
-        return reactive ?? value();
+      get: value,
+      set(next) {
+        if (active()) value(next);
       },
     });
   }
 
-  return { read: Object.freeze(read), writable };
+  return { read: Object.freeze(read), mutable };
 }
 
 function readStateField(source: Record<string, unknown>, name: string): unknown {
@@ -1224,11 +766,12 @@ function createComponentPartComponent(
   options: {
     refs: Record<string, Element | null>;
     partElements: Record<string, Set<Element>>;
-    state: RuntimeMachineState;
+    process: Readonly<Record<string, unknown>>;
     values: Record<string, unknown>;
     motion: Readonly<Record<string, number | undefined>>;
     compiledVisuals?: CompiledVisuals;
-    preset: () => string;
+    visualRevision: () => number;
+    presentation: () => string;
     themeName: () => string;
     scene: PresenceScene<Element>;
     sceneOwner: string;
@@ -1258,12 +801,13 @@ function createCompiledVisualPartComponent(
   options: {
     refs: Record<string, Element | null>;
     partElements: Record<string, Set<Element>>;
-    state: RuntimeMachineState;
+    process: Readonly<Record<string, unknown>>;
     values: Record<string, unknown>;
     motion: Readonly<Record<string, number | undefined>>;
-    preset: () => string;
+    presentation: () => string;
     themeName: () => string;
     compiledVisuals?: CompiledVisuals;
+    visualRevision: () => number;
     scene: PresenceScene<Element>;
     sceneOwner: string;
   },
@@ -1271,16 +815,20 @@ function createCompiledVisualPartComponent(
   return (props: Props = {}) => {
     const { ref: authorRef, ...nativeProps } = props;
     const dependencies = new Set<string>();
-    for (const preset of Object.keys(options.compiledVisuals ?? {})) {
-      for (const dependency of visualPartDependencies(
-        options.compiledVisuals ?? {},
-        preset,
-        componentName,
-        partName,
-      )) {
-        dependencies.add(dependency);
+    const refreshDependencies = () => {
+      dependencies.clear();
+      for (const presentation of Object.keys(options.compiledVisuals ?? {})) {
+        for (const dependency of visualPartDependencies(
+          options.compiledVisuals ?? {},
+          presentation,
+          componentName,
+          partName,
+        )) {
+          dependencies.add(dependency);
+        }
       }
-    }
+    };
+    refreshDependencies();
     const dependsOn = (source: string, name?: string) =>
       dependencies.has(name ? `${source}.${name}` : source) ||
       [...dependencies].some((dependency) => dependency.startsWith(`${source}.`));
@@ -1291,6 +839,11 @@ function createCompiledVisualPartComponent(
     const inlineSize = signal(0, `${componentName}.${partName}.inlineSize`);
     const blockSize = signal(0, `${componentName}.${partName}.blockSize`);
     const environment = createVisualEnvironment(dependencies, componentName, partName);
+    effect(() => {
+      options.visualRevision();
+      refreshDependencies();
+      environment.refresh();
+    });
     const interactionContext = Object.defineProperties(
       {},
       {
@@ -1327,43 +880,37 @@ function createCompiledVisualPartComponent(
         blockSize: { enumerable: true, get: blockSize },
       },
     ) as Readonly<Record<string, unknown>>;
-    const stateContext = Object.defineProperties(
-      {},
-      Object.fromEntries(
-        options.state.paths.map((path) => [
-          path,
-          { enumerable: true, get: () => options.state.matches(path) },
-        ]),
-      ),
-    ) as Readonly<Record<string, boolean>>;
+    const stateContext = Object.freeze({}) as Readonly<Record<string, boolean>>;
     const structuralChildren =
       typeof nativeProps.children === "function" &&
       Boolean(
         visualPartCollection(
           options.compiledVisuals ?? {},
-          options.preset(),
+          options.presentation(),
           componentName,
           partName,
           options.themeName(),
         ),
       );
-    const readAttributes = computed(() =>
-      visualPartAttributes(
+    const readAttributes = computed(() => {
+      options.visualRevision();
+      return visualPartAttributes(
         options.compiledVisuals ?? {},
-        options.preset(),
+        options.presentation(),
         componentName,
         partName,
         {
           theme: options.themeName(),
           states: stateContext,
+          process: options.process,
           values: options.values,
           interaction: interactionContext,
           geometry: geometryContext,
-          environment,
+          environment: environment.context,
           motion: options.motion,
         },
-      ),
-    );
+      );
+    });
     const base: Record<string, unknown> = {
       __poggersScene: {
         scene: options.scene,
@@ -1378,17 +925,19 @@ function createCompiledVisualPartComponent(
         return readAttributes().style;
       },
       "data-motion-lifecycle"() {
+        options.visualRevision();
         return visualPartPresence(
           options.compiledVisuals ?? {},
-          options.preset(),
+          options.presentation(),
           componentName,
           partName,
         )?.lifecycle;
       },
       "data-motion-layout"() {
+        options.visualRevision();
         return visualPartPresence(
           options.compiledVisuals ?? {},
-          options.preset(),
+          options.presentation(),
           componentName,
           partName,
         )?.layout;
@@ -1442,22 +991,32 @@ function createCompiledVisualPartComponent(
           if (dependsOn("geometry")) {
             const ResizeObserverClass = element.ownerDocument.defaultView?.ResizeObserver;
             if (ResizeObserverClass) {
+              const view = element.ownerDocument.defaultView;
+              let frame: number | undefined;
               const observer = new ResizeObserverClass(([entry]) => {
                 if (!entry) return;
-                inlineSize(entry.contentRect.width);
-                blockSize(entry.contentRect.height);
+                const { width, height } = entry.contentRect;
+                if (frame !== undefined) view?.cancelAnimationFrame(frame);
+                frame = view?.requestAnimationFrame(() => {
+                  frame = undefined;
+                  inlineSize(width);
+                  blockSize(height);
+                });
               });
               observer.observe(element);
               const rectangle = element.getBoundingClientRect();
               inlineSize(rectangle.width);
               blockSize(rectangle.height);
-              onCleanup(() => observer.disconnect());
+              onCleanup(() => {
+                if (frame !== undefined) view?.cancelAnimationFrame(frame);
+                observer.disconnect();
+              });
             }
           }
           bindVirtualCollectionHost(element, () =>
             visualPartCollection(
               options.compiledVisuals ?? {},
-              options.preset(),
+              options.presentation(),
               componentName,
               partName,
               options.themeName(),
@@ -1547,7 +1106,10 @@ function createVisualEnvironment(
   dependencies: ReadonlySet<string>,
   component: string,
   part: string,
-): Readonly<Record<string, unknown>> {
+): Readonly<{
+  context: Readonly<Record<string, unknown>>;
+  refresh(): void;
+}> {
   const queries: Readonly<Record<string, string>> = {
     reducedMotion: "(prefers-reduced-motion: reduce)",
     moreContrast: "(prefers-contrast: more)",
@@ -1557,30 +1119,79 @@ function createVisualEnvironment(
     finePointer: "(pointer: fine)",
     coarsePointer: "(pointer: coarse)",
   };
-  const values: Record<string, Signal<boolean>> = {};
-  for (const [name, query] of Object.entries(queries)) {
-    if (!dependencies.has(`environment.${name}`)) continue;
-    const media = typeof matchMedia === "function" ? matchMedia(query) : undefined;
+  const active = new Set<string>();
+  const values = new Map<string, Signal<boolean>>();
+  const releases = new Map<string, () => void>();
+  let mounted = false;
+
+  const ensureValue = (name: string) => {
+    const existing = values.get(name);
+    if (existing) return existing;
+    const query = queries[name];
+    const media = query && typeof matchMedia === "function" ? matchMedia(query) : undefined;
     const value = signal(media?.matches ?? false, `${component}.${part}.environment.${name}`);
-    values[name] = value;
-    if (media) {
-      onMount(() => {
-        const change = (event: MediaQueryListEvent) => value(event.matches);
-        media.addEventListener("change", change);
-        return () => media.removeEventListener("change", change);
-      });
+    values.set(name, value);
+    return value;
+  };
+  const attach = (name: string) => {
+    if (!mounted || releases.has(name)) return;
+    const query = queries[name];
+    const value = ensureValue(name);
+    const media = query && typeof matchMedia === "function" ? matchMedia(query) : undefined;
+    if (!media) return;
+    value(media.matches);
+    const change = (event: MediaQueryListEvent) => value(event.matches);
+    media.addEventListener("change", change);
+    releases.set(name, () => media.removeEventListener("change", change));
+  };
+  const detach = (name: string) => {
+    releases.get(name)?.();
+    releases.delete(name);
+  };
+  const refresh = () => {
+    const next = new Set(
+      Object.keys(queries).filter((name) => dependencies.has(`environment.${name}`)),
+    );
+    for (const name of active) {
+      if (next.has(name)) continue;
+      active.delete(name);
+      detach(name);
     }
-  }
-  return Object.defineProperties(
-    {},
-    Object.fromEntries(
-      Object.entries(values).map(([name, value]) => [name, { enumerable: true, get: value }]),
-    ),
-  ) as Readonly<Record<string, unknown>>;
+    for (const name of next) {
+      active.add(name);
+      ensureValue(name);
+      attach(name);
+    }
+  };
+  const context = new Proxy(Object.create(null), {
+    get(_target, property) {
+      if (typeof property !== "string" || !active.has(property)) return undefined;
+      return values.get(property)?.();
+    },
+    ownKeys() {
+      return [...active];
+    },
+    getOwnPropertyDescriptor(_target, property) {
+      return typeof property === "string" && active.has(property)
+        ? { enumerable: true, configurable: true }
+        : undefined;
+    },
+  }) as Readonly<Record<string, unknown>>;
+
+  refresh();
+  onMount(() => {
+    mounted = true;
+    refresh();
+    return () => {
+      mounted = false;
+      for (const name of releases.keys()) detach(name);
+    };
+  });
+  return { context, refresh };
 }
 
-function normalizeRuntimeParts<Spec extends AppSpec>(
-  components?: ComponentRuntimeParts<Spec>,
+function normalizeRuntimeParts<Contract extends ApplicationContract>(
+  components?: ComponentRuntimeParts<Contract>,
 ): RuntimeComponentParts {
   const result: RuntimeComponentParts = {};
   for (const [componentName, config] of Object.entries(components ?? {})) {
@@ -1598,36 +1209,183 @@ function normalizeRuntimeParts<Spec extends AppSpec>(
   return result;
 }
 
-function collectComponentNames<Spec extends AppSpec>(
-  app: App<Spec>,
+function createProgramUI(
+  application: RuntimeApplication,
+  program: string,
+  resolveCapabilities: (address: ProgramAddress) => Readonly<Record<string, unknown>>,
+  hotState?: HotRenderState,
+): {
+  surface: Readonly<Record<string, unknown>>;
+  features: Record<string, Readonly<Record<string, unknown>>>;
+  surfaces: Record<string, Readonly<Record<string, unknown>>>;
+  capabilities: Record<string, Readonly<Record<string, unknown>>>;
+  captureHotState(): HotRenderState;
+  dispose(): Promise<void>;
+} {
+  const surfaces: Record<string, Readonly<Record<string, unknown>>> = Object.create(null);
+  const instances: ProgramContributionInstance[] = [];
+  const providedCapabilities: Record<string, unknown> = Object.create(null);
+  const uiInstances = new Map<string, ProgramContributionInstance["ui"]>();
+  const capabilities: Record<string, Readonly<Record<string, unknown>>> = Object.create(null);
+
+  const instantiate = (
+    feature: RuntimeFeature,
+    path: string,
+  ): Readonly<Record<string, unknown>> => {
+    const children: Record<string, Readonly<Record<string, unknown>>> = Object.create(null);
+    for (const [name, child] of Object.entries(feature.features ?? {}).sort(([left], [right]) =>
+      left.localeCompare(right),
+    )) {
+      children[name] = instantiate(child, path ? `${path}.${name}` : name);
+    }
+
+    const definition = feature.programs?.[program];
+    if (!definition) {
+      const empty = Object.freeze(Object.create(null) as Record<string, unknown>);
+      surfaces[path] = empty;
+      return empty;
+    }
+
+    const address = { program, feature: path };
+    const externalCapabilities = resolveCapabilities(address);
+    const instance = createProgramContributionInstance(definition as never, {
+      address,
+      capabilities: { ...externalCapabilities, ...providedCapabilities },
+      features: children,
+      initialState: hotState?.programs?.[path],
+    });
+    instances.push(instance);
+    uiInstances.set(path, instance.ui);
+    capabilities[path] = instance.capabilities;
+    const provided = instance.start();
+    for (const [name, capability] of Object.entries(provided)) {
+      if (Object.hasOwn(providedCapabilities, name)) {
+        throw new Error(`UI Program "${program}" has multiple providers for Capability "${name}".`);
+      }
+      providedCapabilities[name] = capability;
+    }
+    const surface = instance.ui?.surface ?? Object.freeze({});
+    surfaces[path] = surface;
+    return surface;
+  };
+
+  try {
+    for (const [name, feature] of Object.entries(application.features ?? {}).sort(
+      ([left], [right]) => left.localeCompare(right),
+    )) {
+      instantiate(feature, name);
+    }
+  } catch (error) {
+    void Promise.allSettled([...instances].reverse().map((instance) => instance.dispose()));
+    throw error;
+  }
+
+  const root = collectProgramRoots(application, program);
+  const owner = componentOwner(root);
+  const surface = owner ? (surfaces[owner] ?? Object.freeze({})) : Object.freeze({});
+
+  let disposed = false;
+  return {
+    surface,
+    features: Object.fromEntries(
+      Object.keys(application.features ?? {}).map((name) => [name, surfaces[name] ?? {}]),
+    ),
+    surfaces,
+    capabilities,
+    captureHotState() {
+      const state = hotState ?? {};
+      state.programs = Object.fromEntries(
+        [...uiInstances].flatMap(([path, ui]) => (ui ? [[path, ui.snapshot()]] : [])),
+      );
+      return state;
+    },
+    async dispose() {
+      if (disposed) return;
+      disposed = true;
+      this.captureHotState();
+      const errors: unknown[] = [];
+      for (const instance of [...instances].reverse()) {
+        try {
+          await instance.dispose();
+        } catch (error) {
+          errors.push(error);
+        }
+      }
+      if (errors.length === 1) throw errors[0];
+      if (errors.length > 1) throw new AggregateError(errors, "UI Process disposal failed.");
+    },
+  };
+}
+
+function collectComponentNames(
+  application: RuntimeApplication,
+  program: string,
   parts: RuntimeComponentParts,
 ): string[] {
   const names = new Set<string>();
   for (const name of Object.keys(parts)) names.add(name);
-  for (const name of Object.keys(app.def.components ?? {})) names.add(name);
+  const visit = (
+    features: Readonly<Record<string, RuntimeFeature>> | undefined,
+    parent: string,
+  ) => {
+    for (const [name, feature] of Object.entries(features ?? {})) {
+      const path = parent ? `${parent}.${name}` : name;
+      for (const component of Object.keys(feature.programs?.[program]?.components ?? {})) {
+        names.add(featureComponentName(path, component));
+      }
+      visit(feature.features, path);
+    }
+  };
+  visit(application.features, "");
   return [...names];
 }
 
-function firstPreset<Spec extends AppSpec>(styles: StylesDef<Spec>): string {
-  const explicit = styles.defaultPreset;
-  if (explicit) return String(explicit);
-  return Object.keys(styles.presets)[0] ?? "default";
+function collectProgramRoots(application: RuntimeApplication, program: string): string {
+  const roots: string[] = [];
+  const visit = (
+    features: Readonly<Record<string, RuntimeFeature>> | undefined,
+    parent: string,
+  ) => {
+    for (const [name, feature] of Object.entries(features ?? {}).sort(([left], [right]) =>
+      left.localeCompare(right),
+    )) {
+      const path = parent ? `${parent}.${name}` : name;
+      const root = feature.programs?.[program]?.root;
+      if (root) roots.push(featureComponentName(path, root));
+      visit(feature.features, path);
+    }
+  };
+  visit(application.features, "");
+  if (roots.length !== 1) {
+    throw new Error(
+      `UI Program "${program}" must define exactly one root Component; found ${roots.length}.`,
+    );
+  }
+  return roots[0]!;
 }
 
-function presetSupportsTheme(
+function firstPresentation<Contract extends ApplicationContract>(
+  presentations: PresentationsDefinition<Contract>,
+): string {
+  const explicit = presentations.defaultPresentation;
+  if (explicit) return String(explicit);
+  return Object.keys(presentations.presentations)[0] ?? "default";
+}
+
+function presentationSupportsTheme(
   compiled: CompiledVisuals | undefined,
-  preset: string,
+  presentation: string,
   theme: string,
 ): boolean {
   if (theme === "default") return true;
-  return Object.hasOwn(compiled?.[preset]?.themes ?? {}, theme);
+  return Object.hasOwn(compiled?.[presentation]?.themes ?? {}, theme);
 }
 
-function updateRootPreset(preset: string) {
+function updateRootPresentation(presentation: string) {
   if (typeof document === "undefined") return;
   const root = document.documentElement;
   if (!root) return;
-  root.dataset.preset = String(preset);
+  root.dataset.presentation = presentation;
 }
 
 function updateRootTheme(theme: string) {
@@ -1639,14 +1397,14 @@ function updateRootTheme(theme: string) {
   document.documentElement.dataset.theme = String(theme);
 }
 
+function capitalize(value: string): string {
+  return value.length === 0 ? value : value[0]!.toUpperCase() + value.slice(1);
+}
+
 function mergeClassValue(left: unknown, right: unknown): () => string {
   return () => {
     const leftValue = typeof left === "function" ? (left as () => unknown)() : left;
     const rightValue = typeof right === "function" ? (right as () => unknown)() : right;
     return [leftValue, rightValue].filter(Boolean).join(" ");
   };
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
 }
