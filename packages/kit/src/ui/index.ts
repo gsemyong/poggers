@@ -1,6 +1,6 @@
-export { For, Show } from "./web/runtime";
-export type { VirtualForOptions } from "./web/runtime";
-export type { Child } from "./web/jsx-types";
+export { For, Show } from "./adapters/web/runtime";
+export type { VirtualForOptions } from "./adapters/web/runtime";
+export type { Child } from "./adapters/web/jsx-types";
 export type {
   PlatformAdapter,
   PlatformChild,
@@ -32,4 +32,4 @@ export {
   type PressBindings,
   type Shortcut,
   type ShortcutBinding,
-} from "./web/interaction";
+} from "./adapters/web/interaction";

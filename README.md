@@ -1,37 +1,42 @@
 # Poggers
 
-Poggers is a small TypeScript product language and fine-grained UI framework.
-Applications compose reusable Features into Runtime-tagged Programs with
-explicit Capabilities, platform Components, and complete Presentations. A
-Process is one running instance of a Program, not an authored state container.
+Poggers is a TypeScript product language for portable Programs, typed
+Capabilities, platform Components, and complete Presentations. Applications
+compose reusable Features; platform adapters own rendering and native behavior.
 
-## Develop
+## Create An Application
 
 ```sh
-nub install --frozen-lockfile
-nub run dev:chat
-nub run dev:visual-lab
+nub x @poggers/kit create my-app
+cd my-app
+nub run dev
 ```
 
-Run the complete repository gate with:
+The generated project is the canonical application convention:
+
+```text
+src/
+  app.tsx
+  features/
+    shell.tsx
+  presentations/
+    clean.ts
+```
+
+`app.tsx` is only the composition root. A Feature owns product structure and
+behavior. A Presentation owns visual decisions. Small projects may add more
+files to those two folders without changing the architecture.
+
+## Develop The Kit
+
+This repository contains the framework package and its canonical template. It
+does not maintain separate example applications.
 
 ```sh
+nub install
 nub run check
 nub run build
 ```
 
-The framework package is `@poggers/kit`. Create an application with:
-
-```sh
-nub x @poggers/kit create my-app
-```
-
-The generated project contains one `src/app.tsx`, the complete TypeScript and
-lint configuration, and no generated declaration files.
-
-## Documentation
-
-- [Architecture](docs/architecture.md) defines the maintained product model,
-  ownership boundaries, package surface, and verification policy.
-- [Portable runtime plan](docs/portable-product-runtime-plan.md) records the
-  active implementation gates and evidence.
+See [the architecture document](docs/architecture.md) for the product model,
+adapter boundaries, repository organization, and testing convention.

@@ -7,7 +7,7 @@ import type {
   ComponentElementName,
   ComponentProgramState,
   ComponentState,
-} from "./component.contract";
+} from "./component";
 
 type Empty = Record<never, never>;
 

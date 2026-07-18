@@ -19,35 +19,27 @@
     "src/tooling/create.ts",
     "src/ui/compiler/application.ts",
     "src/ui/component.ts",
-    "src/ui/component.contract.ts",
     "src/ui/index.ts",
     "src/ui/presentation.ts",
     "src/ui/platform.ts",
-    "src/ui/three/adapter.ts",
-    "src/ui/three/jsx-dev-runtime.ts",
-    "src/ui/three/jsx-runtime.ts",
-    "src/ui/three/presentation.ts",
-    "src/ui/three/presentation/adapter.ts",
-    "src/ui/three/presentation/language.ts",
-    "src/ui/three/platform.ts",
-    "src/ui/three/structure.ts",
-    "src/ui/web/adapter.ts",
-    "src/ui/web/drag.anime.ts",
-    "src/ui/web/drag.ts",
-    "src/ui/web/interaction.ts",
-    "src/ui/web/jsx-dev-runtime.ts",
-    "src/ui/web/jsx-runtime.ts",
-    "src/ui/web/jsx-types.ts",
-    "src/ui/web/motion.ts",
-    "src/ui/web/presentation.ts",
-    "src/ui/web/presentation/language.ts",
-    "src/ui/web/platform.ts",
-    "src/ui/web/presentation/adapter.ts",
-    "src/ui/web/presentation/font.ts",
-    "src/ui/web/presentation/style.ts",
-    "src/ui/web/runtime.ts",
-    "src/ui/web/scene.ts",
-    "src/ui/web/structure.ts",
+    "src/ui/adapters/web/adapter.ts",
+    "src/ui/adapters/web/drag.anime.ts",
+    "src/ui/adapters/web/drag.ts",
+    "src/ui/adapters/web/interaction.ts",
+    "src/ui/adapters/web/jsx-dev-runtime.ts",
+    "src/ui/adapters/web/jsx-runtime.ts",
+    "src/ui/adapters/web/jsx-types.ts",
+    "src/ui/adapters/web/motion.ts",
+    "src/ui/adapters/web/presentation.ts",
+    "src/ui/adapters/web/presentation/language.ts",
+    "src/ui/adapters/web/platform.ts",
+    "src/ui/adapters/web/presentation/adapter.ts",
+    "src/ui/adapters/web/presentation/font.ts",
+    "src/ui/adapters/web/presentation/style.ts",
+    "src/ui/adapters/web/runtime.ts",
+    "src/ui/adapters/web/scene.ts",
+    "src/ui/adapters/web/structure.ts",
+    "template",
     "dist",
     "tsconfig.app.json"
   ],
@@ -67,14 +59,14 @@
       "default": "./dist/src/index.js"
     },
     "./jsx-dev-runtime": {
-      "poggers-source": "./src/ui/web/jsx-dev-runtime.ts",
-      "types": "./dist/src/ui/web/jsx-dev-runtime.d.ts",
-      "default": "./dist/src/ui/web/jsx-dev-runtime.js"
+      "poggers-source": "./src/ui/adapters/web/jsx-dev-runtime.ts",
+      "types": "./dist/src/ui/adapters/web/jsx-dev-runtime.d.ts",
+      "default": "./dist/src/ui/adapters/web/jsx-dev-runtime.js"
     },
     "./jsx-runtime": {
-      "poggers-source": "./src/ui/web/jsx-runtime.ts",
-      "types": "./dist/src/ui/web/jsx-runtime.d.ts",
-      "default": "./dist/src/ui/web/jsx-runtime.js"
+      "poggers-source": "./src/ui/adapters/web/jsx-runtime.ts",
+      "types": "./dist/src/ui/adapters/web/jsx-runtime.d.ts",
+      "default": "./dist/src/ui/adapters/web/jsx-runtime.js"
     },
     "./ui": {
       "poggers-source": "./src/ui/index.ts",
@@ -87,24 +79,9 @@
       "default": "./dist/src/ui/presentation.js"
     },
     "./presentation/web": {
-      "poggers-source": "./src/ui/web/presentation.ts",
-      "types": "./dist/src/ui/web/presentation.d.ts",
-      "default": "./dist/src/ui/web/presentation.js"
-    },
-    "./presentation/three": {
-      "poggers-source": "./src/ui/three/presentation.ts",
-      "types": "./dist/src/ui/three/presentation.d.ts",
-      "default": "./dist/src/ui/three/presentation.js"
-    },
-    "./presentation/three/jsx-runtime": {
-      "poggers-source": "./src/ui/three/jsx-runtime.ts",
-      "types": "./dist/src/ui/three/jsx-runtime.d.ts",
-      "default": "./dist/src/ui/three/jsx-runtime.js"
-    },
-    "./presentation/three/jsx-dev-runtime": {
-      "poggers-source": "./src/ui/three/jsx-dev-runtime.ts",
-      "types": "./dist/src/ui/three/jsx-dev-runtime.d.ts",
-      "default": "./dist/src/ui/three/jsx-dev-runtime.js"
+      "poggers-source": "./src/ui/adapters/web/presentation.ts",
+      "types": "./dist/src/ui/adapters/web/presentation.d.ts",
+      "default": "./dist/src/ui/adapters/web/presentation.js"
     },
     "./tsconfig": "./tsconfig.app.json"
   },
@@ -120,11 +97,9 @@
   "dependencies": {
     "@tanstack/virtual-core": "^3.17.3",
     "@types/node": "^24.13.3",
-    "@types/three": "^0.185.1",
     "@typescript/typescript6": "^6.0.2",
     "alien-signals": "^3.2.1",
     "animejs": "^4.5.0",
-    "three": "^0.185.1",
     "vite": "^8.1.5"
   },
   "devDependencies": {

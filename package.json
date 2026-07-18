@@ -2,8 +2,7 @@
   "name": "poggers-workspace",
   "private": true,
   "workspaces": [
-    "packages/*",
-    "apps/*"
+    "packages/*"
   ],
   "type": "module",
   "scripts": {
@@ -13,8 +12,6 @@
     "lint": "oxlint .",
     "test": "nub run -r --if-present test",
     "build": "nub run -r --if-present build",
-    "dev:chat": "nub run --filter @poggers/chat dev",
-    "dev:visual-lab": "nub run --filter @poggers/visual-lab dev",
     "check": "nub run typecheck && nub run lint && nub run fmt:check && nub run test"
   },
   "devDependencies": {

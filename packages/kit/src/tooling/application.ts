@@ -234,8 +234,11 @@ async function prepareApplication(
     candidate,
     candidateSource({
       application: paths.application,
-      platformAdapter: resolve(import.meta.dirname, `../ui/web/adapter${moduleExtension()}`),
-      renderer: resolve(import.meta.dirname, `../ui/web/runtime${moduleExtension()}`),
+      platformAdapter: resolve(
+        import.meta.dirname,
+        `../ui/adapters/web/adapter${moduleExtension()}`,
+      ),
+      renderer: resolve(import.meta.dirname, `../ui/adapters/web/runtime${moduleExtension()}`),
       program: contract.uiProgram,
       components: contract.components,
       hotManifest: createHotManifest(ir),
@@ -283,27 +286,15 @@ function kitAliases() {
     { find: "#ui", replacement: ui },
     {
       find: /^@poggers\/kit\/jsx-dev-runtime$/,
-      replacement: resolve(ui, `web/jsx-dev-runtime${extension}`),
+      replacement: resolve(ui, `adapters/web/jsx-dev-runtime${extension}`),
     },
     {
       find: /^@poggers\/kit\/jsx-runtime$/,
-      replacement: resolve(ui, `web/jsx-runtime${extension}`),
-    },
-    {
-      find: /^@poggers\/kit\/presentation\/three\/jsx-dev-runtime$/,
-      replacement: resolve(ui, `three/jsx-dev-runtime${extension}`),
-    },
-    {
-      find: /^@poggers\/kit\/presentation\/three\/jsx-runtime$/,
-      replacement: resolve(ui, `three/jsx-runtime${extension}`),
-    },
-    {
-      find: /^@poggers\/kit\/presentation\/three$/,
-      replacement: resolve(ui, `three/presentation${extension}`),
+      replacement: resolve(ui, `adapters/web/jsx-runtime${extension}`),
     },
     {
       find: /^@poggers\/kit\/presentation\/web$/,
-      replacement: resolve(ui, `web/presentation${extension}`),
+      replacement: resolve(ui, `adapters/web/presentation${extension}`),
     },
     {
       find: /^@poggers\/kit\/presentation$/,

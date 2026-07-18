@@ -1,7 +1,7 @@
+import type { WebPlatform } from "./ui/adapters/web/platform";
 import type { ComponentContract, ComponentDefinitions, RootComponentName } from "./ui/component";
 import type { PlatformContract, PlatformDefinition, PlatformPrimitiveName } from "./ui/platform";
 import type { PresentationRegistrationContract } from "./ui/presentation";
-import type { WebPlatform } from "./ui/web/platform";
 
 type Empty = Record<never, never>;
 type ActionRecord = Record<string, (...args: never[]) => unknown>;

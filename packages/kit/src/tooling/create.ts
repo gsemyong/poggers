@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdir, readdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 
 export async function createProject(arguments_: readonly string[]): Promise<void> {
@@ -7,25 +7,29 @@ export async function createProject(arguments_: readonly string[]): Promise<void
   const force = arguments_.includes("--force");
   const install = !arguments_.includes("--no-install");
   const version = flag(arguments_, "kit-version") ?? "latest";
-  const name =
-    flag(arguments_, "name") ??
-    basename(target)
-      .toLowerCase()
-      .replace(/[^a-z0-9-]/g, "-");
+  const name = normalizeName(flag(arguments_, "name") ?? basename(target));
 
-  if (!force) {
+  if (!name) throw new TypeError("Project name must contain a letter or number.");
+
+  if (force) {
+    await rm(target, { force: true, recursive: true });
+  } else {
     try {
       if ((await readdir(target)).length) throw new Error(`${target} is not empty.`);
     } catch (error) {
-      if (error instanceof Error && !error.message.includes("ENOENT")) throw error;
+      if (!hasCode(error, "ENOENT")) throw error;
     }
   }
 
-  for (const [path, contents] of Object.entries(template(name, version))) {
-    const file = resolve(target, path);
+  const source = await findTemplate(import.meta.dirname);
+  for (const path of await listFiles(source)) {
+    const destination = path === "gitignore" ? ".gitignore" : path;
+    const file = resolve(target, destination);
+    const contents = render(await readFile(resolve(source, path), "utf8"), { name, version });
     await mkdir(dirname(file), { recursive: true });
     await writeFile(file, contents);
   }
+
   if (install) {
     const code = await run("nub", ["install"], target);
     if (code !== 0) throw new Error("nub install failed.");
@@ -33,124 +37,43 @@ export async function createProject(arguments_: readonly string[]): Promise<void
   console.log(`created ${name} in ${target}`);
 }
 
-function template(name: string, version: string): Record<string, string> {
-  return {
-    "package.json": `${JSON.stringify(
-      {
-        name,
-        private: true,
-        type: "module",
-        scripts: {
-          dev: "poggers dev",
-          build: "poggers build --outdir dist",
-          typecheck: "poggers typecheck",
-          test: "poggers test",
-          lint: "oxlint src",
-          fmt: "oxfmt",
-          check: "poggers check",
-        },
-        dependencies: { "@poggers/kit": version },
-        devDependencies: {
-          oxfmt: "^0.58.0",
-          oxlint: "^1.73.0",
-          typescript: "^7.0.2",
-          vitest: "^4.1.10",
-        },
-        engines: { node: ">=24.0.0" },
-        packageManager: "nub@0.4.13",
-      },
-      null,
-      2,
-    )}\n`,
-    "tsconfig.json": `{ "extends": "@poggers/kit/tsconfig" }\n`,
-    ".gitignore": "node_modules\n.poggers\ndist\n.DS_Store\n",
-    ".node-version": "24.18.0\n",
-    ".oxlintrc.json": `{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "categories": { "correctness": "error" },
-  "rules": {
-    "no-duplicate-imports": "error",
-    "typescript/consistent-type-imports": "error",
-    "typescript/no-explicit-any": "error",
-    "unicorn/filename-case": ["error", { "cases": { "kebabCase": true } }]
-  },
-  "ignorePatterns": [".poggers/**", "dist/**"]
+async function findTemplate(start: string): Promise<string> {
+  for (let directory = start; ; directory = dirname(directory)) {
+    const candidate = resolve(directory, "template");
+    try {
+      await readdir(candidate);
+      return candidate;
+    } catch (error) {
+      if (!hasCode(error, "ENOENT")) throw error;
+    }
+    const parent = dirname(directory);
+    if (parent === directory) throw new Error("Cannot locate the Poggers application template.");
+  }
 }
-`,
-    ".oxfmtrc.json": `{
-  "$schema": "./node_modules/oxfmt/configuration_schema.json",
-  "ignorePatterns": [".poggers/**", "dist/**"]
-}
-`,
-    "src/app.tsx": `import type { Application, Feature, Program, WebMain } from "@poggers/kit";
-import type { PresentationRegistration } from "@poggers/kit/presentation";
-import type { WebPresentation, WebPresentationTokens } from "@poggers/kit/presentation/web";
 
-export type App = {
-  Features: { shell: ShellFeature };
-  Presentations: "clean";
-};
-
-type ShellFeature = {
-  Programs: {
-    browser: Program<
-      WebMain,
-      {
-        Components: {
-          Application: { Elements: { Root: "main"; Title: "h1" } };
-        };
-      }
-    >;
-  };
-};
-
-const theme = {} as const satisfies WebPresentationTokens;
-
-const clean = ((_) => ({
-  Shell: {
-    Application: () => ({
-      Root: {
-        layout: {
-          flow: { axis: "block", align: "center", distribute: "center" },
-          size: { block: { min: { viewport: { axis: "block", percent: 100 } } } },
-        },
-      },
-      Title: { typography: { size: 32, weight: 600, color: "current" } },
+async function listFiles(directory: string, prefix = ""): Promise<string[]> {
+  const files = await Promise.all(
+    (await readdir(resolve(directory, prefix), { withFileTypes: true })).map(async (entry) => {
+      const path = prefix ? `${prefix}/${entry.name}` : entry.name;
+      return entry.isDirectory() ? listFiles(directory, path) : [path];
     }),
-  },
-})) satisfies WebPresentation<App, typeof theme>;
+  );
+  return files.flat().sort();
+}
 
-const cleanRegistration = {
-  presentation: clean,
-  themes: { default: theme },
-} satisfies PresentationRegistration<typeof clean>;
+function render(contents: string, values: { readonly name: string; readonly version: string }) {
+  return contents.replaceAll("{{name}}", values.name).replaceAll("{{kitVersion}}", values.version);
+}
 
-const shellFeature = {
-  programs: {
-    browser: {
-      components: {
-        Application: {
-          view({ elements: { Root, Title } }) {
-            return (
-              <Root>
-                <Title>${name}</Title>
-              </Root>
-            );
-          },
-        },
-      },
-      root: "Application",
-    },
-  },
-} satisfies Feature<ShellFeature>;
+function normalizeName(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
 
-export default {
-  metadata: { name: ${JSON.stringify(name)} },
-  features: { shell: shellFeature },
-  presentations: { clean: cleanRegistration },
-} satisfies Application<App>;
-`,
-  };
+function hasCode(error: unknown, code: string): error is { readonly code: string } {
+  return typeof error === "object" && error !== null && "code" in error && error.code === code;
 }
 
 function flag(arguments_: readonly string[], name: string): string | undefined {

@@ -1,5 +1,14 @@
 import { spawn } from "node:child_process";
-import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  access,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
@@ -20,10 +29,33 @@ describe("project template", () => {
     const target = resolve(parent, "example");
     await createProject([target, "--no-install"]);
 
+    expect((await readdir(target)).sort()).toEqual([
+      ".gitignore",
+      ".node-version",
+      ".oxfmtrc.json",
+      ".oxlintrc.json",
+      "package.json",
+      "src",
+      "tsconfig.json",
+    ]);
+    expect((await readdir(resolve(target, "src"))).sort()).toEqual([
+      "app.tsx",
+      "features",
+      "presentations",
+    ]);
+    expect(await readdir(resolve(target, "src/features"))).toEqual(["shell.tsx"]);
+    expect(await readdir(resolve(target, "src/presentations"))).toEqual(["clean.ts"]);
     expect(await readFile(resolve(target, "src/app.tsx"), "utf8")).toContain(
       "satisfies Application<App>",
     );
+    expect(await readFile(resolve(target, "src/features/shell.tsx"), "utf8")).toContain(
+      "satisfies Feature<ShellFeature>",
+    );
+    expect(await readFile(resolve(target, "src/presentations/clean.ts"), "utf8")).toContain(
+      "satisfies WebPresentation<App, typeof theme>",
+    );
     const packageJson = JSON.parse(await readFile(resolve(target, "package.json"), "utf8")) as {
+      dependencies: Record<string, string>;
       scripts: Record<string, string>;
     };
     expect(Object.keys(packageJson.scripts)).toEqual([
@@ -33,8 +65,10 @@ describe("project template", () => {
       "test",
       "lint",
       "fmt",
+      "fmt:check",
       "check",
     ]);
+    expect(packageJson.dependencies).toEqual({ "@poggers/kit": "latest" });
     expect(await readFile(resolve(target, ".gitignore"), "utf8")).not.toContain("app.d.ts");
     expect(
       await run(
@@ -48,6 +82,13 @@ describe("project template", () => {
     await mkdir(resolve(modules, "@poggers"), { recursive: true });
     await symlink(resolve(import.meta.dirname, "../.."), resolve(modules, "@poggers/kit"), "dir");
 
+    expect(
+      await run(
+        resolve(import.meta.dirname, "../../../../node_modules/.bin/oxlint"),
+        ["src"],
+        target,
+      ),
+    ).toBe(0);
     expect(
       await run(
         resolve(import.meta.dirname, "../../../../node_modules/.bin/tsc"),
@@ -83,6 +124,19 @@ describe("project template", () => {
     expect(() =>
       validateUIProgramRoot({ features: { shell: { programs: { browser: {} } } } }, "browser"),
     ).toThrow("exactly one root Component");
+  });
+
+  test("force replaces the target instead of preserving residue", async () => {
+    const parent = await mkdtemp(resolve(tmpdir(), "poggers-create-force-"));
+    directories.push(parent);
+    const target = resolve(parent, "example");
+    await mkdir(target);
+    await writeFile(resolve(target, "residue.txt"), "remove me");
+
+    await createProject([target, "--no-install", "--force"]);
+
+    await expect(access(resolve(target, "residue.txt"))).rejects.toThrow();
+    await expect(access(resolve(target, "src/app.tsx"))).resolves.toBeUndefined();
   });
 
   test(

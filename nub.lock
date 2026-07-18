@@ -18,26 +18,6 @@ importers:
         specifier: ^7.0.2
         version: 7.0.2
 
-  apps/chat:
-    dependencies:
-      '@poggers/kit':
-        specifier: workspace:*
-        version: link:../../packages/kit
-    devDependencies:
-      typescript:
-        specifier: ^7.0.2
-        version: 7.0.2
-
-  apps/visual-lab:
-    dependencies:
-      '@poggers/kit':
-        specifier: workspace:*
-        version: link:../../packages/kit
-    devDependencies:
-      typescript:
-        specifier: ^7.0.2
-        version: 7.0.2
-
   packages/kit:
     dependencies:
       '@tanstack/virtual-core':
@@ -46,9 +26,6 @@ importers:
       '@types/node':
         specifier: ^24.13.3
         version: 24.13.3
-      '@types/three':
-        specifier: ^0.185.1
-        version: 0.185.1
       '@typescript/typescript6':
         specifier: ^6.0.2
         version: 6.0.2
@@ -58,9 +35,6 @@ importers:
       animejs:
         specifier: ^4.5.0
         version: 4.5.0(@types/three@0.185.1)(three@0.185.1)
-      three:
-        specifier: ^0.185.1
-        version: 0.185.1
       vite:
         specifier: ^8.1.5
         version: 8.1.5(@types/node@24.13.3)

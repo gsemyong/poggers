@@ -1,0 +1,28 @@
+{
+  "name": "{{name}}",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "poggers dev",
+    "build": "poggers build --outdir dist",
+    "typecheck": "poggers typecheck",
+    "test": "poggers test",
+    "lint": "oxlint src",
+    "fmt": "oxfmt",
+    "fmt:check": "oxfmt --check",
+    "check": "poggers check"
+  },
+  "dependencies": {
+    "@poggers/kit": "{{kitVersion}}"
+  },
+  "devDependencies": {
+    "oxfmt": "^0.58.0",
+    "oxlint": "^1.73.0",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "packageManager": "nub@0.4.13"
+}

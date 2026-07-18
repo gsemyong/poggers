@@ -24,8 +24,8 @@ const entrypoints = [
       .filter(isBuildTarget)
       .map((target) => resolve(packageDir, target.slice("./dist/".length).replace(/\.js$/, ".ts"))),
   ),
-  resolve(packageDir, "src/ui/web/adapter.ts"),
-  resolve(packageDir, "src/ui/web/runtime.ts"),
+  resolve(packageDir, "src/ui/adapters/web/adapter.ts"),
+  resolve(packageDir, "src/ui/adapters/web/runtime.ts"),
   resolve(packageDir, "src/compiler/hot.ts"),
 ];
 for (const entrypoint of entrypoints) {
@@ -57,12 +57,7 @@ const declarationCode = await run(
 );
 if (declarationCode !== 0) process.exit(1);
 
-for (const pattern of [
-  "**/*.spec.d.ts",
-  "**/*.typecheck.d.ts",
-  "**/*.conformance.d.ts",
-  "**/*.reference.d.ts",
-]) {
+for (const pattern of ["**/*.spec.d.ts", "**/*.typecheck.d.ts"]) {
   for await (const file of glob(pattern, { cwd: distDir })) {
     await rm(resolve(distDir, file));
   }

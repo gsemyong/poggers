@@ -24,7 +24,7 @@ Those are semantic Capabilities supplied by a Runtime adapter.
 - **Component** defines native hierarchy, accessibility, listeners, local
   interaction state, and composition.
 - **Presentation** owns every visual, responsive, gesture, and motion decision
-  through named Component Parts.
+  through named Component Elements.
 
 ```text
 Application
@@ -36,7 +36,7 @@ Application
    |  `- optional platform UI
    |     |- reactive state and actions
    |     |- Components and one root
-   |     `- named Parts styled by Presentations
+   |     `- named Elements styled by Presentations
    `- child Features
 
 TypeScript source
@@ -101,8 +101,8 @@ export const orders = {
       },
       components: {
         OrderList: {
-          view({ parts, process }) {
-            const { Root, Row, Name } = parts;
+          view({ elements, process }) {
+            const { Root, Row, Name } = elements;
             return (
               <Root>
                 <For each={process.orders} by="id">
@@ -142,13 +142,14 @@ The UI layers have non-overlapping responsibilities:
 2. Component state and actions coordinate one mounted interaction.
 3. Component views define JSX hierarchy, native attributes, accessibility,
    listeners, slots, and Component composition.
-4. Named Parts expose presentation endpoints backed by native elements.
+4. Named Elements expose presentation endpoints backed by native elements.
 5. Presentations own styling, conditions, responsive behavior, gestures, and
    motion.
 
 The web adapter uses fine-grained signals and direct DOM updates. It has no
-virtual DOM. Statecharts are available for interactions that benefit from
-explicit states and transitions; they are not the global application model.
+virtual DOM. State and actions are the single interaction model at both Program
+and Component scope. `start` is the lifecycle boundary for subscriptions and
+other long-lived platform work.
 
 ## Compilation
 
@@ -182,22 +183,44 @@ no JavaScript runtime. Browser UI remains a web target.
 ```text
 packages/kit/
   scripts/build.ts
+  template/               # the canonical generated application
   src/
     application.ts
     runtime.ts
     compiler/
     tooling/
     ui/
+      component.ts
+      platform.ts
+      presentation.ts
       compiler/
-      web/
+      adapters/
+        web/
+          presentation/    # the web presentation language and adapter
   tsconfig.app.json
 
-apps/<name>/src/
-  app.tsx
-  features/<feature>.tsx
-  presentations/<presentation>.ts
+generated-application/
+  src/
+    app.tsx                # composition only
+    features/
+      <feature>.tsx        # one vertical product slice
+    presentations/
+      <presentation>.ts    # one complete visual system
 ```
 
-Tests are colocated with the contract or translation they protect. Generated
-artifacts live under `.poggers` or an explicit output directory and are never
-source. Public files exist only for durable architectural concepts.
+Top-level files in `ui` are durable public concepts. Platform-specific code is
+owned by one adapter folder; adapter internals stay beside the language they
+implement. A new platform is a sibling of `ui/adapters/web` and owns its
+structural primitives, JSX runtime, Presentation language, and paired adapter.
+Experimental adapters are not shipped as framework surface.
+
+The repository does not contain sample applications. `packages/kit/template`
+is the single maintained application example and the source copied by
+`poggers create`. Its exact files are tested through formatting, lint, type
+safety, compiler extraction, and a production build.
+
+Executable behavior and contract checks use colocated `*.spec.ts` files.
+`*.typecheck.ts(x)` is reserved for compile-only assertions that cannot execute
+as a test module, such as intentionally invalid JSX. Generated artifacts live
+under `.poggers` or an explicit output directory and are never source. Public
+files exist only for durable architectural concepts.
