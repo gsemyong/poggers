@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { access, glob, readFile, rm } from "node:fs/promises";
 import { resolve } from "node:path";
+import process from "node:process";
 
 import { build } from "vite";
 
@@ -67,7 +68,6 @@ await rm(resolve(distDir, "scripts"), { force: true, recursive: true });
 await build({
   configFile: false,
   root: packageDir,
-  resolve: { alias: { "#ui": resolve(packageDir, "src/ui") } },
   build: {
     emptyOutDir: false,
     minify: false,
@@ -85,7 +85,7 @@ await build({
       },
     },
     sourcemap: false,
-    target: "node24",
+    target: "node26",
   },
 });
 

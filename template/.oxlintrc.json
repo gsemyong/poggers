@@ -1,6 +1,6 @@
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["import", "typescript", "unicorn"],
+  "plugins": ["import", "typescript", "unicorn", "oxc"],
   "categories": {
     "correctness": "error"
   },
@@ -11,5 +11,8 @@
     "typescript/no-explicit-any": "error",
     "unicorn/filename-case": "error"
   },
-  "ignorePatterns": [".poggers/**", "dist/**"]
+  "options": {
+    "reportUnusedDisableDirectives": "error",
+    "denyWarnings": true
+  }
 }

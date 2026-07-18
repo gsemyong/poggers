@@ -1,6 +1,6 @@
 import { createDraggable } from "animejs";
 
-import { mountDialog as mountRetainedDialog } from "#ui/web/structure/runtime";
+import { mountDialog as mountRetainedDialog } from "./runtime";
 
 export type DragAxis = "inline" | "block" | "both";
 

@@ -6,24 +6,25 @@
     "poggers": "./dist/src/cli.js"
   },
   "files": [
+    "dist",
     "src/application.ts",
+    "src/cli.ts",
     "src/compiler/backend/development.ts",
     "src/compiler/backend/production.ts",
     "src/compiler/frontend.ts",
     "src/compiler/ir.ts",
     "src/execution.ts",
     "src/index.ts",
-    "src/cli.ts",
     "src/ui/component.ts",
     "src/ui/index.ts",
     "src/ui/platform.ts",
     "src/ui/presentation.ts",
     "src/ui/web/backend.ts",
     "src/ui/web/index.ts",
-    "src/ui/web/platform.ts",
     "src/ui/web/jsx/development.ts",
     "src/ui/web/jsx/runtime.ts",
     "src/ui/web/jsx/types.ts",
+    "src/ui/web/platform.ts",
     "src/ui/web/presentation/font.ts",
     "src/ui/web/presentation/index.ts",
     "src/ui/web/presentation/language.ts",
@@ -36,18 +37,11 @@
     "src/ui/web/structure/runtime.ts",
     "src/ui/web/structure/scene.ts",
     "template",
-    "dist",
-    "tsconfig.app.json"
+    "template/.gitignore",
+    "tsconfig.json"
   ],
   "type": "module",
   "types": "./dist/src/index.d.ts",
-  "imports": {
-    "#ui/*": {
-      "poggers-source": "./src/ui/*.ts",
-      "types": "./dist/src/ui/*.d.ts",
-      "default": "./dist/src/ui/*.js"
-    }
-  },
   "exports": {
     ".": {
       "poggers-source": "./src/index.ts",
@@ -84,7 +78,7 @@
       "types": "./dist/src/ui/web/presentation/index.d.ts",
       "default": "./dist/src/ui/web/presentation/index.js"
     },
-    "./tsconfig": "./tsconfig.app.json"
+    "./tsconfig": "./tsconfig.json"
   },
   "publishConfig": {
     "access": "public"
@@ -99,25 +93,21 @@
     "check": "nub run typecheck && nub run lint && nub run fmt:check && nub run test"
   },
   "dependencies": {
-    "@tanstack/virtual-core": "^3.17.3",
+    "@tanstack/virtual-core": "^3.17.4",
     "@typescript/typescript6": "^6.0.2",
     "alien-signals": "^3.2.1",
     "animejs": "^4.5.0",
     "vite": "^8.1.5"
   },
   "devDependencies": {
-    "@types/node": "^24.13.3",
-    "oxfmt": "^0.58.0",
-    "oxlint": "^1.73.0",
+    "@types/node": "^26.1.1",
+    "oxfmt": "^0.59.0",
+    "oxlint": "^1.74.0",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10"
   },
-  "devEngines": {
-    "packageManager": {
-      "name": "nub",
-      "version": "^0.4.13",
-      "onFail": "warn"
-    }
+  "engines": {
+    "node": ">=26.0.0"
   },
   "packageManager": "nub@0.4.13"
 }

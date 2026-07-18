@@ -239,7 +239,6 @@ function kitAliases() {
   const ui = resolve(kit, "ui");
   const extension = moduleExtension();
   return [
-    { find: "#ui", replacement: ui },
     {
       find: /^@poggers\/kit\/jsx-dev-runtime$/,
       replacement: resolve(ui, `web/jsx/development${extension}`),
@@ -257,7 +256,6 @@ function kitAliases() {
       replacement: resolve(ui, `presentation${extension}`),
     },
     { find: /^@poggers\/kit\/ui$/, replacement: resolve(ui, `index${extension}`) },
-    { find: /^@poggers\/kit\/web$/, replacement: resolve(ui, `web/index${extension}`) },
     { find: /^@poggers\/kit$/, replacement: resolve(kit, `index${extension}`) },
   ];
 }
@@ -371,7 +369,7 @@ async function loadApplication(
         output: { entryFileNames: "application.js", format: "es" },
       },
       ssr: true,
-      target: "node24",
+      target: "node26",
     },
     ssr: { noExternal: true },
   });

@@ -1,4 +1,7 @@
 node_modules
 .poggers
 dist
+coverage
 .DS_Store
+.env
+mise.local.toml

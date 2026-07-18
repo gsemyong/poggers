@@ -79,6 +79,8 @@ poggers/
           style.ts
 
   template/
+    .gitignore
+    mise.toml
     package.json
     tsconfig.json
     src/
@@ -96,15 +98,14 @@ poggers/
     build.ts
 
   package.json
+  mise.toml
   tsconfig.json
-  tsconfig.app.json
-  vitest.config.ts
   nub.lock
 ```
 
 Configuration files required by their tools, including `.gitignore`,
-`.node-version`, `.npmrc`, `.oxfmtrc.json`, and `.oxlintrc.json`, remain at the
-repository root.
+`.oxfmtrc.json`, `.oxlintrc.json`, and `mise.toml`, remain at the repository
+root.
 
 ## Responsibility map
 
@@ -219,8 +220,8 @@ directory levels.
 - [x] Update package `files` so the tarball contains only required source,
       declarations, runtime output, template, and configuration.
 - [x] Update the build script to derive and verify all public entries.
-- [x] Update TypeScript aliases, Vitest aliases, lint boundaries, and formatter
-      configuration for the flattened hierarchy.
+- [x] Remove obsolete resolver aliases and align TypeScript, lint, and formatter
+      configuration with the flattened hierarchy.
 - [x] Update compiler and CLI path resolution so source and packed execution use
       the same convention.
 

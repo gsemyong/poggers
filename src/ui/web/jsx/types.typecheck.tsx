@@ -1,4 +1,4 @@
-import type { Child } from "#ui/web/structure/runtime";
+import type { Child } from "../structure/runtime";
 
 const _cleanupRef = (
   <button

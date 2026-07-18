@@ -24,7 +24,7 @@ import {
   type MotionTarget,
   type LayoutBackend,
   type LayoutChannelAdapter,
-} from "#ui/web/presentation/motion";
+} from "./motion";
 class TestScheduler implements MotionScheduler {
   #callbacks = new Map<number, (time: number) => void>();
   #next = 1;

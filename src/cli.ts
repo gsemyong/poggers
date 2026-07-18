@@ -2,6 +2,7 @@
 import { spawn } from "node:child_process";
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
+import process from "node:process";
 
 import { buildRustApplication } from "./compiler/backend/production";
 import { buildApplication, runApplication } from "./ui/web/backend";
@@ -99,8 +100,7 @@ export async function createProject(arguments_: readonly string[]): Promise<void
 
   const source = await findTemplate(import.meta.dirname);
   for (const path of await listFiles(source)) {
-    const destination = path === "gitignore" ? ".gitignore" : path;
-    const file = resolve(target, destination);
+    const file = resolve(target, path);
     const contents = renderTemplate(await readFile(resolve(source, path), "utf8"), {
       name,
       version,

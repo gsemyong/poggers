@@ -4,7 +4,6 @@
   "categories": {
     "correctness": "error"
   },
-  "ignorePatterns": ["**/.poggers/**", "**/.turbo/**", "**/dist/**", "coverage/**"],
   "rules": {
     "import/no-cycle": "error",
     "no-duplicate-imports": "error",
@@ -28,8 +27,5 @@
   "options": {
     "reportUnusedDisableDirectives": "error",
     "denyWarnings": true
-  },
-  "env": {
-    "builtin": true
   }
 }

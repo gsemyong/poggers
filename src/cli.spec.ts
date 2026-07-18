@@ -32,9 +32,9 @@ describe("project template", () => {
 
     expect((await readdir(target)).sort()).toEqual([
       ".gitignore",
-      ".node-version",
       ".oxfmtrc.json",
       ".oxlintrc.json",
+      "mise.toml",
       "package.json",
       "src",
       "tsconfig.json",
@@ -57,6 +57,8 @@ describe("project template", () => {
     );
     const packageJson = JSON.parse(await readFile(resolve(target, "package.json"), "utf8")) as {
       dependencies: Record<string, string>;
+      engines: { node: string };
+      packageManager: string;
       scripts: Record<string, string>;
     };
     expect(Object.keys(packageJson.scripts)).toEqual([
@@ -70,6 +72,9 @@ describe("project template", () => {
       "check",
     ]);
     expect(packageJson.dependencies).toEqual({ "@poggers/kit": "latest" });
+    expect(packageJson.engines.node).toBe(">=26.0.0");
+    expect(packageJson.packageManager).toBe("nub@0.4.13");
+    expect(await readFile(resolve(target, "mise.toml"), "utf8")).toContain('node = "26.5.0"');
     expect(await readFile(resolve(target, ".gitignore"), "utf8")).not.toContain("app.d.ts");
     expect(
       await run(

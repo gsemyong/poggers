@@ -1,25 +1,3 @@
-import type {
-  WebPresentationDeclaration,
-  WebPresentationLanguage,
-  WebPresentationTokens,
-} from "#ui/web/presentation/language";
-import {
-  allocateSceneOwner,
-  currentPresenceScene,
-  currentStructuralKey,
-  effect,
-  jsx,
-  onCleanup,
-  onMount,
-  signal,
-  type Child,
-  type Component,
-  type Props,
-  type HotRenderState,
-  type Signal,
-} from "#ui/web/structure/runtime";
-import { PresenceScene } from "#ui/web/structure/scene";
-
 import type { Application, ApplicationContract } from "../../../application";
 import {
   createProgramContributionInstance,
@@ -36,6 +14,27 @@ import type {
   PresentationName,
 } from "../../component";
 import type { PresentationAdapter, PresentationRegistrationContract } from "../../presentation";
+import type {
+  WebPresentationDeclaration,
+  WebPresentationLanguage,
+  WebPresentationTokens,
+} from "../presentation/language";
+import {
+  allocateSceneOwner,
+  currentPresenceScene,
+  currentStructuralKey,
+  effect,
+  jsx,
+  onCleanup,
+  onMount,
+  signal,
+  type Child,
+  type Component,
+  type Props,
+  type HotRenderState,
+  type Signal,
+} from "./runtime";
+import { PresenceScene } from "./scene";
 
 export type ComponentRuntimeElements<Contract extends ApplicationContract> = {
   [Name in ComponentName<Contract>]?: {

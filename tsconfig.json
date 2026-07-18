@@ -1,8 +1,28 @@
 {
-  "extends": "./tsconfig.app.json",
   "compilerOptions": {
+    "lib": ["ES2024", "ESNext.Disposable", "DOM"],
+    "target": "ESNext",
+    "module": "Preserve",
+    "moduleDetection": "force",
+    "jsx": "react-jsx",
+    "jsxImportSource": "@poggers/kit",
+    "allowImportingTsExtensions": true,
+    "types": [],
+    "moduleResolution": "bundler",
     "customConditions": ["poggers-source"],
-    "types": ["node"]
+    "paths": { "src/*": ["${configDir}/src/*"] },
+    "verbatimModuleSyntax": true,
+    "noEmit": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "scripts/**/*.ts"]
+  "include": [
+    "${configDir}/src/**/*.ts",
+    "${configDir}/src/**/*.tsx",
+    "${configDir}/src/**/*.d.ts",
+    "${configDir}/scripts/**/*.ts"
+  ]
 }

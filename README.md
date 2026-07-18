@@ -9,6 +9,8 @@ compose reusable Features; platform backends own native realization.
 ```sh
 nub x @poggers/kit create my-app
 cd my-app
+mise install
+nub install
 nub run dev
 ```
 
@@ -33,6 +35,7 @@ This repository contains the framework package and its canonical template. It
 does not maintain separate example applications.
 
 ```sh
+mise install
 nub install
 nub run check
 nub run build
