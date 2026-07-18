@@ -23,7 +23,7 @@ Those are semantic Capabilities supplied by a Runtime adapter.
   dependency, and communication boundary.
 - **Component** defines native hierarchy, accessibility, listeners, local
   interaction state, and composition.
-- **Presentation** owns every visual, responsive, gesture, and motion decision
+- **Presentation** owns every visual, responsive, asset, and motion decision
   through named Component Elements.
 
 ```text
@@ -42,9 +42,8 @@ Application
 TypeScript source
 `- compiler frontend
    `- versioned, dependency-free product IR
-      |- Node/Vite development adapter
-      |- Vite web production adapter
-      `- Rust headless production adapter
+      |- development backend
+      `- production backend
 ```
 
 ## Product language
@@ -54,6 +53,9 @@ wrapper exists merely to recover inference. UI fields are flattened into their
 owning Program; there is no second `ui` object.
 
 ```tsx
+import type { Feature, Program, Server } from "@poggers/kit";
+import { For, type WebMain } from "@poggers/kit/web";
+
 type OrdersFeature = {
   Programs: {
     cloud: Program<
@@ -141,30 +143,36 @@ The UI layers have non-overlapping responsibilities:
 1. Program state and actions coordinate platform-level product behavior.
 2. Component state and actions coordinate one mounted interaction.
 3. Component views define JSX hierarchy, native attributes, accessibility,
-   listeners, slots, and Component composition.
+   listeners, gestures, slots, and Component composition.
 4. Named Elements expose presentation endpoints backed by native elements.
 5. Presentations own styling, conditions, responsive behavior, gestures, and
    motion.
 
-The web adapter uses fine-grained signals and direct DOM updates. It has no
+The web platform uses fine-grained signals and direct DOM updates. It has no
 virtual DOM. State and actions are the single interaction model at both Program
 and Component scope. `start` is the lifecycle boundary for subscriptions and
 other long-lived platform work.
 
 ## Compilation
 
-The compiler reads the generic contracts and implementations without executing
-application behavior. It emits deterministic, versioned product IR containing
-Feature composition, Programs, Runtime requirements, Capability contracts, UI
-schemas, stable Component identities, and the supported portable process body.
+The compiler frontend reads the generic contracts and implementations without
+executing application behavior. It emits deterministic, versioned product IR
+containing Feature composition, Programs, Runtime requirements, Capability
+contracts, UI schemas, stable Component identities, and the supported portable
+process body.
+
+The development backend turns that meaning into a live, replaceable system. The
+production backend turns the same meaning into optimized artifacts. Either
+backend may emit or embed any implementation language; those choices do not
+change the product language or repository architecture.
 
 Development uses pinned Node and Nub with Vite 8. Poggers owns transactional
 semantic replacement on top of Vite HMR: compatible Program and Component state,
 focus, selection, scroll, and native dialog state survive replacement; failed
 compilation or activation leaves the previous revision live.
 
-Web production uses Vite/Rolldown. A selected portable headless Program can be
-built from the same IR with:
+The current web production implementation uses Vite/Rolldown. The current
+headless production implementation can emit a selected Program as Rust with:
 
 ```sh
 poggers build --target rust --program <name-or-id> \
@@ -181,22 +189,30 @@ no JavaScript runtime. Browser UI remains a web target.
 ## Repository convention
 
 ```text
-packages/kit/
+poggers/
+  package.json             # the one publishable @poggers/kit package
   scripts/build.ts
-  template/               # the canonical generated application
+  template/                # the canonical generated application
   src/
     application.ts
-    runtime.ts
+    execution.ts
+    cli.ts
     compiler/
-    tooling/
+      frontend.ts
+      ir.ts
+      backend/
+        development.ts
+        production.ts
     ui/
       component.ts
       platform.ts
       presentation.ts
-      compiler/
-      adapters/
-        web/
-          presentation/    # the web presentation language and adapter
+      web/
+        platform.ts
+        backend.ts
+        jsx/
+        structure/
+        presentation/
   tsconfig.app.json
 
 generated-application/
@@ -208,16 +224,17 @@ generated-application/
       <presentation>.ts    # one complete visual system
 ```
 
-Top-level files in `ui` are durable public concepts. Platform-specific code is
-owned by one adapter folder; adapter internals stay beside the language they
-implement. A new platform is a sibling of `ui/adapters/web` and owns its
-structural primitives, JSX runtime, Presentation language, and paired adapter.
-Experimental adapters are not shipped as framework surface.
+Top-level files in `ui` are durable platform-neutral concepts and cannot import
+a concrete platform. Each platform is a sibling of `ui/web` and owns its JSX
+protocol, structural language and runtime, Presentation language and runtime,
+and development/production realization. Interaction helpers stay under
+structure; animation, style, and asset helpers stay under Presentation.
+Experimental platforms are not shipped as framework surface.
 
-The repository does not contain sample applications. `packages/kit/template`
-is the single maintained application example and the source copied by
-`poggers create`. Its exact files are tested through formatting, lint, type
-safety, compiler extraction, and a production build.
+The repository does not contain sample applications. `template` is the single
+maintained application example and the source copied by `poggers create`. Its
+exact files are tested through formatting, lint, type safety, compiler
+extraction, and a production build.
 
 Executable behavior and contract checks use colocated `*.spec.ts` files.
 `*.typecheck.ts(x)` is reserved for compile-only assertions that cannot execute

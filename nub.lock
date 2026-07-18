@@ -7,25 +7,10 @@ settings:
 importers:
 
   .:
-    devDependencies:
-      oxfmt:
-        specifier: ^0.58.0
-        version: 0.58.0
-      oxlint:
-        specifier: ^1.73.0
-        version: 1.74.0
-      typescript:
-        specifier: ^7.0.2
-        version: 7.0.2
-
-  packages/kit:
     dependencies:
       '@tanstack/virtual-core':
         specifier: ^3.17.3
         version: 3.17.4
-      '@types/node':
-        specifier: ^24.13.3
-        version: 24.13.3
       '@typescript/typescript6':
         specifier: ^6.0.2
         version: 6.0.2
@@ -39,6 +24,15 @@ importers:
         specifier: ^8.1.5
         version: 8.1.5(@types/node@24.13.3)
     devDependencies:
+      '@types/node':
+        specifier: ^24.13.3
+        version: 24.13.3
+      oxfmt:
+        specifier: ^0.58.0
+        version: 0.58.0
+      oxlint:
+        specifier: ^1.73.0
+        version: 1.74.0
       typescript:
         specifier: ^7.0.2
         version: 7.0.2

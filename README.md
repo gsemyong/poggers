@@ -2,7 +2,7 @@
 
 Poggers is a TypeScript product language for portable Programs, typed
 Capabilities, platform Components, and complete Presentations. Applications
-compose reusable Features; platform adapters own rendering and native behavior.
+compose reusable Features; platform backends own native realization.
 
 ## Create An Application
 

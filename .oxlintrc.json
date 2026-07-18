@@ -14,9 +14,14 @@
   },
   "overrides": [
     {
-      "files": ["packages/kit/src/ui/**/*.{ts,tsx}"],
+      "files": [
+        "src/ui/component.ts",
+        "src/ui/index.ts",
+        "src/ui/platform.ts",
+        "src/ui/presentation.ts"
+      ],
       "rules": {
-        "no-restricted-imports": ["error", { "patterns": ["**/tooling/**"] }]
+        "no-restricted-imports": ["error", { "patterns": ["**/web/**"] }]
       }
     }
   ],
