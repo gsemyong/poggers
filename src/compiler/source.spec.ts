@@ -5,10 +5,10 @@ import { resolve } from "node:path";
 
 import { afterEach, describe, expect, test } from "vitest";
 
-import { executeProgramIR } from "./backend/development";
-import { emitRustProgram } from "./backend/production";
-import { compileProduct, ProductDiagnostic } from "./frontend";
-import { serializeProductIR, type TypeIR } from "./ir";
+import { executeProgramIR } from "./development";
+import { serializeApplicationIR, type TypeIR } from "./ir";
+import { emitRustProgram } from "./production";
+import { compileApplication, ApplicationDiagnostic } from "./source";
 
 const temporaryDirectories: string[] = [];
 
@@ -20,13 +20,13 @@ afterEach(async () => {
   );
 });
 
-describe("Poggers compiler frontend", () => {
-  test("extracts stable product meaning and portable control flow without executing source", async () => {
-    const entry = await fixture(productSource());
-    const first = compileProduct(entry);
-    const second = compileProduct(entry);
+describe("Poggers Application compiler", () => {
+  test("extracts stable Application meaning and portable control flow without executing source", async () => {
+    const entry = await fixture(applicationSource());
+    const first = compileApplication(entry);
+    const second = compileApplication(entry);
 
-    expect(serializeProductIR(second)).toBe(serializeProductIR(first));
+    expect(serializeApplicationIR(second)).toBe(serializeApplicationIR(first));
     expect(first.application).toEqual({
       id: "application/Portable fixture",
       name: "Portable fixture",
@@ -44,7 +44,7 @@ describe("Poggers compiler frontend", () => {
     ]);
     const program = first.programs.find(({ id }) => id === "feature/worker/program/cloud");
     expect(program).toMatchObject({
-      runtime: { name: "server" },
+      environment: { name: "server" },
       requires: [{ name: "numbers" }, { name: "output" }],
       start: { asynchronous: true },
     });
@@ -52,23 +52,23 @@ describe("Poggers compiler frontend", () => {
   });
 
   test("semantic IDs do not depend on declaration order", async () => {
-    const entry = await fixture(productSource());
-    const original = compileProduct(entry);
+    const entry = await fixture(applicationSource());
+    const original = compileApplication(entry);
     await writeFile(
       entry,
-      productSource().replace("child: Child; worker: Worker", "worker: Worker; child: Child"),
+      applicationSource().replace("child: Child; worker: Worker", "worker: Worker; child: Child"),
     );
-    const reordered = compileProduct(entry);
+    const reordered = compileApplication(entry);
 
     expect(reordered.features.map(({ id }) => id)).toEqual(original.features.map(({ id }) => id));
     expect(reordered.programs.map(({ id }) => id)).toEqual(original.programs.map(({ id }) => id));
   });
 
-  test("extracts deterministic Component state, actions, visual units, Elements, and lifecycle", async () => {
-    const ir = compileProduct(await fixture(componentProductSource()));
+  test("extracts deterministic Component state, actions, Elements, and lifecycle", async () => {
+    const ir = compileApplication(await fixture(componentApplicationSource()));
     const component = ir.programs[0]?.ui?.components[0];
 
-    expect(ir.programs[0]?.runtime).toEqual({ name: "web-main", platform: "web" });
+    expect(ir.programs[0]?.environment).toEqual({ name: "browser-main", uiPlatform: "web" });
 
     expect(component).toEqual({
       name: "Drawer",
@@ -84,37 +84,36 @@ describe("Poggers compiler frontend", () => {
         },
       }),
       actions: ["close", "open"],
-      visualValues: [{ name: "dragOffset", kind: "length" }],
       elements: [
         { name: "Root", element: "main" },
         { name: "Surface", element: "section" },
       ],
-      implementation: { state: true, actions: true, start: true, view: true },
+      implementation: { state: true, actions: true, mount: true, view: true },
     });
   });
 
   test("rejects undeclared runtime calls at their source location", async () => {
     const entry = await fixture(
-      productSource().replace(
+      applicationSource().replace(
         "const values = await capabilities.numbers.read({ count: 4 });",
         "const values = [Date.now()];",
       ),
     );
 
-    expect(() => compileProduct(entry)).toThrow(ProductDiagnostic);
-    expect(() => compileProduct(entry)).toThrow(/may call only declared Capabilities/);
+    expect(() => compileApplication(entry)).toThrow(ApplicationDiagnostic);
+    expect(() => compileApplication(entry)).toThrow(/may call only declared Capabilities/);
   });
 
   test("rejects any in portable Capability contracts", async () => {
     const entry = await fixture(
-      productSource().replace("read(input: { count: number })", "read(input: any)"),
+      applicationSource().replace("read(input: { count: number })", "read(input: any)"),
     );
 
-    expect(() => compileProduct(entry)).toThrow(/cannot contain any/);
+    expect(() => compileApplication(entry)).toThrow(/cannot contain any/);
   });
 
   test("executes the extracted process through injected Capabilities", async () => {
-    const ir = compileProduct(await fixture(productSource()));
+    const ir = compileApplication(await fixture(applicationSource()));
     const writes: unknown[] = [];
     const execution = await executeProgramIR(ir, "feature/worker/program/cloud", {
       numbers: { read: async () => [1, 2, 3, 4] },
@@ -129,8 +128,8 @@ describe("Poggers compiler frontend", () => {
     expect(writes).toEqual([{ category: "large", value: 10 }]);
   });
 
-  test("preserves Capability failures across the Node and Rust backends", async () => {
-    const ir = compileProduct(await fixture(productSource()));
+  test("preserves Capability failures across the development and Rust realizations", async () => {
+    const ir = compileApplication(await fixture(applicationSource()));
     const calls: string[] = [];
     await expect(
       executeProgramIR(ir, "feature/worker/program/cloud", {
@@ -161,7 +160,7 @@ describe("Poggers compiler frontend", () => {
   }, 30_000);
 
   test("executes the same IR through a native Rust artifact", async () => {
-    const ir = compileProduct(await fixture(productSource()));
+    const ir = compileApplication(await fixture(applicationSource()));
     const directory = await temporaryDirectory("poggers-rust-");
     await emitRustProgram({
       ir,
@@ -185,7 +184,7 @@ describe("Poggers compiler frontend", () => {
   }, 30_000);
 
   test("rejects a missing Rust Capability implementation before Cargo", async () => {
-    const ir = compileProduct(await fixture(productSource()));
+    const ir = compileApplication(await fixture(applicationSource()));
     const directory = await temporaryDirectory("poggers-rust-");
     await expect(
       emitRustProgram({
@@ -198,7 +197,7 @@ describe("Poggers compiler frontend", () => {
   });
 
   test("binds a real Rust Capability adapter through the generated trait", async () => {
-    const ir = compileProduct(await fixture(productSource()));
+    const ir = compileApplication(await fixture(applicationSource()));
     const directory = await temporaryDirectory("poggers-rust-adapter-");
     await emitRustProgram({
       ir,
@@ -273,11 +272,11 @@ function command(executable: string, arguments_: readonly string[], cwd: string)
   });
 }
 
-function productSource(): string {
+function applicationSource(): string {
   return `
 type Platform = { readonly Name: string };
-type Runtime = { readonly Name: string; readonly Platform?: Platform };
-type Program<R extends Runtime, C extends object = {}> = Readonly<C & { Runtime: R }>;
+type Environment = { readonly Name: string; readonly UI?: Platform };
+type Program<E extends Environment, C extends object = {}> = Readonly<C & { Environment: E }>;
 type Feature<C> = unknown;
 type Application<C> = unknown;
 
@@ -331,26 +330,25 @@ export default {
 `;
 }
 
-function componentProductSource(): string {
+function componentApplicationSource(): string {
   return `
 type Platform = { readonly Name: string };
-type Runtime = { readonly Name: string; readonly Platform?: Platform };
-type Program<R extends Runtime, C extends object = {}> = Readonly<C & { Runtime: R }>;
+type Environment = { readonly Name: string; readonly UI?: Platform };
+type Program<E extends Environment, C extends object = {}> = Readonly<C & { Environment: E }>;
 type Feature<C> = unknown;
 type Application<C> = unknown;
-type VisualValue<Kind extends string> = { readonly "poggers.visualValue": Kind };
 
 type Shell = {
   Programs: {
     browser: Program<
-      { Name: "web-main"; Platform: { Name: "web" } },
+      { Name: "browser-main"; UI: { Name: "web" } },
       {
         Components: {
           Drawer: {
             Props: { onDismiss?(): void; label: string };
             State: {
               phase: "closed" | "open";
-              dragOffset: VisualValue<"length">;
+              dragOffset: number;
             };
             Actions: { open(): void; close(): void };
             Elements: { Root: "main"; Surface: "section" };
@@ -369,7 +367,7 @@ const shell = {
         Drawer: {
           state: { phase: "closed", dragOffset: 0 },
           actions: { open() {}, close() {} },
-          start() {},
+          mount() {},
           view() { return null; },
         },
       },

@@ -1,7 +1,8 @@
-import type { Application, Feature, Program, Server } from "./application";
-import type { WebMain, WebServiceWorker } from "./ui/web/platform";
+import type { Application, Feature, Program } from "./application";
+import type { BrowserMainThread, BrowserServiceWorker } from "./ui/web/platform";
 
 type Message = Readonly<{ id: string; text: string }>;
+type Server = { readonly Name: "server" };
 type Messages = Readonly<{
   list(): Promise<readonly Message[]>;
   send(input: { text: string }): Promise<void>;
@@ -15,7 +16,7 @@ type DesktopPlatform = {
   readonly Child: unknown;
   readonly Primitives: {};
 };
-type DesktopMain = { readonly Name: "desktop-main"; readonly Platform: DesktopPlatform };
+type DesktopMain = { readonly Name: "desktop-main"; readonly UI: DesktopPlatform };
 
 type ChatFeature = {
   Programs: {
@@ -27,7 +28,7 @@ type ChatFeature = {
       }
     >;
     browser: Program<
-      WebMain,
+      BrowserMainThread,
       {
         Requires: { messages: Messages; clock: Clock };
         State: { messages: readonly Message[] };
@@ -47,7 +48,7 @@ type ChatFeature = {
         };
       }
     >;
-    worker: Program<WebServiceWorker, { Requires: { messages: Messages } }>;
+    worker: Program<BrowserServiceWorker, { Requires: { messages: Messages } }>;
     desktop: Program<DesktopMain>;
   };
 };
@@ -105,16 +106,16 @@ const chatFeature = {
               state.draft = "";
             },
           },
-          start(scope) {
+          mount(scope) {
             scope.elements.Send.element satisfies HTMLButtonElement | null;
             scope.state.draft satisfies string;
-            // @ts-expect-error Component start receives readonly state.
+            // @ts-expect-error Component mount receives readonly state.
             scope.state.draft = "invalid";
             return scope.capabilities.clock.subscribe(scope.actions.clear);
           },
-          view({ process, state, actions, elements: { Root, Send } }) {
-            process.messages satisfies readonly Message[];
-            process.send satisfies (input: { text: string }) => Promise<void>;
+          view({ feature, state, actions, elements: { Root, Send } }) {
+            feature.messages satisfies readonly Message[];
+            feature.send satisfies (input: { text: string }) => Promise<void>;
             state.draft satisfies string;
             actions.change satisfies (input: { value: string }) => string;
             // @ts-expect-error Component views receive readonly state.
@@ -143,7 +144,7 @@ type ShellFeature = {
   Features: { chat: ChatFeature };
   Programs: {
     browser: Program<
-      WebMain,
+      BrowserMainThread,
       {
         Requires: { navigation: Navigation };
         State: { route: "chat" | "about" };
@@ -179,26 +180,26 @@ const shellFeature = {
   },
 } satisfies Feature<ShellFeature>;
 
-type Product = {
+type TestApplication = {
   Features: { shell: ShellFeature };
   Presentations: "paper" | "native";
 };
 
-const product = {
+const application = {
   metadata: { name: "Messages" },
   features: { shell: shellFeature },
   presentations: {
-    paper: { presentation: (_: {}) => ({}), themes: { default: {} } },
-    native: { presentation: (_: {}) => ({}), themes: { default: {} } },
+    paper: {},
+    native: {},
   },
-} satisfies Application<Product>;
+} satisfies Application<TestApplication>;
 
-void product;
+void application;
 
 type InvalidHeadlessUI = Program<Server, { Components: {} }>;
-// @ts-expect-error Headless Runtimes cannot own UI.
+// @ts-expect-error Headless Environments cannot own UI.
 const invalidHeadlessUI: InvalidHeadlessUI = {
-  Runtime: { Name: "server" },
+  Environment: { Name: "server" },
   Components: {},
 };
 
@@ -221,27 +222,27 @@ const brokenProvider: Feature<BrokenProvider> = {
 
 void brokenProvider;
 
-type ConflictingRuntimes = {
+type ConflictingEnvironments = {
   Features: {
     first: { Programs: { shared: Program<Server> } };
-    second: { Programs: { shared: Program<WebServiceWorker> } };
+    second: { Programs: { shared: Program<BrowserServiceWorker> } };
   };
 };
 
-// @ts-expect-error Contributions sharing a Program name require one Runtime.
-const conflictingRuntimes: Application<ConflictingRuntimes> = {
+// @ts-expect-error Contributions sharing a Program name require one Environment.
+const conflictingEnvironments: Application<ConflictingEnvironments> = {
   features: {
     first: { programs: { shared: {} } },
     second: { programs: { shared: {} } },
   },
 };
 
-void conflictingRuntimes;
+void conflictingEnvironments;
 
 type RemovedComponentSurface = {
   Programs: {
     browser: Program<
-      WebMain,
+      BrowserMainThread,
       { Components: { Root: { State: { open: boolean }; Elements: { Root: "main" } } } }
     >;
   };
@@ -264,12 +265,12 @@ const removedComponentSurface = {
 
 void removedComponentSurface;
 
-type OwnedStartResource = { Programs: { worker: Program<WebServiceWorker> } };
+type OwnedStartResource = { Programs: { worker: Program<BrowserServiceWorker> } };
 
 const invalidCleanupCallback = {
   programs: {
     worker: {
-      // @ts-expect-error Runtime ownership accepts resources, not cleanup callbacks.
+      // @ts-expect-error Environment ownership accepts resources, not cleanup callbacks.
       start: () => () => undefined,
     },
   },

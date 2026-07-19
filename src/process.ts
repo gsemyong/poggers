@@ -2,20 +2,20 @@ import { endBatch, signal as createSignal, startBatch } from "alien-signals";
 
 import type { Application, ApplicationContract } from "./application";
 
-type RuntimeCleanup = () => void | Promise<void>;
-type RuntimeIterator = AsyncIterator<unknown>;
+type ResourceCleanup = () => void | Promise<void>;
+type ResourceIterator = AsyncIterator<unknown>;
 
 type RuntimeUI = Readonly<{
   state?: Readonly<Record<string, unknown>>;
   actions?: Readonly<
-    Record<string, (scope: RuntimeActionScope, ...args: readonly unknown[]) => unknown>
+    Record<string, (context: RuntimeActionContext, ...args: readonly unknown[]) => unknown>
   >;
   components?: Readonly<Record<string, unknown>>;
   root?: string;
 }>;
 
 type RuntimeProgramDefinition = Readonly<{
-  start?: (scope: RuntimeStartScope) => unknown;
+  start?: (context: RuntimeStartContext) => unknown;
 }> &
   RuntimeUI;
 
@@ -28,36 +28,32 @@ type RuntimeApplication = Readonly<{
   features?: Readonly<Record<string, RuntimeFeature>>;
 }>;
 
-type RuntimeActionScope = Readonly<{
+type RuntimeActionContext = Readonly<{
   capabilities: Readonly<Record<string, unknown>>;
   features: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
   state: Record<string, unknown>;
 }>;
 
-type RuntimeStartScope = Readonly<{
+type RuntimeStartContext = Readonly<{
   capabilities: Readonly<Record<string, unknown>>;
   actions?: Readonly<Record<string, (...args: readonly unknown[]) => unknown>>;
   features?: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
 }>;
 
-export type ProgramAddress = Readonly<{
+export type ProgramContributionAddress = Readonly<{
   program: string;
   feature: string;
 }>;
 
-/** Adapter-owned binding between a Program contribution and its environment. */
-export type ProgramAdapter = Readonly<{
+/** Resolves external Capabilities required by one Program contribution. */
+export type CapabilityResolver = Readonly<{
   resolve(
-    address: ProgramAddress,
+    address: ProgramContributionAddress,
   ): Readonly<Record<string, unknown>> | Promise<Readonly<Record<string, unknown>>>;
-  publish?(
-    address: ProgramAddress,
-    capabilities: Readonly<Record<string, unknown>>,
-  ): void | Promise<void>;
 }>;
 
-export type UIInstance = Readonly<{
-  surface: Readonly<Record<string, unknown>>;
+export type UIContributionInstance = Readonly<{
+  api: Readonly<Record<string, unknown>>;
   state: Readonly<Record<string, unknown>>;
   actions: Readonly<Record<string, (...args: readonly unknown[]) => unknown>>;
   snapshot(): Record<string, unknown>;
@@ -65,8 +61,8 @@ export type UIInstance = Readonly<{
 }>;
 
 export type ProgramContributionInstance = Readonly<{
-  address: ProgramAddress;
-  ui?: UIInstance;
+  address: ProgramContributionAddress;
+  ui?: UIContributionInstance;
   capabilities: Readonly<Record<string, unknown>>;
   provided: Readonly<Record<string, unknown>>;
   start(): Readonly<Record<string, unknown>>;
@@ -76,23 +72,23 @@ export type ProgramContributionInstance = Readonly<{
 export type Process = Readonly<{
   name: string;
   contributions: readonly ProgramContributionInstance[];
-  surfaces: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
+  ui: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
   dispose(): Promise<void>;
 }>;
 
-type UIInstanceOptions = Readonly<{
+type UIContributionOptions = Readonly<{
   capabilities?: Readonly<Record<string, unknown>>;
   features?: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
   name?: string;
   initialState?: Readonly<Record<string, unknown>>;
-  scope?: RuntimeScope;
+  scope?: ResourceScope;
 }>;
 
-/** Creates one Feature-local UI state/action surface inside a Program Process. */
-export function createUIInstance(
+/** Creates one live Feature-local UI API inside a Process. */
+export function createUIContributionInstance(
   definition: RuntimeUI,
-  options: UIInstanceOptions = {},
-): UIInstance {
+  options: UIContributionOptions = {},
+): UIContributionInstance {
   const name = options.name ?? "ui";
   let disposed = false;
   const initialState = Object.fromEntries(
@@ -105,7 +101,7 @@ export function createUIInstance(
   const capabilities = options.capabilities ?? {};
   const features = options.features ?? {};
   const ownsScope = !options.scope;
-  const scope = options.scope ?? new RuntimeScope();
+  const scope = options.scope ?? new ResourceScope();
   let disposal: Promise<void> | undefined;
   const actions: Record<string, (...args: readonly unknown[]) => unknown> = Object.create(null);
 
@@ -116,20 +112,20 @@ export function createUIInstance(
     };
   }
 
-  const surface = Object.create(null) as Record<string, unknown>;
+  const api = Object.create(null) as Record<string, unknown>;
   for (const stateName of Object.keys(definition.state ?? {})) {
     if (stateName in actions) {
       throw new Error(`UI contribution "${name}" declares state and action "${stateName}".`);
     }
-    Object.defineProperty(surface, stateName, {
+    Object.defineProperty(api, stateName, {
       enumerable: true,
       get: () => state[stateName],
     });
   }
-  Object.assign(surface, actions);
+  Object.assign(api, actions);
 
   return {
-    surface,
+    api,
     state,
     actions,
     snapshot() {
@@ -145,15 +141,15 @@ export function createUIInstance(
 }
 
 type ProgramContributionOptions = Readonly<{
-  address: ProgramAddress;
+  address: ProgramContributionAddress;
   capabilities?: Readonly<Record<string, unknown>>;
   features?: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
   initialState?: Readonly<Record<string, unknown>>;
 }>;
 
-export class RuntimeScope {
-  readonly iterators = new Set<RuntimeIterator>();
-  readonly resources: RuntimeCleanup[] = [];
+export class ResourceScope {
+  readonly iterators = new Set<ResourceIterator>();
+  readonly resources: ResourceCleanup[] = [];
   readonly pending = new Set<Promise<void>>();
   readonly errors: unknown[] = [];
   #active = true;
@@ -164,7 +160,7 @@ export class RuntimeScope {
     return this.#active;
   }
 
-  add(cleanup: RuntimeCleanup): void {
+  add(cleanup: ResourceCleanup): void {
     if (!this.#active) {
       this.track(
         Promise.resolve()
@@ -223,7 +219,7 @@ export class RuntimeScope {
   }
 
   action<Value>(run: () => Value): Value {
-    if (!this.#active) throw new Error("Runtime owner is disposed.");
+    if (!this.#active) throw new Error("Resource scope is disposed.");
     startBatch();
     try {
       const value = run();
@@ -280,7 +276,7 @@ export class RuntimeScope {
     while (this.pending.size) await Promise.all(this.pending);
     if (this.errors.length === 1) throw this.errors[0];
     if (this.errors.length > 1) {
-      throw new AggregateError(this.errors, "Runtime scope disposal failed.");
+      throw new AggregateError(this.errors, "Resource scope disposal failed.");
     }
   }
 }
@@ -290,16 +286,16 @@ export function createProgramContributionInstance(
   definition: RuntimeProgramDefinition,
   options: ProgramContributionOptions,
 ): ProgramContributionInstance {
-  const scope = new RuntimeScope();
+  const scope = new ResourceScope();
   let started = false;
   let disposed = false;
   let provided: Readonly<Record<string, unknown>> = Object.freeze({});
   const availableCapabilities: Record<string, unknown> = {
     ...options.capabilities,
   };
-  const capabilities = scopeCapabilities(availableCapabilities, scope);
+  const capabilities = bindCapabilitiesToScope(availableCapabilities, scope);
   const ui = hasRuntimeUI(definition)
-    ? createUIInstance(definition, {
+    ? createUIContributionInstance(definition, {
         name: `${options.address.program}:${options.address.feature}`,
         capabilities,
         features: options.features,
@@ -375,14 +371,14 @@ export function createProgramContributionInstance(
 }
 
 /** Starts every Feature contribution to one named Program. */
-export async function startProgram<Contract extends ApplicationContract>(
+export async function startProcess<Contract extends ApplicationContract>(
   application: Application<Contract>,
   name: string,
-  adapter: ProgramAdapter,
+  resolver: CapabilityResolver,
 ): Promise<Process> {
   const runtime = application as RuntimeApplication;
   const contributions: ProgramContributionInstance[] = [];
-  const surfaces: Record<string, Readonly<Record<string, unknown>>> = Object.create(null);
+  const ui: Record<string, Readonly<Record<string, unknown>>> = Object.create(null);
   const providedCapabilities: Record<string, unknown> = Object.create(null);
   let found = false;
 
@@ -406,7 +402,7 @@ export async function startProgram<Contract extends ApplicationContract>(
 
     found = true;
     const address = { program: name, feature: path };
-    const capabilities = await adapter.resolve(address);
+    const capabilities = await resolver.resolve(address);
     if (!isRecord(capabilities)) {
       throw new Error(`${formatAddress(address)} adapter returned invalid Capabilities.`);
     }
@@ -422,7 +418,7 @@ export async function startProgram<Contract extends ApplicationContract>(
     const definition = node.feature.programs?.[name];
     if (!definition) {
       const empty = Object.freeze(Object.create(null) as Record<string, unknown>);
-      surfaces[node.path] = empty;
+      ui[node.path] = empty;
       return empty;
     }
 
@@ -442,10 +438,9 @@ export async function startProgram<Contract extends ApplicationContract>(
       }
       providedCapabilities[capabilityName] = capability;
     }
-    if (Object.keys(provided).length) await adapter.publish?.(address, provided);
-    const surface = instance.ui?.surface ?? Object.freeze({});
-    surfaces[node.path] = surface;
-    return surface;
+    const api = instance.ui?.api ?? Object.freeze({});
+    ui[node.path] = api;
+    return api;
   };
 
   try {
@@ -464,7 +459,7 @@ export async function startProgram<Contract extends ApplicationContract>(
   return {
     name,
     contributions,
-    surfaces,
+    ui,
     async dispose() {
       if (disposed) return;
       disposed = true;
@@ -509,9 +504,9 @@ function hasRuntimeUI(definition: RuntimeProgramDefinition): boolean {
   );
 }
 
-export function scopeCapabilities(
+export function bindCapabilitiesToScope(
   capabilities: Readonly<Record<string, unknown>>,
-  scope: RuntimeScope,
+  scope: ResourceScope,
 ): Readonly<Record<string, unknown>> {
   const proxies = new WeakMap<object, object>();
 
@@ -524,7 +519,7 @@ export function scopeCapabilities(
       const iterable = {
         [Symbol.asyncIterator]() {
           const source = value[Symbol.asyncIterator]();
-          const iterator: RuntimeIterator = {
+          const iterator: ResourceIterator = {
             async next() {
               const result = await source.next();
               if (result.done) scope.iterators.delete(iterator);
@@ -593,7 +588,7 @@ function qualify(parent: string, name: string): string {
   return parent ? `${parent}.${name}` : name;
 }
 
-function formatAddress(address: ProgramAddress): string {
+function formatAddress(address: ProgramContributionAddress): string {
   return `Program "${address.program}" Feature "${address.feature}"`;
 }
 

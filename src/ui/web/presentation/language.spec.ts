@@ -1,8 +1,7 @@
 import { expect, it } from "vitest";
 
 import type { Program } from "../../../application";
-import type { VisualValue } from "../../component";
-import type { WebMain } from "../platform";
+import type { BrowserMainThread } from "../platform";
 import type {
   WebPresentation,
   WebPresentationDeclaration,
@@ -12,7 +11,7 @@ import type {
 type Fixture = {
   Programs: {
     browser: Program<
-      WebMain,
+      BrowserMainThread,
       {
         Components: {
           Drawer: {
@@ -20,9 +19,9 @@ type Fixture = {
               open: boolean;
               dragging: boolean;
               pressed: boolean;
-              dragOffset: VisualValue<"length">;
+              dragOffset: number;
               dragVelocity: number;
-              progress: VisualValue<"progress">;
+              progress: number;
             };
             Actions: { close(): void };
             Elements: {
@@ -39,7 +38,7 @@ type Fixture = {
   };
 };
 
-const theme = {
+const parameters = {
   color: {
     panel: { l: 0.99, c: 0.002, h: 250 },
     overlay: { l: 0, c: 0, h: 0, alpha: 0.3 },
@@ -138,8 +137,8 @@ const webPresentationFixture = ((tokens) => {
       };
     },
   };
-}) satisfies WebPresentation<Fixture, typeof theme>;
+}) satisfies WebPresentation<Fixture, typeof parameters>;
 
-it("types responsive resources, motion, targets, and visual values as one declaration", () => {
+it("types responsive resources, motion, targets, and state as one declaration", () => {
   expect(webPresentationFixture).toBeTypeOf("function");
 });

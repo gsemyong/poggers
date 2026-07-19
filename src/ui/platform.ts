@@ -1,39 +1,32 @@
-import type { PresentationAdapter } from "./presentation";
-
-/** One primitive's platform-specific structure and Presentation contract. */
-export type PlatformPrimitive<
-  Props extends object = object,
-  Target = unknown,
-  Declaration extends object = object,
-> = Readonly<{
+/** One primitive's platform-specific structural contract. */
+export type UIPlatformPrimitive<Props extends object = object, Target = unknown> = Readonly<{
   Props: Props;
   Target: Target;
-  Presentation: Declaration;
 }>;
 
 /** The complete authoring language contributed by one UI platform. */
-export type PlatformContract = Readonly<{
+export type UIPlatformContract = Readonly<{
   Name: string;
   Child: unknown;
   Primitives: object;
 }>;
 
-type InvalidPlatformPrimitiveName<Platform extends PlatformContract> = {
-  [Name in keyof Platform["Primitives"]]: Platform["Primitives"][Name] extends PlatformPrimitive
+type InvalidUIPlatformPrimitiveName<Platform extends UIPlatformContract> = {
+  [Name in keyof Platform["Primitives"]]: Platform["Primitives"][Name] extends UIPlatformPrimitive
     ? never
     : Name;
 }[keyof Platform["Primitives"]];
 
 /** Rejects contracts containing entries that are not complete primitives. */
-export type PlatformDefinition<Platform extends PlatformContract> = [
-  InvalidPlatformPrimitiveName<Platform>,
+export type UIPlatformDefinition<Platform extends UIPlatformContract> = [
+  InvalidUIPlatformPrimitiveName<Platform>,
 ] extends [never]
   ? Platform
   : never;
 
-export type PlatformPrimitiveName<Platform extends PlatformContract> = Extract<
+export type UIPlatformPrimitiveName<Platform extends UIPlatformContract> = Extract<
   {
-    [Name in keyof Platform["Primitives"]]: Platform["Primitives"][Name] extends PlatformPrimitive
+    [Name in keyof Platform["Primitives"]]: Platform["Primitives"][Name] extends UIPlatformPrimitive
       ? Name
       : never;
   }[keyof Platform["Primitives"]],
@@ -41,69 +34,41 @@ export type PlatformPrimitiveName<Platform extends PlatformContract> = Extract<
 >;
 
 type PrimitiveOf<
-  Platform extends PlatformContract,
-  Primitive extends PlatformPrimitiveName<Platform>,
+  Platform extends UIPlatformContract,
+  Primitive extends UIPlatformPrimitiveName<Platform>,
 > = Platform["Primitives"][Primitive];
 
-export type PlatformPrimitiveProps<
-  Platform extends PlatformContract,
-  Primitive extends PlatformPrimitiveName<Platform>,
+export type UIPlatformPrimitiveProps<
+  Platform extends UIPlatformContract,
+  Primitive extends UIPlatformPrimitiveName<Platform>,
 > =
-  PrimitiveOf<Platform, Primitive> extends PlatformPrimitive<infer Props, unknown, object>
+  PrimitiveOf<Platform, Primitive> extends UIPlatformPrimitive<infer Props, unknown>
     ? Props
     : never;
 
-export type PlatformPrimitiveTarget<
-  Platform extends PlatformContract,
-  Primitive extends PlatformPrimitiveName<Platform>,
+export type UIPlatformPrimitiveTarget<
+  Platform extends UIPlatformContract,
+  Primitive extends UIPlatformPrimitiveName<Platform>,
 > =
-  PrimitiveOf<Platform, Primitive> extends PlatformPrimitive<object, infer Target, object>
+  PrimitiveOf<Platform, Primitive> extends UIPlatformPrimitive<object, infer Target>
     ? Target
     : never;
 
-export type PlatformPrimitivePresentation<
-  Platform extends PlatformContract,
-  Primitive extends PlatformPrimitiveName<Platform>,
-> =
-  PrimitiveOf<Platform, Primitive> extends PlatformPrimitive<object, unknown, infer Declaration>
-    ? Declaration
-    : never;
+export type UIPlatformChild<Platform extends UIPlatformContract> = Platform["Child"];
 
-export type PlatformChild<Platform extends PlatformContract> = Platform["Child"];
-
-export type PlatformTarget<Platform extends PlatformContract> = {
-  [Primitive in PlatformPrimitiveName<Platform>]: PlatformPrimitiveTarget<Platform, Primitive>;
-}[PlatformPrimitiveName<Platform>];
-
-/** The Presentation language mechanically associated with a platform. */
-export type PlatformPresentationLanguage<Platform extends PlatformContract> = Readonly<{
-  Declaration: {
-    [Primitive in PlatformPrimitiveName<Platform>]: PlatformPrimitivePresentation<
-      Platform,
-      Primitive
-    >;
-  }[PlatformPrimitiveName<Platform>];
-  Declarations: {
-    readonly [Primitive in PlatformPrimitiveName<Platform>]: PlatformPrimitivePresentation<
-      Platform,
-      Primitive
-    >;
-  };
-}>;
+export type UIPlatformTarget<Platform extends UIPlatformContract> = {
+  [Primitive in UIPlatformPrimitiveName<Platform>]: UIPlatformPrimitiveTarget<Platform, Primitive>;
+}[UIPlatformPrimitiveName<Platform>];
 
 /**
  * Associates a platform's structural implementation with its Presentation
  * adapter. Structure remains platform-specific; only the pairing is universal.
  */
-export type PlatformAdapter<
-  Platform extends PlatformContract,
-  Structure,
-  Target = PlatformTarget<Platform>,
-> =
-  Platform extends PlatformDefinition<Platform>
+export type UIPlatformAdapter<Platform extends UIPlatformContract, Component, Presentation> =
+  Platform extends UIPlatformDefinition<Platform>
     ? Readonly<{
         name: Platform["Name"];
-        structure: Structure;
-        presentation: PresentationAdapter<PlatformPresentationLanguage<Platform>, Target>;
+        component: Component;
+        presentation: Presentation;
       }>
     : never;

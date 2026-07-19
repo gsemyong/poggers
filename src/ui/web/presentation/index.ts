@@ -1,6 +1,6 @@
-export { createWebPresentationAdapter } from "./runtime";
-export type { WebPresentationAdapterOptions } from "./runtime";
-export type { WebPlatform } from "../platform";
+export { createWebPresentationAdapter } from "./adapter";
+export type { WebPresentationAdapterOptions } from "./adapter";
+export type { WebUIPlatform } from "../platform";
 export type {
   WebImageResource,
   WebMotionDeclaration,

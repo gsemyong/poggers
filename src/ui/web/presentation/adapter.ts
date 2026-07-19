@@ -1,14 +1,19 @@
 import type {
   PresentationAdapter,
   PresentationAdapterSession,
-  PresentationTargetSources,
+  PresentationTargetResolver,
 } from "../../presentation";
 import {
   bindVirtualCollectionHost,
   unbindVirtualCollectionHost,
   type VirtualCollectionGeometry,
-} from "../structure/runtime";
-import { createWebFontBackend, webFontKey, type WebFontBackend, type WebFontLease } from "./font";
+} from "../component/runtime";
+import {
+  createWebFontRegistry,
+  webFontKey,
+  type WebFontRegistry,
+  type WebFontLease,
+} from "./fonts";
 import type {
   FontAsset,
   WebMotionDeclaration,
@@ -96,7 +101,7 @@ type PoppedPresenceStyles = Readonly<{
 export type WebPresentationAdapterOptions = Readonly<{
   motionBackend?: MotionBackend;
   layoutBackend?: LayoutBackend;
-  fontBackend?: WebFontBackend;
+  fontRegistry?: WebFontRegistry;
   scheduler?: MotionScheduler;
   suppressInitialEnter?: boolean;
 }>;
@@ -106,11 +111,14 @@ type MediaObservation = {
   readonly release: () => void;
 };
 
-type PreparedTarget<ElementName extends string, Theme extends WebPresentationTokens> = Readonly<{
+type PreparedTarget<
+  ElementName extends string,
+  Parameters extends WebPresentationTokens,
+> = Readonly<{
   elementName: ElementName;
   target: Element;
-  authored: WebPresentationDeclaration<Theme> | undefined;
-  declaration: WebPresentationDeclaration<Theme> | undefined;
+  authored: WebPresentationDeclaration<Parameters> | undefined;
+  declaration: WebPresentationDeclaration<Parameters> | undefined;
   style: Readonly<Record<string, string>>;
 }>;
 
@@ -127,19 +135,19 @@ type SharedIdentityClaim = Readonly<{
 type SharedIdentityCoordinator = ReturnType<typeof createSharedIdentityCoordinator>;
 
 let nextSessionIdentity = 0;
-const defaultFontBackend = createWebFontBackend();
+const defaultFontRegistry = createWebFontRegistry();
 
 /** Implements the web presentation language with native styles and retained motion. */
-export function createWebPresentationAdapter<Theme extends WebPresentationTokens>(
+export function createWebPresentationAdapter<Parameters extends WebPresentationTokens>(
   options: WebPresentationAdapterOptions = {},
-): PresentationAdapter<WebPresentationLanguage<Theme>, Element> {
+): PresentationAdapter<WebPresentationLanguage<Parameters>, Element> {
   const sharedIdentityCoordinator = createSharedIdentityCoordinator(options);
 
   return {
     create<const ElementName extends string>(input: {
       readonly boundary: Element;
-      readonly targets: PresentationTargetSources<ElementName, Element>;
-    }): PresentationAdapterSession<WebPresentationLanguage<Theme>, ElementName> {
+      readonly targets: PresentationTargetResolver<ElementName, Element>;
+    }): PresentationAdapterSession<WebPresentationLanguage<Parameters>, ElementName> {
       return createWebPresentationSession(input, options, sharedIdentityCoordinator);
     },
   };
@@ -177,16 +185,16 @@ function createSharedIdentityCoordinator(options: WebPresentationAdapterOptions)
 }
 
 function createWebPresentationSession<
-  Theme extends WebPresentationTokens,
+  Parameters extends WebPresentationTokens,
   ElementName extends string,
 >(
   input: {
     readonly boundary: Element;
-    readonly targets: PresentationTargetSources<ElementName, Element>;
+    readonly targets: PresentationTargetResolver<ElementName, Element>;
   },
   options: WebPresentationAdapterOptions,
   sharedIdentityCoordinator: SharedIdentityCoordinator,
-): PresentationAdapterSession<WebPresentationLanguage<Theme>, ElementName> {
+): PresentationAdapterSession<WebPresentationLanguage<Parameters>, ElementName> {
   const sessionIdentity = `presentation-${nextSessionIdentity++}`;
   const cleanups: Array<() => void> = [];
   const styles = new Map<StyledElement, Map<string, string>>();
@@ -215,8 +223,10 @@ function createWebPresentationSession<
   let disposed = false;
   let conditionCommitQueued = false;
   let lastDeclarations: Readonly<
-    Partial<Record<ElementName, Readonly<WebPresentationDeclaration<Theme>>>>
-  > = {} as Readonly<Partial<Record<ElementName, Readonly<WebPresentationDeclaration<Theme>>>>>;
+    Partial<Record<ElementName, Readonly<WebPresentationDeclaration<Parameters>>>>
+  > = {} as Readonly<
+    Partial<Record<ElementName, Readonly<WebPresentationDeclaration<Parameters>>>>
+  >;
 
   const identityFor = (target: Element): number => {
     const current = targetIdentities.get(target);
@@ -288,7 +298,7 @@ function createWebPresentationSession<
 
   const keyFor = (elementName: string, target: Element, property: MotionProperty | "layout") =>
     `${sessionIdentity}/${elementName}/${identityFor(target)}/${property}`;
-  const session: PresentationAdapterSession<WebPresentationLanguage<Theme>, ElementName> = {
+  const session: PresentationAdapterSession<WebPresentationLanguage<Parameters>, ElementName> = {
     commit(declarations) {
       if (disposed) throw new Error("Cannot commit a disposed web presentation session.");
       lastDeclarations = declarations;
@@ -451,13 +461,15 @@ function createWebPresentationSession<
 
   function prepareTargets(
     declarations: Readonly<
-      Partial<Record<ElementName, Readonly<WebPresentationDeclaration<Theme>>>>
+      Partial<Record<ElementName, Readonly<WebPresentationDeclaration<Parameters>>>>
     >,
     targets: ReadonlyMap<ElementName, readonly Element[]>,
-  ): readonly PreparedTarget<ElementName, Theme>[] {
-    const prepared: PreparedTarget<ElementName, Theme>[] = [];
+  ): readonly PreparedTarget<ElementName, Parameters>[] {
+    const prepared: PreparedTarget<ElementName, Parameters>[] = [];
     for (const elementName of Object.keys(input.targets) as ElementName[]) {
-      const authored = declarations[elementName] as WebPresentationDeclaration<Theme> | undefined;
+      const authored = declarations[elementName] as
+        | WebPresentationDeclaration<Parameters>
+        | undefined;
       if (authored) validateWebPresentationDeclaration(authored, String(elementName));
       for (const target of targets.get(elementName) ?? []) {
         const state = refreshNativeConditionState(target, authored);
@@ -520,7 +532,7 @@ function createWebPresentationSession<
 
   function applyCollectionGeometry(
     target: Element,
-    declaration: WebPresentationDeclaration<Theme> | undefined,
+    declaration: WebPresentationDeclaration<Parameters> | undefined,
   ): void {
     if (typeof HTMLElement === "undefined" || !(target instanceof HTMLElement)) return;
     const collection = declaration?.layout?.collection;
@@ -549,7 +561,7 @@ function createWebPresentationSession<
 
   function refreshNativeConditionState(
     target: Element,
-    declaration: WebPresentationDeclaration<Theme> | undefined,
+    declaration: WebPresentationDeclaration<Parameters> | undefined,
   ): NativeConditionState | undefined {
     if (!needsTargetConditions(declaration)) return conditions.get(target);
     const state = conditions.get(target) ?? {
@@ -567,9 +579,9 @@ function createWebPresentationSession<
   function synchronizeFonts(next: ReadonlyMap<string, FontAsset>): void {
     const document = input.boundary.ownerDocument;
     if (!document) return;
-    const backend = options.fontBackend ?? defaultFontBackend;
+    const registry = options.fontRegistry ?? defaultFontRegistry;
     for (const [key, font] of next) {
-      if (!fontLeases.has(key)) fontLeases.set(key, backend.acquire(document, font));
+      if (!fontLeases.has(key)) fontLeases.set(key, registry.acquire(document, font));
     }
     for (const [key, lease] of fontLeases) {
       if (next.has(key)) continue;
@@ -580,7 +592,7 @@ function createWebPresentationSession<
 
   function observeNativeConditions(
     target: Element,
-    declaration: WebPresentationDeclaration<Theme> | undefined,
+    declaration: WebPresentationDeclaration<Parameters> | undefined,
   ): void {
     if (!needsTargetConditions(declaration)) {
       conditionCleanups.get(target)?.();
@@ -636,7 +648,7 @@ function createWebPresentationSession<
   }
 
   function synchronizeSharedIdentities(
-    prepared: readonly PreparedTarget<ElementName, Theme>[],
+    prepared: readonly PreparedTarget<ElementName, Parameters>[],
   ): void {
     const next = new Map<Element, string>();
     const targets = new Map<string, Element>();
@@ -674,7 +686,7 @@ function createWebPresentationSession<
   }
 
   function sharedTransfers(
-    prepared: readonly PreparedTarget<ElementName, Theme>[],
+    prepared: readonly PreparedTarget<ElementName, Parameters>[],
   ): readonly Readonly<{
     elementName: ElementName;
     target: Element;
@@ -745,7 +757,9 @@ function createWebPresentationSession<
     }
   }
 
-  function captureSharedGeometry(prepared: readonly PreparedTarget<ElementName, Theme>[]): void {
+  function captureSharedGeometry(
+    prepared: readonly PreparedTarget<ElementName, Parameters>[],
+  ): void {
     for (const { target, declaration } of prepared) {
       const identity = activeSharedIdentity(target, declaration);
       if (!identity) continue;
@@ -755,7 +769,7 @@ function createWebPresentationSession<
 
   function activeSharedIdentity(
     target: Element,
-    declaration: WebPresentationDeclaration<Theme> | undefined,
+    declaration: WebPresentationDeclaration<Parameters> | undefined,
   ): string | undefined {
     return target.getAttribute("data-motion-state") === "exiting"
       ? undefined
@@ -765,7 +779,7 @@ function createWebPresentationSession<
   function applyElementMotion(
     elementName: ElementName,
     target: Element,
-    declaration: WebMotionDeclaration<Theme> | undefined,
+    declaration: WebMotionDeclaration<Parameters> | undefined,
     nextKeys: Set<string>,
   ): void {
     if (!isStyledElement(target)) return;
@@ -969,9 +983,9 @@ function createWebPresentationSession<
   }
 }
 
-function retainsVisibleLayout<Theme extends WebPresentationTokens>(
+function retainsVisibleLayout<Parameters extends WebPresentationTokens>(
   target: Element,
-  next: WebMotionDeclaration<Theme>["presence"] | undefined,
+  next: WebMotionDeclaration<Parameters>["presence"] | undefined,
   previous: PresenceState | undefined,
 ): boolean {
   if (!next) return true;
@@ -982,14 +996,14 @@ function retainsVisibleLayout<Theme extends WebPresentationTokens>(
   return visible && previous?.visible === true && !previous.transitioning;
 }
 
-function resolveWebConditions<Theme extends WebPresentationTokens>(
-  declaration: WebPresentationDeclaration<Theme> | undefined,
+function resolveWebConditions<Parameters extends WebPresentationTokens>(
+  declaration: WebPresentationDeclaration<Parameters> | undefined,
   state: NativeConditionState | undefined,
   environment: WebConditionEnvironment,
-): WebPresentationDeclaration<Theme> | undefined {
+): WebPresentationDeclaration<Parameters> | undefined {
   if (!declaration) return undefined;
   const { conditions, ...base } = declaration;
-  let resolved = base as WebPresentationDeclaration<Theme>;
+  let resolved = base as WebPresentationDeclaration<Parameters>;
   for (const rule of conditions ?? []) {
     if (matchesWebCondition(rule.when, state, environment)) {
       resolved = mergeDeclarations(resolved, rule.use);
@@ -999,13 +1013,13 @@ function resolveWebConditions<Theme extends WebPresentationTokens>(
   if (paint.focusRing !== undefined && paint.focusRing !== "none" && !state?.focusVisible) {
     const nextPaint = { ...paint };
     delete nextPaint.focusRing;
-    resolved = { ...resolved, paint: nextPaint } as WebPresentationDeclaration<Theme>;
+    resolved = { ...resolved, paint: nextPaint } as WebPresentationDeclaration<Parameters>;
   }
   return resolved;
 }
 
-function matchesWebCondition<Theme extends WebPresentationTokens>(
-  condition: WebPresentationCondition<Theme>,
+function matchesWebCondition<Parameters extends WebPresentationTokens>(
+  condition: WebPresentationCondition<Parameters>,
   target: NativeConditionState | undefined,
   environment: WebConditionEnvironment,
 ): boolean {
@@ -1045,14 +1059,14 @@ function conditionMetric(value: unknown): number | undefined {
   return typeof metric === "number" ? metric : undefined;
 }
 
-function mergeDeclarations<Theme extends WebPresentationTokens>(
-  base: WebPresentationDeclaration<Theme>,
+function mergeDeclarations<Parameters extends WebPresentationTokens>(
+  base: WebPresentationDeclaration<Parameters>,
   override: object,
-): WebPresentationDeclaration<Theme> {
+): WebPresentationDeclaration<Parameters> {
   const merged = mergeRecords(
     base as UnknownRecord,
     override as UnknownRecord,
-  ) as WebPresentationDeclaration<Theme>;
+  ) as WebPresentationDeclaration<Parameters>;
   const overrideLayout = record(record(override).layout);
   const modes = ["flow", "grid", "overlay"].filter((mode) => mode in overrideLayout);
   if (modes.length !== 1) return merged;
@@ -1060,7 +1074,7 @@ function mergeDeclarations<Theme extends WebPresentationTokens>(
   for (const mode of ["flow", "grid", "overlay"]) {
     if (mode !== modes[0]) delete layout[mode];
   }
-  return { ...merged, layout } as WebPresentationDeclaration<Theme>;
+  return { ...merged, layout } as WebPresentationDeclaration<Parameters>;
 }
 
 function mergeRecords(base: UnknownRecord, override: UnknownRecord): UnknownRecord {
@@ -1211,9 +1225,9 @@ function observeMedia(boundary: Element, query: string, changed: () => void): Me
   };
 }
 
-function applyPresenceLifecycle<Theme extends WebPresentationTokens>(
+function applyPresenceLifecycle<Parameters extends WebPresentationTokens>(
   target: Element,
-  presence: WebMotionDeclaration<Theme>["presence"] | undefined,
+  presence: WebMotionDeclaration<Parameters>["presence"] | undefined,
   lifecycleRecords: Map<Element, string | null>,
   layoutRecords: Map<Element, string | null>,
 ): void {
@@ -1238,9 +1252,9 @@ function applyPresenceLifecycle<Theme extends WebPresentationTokens>(
   }
 }
 
-function applyStructuralPresenceLayout<Theme extends WebPresentationTokens>(
+function applyStructuralPresenceLayout<Parameters extends WebPresentationTokens>(
   target: Element,
-  presence: WebMotionDeclaration<Theme>["presence"] | undefined,
+  presence: WebMotionDeclaration<Parameters>["presence"] | undefined,
   records: Map<HTMLElement, PoppedPresenceStyles>,
 ): void {
   if (typeof HTMLElement === "undefined" || !(target instanceof HTMLElement)) return;
@@ -1338,9 +1352,9 @@ function restoreOwnedStyles(target: StyledElement, owned: Map<string, string>): 
   for (const [property, value] of owned) setStyle(target.style, property, value);
 }
 
-function applyAnchor<ElementName extends string, Theme extends WebPresentationTokens>(
+function applyAnchor<ElementName extends string, Parameters extends WebPresentationTokens>(
   target: Element,
-  declaration: WebPresentationDeclaration<Theme> | undefined,
+  declaration: WebPresentationDeclaration<Parameters> | undefined,
   elements: ReadonlyMap<ElementName, readonly Element[]>,
   session: string,
   styles: Map<StyledElement, Map<string, string>>,
@@ -1388,9 +1402,9 @@ function restoreResource(target: Element, source: string | null): void {
   else target.setAttribute("src", source);
 }
 
-function applyLayers<Theme extends WebPresentationTokens>(
+function applyLayers<Parameters extends WebPresentationTokens>(
   target: Element,
-  definitions: readonly WebRenderLayer<Theme>[],
+  definitions: readonly WebRenderLayer<Parameters>[],
   records: Map<Element, Map<string, Element>>,
   styles: Map<StyledElement, Map<string, string>>,
 ): void {
@@ -1458,8 +1472,8 @@ function restoreAttribute(target: Element, name: string, value: string | null | 
   else target.setAttribute(name, value);
 }
 
-function needsTargetConditions<Theme extends WebPresentationTokens>(
-  declaration: WebPresentationDeclaration<Theme> | undefined,
+function needsTargetConditions<Parameters extends WebPresentationTokens>(
+  declaration: WebPresentationDeclaration<Parameters> | undefined,
 ): boolean {
   return (
     declaration?.conditions?.some((rule) => Object.keys(rule.when.target ?? {}).length > 0) ===
@@ -1467,8 +1481,8 @@ function needsTargetConditions<Theme extends WebPresentationTokens>(
   );
 }
 
-function validateWebPresentationDeclaration<Theme extends WebPresentationTokens>(
-  declaration: WebPresentationDeclaration<Theme>,
+function validateWebPresentationDeclaration<Parameters extends WebPresentationTokens>(
+  declaration: WebPresentationDeclaration<Parameters>,
   elementName: string,
 ): void {
   validateSerializableValue(
@@ -1580,11 +1594,11 @@ function validateSerializableValue(value: unknown, path: string, ancestors: Set<
   ancestors.delete(value);
 }
 
-function motionValues<Theme extends WebPresentationTokens>(
-  declaration: WebMotionDeclaration<Theme> | undefined,
-): readonly [MotionProperty, WebMotionValue<Theme>][] {
+function motionValues<Parameters extends WebPresentationTokens>(
+  declaration: WebMotionDeclaration<Parameters> | undefined,
+): readonly [MotionProperty, WebMotionValue<Parameters>][] {
   if (!declaration) return [];
-  const result: Array<[MotionProperty, WebMotionValue<Theme>]> = [];
+  const result: Array<[MotionProperty, WebMotionValue<Parameters>]> = [];
   if (declaration.opacity !== undefined) result.push(["opacity", declaration.opacity]);
   if (declaration.translation?.inline !== undefined) {
     result.push(["translateX", declaration.translation.inline]);

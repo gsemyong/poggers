@@ -1,14 +1,14 @@
 import { describe, expect, test } from "vitest";
 
 import type { Application, Feature, Program } from "../../../application";
-import { createWebPlatformAdapter, type WebMain } from "../platform";
+import { createWebUIPlatformAdapter, type BrowserMainThread } from "../platform";
 
-const createApplicationUI = createWebPlatformAdapter().structure.createApplicationUI;
+const createApplicationUI = createWebUIPlatformAdapter().component.createApplicationUI;
 
 type Counter = {
   Programs: {
     browser: Program<
-      WebMain,
+      BrowserMainThread,
       {
         State: { count: number };
         Actions: { increment(input: { by: number }): number };
@@ -21,7 +21,7 @@ type Shell = {
   Features: { first: Counter; second: Counter };
   Programs: {
     browser: Program<
-      WebMain,
+      BrowserMainThread,
       {
         State: { total: number };
         Actions: {
@@ -50,7 +50,7 @@ const counter = (count: number): Feature<Counter> => ({
 });
 
 describe("Program UI composition", () => {
-  test("composes isolated child surfaces into a parent UI contribution", async () => {
+  test("composes isolated child APIs into a parent UI contribution", async () => {
     const shell: Feature<Shell> = {
       features: { first: counter(1), second: counter(10) },
       programs: {
@@ -74,14 +74,14 @@ describe("Program UI composition", () => {
       program: "browser",
       presentations: { presentations: {} },
     });
-    const increment = ui.process.increment as (input: {
+    const increment = ui.api.increment as (input: {
       feature: "first" | "second";
       by: number;
     }) => number;
 
-    expect(ui.process.total).toBe(0);
+    expect(ui.api.total).toBe(0);
     expect(increment({ feature: "first", by: 2 })).toBe(3);
-    expect(ui.process.total).toBe(13);
+    expect(ui.api.total).toBe(13);
 
     await ui.dispose();
     expect(() => increment({ feature: "first", by: 1 })).toThrow("disposed");
@@ -122,10 +122,7 @@ describe("Program UI composition", () => {
         },
       },
     };
-    const family = {
-      presentation: (_: { tone: string }) => ({ components: {} }),
-      themes: { default: { tone: "quiet" }, vivid: { tone: "bright" } },
-    };
+    const family = {};
     type AppearanceContract = Contract & { Presentations: "family" };
     const application = {
       features: { shell },
@@ -137,13 +134,11 @@ describe("Program UI composition", () => {
       presentations: { presentations: { family } },
     });
 
-    ui.setPresentation({ presentation: "family", theme: "vivid" });
-    expect(ui.presentation()).toEqual({ presentation: "family", theme: "vivid" });
-    expect(ui.process.total).toBe(0);
+    expect(ui.api.total).toBe(0);
     expect(ui.updatePresentations({ family })).toBe(true);
     expect(
       ui.updatePresentations({
-        studio: { presentation: (_: {}) => ({ components: {} }), themes: { default: {} } },
+        studio: {},
       }),
     ).toBe(false);
 
@@ -184,14 +179,14 @@ describe("Program UI composition", () => {
   test("binds child-provided Capabilities into its parent contribution", async () => {
     type Provider = {
       Programs: {
-        browser: Program<WebMain, { Provides: { reader: { read(): string } } }>;
+        browser: Program<BrowserMainThread, { Provides: { reader: { read(): string } } }>;
       };
     };
     type Consumer = {
       Features: { provider: Provider };
       Programs: {
         browser: Program<
-          WebMain,
+          BrowserMainThread,
           {
             Requires: { reader: { read(): string } };
             State: { value: string };
@@ -201,7 +196,7 @@ describe("Program UI composition", () => {
         >;
       };
     };
-    type Product = { Features: { consumer: Consumer } };
+    type App = { Features: { consumer: Consumer } };
     const provider: Feature<Provider> = {
       programs: {
         browser: {
@@ -227,14 +222,14 @@ describe("Program UI composition", () => {
         },
       },
     };
-    const application: Application<Product> = { features: { consumer } };
+    const application: Application<App> = { features: { consumer } };
     const ui = createApplicationUI({
       application,
       program: "browser",
       presentations: { presentations: {} },
     });
 
-    expect(ui.process.value).toBe("provided");
+    expect(ui.api.value).toBe("provided");
     await ui.dispose();
   });
 
@@ -264,7 +259,7 @@ describe("Program UI composition", () => {
       presentations: { presentations: {} },
       hotState,
     });
-    (first.process.increment as (input: { feature: "first"; by: number }) => number)({
+    (first.api.increment as (input: { feature: "first"; by: number }) => number)({
       feature: "first",
       by: 4,
     });
@@ -277,14 +272,14 @@ describe("Program UI composition", () => {
       presentations: { presentations: {} },
       hotState,
     });
-    expect(second.process.total).toBe(15);
+    expect(second.api.total).toBe(15);
     expect(
-      (second.process.increment as (input: { feature: "second"; by: number }) => number)({
+      (second.api.increment as (input: { feature: "second"; by: number }) => number)({
         feature: "second",
         by: 1,
       }),
     ).toBe(11);
-    expect(second.process.total).toBe(16);
+    expect(second.api.total).toBe(16);
     await second.dispose();
   });
 });

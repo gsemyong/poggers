@@ -1,8 +1,11 @@
-import type { PlatformAdapter, PlatformDefinition, PlatformPrimitive } from "../platform";
-import type { Child, IntrinsicElements } from "./jsx/types";
-import type { WebPresentationDeclaration, WebPresentationTokens } from "./presentation/language";
-import { createWebPresentationAdapter } from "./presentation/runtime";
-import { createApplicationUI, type WebStructureAdapter } from "./structure/language";
+import { installJSXRenderer } from "../jsx/runtime";
+import type { UIPlatformAdapter, UIPlatformDefinition, UIPlatformPrimitive } from "../platform";
+import type { PresentationAdapter } from "../presentation";
+import { createApplicationUI, type WebComponentAdapter } from "./component/adapter";
+import type { Child, IntrinsicElements } from "./component/elements";
+import { jsx as webJSX } from "./component/runtime";
+import { createWebPresentationAdapter } from "./presentation/adapter";
+import type { WebPresentationLanguage, WebPresentationTokens } from "./presentation/language";
 
 type WebPrimitiveName = Extract<keyof IntrinsicElements, string>;
 
@@ -12,14 +15,16 @@ type WebTarget<Name extends WebPrimitiveName> = Name extends keyof HTMLElementTa
     ? SVGElementTagNameMap[Name]
     : Element;
 
-type WebPrimitive<Name extends WebPrimitiveName> = PlatformPrimitive<
+type WebPrimitive<Name extends WebPrimitiveName> = UIPlatformPrimitive<
   Omit<IntrinsicElements[Name], "class" | "className" | "style">,
-  WebTarget<Name>,
-  WebPresentationDeclaration<WebPresentationTokens>
+  WebTarget<Name>
 >;
 
+const renderWebIntrinsic = (type: string, props: Readonly<Record<string, unknown>>) =>
+  webJSX(type, props as Parameters<typeof webJSX>[1]);
+
 /** The typed structure and Presentation vocabulary of the web platform. */
-export type WebPlatform = Readonly<{
+export type WebUIPlatform = Readonly<{
   Name: "web";
   Child: Child;
   Primitives: {
@@ -27,23 +32,28 @@ export type WebPlatform = Readonly<{
   };
 }>;
 
-export type WebMain = { readonly Name: "web-main"; readonly Platform: WebPlatform };
-export type WebServiceWorker = { readonly Name: "web-service-worker" };
+export type BrowserMainThread = { readonly Name: "browser-main"; readonly UI: WebUIPlatform };
+export type BrowserServiceWorker = { readonly Name: "browser-service-worker" };
 
-type WebPlatformSatisfiesContract =
-  WebPlatform extends PlatformDefinition<WebPlatform> ? true : never;
-const webPlatformSatisfiesContract: WebPlatformSatisfiesContract = true;
+type WebUIPlatformSatisfiesContract =
+  WebUIPlatform extends UIPlatformDefinition<WebUIPlatform> ? true : never;
+const webPlatformSatisfiesContract: WebUIPlatformSatisfiesContract = true;
 void webPlatformSatisfiesContract;
 
-export type WebPlatformAdapter = PlatformAdapter<WebPlatform, WebStructureAdapter, Element>;
+export type WebUIPlatformAdapter = UIPlatformAdapter<
+  WebUIPlatform,
+  WebComponentAdapter,
+  PresentationAdapter<WebPresentationLanguage<WebPresentationTokens>, Element>
+>;
 
 /** Creates one paired web structure and Presentation implementation. */
-export function createWebPlatformAdapter(): WebPlatformAdapter {
+export function createWebUIPlatformAdapter(): WebUIPlatformAdapter {
+  installJSXRenderer(renderWebIntrinsic);
   const presentation = createWebPresentationAdapter<WebPresentationTokens>();
-  const structure: WebStructureAdapter = {
+  const component: WebComponentAdapter = {
     createApplicationUI(options) {
       return createApplicationUI({ ...options, presentationAdapter: presentation });
     },
   };
-  return { name: "web", structure, presentation };
+  return { name: "web", component, presentation };
 }

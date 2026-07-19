@@ -1,8 +1,13 @@
-export { For, Show } from "./structure/runtime";
-export type { Child } from "./jsx/types";
-export type { VirtualForOptions } from "./structure/runtime";
-export { createWebPlatformAdapter } from "./platform";
-export type { WebMain, WebPlatform, WebPlatformAdapter, WebServiceWorker } from "./platform";
+export { For, Show } from "./component/runtime";
+export type { Child } from "./component/elements";
+export type { VirtualForOptions } from "./component/runtime";
+export { createWebUIPlatformAdapter } from "./platform";
+export type {
+  BrowserMainThread,
+  BrowserServiceWorker,
+  WebUIPlatform,
+  WebUIPlatformAdapter,
+} from "./platform";
 export {
   createPress,
   createShortcut,
@@ -15,4 +20,4 @@ export {
   type PressBindings,
   type Shortcut,
   type ShortcutBinding,
-} from "./structure/interaction";
+} from "./component/interaction";

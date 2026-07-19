@@ -4,8 +4,8 @@ import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 import process from "node:process";
 
-import { buildRustApplication } from "./compiler/backend/production";
-import { buildApplication, runApplication } from "./ui/web/backend";
+import { buildRustApplication } from "./compiler/production";
+import { buildApplication, runApplication } from "./ui/web/toolchain";
 
 export async function runCli(arguments_ = process.argv.slice(2)): Promise<void> {
   const [command = "dev", ...commandArguments] = arguments_;
@@ -54,7 +54,7 @@ export async function runCli(arguments_ = process.argv.slice(2)): Promise<void> 
     );
   } else if (command === "test") {
     process.exitCode = await run(
-      [resolve(directory, "node_modules/.bin/vitest"), "run", "--passWithNoTests", "src"],
+      [resolve(directory, "node_modules/.bin/vitest"), "run", "--passWithNoTests"],
       directory,
     );
   } else if (command === "check") {
@@ -62,7 +62,7 @@ export async function runCli(arguments_ = process.argv.slice(2)): Promise<void> 
       [resolve(directory, "node_modules/.bin/tsc"), "-p", "tsconfig.json"],
       [resolve(directory, "node_modules/.bin/oxlint"), "src"],
       [resolve(directory, "node_modules/.bin/oxfmt"), "--check"],
-      [resolve(directory, "node_modules/.bin/vitest"), "run", "--passWithNoTests", "src"],
+      [resolve(directory, "node_modules/.bin/vitest"), "run", "--passWithNoTests"],
     ];
     for (const current of commands) {
       const code = await run(current, directory);

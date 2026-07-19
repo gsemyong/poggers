@@ -1,4 +1,4 @@
-export const POGGERS_IR_VERSION = 1 as const;
+export const POGGERS_IR_VERSION = 3 as const;
 
 export type SourceSpan = Readonly<{
   file: string;
@@ -94,12 +94,11 @@ export type ComponentIR = Readonly<{
   propCallbacks: readonly string[];
   state: TypeIR;
   actions: readonly string[];
-  visualValues: readonly Readonly<{ name: string; kind: string }>[];
   elements: readonly Readonly<{ name: string; element: string }>[];
   implementation: Readonly<{
     state: boolean;
     actions: boolean;
-    start: boolean;
+    mount: boolean;
     view: boolean;
   }>;
 }>;
@@ -108,7 +107,7 @@ export type ProgramIR = Readonly<{
   id: string;
   feature: string;
   name: string;
-  runtime: Readonly<{ name: string; platform?: string }>;
+  environment: Readonly<{ name: string; uiPlatform?: string }>;
   requires: readonly CapabilityIR[];
   provides: readonly CapabilityIR[];
   ui?: Readonly<{
@@ -128,7 +127,7 @@ export type FeatureIR = Readonly<{
   programs: readonly string[];
 }>;
 
-export type ProductIR = Readonly<{
+export type ApplicationIR = Readonly<{
   version: typeof POGGERS_IR_VERSION;
   application: Readonly<{
     id: string;
@@ -139,12 +138,14 @@ export type ProductIR = Readonly<{
   programs: readonly ProgramIR[];
 }>;
 
-export function serializeProductIR(ir: ProductIR): string {
-  assertProductIRVersion(ir);
+export function serializeApplicationIR(ir: ApplicationIR): string {
+  assertApplicationIRVersion(ir);
   return `${JSON.stringify(ir, undefined, 2)}\n`;
 }
 
-export function assertProductIRVersion(ir: Pick<ProductIR, "version">): asserts ir is ProductIR {
+export function assertApplicationIRVersion(
+  ir: Pick<ApplicationIR, "version">,
+): asserts ir is ApplicationIR {
   if (ir.version !== POGGERS_IR_VERSION) {
     throw new Error(`Unsupported Poggers IR version ${String(ir.version)}.`);
   }

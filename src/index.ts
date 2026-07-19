@@ -3,37 +3,35 @@ export type {
   ApplicationContract,
   ApplicationFeatures,
   ApplicationMetadata,
-  ApplicationPwa,
+  EnvironmentContract,
   Feature,
   FeatureContract,
-  FeatureUISurfaces,
+  FeatureDefinitions,
+  FeatureUIAPIs,
   Program,
   ProgramContract,
   ProgramOwner,
   ProgramProvides,
   ProgramRequires,
-  ProgramStartScope,
+  ProgramStartContext,
   PresentationName,
-  RuntimeContract,
-  Server,
   UIActions,
-  UIActionScope,
+  UIActionContext,
+  UIContributionAPI,
   UIState,
-  UISurface,
 } from "./application";
-
-export type { ProgramAdapter, ProgramAddress, Process } from "./execution";
-export { startProgram } from "./execution";
-
+export {
+  bindCapabilitiesToScope,
+  createProgramContributionInstance,
+  createUIContributionInstance,
+  ResourceScope,
+  startProcess,
+} from "./process";
 export type {
-  PlatformAdapter,
-  PlatformChild,
-  PlatformContract,
-  PlatformPresentationLanguage,
-  PlatformPrimitive,
-  PlatformPrimitiveName,
-  PlatformPrimitivePresentation,
-  PlatformPrimitiveProps,
-  PlatformPrimitiveTarget,
-  PlatformTarget,
-} from "./ui/platform";
+  CapabilityResolver,
+  Process,
+  ProgramContributionAddress,
+  ProgramContributionInstance,
+  UIContributionInstance,
+} from "./process";
+export type * from "./ui/index";

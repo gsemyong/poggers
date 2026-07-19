@@ -9,33 +9,34 @@
     "dist",
     "src/application.ts",
     "src/cli.ts",
-    "src/compiler/backend/development.ts",
-    "src/compiler/backend/production.ts",
-    "src/compiler/frontend.ts",
+    "src/compiler/development.ts",
+    "src/compiler/production.ts",
+    "src/compiler/source.ts",
     "src/compiler/ir.ts",
-    "src/execution.ts",
+    "src/process.ts",
     "src/index.ts",
     "src/ui/component.ts",
     "src/ui/index.ts",
     "src/ui/platform.ts",
     "src/ui/presentation.ts",
-    "src/ui/web/backend.ts",
+    "src/ui/web/toolchain.ts",
     "src/ui/web/index.ts",
-    "src/ui/web/jsx/development.ts",
-    "src/ui/web/jsx/runtime.ts",
-    "src/ui/web/jsx/types.ts",
+    "src/ui/jsx/development.ts",
+    "src/ui/jsx/runtime.ts",
+    "src/ui/jsx/types.ts",
     "src/ui/web/platform.ts",
-    "src/ui/web/presentation/font.ts",
+    "src/ui/web/presentation/fonts.ts",
     "src/ui/web/presentation/index.ts",
     "src/ui/web/presentation/language.ts",
     "src/ui/web/presentation/motion.ts",
-    "src/ui/web/presentation/runtime.ts",
+    "src/ui/web/presentation/adapter.ts",
     "src/ui/web/presentation/style.ts",
-    "src/ui/web/structure/compiler.ts",
-    "src/ui/web/structure/interaction.ts",
-    "src/ui/web/structure/language.ts",
-    "src/ui/web/structure/runtime.ts",
-    "src/ui/web/structure/scene.ts",
+    "src/ui/web/component/adapter.ts",
+    "src/ui/web/component/compiler.ts",
+    "src/ui/web/component/elements.ts",
+    "src/ui/web/component/interaction.ts",
+    "src/ui/web/component/presence.ts",
+    "src/ui/web/component/runtime.ts",
     "template",
     "template/.gitignore",
     "tsconfig.json"
@@ -49,24 +50,14 @@
       "default": "./dist/src/index.js"
     },
     "./jsx-dev-runtime": {
-      "poggers-source": "./src/ui/web/jsx/development.ts",
-      "types": "./dist/src/ui/web/jsx/development.d.ts",
-      "default": "./dist/src/ui/web/jsx/development.js"
+      "poggers-source": "./src/ui/jsx/development.ts",
+      "types": "./dist/src/ui/jsx/development.d.ts",
+      "default": "./dist/src/ui/jsx/development.js"
     },
     "./jsx-runtime": {
-      "poggers-source": "./src/ui/web/jsx/runtime.ts",
-      "types": "./dist/src/ui/web/jsx/runtime.d.ts",
-      "default": "./dist/src/ui/web/jsx/runtime.js"
-    },
-    "./ui": {
-      "poggers-source": "./src/ui/index.ts",
-      "types": "./dist/src/ui/index.d.ts",
-      "default": "./dist/src/ui/index.js"
-    },
-    "./presentation": {
-      "poggers-source": "./src/ui/presentation.ts",
-      "types": "./dist/src/ui/presentation.d.ts",
-      "default": "./dist/src/ui/presentation.js"
+      "poggers-source": "./src/ui/jsx/runtime.ts",
+      "types": "./dist/src/ui/jsx/runtime.d.ts",
+      "default": "./dist/src/ui/jsx/runtime.js"
     },
     "./web": {
       "poggers-source": "./src/ui/web/index.ts",
@@ -88,8 +79,8 @@
     "typecheck": "tsc --noEmit",
     "fmt": "oxfmt",
     "fmt:check": "oxfmt --check",
-    "lint": "oxlint src scripts",
-    "test": "vitest run src",
+    "lint": "oxlint src scripts vitest.config.ts",
+    "test": "vitest run",
     "check": "nub run typecheck && nub run lint && nub run fmt:check && nub run test"
   },
   "dependencies": {
@@ -101,6 +92,7 @@
   },
   "devDependencies": {
     "@types/node": "^26.1.1",
+    "fast-check": "^4.9.0",
     "oxfmt": "^0.59.0",
     "oxlint": "^1.74.0",
     "typescript": "^7.0.2",

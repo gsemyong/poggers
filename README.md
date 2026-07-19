@@ -2,7 +2,7 @@
 
 Poggers is a TypeScript product language for portable Programs, typed
 Capabilities, platform Components, and complete Presentations. Applications
-compose reusable Features; platform backends own native realization.
+compose reusable Features; adapters own native realization.
 
 ## Create An Application
 
@@ -26,8 +26,9 @@ src/
 ```
 
 `app.tsx` is only the composition root. A Feature owns product structure and
-behavior. A Presentation owns visual decisions. Small projects may add more
-files to those two folders without changing the architecture.
+behavior. A Presentation owns adapter-defined user-facing decisions, including
+visuals, assets, and motion on the web. Small projects may add more files to
+those two folders without changing the architecture.
 
 ## Develop The Kit
 

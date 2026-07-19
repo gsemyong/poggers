@@ -10,24 +10,24 @@ import {
   type FeatureIR,
   type FieldIR,
   type FunctionIR,
-  type ProductIR,
+  type ApplicationIR,
   type ProgramIR,
   type SourceSpan,
   type StatementIR,
   type TypeIR,
 } from "./ir";
 
-export class ProductDiagnostic extends Error {
+export class ApplicationDiagnostic extends Error {
   readonly span: SourceSpan;
 
   constructor(message: string, span: SourceSpan) {
     super(`${span.file}:${span.line}:${span.column}: ${message}`);
-    this.name = "ProductDiagnostic";
+    this.name = "ApplicationDiagnostic";
     this.span = span;
   }
 }
 
-export function compileProduct(entry: string): ProductIR {
+export function compileApplication(entry: string): ApplicationIR {
   const file = resolve(entry);
   const configuration = ts.findConfigFile(dirname(file), ts.sys.fileExists, "tsconfig.json");
   const configured = configuration ? readCompilerOptions(configuration) : undefined;
@@ -194,12 +194,12 @@ function extractProgram(
   feature: string,
   name: string,
 ): ProgramIR {
-  const runtime = propertyType(checker, contract, "Runtime", value);
-  if (!runtime) throw diagnostic(value, `Program ${JSON.stringify(name)} has no Runtime.`);
-  const runtimeName = literalProperty(checker, runtime, "Name", value);
-  const platformContract = propertyType(checker, runtime, "Platform", value);
-  const platform = platformContract
-    ? literalProperty(checker, platformContract, "Name", value)
+  const environment = propertyType(checker, contract, "Environment", value);
+  if (!environment) throw diagnostic(value, `Program ${JSON.stringify(name)} has no Environment.`);
+  const environmentName = literalProperty(checker, environment, "Name", value);
+  const uiPlatformContract = propertyType(checker, environment, "UI", value);
+  const uiPlatform = uiPlatformContract
+    ? literalProperty(checker, uiPlatformContract, "Name", value)
     : undefined;
   const state = propertyType(checker, contract, "State", value);
   const actions = propertyType(checker, contract, "Actions", value);
@@ -212,7 +212,7 @@ function extractProgram(
     id: `feature/${feature}/program/${name}`,
     feature,
     name,
-    runtime: { name: runtimeName, ...(platform ? { platform } : {}) },
+    environment: { name: environmentName, ...(uiPlatform ? { uiPlatform } : {}) },
     requires: capabilityList(checker, propertyType(checker, contract, "Requires", value), value),
     provides: capabilityList(checker, propertyType(checker, contract, "Provides", value), value),
     ...(state || actions || components
@@ -261,7 +261,6 @@ function componentList(
     const implementation = values
       ? objectExpression(checker, resolveObjectMember(checker, values, symbol.getName()))
       : undefined;
-    const stateMetadata = componentState(checker, state, location);
     return {
       name: symbol.getName(),
       propCallbacks: sortedSymbols(props?.getProperties() ?? [])
@@ -274,9 +273,8 @@ function componentList(
               .getCallSignatures().length,
         )
         .map((field) => field.getName()),
-      state: stateMetadata.type,
+      state: state ? lowerType(checker, state, location) : emptyRecord(),
       actions: sortedSymbols(actions?.getProperties() ?? []).map((action) => action.getName()),
-      visualValues: stateMetadata.visualValues,
       elements: sortedSymbols(elements?.getProperties() ?? []).map((element) => ({
         name: element.getName(),
         element: literalType(
@@ -288,40 +286,11 @@ function componentList(
       implementation: {
         state: Boolean(implementation && objectMemberDeclaration(implementation, "state")),
         actions: Boolean(implementation && objectMemberDeclaration(implementation, "actions")),
-        start: Boolean(implementation && objectMemberDeclaration(implementation, "start")),
+        mount: Boolean(implementation && objectMemberDeclaration(implementation, "mount")),
         view: Boolean(implementation && objectMemberDeclaration(implementation, "view")),
       },
     };
   });
-}
-
-function componentState(
-  checker: ts.TypeChecker,
-  state: ts.Type | undefined,
-  at: ts.Node,
-): Readonly<{
-  type: TypeIR;
-  visualValues: readonly Readonly<{ name: string; kind: string }>[];
-}> {
-  if (!state) return { type: emptyRecord(), visualValues: [] };
-  const visualValues: Array<{ name: string; kind: string }> = [];
-  const fields = sortedSymbols(state.getProperties()).map((field): FieldIR => {
-    const location = field.valueDeclaration ?? at;
-    const fieldType = checker.getTypeOfSymbolAtLocation(field, location);
-    const visualKind = propertyType(checker, fieldType, "poggers.visualValue", location);
-    if (visualKind && visualKind.flags & ts.TypeFlags.StringLiteral) {
-      visualValues.push({
-        name: field.getName(),
-        kind: (visualKind as ts.StringLiteralType).value,
-      });
-    }
-    return {
-      name: field.getName(),
-      optional: Boolean(field.flags & ts.SymbolFlags.Optional),
-      type: visualKind ? primitive("number") : lowerType(checker, fieldType, location),
-    };
-  });
-  return { type: { kind: "record", fields }, visualValues };
 }
 
 function literalType(type: ts.Type, at: ts.Node, label: string): string {
@@ -873,8 +842,8 @@ function spanOf(node: ts.Node): SourceSpan {
   return { file: source.fileName, line: position.line + 1, column: position.character + 1 };
 }
 
-function diagnostic(node: ts.Node, message: string): ProductDiagnostic {
-  return new ProductDiagnostic(message, spanOf(node));
+function diagnostic(node: ts.Node, message: string): ApplicationDiagnostic {
+  return new ApplicationDiagnostic(message, spanOf(node));
 }
 
 function formatTypeScriptDiagnostic(item: ts.Diagnostic): string {
@@ -899,7 +868,7 @@ function readCompilerOptions(configuration: string): ts.CompilerOptions {
   return parsed.options;
 }
 
-function normalizeSourceFiles(ir: ProductIR, root: string): ProductIR {
+function normalizeSourceFiles(ir: ApplicationIR, root: string): ApplicationIR {
   const normalizeSpan = (span: SourceSpan): SourceSpan => ({
     ...span,
     file: relative(root, span.file).replaceAll("\\", "/"),

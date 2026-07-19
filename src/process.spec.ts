@@ -1,19 +1,39 @@
 import { effect } from "alien-signals";
+import fc from "fast-check";
 import { describe, expect, test } from "vitest";
 
-import type { Application, Feature, Program, Server } from "./application";
+import type { Application, Feature, Program } from "./application";
 import {
   createProgramContributionInstance,
-  createUIInstance,
-  RuntimeScope,
-  startProgram,
-  type ProgramAdapter,
-} from "./execution";
-import type { WebMain } from "./ui/web/platform";
+  createUIContributionInstance,
+  ResourceScope,
+  startProcess,
+  type CapabilityResolver,
+} from "./process";
+import type { BrowserMainThread } from "./ui/web/platform";
+
+type Server = { readonly Name: "server" };
 
 describe("Program runtime", () => {
+  test("disposes arbitrary owned resources once in reverse order", async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.uniqueArray(fc.string(), { maxLength: 40 }), async (resources) => {
+        const scope = new ResourceScope();
+        const disposed: string[] = [];
+        for (const resource of resources) scope.add(() => void disposed.push(resource));
+
+        const first = scope.dispose();
+        const second = scope.dispose();
+        expect(second).toBe(first);
+        await first;
+        expect(disposed).toEqual([...resources].reverse());
+      }),
+      { numRuns: 100 },
+    );
+  });
+
   test("disconnects owned producers synchronously when disposal begins", async () => {
-    const scope = new RuntimeScope();
+    const scope = new ResourceScope();
     let connected = true;
     scope.add(() => {
       connected = false;
@@ -25,7 +45,7 @@ describe("Program runtime", () => {
   });
 
   test("creates an isolated reactive UI state and action surface", async () => {
-    const first = createUIInstance({
+    const first = createUIContributionInstance({
       state: { count: 0 },
       actions: {
         add({ state }, value) {
@@ -34,19 +54,19 @@ describe("Program runtime", () => {
         },
       },
     });
-    const second = createUIInstance({ state: { count: 0 } });
+    const second = createUIContributionInstance({ state: { count: 0 } });
 
     expect(first.actions.add?.(2)).toBe(2);
-    expect(first.surface.count).toBe(2);
+    expect(first.api.count).toBe(2);
     expect(first.snapshot()).toEqual({ count: 2 });
-    expect(second.surface.count).toBe(0);
+    expect(second.api.count).toBe(0);
     await first.dispose();
     await second.dispose();
     expect(() => first.actions.add?.(1)).toThrow("disposed");
   });
 
   test("restores only declared UI state from a hot snapshot", async () => {
-    const ui = createUIInstance(
+    const ui = createUIContributionInstance(
       { state: { count: 0, label: "new" } },
       { initialState: { count: 7, removed: true } },
     );
@@ -56,7 +76,7 @@ describe("Program runtime", () => {
   });
 
   test("batches every synchronous action into one reactive notification", async () => {
-    const ui = createUIInstance({
+    const ui = createUIContributionInstance({
       state: { first: 0, second: 0 },
       actions: {
         update({ state }) {
@@ -67,7 +87,7 @@ describe("Program runtime", () => {
     });
     const snapshots: string[] = [];
     const stop = effect(() => {
-      snapshots.push(`${String(ui.surface.first)}:${String(ui.surface.second)}`);
+      snapshots.push(`${String(ui.api.first)}:${String(ui.api.second)}`);
     });
 
     ui.actions.update?.();
@@ -79,7 +99,7 @@ describe("Program runtime", () => {
 
   test("owns resources returned by standalone UI actions", async () => {
     const events: string[] = [];
-    const ui = createUIInstance({
+    const ui = createUIContributionInstance({
       actions: {
         open() {
           return {
@@ -255,7 +275,7 @@ describe("Program runtime", () => {
   test("prevents stale async actions from mutating disposed state", async () => {
     let resume!: () => void;
     const resumed = new Promise<void>((resolve) => (resume = resolve));
-    const ui = createUIInstance({
+    const ui = createUIContributionInstance({
       state: { value: "current" },
       actions: {
         async replace({ state }) {
@@ -339,7 +359,7 @@ describe("Program runtime", () => {
 
   test("does not duplicate subscriptions across repeated activation", async () => {
     const listeners = new Set<() => void>();
-    const adapter: ProgramAdapter = {
+    const adapter: CapabilityResolver = {
       resolve: () => ({
         changes: {
           subscribe(receive: () => void): Disposable {
@@ -352,7 +372,7 @@ describe("Program runtime", () => {
     type Watcher = {
       Programs: {
         browser: Program<
-          WebMain,
+          BrowserMainThread,
           { Requires: { changes: { subscribe(receive: () => void): Disposable } } }
         >;
       };
@@ -372,7 +392,7 @@ describe("Program runtime", () => {
     };
 
     for (let revision = 0; revision < 100; revision++) {
-      const process = await startProgram(application, "browser", adapter);
+      const process = await startProcess(application, "browser", adapter);
       expect(listeners.size).toBe(1);
       await process.dispose();
       expect(listeners.size).toBe(0);
@@ -389,9 +409,8 @@ describe("Program runtime", () => {
         cloud: Program<Server, { Requires: { child: { read(): string } } }>;
       };
     };
-    type Product = { Features: { parent: Parent } };
+    type App = { Features: { parent: Parent } };
     const starts: string[] = [];
-    const publishes: string[] = [];
 
     const child: Feature<Child> = {
       programs: {
@@ -413,16 +432,10 @@ describe("Program runtime", () => {
         },
       },
     };
-    const application: Application<Product> = { features: { parent } };
-    const process = await startProgram(application, "cloud", {
-      resolve: () => ({}),
-      publish(address) {
-        publishes.push(address.feature);
-      },
-    });
+    const application: Application<App> = { features: { parent } };
+    const process = await startProcess(application, "cloud", { resolve: () => ({}) });
 
     expect(starts).toEqual(["parent.child", "parent:child"]);
-    expect(publishes).toEqual(["parent.child"]);
     expect(process.contributions.map(({ address }) => address.feature)).toEqual([
       "parent.child",
       "parent",
@@ -432,7 +445,7 @@ describe("Program runtime", () => {
 
   test("resolves every binding before user work starts", async () => {
     type Leaf = { Programs: { cloud: Program<Server> } };
-    type Product = { Features: { first: Leaf; second: Leaf } };
+    type App = { Features: { first: Leaf; second: Leaf } };
     const events: string[] = [];
     const feature = (name: string): Feature<Leaf> => ({
       programs: {
@@ -443,12 +456,12 @@ describe("Program runtime", () => {
         },
       },
     });
-    const application: Application<Product> = {
+    const application: Application<App> = {
       features: { first: feature("first"), second: feature("second") },
     };
 
     await expect(
-      startProgram(application, "cloud", {
+      startProcess(application, "cloud", {
         resolve({ feature: path }) {
           if (path === "second") throw new Error("binding failed");
           return {};
@@ -464,9 +477,9 @@ describe("Program runtime", () => {
         cloud: Program<Server, { Requires: { resource: { open(): Disposable } } }>;
       };
     };
-    type Product = { Features: { first: Leaf; second: Leaf } };
+    type App = { Features: { first: Leaf; second: Leaf } };
     const events: string[] = [];
-    const application: Application<Product> = {
+    const application: Application<App> = {
       features: {
         first: {
           programs: {
@@ -492,7 +505,7 @@ describe("Program runtime", () => {
     };
 
     await expect(
-      startProgram(application, "cloud", {
+      startProcess(application, "cloud", {
         resolve: () => ({
           resource: {
             open: () => ({
@@ -552,7 +565,7 @@ describe("Program runtime", () => {
     type Consumer = {
       Programs: {
         browser: Program<
-          WebMain,
+          BrowserMainThread,
           {
             Requires: { reader: Reader };
             State: { value: string };
@@ -562,7 +575,7 @@ describe("Program runtime", () => {
         >;
       };
     };
-    type Product = { Features: { consumer: Consumer } };
+    type App = { Features: { consumer: Consumer } };
     const consumer: Feature<Consumer> = {
       programs: {
         browser: {
@@ -580,16 +593,16 @@ describe("Program runtime", () => {
         },
       },
     };
-    const application: Application<Product> = { features: { consumer } };
-    const adapters: ProgramAdapter[] = [
+    const application: Application<App> = { features: { consumer } };
+    const adapters: CapabilityResolver[] = [
       { resolve: () => ({ reader: { read: () => "local" } }) },
       { resolve: () => ({ reader: { read: () => "proxy" } }) },
       { resolve: () => ({ reader: { read: () => "fake" } }) },
     ];
 
     for (const [index, adapter] of adapters.entries()) {
-      const process = await startProgram(application, "browser", adapter);
-      expect(process.surfaces.consumer?.value).toBe(["local", "proxy", "fake"][index]);
+      const process = await startProcess(application, "browser", adapter);
+      expect(process.ui.consumer?.value).toBe(["local", "proxy", "fake"][index]);
       await process.dispose();
     }
   });

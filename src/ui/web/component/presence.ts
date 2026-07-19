@@ -1,12 +1,12 @@
 export type ScenePresence = "entering" | "present" | "exiting" | "detached";
 
-export type SceneNode<Backend = unknown> = {
+export type PresenceNode<Backend = unknown> = {
   readonly id: string;
   readonly owner: string;
   readonly element: string;
   readonly key?: string;
-  readonly children: SceneNode<Backend>[];
-  parent: SceneNode<Backend> | null;
+  readonly children: PresenceNode<Backend>[];
+  parent: PresenceNode<Backend> | null;
   backend: Backend | null;
   presence: ScenePresence;
   visible: boolean;
@@ -17,20 +17,20 @@ export type SceneRegistration<Backend> = {
   readonly element: string;
   readonly key?: string;
   readonly backend: Backend;
-  readonly parent?: SceneNode<Backend> | null;
+  readonly parent?: PresenceNode<Backend> | null;
 };
 
-export class PresenceScene<Backend = unknown> {
-  readonly roots: SceneNode<Backend>[] = [];
+export class PresenceGraph<Backend = unknown> {
+  readonly roots: PresenceNode<Backend>[] = [];
 
-  readonly #nodes = new Map<string, SceneNode<Backend>>();
+  readonly #nodes = new Map<string, PresenceNode<Backend>>();
   readonly #occurrences = new Map<string, number>();
 
   get size(): number {
     return this.#nodes.size;
   }
 
-  register(registration: SceneRegistration<Backend>): SceneNode<Backend> {
+  register(registration: SceneRegistration<Backend>): PresenceNode<Backend> {
     const id = this.#identity(registration.owner, registration.element, registration.key);
     const existing = this.#nodes.get(id);
     if (existing) {
@@ -40,7 +40,7 @@ export class PresenceScene<Backend = unknown> {
       return existing;
     }
 
-    const node: SceneNode<Backend> = {
+    const node: PresenceNode<Backend> = {
       id,
       owner: registration.owner,
       element: registration.element,
@@ -56,11 +56,15 @@ export class PresenceScene<Backend = unknown> {
     return node;
   }
 
-  get(id: string): SceneNode<Backend> | undefined {
+  get(id: string): PresenceNode<Backend> | undefined {
     return this.#nodes.get(id);
   }
 
-  reparent(node: SceneNode<Backend>, parent: SceneNode<Backend> | null, index?: number): void {
+  reparent(
+    node: PresenceNode<Backend>,
+    parent: PresenceNode<Backend> | null,
+    index?: number,
+  ): void {
     const siblings = parent?.children ?? this.roots;
     if (node.parent === parent) {
       if (index === undefined || siblings[index] === node) return;
@@ -73,15 +77,15 @@ export class PresenceScene<Backend = unknown> {
     this.#attach(node, parent, index);
   }
 
-  setPresence(node: SceneNode<Backend>, presence: ScenePresence): void {
+  setPresence(node: PresenceNode<Backend>, presence: ScenePresence): void {
     if (this.#nodes.has(node.id)) node.presence = presence;
   }
 
-  setVisible(node: SceneNode<Backend>, visible: boolean): void {
+  setVisible(node: PresenceNode<Backend>, visible: boolean): void {
     if (this.#nodes.has(node.id)) node.visible = visible;
   }
 
-  detach(node: SceneNode<Backend>): void {
+  detach(node: PresenceNode<Backend>): void {
     if (!this.#nodes.has(node.id)) return;
     for (const child of node.children) this.detach(child);
     this.#detachFromParent(node);
@@ -109,7 +113,7 @@ export class PresenceScene<Backend = unknown> {
     return `${occurrenceKey}:#${occurrence}`;
   }
 
-  #attach(node: SceneNode<Backend>, parent: SceneNode<Backend> | null, index?: number): void {
+  #attach(node: PresenceNode<Backend>, parent: PresenceNode<Backend> | null, index?: number): void {
     node.parent = parent;
     const siblings = parent?.children ?? this.roots;
     siblings.splice(
@@ -119,7 +123,7 @@ export class PresenceScene<Backend = unknown> {
     );
   }
 
-  #detachFromParent(node: SceneNode<Backend>): void {
+  #detachFromParent(node: PresenceNode<Backend>): void {
     const siblings = node.parent?.children ?? this.roots;
     const index = siblings.indexOf(node);
     if (index >= 0) siblings.splice(index, 1);
@@ -128,21 +132,21 @@ export class PresenceScene<Backend = unknown> {
 }
 
 export type SceneElementRegistration = {
-  readonly scene: PresenceScene<Element>;
+  readonly scene: PresenceGraph<Element>;
   readonly owner: string;
   readonly element: string;
   readonly key?: string;
 };
 
-const sceneNodes = new WeakMap<Element, SceneNode<Element>>();
-const nodeScenes = new WeakMap<SceneNode<Element>, PresenceScene<Element>>();
+const sceneNodes = new WeakMap<Element, PresenceNode<Element>>();
+const nodeScenes = new WeakMap<PresenceNode<Element>, PresenceGraph<Element>>();
 
-export function mountSceneElement(
+export function mountPresenceElement(
   element: Element,
   registration: SceneElementRegistration,
   host: Element | null,
-): SceneNode<Element> {
-  const parent = findSceneParent(host, registration.scene);
+): PresenceNode<Element> {
+  const parent = findPresenceParent(host, registration.scene);
   const node = registration.scene.register({
     owner: registration.owner,
     element: registration.element,
@@ -165,7 +169,7 @@ export function setSceneElementVisible(element: Element, visible: boolean): void
   if (node) nodeScenes.get(node)?.setVisible(node, visible);
 }
 
-export function unmountSceneElement(element: Element, scene: PresenceScene<Element>): void {
+export function unmountPresenceElement(element: Element, scene: PresenceGraph<Element>): void {
   const node = sceneNodes.get(element);
   if (!node) return;
   sceneNodes.delete(element);
@@ -188,10 +192,10 @@ export function adoptSceneChildren(element: Element): void {
   for (const child of element.children ?? []) visit(child);
 }
 
-function findSceneParent(
+function findPresenceParent(
   host: Element | null,
-  scene: PresenceScene<Element>,
-): SceneNode<Element> | null {
+  scene: PresenceGraph<Element>,
+): PresenceNode<Element> | null {
   for (let candidate = host; candidate; candidate = candidate.parentElement) {
     const node = sceneNodes.get(candidate);
     if (node && scene.get(node.id) === node) return node;

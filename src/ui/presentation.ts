@@ -5,22 +5,21 @@ import type {
   ComponentName,
   ComponentOwner,
   ComponentElementName,
-  ComponentProgramState,
+  ComponentFeatureState,
   ComponentState,
 } from "./component";
 
 type Empty = Record<never, never>;
 
 /** A typed declaration identity for a named Element, never a native handle. */
-export type PresentationTarget<Name extends string = string, Scope = unknown> = Readonly<{
+export type PresentationTarget<Name extends string = string, Owner = unknown> = Readonly<{
   name: Name;
-  readonly "poggers.presentationTargetScope"?: Scope;
+  readonly "poggers.presentationTargetOwner"?: Owner;
 }>;
 
-/** A platform's complete immutable presentation declaration language. */
+/** A platform's immutable Presentation declarations, indexed by primitive name. */
 export type PresentationLanguage = {
-  readonly Declaration: object;
-  readonly Declarations?: Readonly<Record<string, object>>;
+  readonly Declarations: Readonly<Record<string, object>>;
 };
 
 type PresentationElementDeclaration<
@@ -28,23 +27,21 @@ type PresentationElementDeclaration<
   Name extends ComponentName<Owner>,
   Element extends ComponentElementName<Owner, Name>,
   Language extends PresentationLanguage,
-> = Language extends { readonly Declarations: infer Declarations extends Record<string, object> }
-  ? ComponentElements<Owner, Name>[Element] extends infer Primitive extends string
-    ? Primitive extends keyof Declarations
-      ? Declarations[Primitive]
-      : never
+> = ComponentElements<Owner, Name>[Element] extends infer Primitive extends string
+  ? Primitive extends keyof Language["Declarations"]
+    ? Language["Declarations"][Primitive]
     : never
-  : Language["Declaration"];
+  : never;
 
 type PresentationState<Program extends object, Local extends object> =
   Extract<keyof Program, keyof Local> extends never ? Readonly<Program & Local> : never;
 
-export type PresentationComponentScope<
+export type PresentationComponentInput<
   Owner extends ComponentOwner,
   Name extends ComponentName<Owner>,
 > = Readonly<{
   props: Readonly<ComponentProps<Owner, Name>>;
-  state: PresentationState<ComponentProgramState<Owner>, ComponentState<Owner, Name>>;
+  state: PresentationState<ComponentFeatureState<Owner>, ComponentState<Owner, Name>>;
   targets: Readonly<{
     [Element in ComponentElementName<Owner, Name>]: PresentationTarget<
       Element,
@@ -53,7 +50,7 @@ export type PresentationComponentScope<
   }>;
 }>;
 
-export type PresentationComponentResult<
+export type PresentationComponentDeclaration<
   Owner extends ComponentOwner,
   Name extends ComponentName<Owner>,
   Language extends PresentationLanguage,
@@ -68,8 +65,8 @@ type PresentationComponentDefinitions<
   Language extends PresentationLanguage,
 > = {
   readonly [Name in ComponentName<Owner>]: (
-    scope: PresentationComponentScope<Owner, Name>,
-  ) => PresentationComponentResult<Owner, Name, Language>;
+    input: PresentationComponentInput<Owner, Name>,
+  ) => PresentationComponentDeclaration<Owner, Name, Language>;
 };
 
 type PresentationFeatureDefinitions<
@@ -81,7 +78,7 @@ type PresentationFeatureDefinitions<
   >]: PresentationComponentTree<Extract<ComponentFeatures<Owner>[Name], ComponentOwner>, Language>;
 };
 
-/** Mirrors the Component and Feature names exposed by one product contract. */
+/** Mirrors the Component and Feature names exposed by one Application contract. */
 export type PresentationComponentTree<
   Owner extends ComponentOwner,
   Language extends PresentationLanguage,
@@ -93,56 +90,36 @@ export type PresentationDefinition<
   Language extends PresentationLanguage,
 > = Readonly<PresentationComponentTree<Root, Language>>;
 
-/** Purely maps a Theme, Component props, and structural state to declarations. */
+/** Configures a Presentation from adapter-defined parameters. */
 export type Presentation<
   Root extends ComponentOwner,
   Language extends PresentationLanguage,
-  Tokens extends object = Empty,
-> = (tokens: Readonly<Tokens>) => PresentationDefinition<Root, Language>;
+  Parameters extends object = Empty,
+> = (parameters: Readonly<Parameters>) => PresentationDefinition<Root, Language>;
 
-export type PresentationTokensOf<Value> = Value extends (
-  tokens: infer Tokens extends object,
-) => object
-  ? Tokens
-  : never;
-
-/** Pairs one reusable Presentation program with concrete, type-checked Themes. */
-export type PresentationRegistration<Value> = Value extends (
-  tokens: infer Tokens extends object,
-) => object
-  ? Readonly<{
-      presentation: Value;
-      themes: Readonly<{ readonly default: Readonly<Tokens> } & Record<string, Readonly<Tokens>>>;
-    }>
-  : never;
-
-/** Runtime-erased shape shared by every typed Presentation registration. */
-export type PresentationRegistrationContract = Readonly<{
-  presentation: (tokens: never) => object;
-  themes: Readonly<{ readonly default: object } & Record<string, object>>;
-}>;
-
-export type PresentationTargetSources<ElementName extends string, NativeTarget> = Readonly<
+export type PresentationTargetResolver<ElementName extends string, NativeTarget> = Readonly<
   Record<ElementName, () => readonly NativeTarget[]>
 >;
+
+type PresentationDeclaration<Language extends PresentationLanguage> =
+  Language["Declarations"][keyof Language["Declarations"]];
 
 export type PresentationAdapterSession<
   Language extends PresentationLanguage,
   ElementName extends string,
 > = {
   commit(
-    declarations: Readonly<Partial<Record<ElementName, Readonly<Language["Declaration"]>>>>,
+    declarations: Readonly<
+      Partial<Record<ElementName, Readonly<PresentationDeclaration<Language>>>>
+    >,
   ): void;
   dispose(): void;
 };
 
-/** Owns native observation, rendering, motion, and disposal for one platform. */
+/** Realizes and disposes Presentation declarations for one platform. */
 export type PresentationAdapter<Language extends PresentationLanguage, NativeTarget> = {
   create<const ElementName extends string>(options: {
     readonly boundary: NativeTarget;
-    readonly targets: PresentationTargetSources<ElementName, NativeTarget>;
+    readonly targets: PresentationTargetResolver<ElementName, NativeTarget>;
   }): PresentationAdapterSession<Language, ElementName>;
 };
-
-export type { PresentationAppearance } from "./component";
-export type { PresentationName } from "../application";

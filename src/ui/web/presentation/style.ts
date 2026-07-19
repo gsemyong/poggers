@@ -1,12 +1,15 @@
-import { webFontFamily } from "./font";
+import { webFontFamily } from "./fonts";
 import type { FontAsset, WebPresentationDeclaration, WebPresentationTokens } from "./language";
 
 type UnknownRecord = Record<string, unknown>;
 export type WebStyleMap = Readonly<Record<string, string>>;
 
 /** Deterministically translates web presentation meaning into logical CSS properties. */
-export function translateWebPresentationStyle<Theme extends WebPresentationTokens>(
-  declaration: Pick<WebPresentationDeclaration<Theme>, "layout" | "shape" | "paint" | "typography">,
+export function translateWebPresentationStyle<Parameters extends WebPresentationTokens>(
+  declaration: Pick<
+    WebPresentationDeclaration<Parameters>,
+    "layout" | "shape" | "paint" | "typography"
+  >,
 ): WebStyleMap {
   const styles: Record<string, string> = {};
   const layout = record(declaration.layout);

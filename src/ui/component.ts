@@ -1,31 +1,14 @@
+import type { JSXElement } from "./jsx/types";
 import type {
-  PlatformChild,
-  PlatformContract,
-  PlatformPrimitiveName,
-  PlatformPrimitiveProps,
-  PlatformPrimitiveTarget,
+  UIPlatformChild,
+  UIPlatformContract,
+  UIPlatformPrimitiveName,
+  UIPlatformPrimitiveProps,
+  UIPlatformPrimitiveTarget,
 } from "./platform";
 
 type Empty = Record<never, never>;
 type ActionRecord = Record<string, (...args: never[]) => unknown>;
-
-export type ComponentValueKind =
-  | "number"
-  | "progress"
-  | "opacity"
-  | "ratio"
-  | "angle"
-  | "time"
-  | "zIndex"
-  | "length"
-  | "space"
-  | "size"
-  | "radius";
-
-/** Marks a numeric Component state field with its presentation unit. */
-export type VisualValue<Kind extends ComponentValueKind> = {
-  readonly "poggers.visualValue": Kind;
-};
 
 /** The platform-specific structural meaning exposed by one Component. */
 export type ComponentContract = {
@@ -38,7 +21,7 @@ export type ComponentContract = {
 
 /** A Feature or Program shape from which Component meaning can be projected. */
 export type ComponentOwner = {
-  Runtime?: { Name: string; Platform?: PlatformContract };
+  Environment?: { Name: string; UI?: UIPlatformContract };
   State?: object;
   Actions?: ActionRecord;
   Requires?: object;
@@ -47,7 +30,7 @@ export type ComponentOwner = {
   Programs?: Record<
     string,
     {
-      Runtime?: { Name: string; Platform?: PlatformContract };
+      Environment?: { Name: string; UI?: UIPlatformContract };
       State?: object;
       Actions?: ActionRecord;
       Requires?: object;
@@ -76,9 +59,9 @@ type ProgramUIOf<Owner extends ComponentOwner> = Owner extends {
 type UIOf<Owner extends ComponentOwner> = [DirectUIOf<Owner>] extends [never]
   ? ProgramUIOf<Owner>
   : DirectUIOf<Owner>;
-export type ComponentPlatform<Owner extends ComponentOwner> =
+export type ComponentUIPlatform<Owner extends ComponentOwner> =
   UIOf<Owner> extends {
-    Runtime: { Platform: infer Platform extends PlatformContract };
+    Environment: { UI: infer Platform extends UIPlatformContract };
   }
     ? Platform
     : never;
@@ -115,10 +98,10 @@ type UIProvidesOf<Owner extends ComponentOwner> = [UIOf<Owner>] extends [never]
     ? Provides
     : Empty;
 
-export type ComponentProcess<Owner extends ComponentOwner> = Readonly<UIStateOf<Owner>> & {
+export type ComponentFeatureAPI<Owner extends ComponentOwner> = Readonly<UIStateOf<Owner>> & {
   readonly [Name in keyof UIActionsOf<Owner>]: UIActionsOf<Owner>[Name];
 };
-export type ComponentProgramState<Owner extends ComponentOwner> = Readonly<UIStateOf<Owner>>;
+export type ComponentFeatureState<Owner extends ComponentOwner> = Readonly<UIStateOf<Owner>>;
 export type ComponentCapabilities<Owner extends ComponentOwner> = Readonly<
   UIRequiresOf<Owner> & UIProvidesOf<Owner>
 >;
@@ -127,52 +110,39 @@ export type ComponentName<Owner extends ComponentOwner> = Extract<
   keyof ComponentsOf<Owner>,
   string
 >;
-export type ComponentFor<
+export type ComponentContractOf<
   Owner extends ComponentOwner,
   Name extends ComponentName<Owner>,
 > = ComponentsOf<Owner>[Name];
 export type ComponentProps<Owner extends ComponentOwner, Name extends ComponentName<Owner>> =
-  ComponentFor<Owner, Name> extends { Props: infer Props extends Record<string, unknown> }
+  ComponentContractOf<Owner, Name> extends { Props: infer Props extends Record<string, unknown> }
     ? Props
     : Empty;
 type ComponentStateContract<Owner extends ComponentOwner, Name extends ComponentName<Owner>> =
-  ComponentFor<Owner, Name> extends { State: infer State extends Record<string, unknown> }
+  ComponentContractOf<Owner, Name> extends { State: infer State extends Record<string, unknown> }
     ? State
     : Empty;
-type StateValue<Value> =
-  Value extends VisualValue<infer Kind>
-    ? Kind extends ComponentValueKind
-      ? number
-      : never
-    : Value;
 export type ComponentState<Owner extends ComponentOwner, Name extends ComponentName<Owner>> = {
-  readonly [Value in keyof ComponentStateContract<Owner, Name>]: StateValue<
-    ComponentStateContract<Owner, Name>[Value]
-  >;
-};
-export type ComponentStateKinds<Owner extends ComponentOwner, Name extends ComponentName<Owner>> = {
-  [Value in keyof ComponentStateContract<Owner, Name> as ComponentStateContract<
+  readonly [Value in keyof ComponentStateContract<Owner, Name>]: ComponentStateContract<
     Owner,
     Name
-  >[Value] extends VisualValue<ComponentValueKind>
-    ? Value
-    : never]: ComponentStateContract<Owner, Name>[Value] extends VisualValue<infer Kind>
-    ? Kind
-    : never;
+  >[Value];
 };
 export type ComponentActions<Owner extends ComponentOwner, Name extends ComponentName<Owner>> =
-  ComponentFor<Owner, Name> extends { Actions: infer Actions extends ActionRecord }
+  ComponentContractOf<Owner, Name> extends { Actions: infer Actions extends ActionRecord }
     ? Actions
     : Empty;
 export type ComponentActionArgs<Action> = Action extends (...args: infer Args) => unknown
   ? Args
   : [];
 export type ComponentSlots<Owner extends ComponentOwner, Name extends ComponentName<Owner>> =
-  ComponentFor<Owner, Name> extends { Slots: infer Slots extends Record<string, unknown> }
+  ComponentContractOf<Owner, Name> extends { Slots: infer Slots extends Record<string, unknown> }
     ? Slots
     : Empty;
 export type ComponentElements<Owner extends ComponentOwner, Name extends ComponentName<Owner>> =
-  ComponentFor<Owner, Name> extends { Elements: infer Elements extends Record<string, string> }
+  ComponentContractOf<Owner, Name> extends {
+    Elements: infer Elements extends Record<string, string>;
+  }
     ? Elements
     : never;
 export type ComponentElementName<
@@ -187,66 +157,50 @@ type ComponentExternalProps<
 
 type Mutable<Value extends object> = { -readonly [Key in keyof Value]: Value[Key] };
 type ComponentResource = Disposable | AsyncDisposable | AsyncIterable<unknown>;
-type ComponentStartResult = void | ComponentResource | PromiseLike<void | ComponentResource>;
+type ComponentMountResult = void | ComponentResource | PromiseLike<void | ComponentResource>;
 type ComponentActionResult<Action> = Action extends (...args: never[]) => infer Result
   ? Result
   : never;
 
 type FeaturesOf<Owner extends ComponentOwner> = ComponentFeatures<Owner>;
 
-export type PresentationName<Root extends ComponentOwner> = Root extends {
-  Presentations: infer Presentations;
-}
-  ? Presentations extends string
-    ? Presentations
-    : Presentations extends Record<string, unknown>
-      ? Extract<keyof Presentations, string>
-      : never
-  : string;
-export type PresentationAppearance<Root extends ComponentOwner> = Readonly<{
-  presentation: PresentationName<Root>;
-  theme: string;
-}>;
-export type PresentationControl<Root extends ComponentOwner> = Readonly<{
-  select(appearance: PresentationAppearance<Root>): void;
-}>;
 type ElementTag<
   Owner extends ComponentOwner,
   Name extends ComponentName<Owner>,
   ElementName extends ComponentElementName<Owner, Name>,
 > = ComponentElements<Owner, Name>[ElementName] & string;
-type OwnerPlatform<Owner extends ComponentOwner> = Extract<
-  ComponentPlatform<Owner>,
-  PlatformContract
+type OwnerUIPlatform<Owner extends ComponentOwner> = Extract<
+  ComponentUIPlatform<Owner>,
+  UIPlatformContract
 >;
-type ComponentChild<Owner extends ComponentOwner> = [OwnerPlatform<Owner>] extends [never]
+type ComponentChild<Owner extends ComponentOwner> = [OwnerUIPlatform<Owner>] extends [never]
   ? unknown
-  : PlatformChild<OwnerPlatform<Owner>>;
+  : UIPlatformChild<OwnerUIPlatform<Owner>>;
 type PrimitiveFor<
   Owner extends ComponentOwner,
   Name extends ComponentName<Owner>,
   ElementName extends ComponentElementName<Owner, Name>,
-> = Extract<ElementTag<Owner, Name, ElementName>, PlatformPrimitiveName<OwnerPlatform<Owner>>>;
+> = Extract<ElementTag<Owner, Name, ElementName>, UIPlatformPrimitiveName<OwnerUIPlatform<Owner>>>;
 type NativeProps<
   Owner extends ComponentOwner,
   Name extends ComponentName<Owner>,
   ElementName extends ComponentElementName<Owner, Name>,
-> = PlatformPrimitiveProps<OwnerPlatform<Owner>, PrimitiveFor<Owner, Name, ElementName>>;
+> = UIPlatformPrimitiveProps<OwnerUIPlatform<Owner>, PrimitiveFor<Owner, Name, ElementName>>;
 type NativeElement<
   Owner extends ComponentOwner,
   Name extends ComponentName<Owner>,
   ElementName extends ComponentElementName<Owner, Name>,
-> = PlatformPrimitiveTarget<OwnerPlatform<Owner>, PrimitiveFor<Owner, Name, ElementName>>;
+> = UIPlatformPrimitiveTarget<OwnerUIPlatform<Owner>, PrimitiveFor<Owner, Name, ElementName>>;
 export type ComponentElement<
   Owner extends ComponentOwner,
   Name extends ComponentName<Owner>,
   ElementName extends ComponentElementName<Owner, Name>,
 > = {
-  (props?: NativeProps<Owner, Name, ElementName>): ComponentChild<Owner>;
+  (props?: NativeProps<Owner, Name, ElementName>): JSXElement;
   readonly element: NativeElement<Owner, Name, ElementName> | null;
   readonly elements: readonly NativeElement<Owner, Name, ElementName>[];
 };
-type ComponentElementSurface<Owner extends ComponentOwner, Name extends ComponentName<Owner>> = {
+type ComponentElementMap<Owner extends ComponentOwner, Name extends ComponentName<Owner>> = {
   readonly [ElementName in ComponentElementName<Owner, Name>]: ComponentElement<
     Owner,
     Name,
@@ -264,8 +218,8 @@ type ComponentJSXProps<
 type ComponentRenderer<Owner extends ComponentOwner, Name extends ComponentName<Owner>> = [
   RequiredKeys<ComponentJSXProps<Owner, Name>>,
 ] extends [never]
-  ? (props?: ComponentJSXProps<Owner, Name>) => ComponentChild<Owner>
-  : (props: ComponentJSXProps<Owner, Name>) => ComponentChild<Owner>;
+  ? (props?: ComponentJSXProps<Owner, Name>) => JSXElement
+  : (props: ComponentJSXProps<Owner, Name>) => JSXElement;
 export type ComponentRenderers<Owner extends ComponentOwner> = {
   readonly [Name in ComponentName<Owner>]: ComponentRenderer<Owner, Name>;
 };
@@ -277,45 +231,45 @@ type ChildComponentNamespaces<Owner extends ComponentOwner> = {
 };
 export type ComponentComposition<Owner extends ComponentOwner> = ComponentRenderers<Owner> &
   ChildComponentNamespaces<Owner>;
-type BoundComponentActions<Owner extends ComponentOwner, Name extends ComponentName<Owner>> = {
+type ComponentActionAPI<Owner extends ComponentOwner, Name extends ComponentName<Owner>> = {
   readonly [Action in keyof ComponentActions<Owner, Name>]: (
     ...args: ComponentActionArgs<ComponentActions<Owner, Name>[Action]>
   ) => ComponentActionResult<ComponentActions<Owner, Name>[Action]>;
 };
 
-export type ComponentRenderScope<
+export type ComponentViewContext<
   _Root extends ComponentOwner,
   Owner extends ComponentOwner,
   Name extends ComponentName<Owner>,
 > = Readonly<{
   props: ComponentExternalProps<Owner, Name>;
-  process: ComponentProcess<Owner>;
+  feature: ComponentFeatureAPI<Owner>;
   state: ComponentState<Owner, Name>;
-  actions: BoundComponentActions<Owner, Name>;
+  actions: ComponentActionAPI<Owner, Name>;
   slots: ComponentSlots<Owner, Name>;
   components: ComponentComposition<Owner>;
-  elements: ComponentElementSurface<Owner, Name>;
+  elements: ComponentElementMap<Owner, Name>;
 }>;
 
-export type ComponentStateInitializationScope<
+export type ComponentStateInput<
   _Root extends ComponentOwner,
   Owner extends ComponentOwner,
   Name extends ComponentName<Owner>,
 > = Readonly<{
   props: ComponentExternalProps<Owner, Name>;
-  process: ComponentProcess<Owner>;
+  feature: ComponentFeatureAPI<Owner>;
 }>;
 
-export type ComponentActionScope<
+export type ComponentActionContext<
   _Root extends ComponentOwner,
   Owner extends ComponentOwner,
   Name extends ComponentName<Owner>,
 > = Readonly<{
   props: ComponentExternalProps<Owner, Name>;
-  process: ComponentProcess<Owner>;
+  feature: ComponentFeatureAPI<Owner>;
   capabilities: ComponentCapabilities<Owner>;
   state: Mutable<ComponentState<Owner, Name>>;
-  elements: ComponentElementSurface<Owner, Name>;
+  elements: ComponentElementMap<Owner, Name>;
 }>;
 
 type ComponentActionDefinitions<
@@ -324,7 +278,7 @@ type ComponentActionDefinitions<
   Name extends ComponentName<Owner>,
 > = {
   readonly [Action in keyof ComponentActions<Owner, Name>]: (
-    scope: ComponentActionScope<Root, Owner, Name>,
+    context: ComponentActionContext<Root, Owner, Name>,
     ...args: ComponentActionArgs<ComponentActions<Owner, Name>[Action]>
   ) => ComponentActionResult<ComponentActions<Owner, Name>[Action]>;
 };
@@ -337,17 +291,17 @@ type ComponentActionField<
   ? { readonly actions?: never }
   : { readonly actions: ComponentActionDefinitions<Root, Owner, Name> };
 
-export type ComponentStartScope<
+export type ComponentMountContext<
   _Root extends ComponentOwner,
   Owner extends ComponentOwner,
   Name extends ComponentName<Owner>,
 > = Readonly<{
   props: ComponentExternalProps<Owner, Name>;
-  process: ComponentProcess<Owner>;
+  feature: ComponentFeatureAPI<Owner>;
   capabilities: ComponentCapabilities<Owner>;
   state: ComponentState<Owner, Name>;
-  actions: BoundComponentActions<Owner, Name>;
-  elements: ComponentElementSurface<Owner, Name>;
+  actions: ComponentActionAPI<Owner, Name>;
+  elements: ComponentElementMap<Owner, Name>;
 }>;
 
 type ComponentInitialState<
@@ -363,11 +317,9 @@ export type ComponentDefinition<
   {
     state?:
       | ComponentInitialState<Owner, Name>
-      | ((
-          scope: ComponentStateInitializationScope<Root, Owner, Name>,
-        ) => ComponentInitialState<Owner, Name>);
-    start?(scope: ComponentStartScope<Root, Owner, Name>): ComponentStartResult;
-    view(scope: ComponentRenderScope<Root, Owner, Name>): ComponentChild<Owner>;
+      | ((input: ComponentStateInput<Root, Owner, Name>) => ComponentInitialState<Owner, Name>);
+    mount?(context: ComponentMountContext<Root, Owner, Name>): ComponentMountResult;
+    view(context: ComponentViewContext<Root, Owner, Name>): ComponentChild<Owner>;
   } & ComponentActionField<Root, Owner, Name>
 >;
 

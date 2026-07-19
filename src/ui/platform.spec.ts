@@ -1,12 +1,11 @@
 import { expect, it } from "vitest";
 
 import type {
-  PlatformAdapter,
-  PlatformDefinition,
-  PlatformPresentationLanguage,
-  PlatformPrimitive,
-  PlatformPrimitiveProps,
-  PlatformTarget,
+  UIPlatformAdapter,
+  UIPlatformDefinition,
+  UIPlatformPrimitive,
+  UIPlatformPrimitiveProps,
+  UIPlatformTarget,
 } from "./platform";
 import type { PresentationAdapter } from "./presentation";
 
@@ -14,36 +13,33 @@ type TestPlatform = {
   Name: "test";
   Child: unknown;
   Primitives: {
-    surface: PlatformPrimitive<
-      { readonly role?: string },
-      { readonly kind: "surface" },
-      { readonly opacity?: number }
-    >;
-    text: PlatformPrimitive<
-      { readonly value: string },
-      { readonly kind: "text" },
-      { readonly color?: string }
-    >;
+    surface: UIPlatformPrimitive<{ readonly role?: string }, { readonly kind: "surface" }>;
+    text: UIPlatformPrimitive<{ readonly value: string }, { readonly kind: "text" }>;
   };
 };
 
-const definition: PlatformDefinition<TestPlatform> = {} as TestPlatform;
-const props: PlatformPrimitiveProps<TestPlatform, "text"> = { value: "Hello" };
+const definition: UIPlatformDefinition<TestPlatform> = {} as TestPlatform;
+const props: UIPlatformPrimitiveProps<TestPlatform, "text"> = { value: "Hello" };
 
 const presentation = {
   create() {
     return { commit() {}, dispose() {} };
   },
 } satisfies PresentationAdapter<
-  PlatformPresentationLanguage<TestPlatform>,
-  PlatformTarget<TestPlatform>
+  {
+    Declarations: {
+      surface: { readonly opacity?: number };
+      text: { readonly color?: string };
+    };
+  },
+  UIPlatformTarget<TestPlatform>
 >;
 
 const adapter = {
   name: "test",
-  structure: { mount() {} },
+  component: { mount() {} },
   presentation,
-} satisfies PlatformAdapter<TestPlatform, { mount(): void }>;
+} satisfies UIPlatformAdapter<TestPlatform, { mount(): void }, typeof presentation>;
 
 it("pairs one platform contract with its structure and presentation adapters", () => {
   expect(definition).toBeDefined();
@@ -57,6 +53,6 @@ type InvalidPlatform = {
   Primitives: { surface: { Props: object } };
 };
 
-// @ts-expect-error every primitive must define props, a native target, and presentation meaning
-const invalid: PlatformDefinition<InvalidPlatform> = {} as InvalidPlatform;
+// @ts-expect-error every primitive must define props and a native target
+const invalid: UIPlatformDefinition<InvalidPlatform> = {} as InvalidPlatform;
 void invalid;

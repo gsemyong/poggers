@@ -1,14 +1,14 @@
 import {
-  assertProductIRVersion,
+  assertApplicationIRVersion,
   type ComponentIR,
   type ExpressionIR,
-  type ProductIR,
+  type ApplicationIR,
   type ProgramIR,
   type StatementIR,
   type TypeIR,
-} from "../ir";
+} from "./ir";
 
-export type NodeCapabilities = Readonly<
+export type CapabilityImplementations = Readonly<
   Record<string, Readonly<Record<string, (...arguments_: readonly unknown[]) => unknown>>>
 >;
 
@@ -19,11 +19,11 @@ export type ExecutionTrace = Readonly<{
 
 /** Executes the portable process body represented by the typed IR. */
 export async function executeProgramIR(
-  ir: ProductIR,
+  ir: ApplicationIR,
   programId: string,
-  capabilities: NodeCapabilities,
+  capabilities: CapabilityImplementations,
 ): Promise<ExecutionTrace> {
-  assertProductIRVersion(ir);
+  assertApplicationIRVersion(ir);
   const program = ir.programs.find(({ id }) => id === programId);
   if (!program) throw new Error(`Unknown Program ${JSON.stringify(programId)}.`);
   validateCapabilities(program, capabilities);
@@ -35,7 +35,7 @@ export async function executeProgramIR(
   return { calls, result: completion.value };
 }
 
-function validateCapabilities(program: ProgramIR, capabilities: NodeCapabilities): void {
+function validateCapabilities(program: ProgramIR, capabilities: CapabilityImplementations): void {
   for (const contract of program.requires) {
     const implementation = capabilities[contract.name];
     if (!implementation) {
@@ -62,7 +62,7 @@ type Completion = Readonly<{ returned: boolean; value?: unknown }>;
 async function executeStatements(
   statements: readonly StatementIR[],
   locals: Map<string, unknown>,
-  capabilities: NodeCapabilities,
+  capabilities: CapabilityImplementations,
   calls: string[],
 ): Promise<Completion> {
   for (const statement of statements) {
@@ -116,7 +116,7 @@ async function executeStatements(
 async function evaluate(
   expression: ExpressionIR,
   locals: ReadonlyMap<string, unknown>,
-  capabilities: NodeCapabilities,
+  capabilities: CapabilityImplementations,
   calls: string[],
 ): Promise<unknown> {
   switch (expression.kind) {
@@ -233,11 +233,11 @@ function truthy(value: unknown): boolean {
   return Boolean(value);
 }
 
-export type HotManifest = Readonly<{
+export type HotReplacementManifest = Readonly<{
   revision: string;
   programs: readonly Readonly<{
     id: string;
-    runtime: ProgramIR["runtime"];
+    environment: ProgramIR["environment"];
     state?: TypeIR;
     components: readonly ComponentIR[];
   }>[];
@@ -250,7 +250,7 @@ export type HotActivation<Value, Snapshot> = Readonly<{
 }>;
 
 export type HotCandidate<Value, Snapshot> = Readonly<{
-  manifest: HotManifest;
+  manifest: HotReplacementManifest;
   prepare(previous: Snapshot | undefined): Promise<
     Readonly<{
       activate(): Promise<HotActivation<Value, Snapshot>>;
@@ -263,22 +263,25 @@ export type HotUpdateResult<Value> =
   | Readonly<{ status: "activated"; value: Value }>
   | Readonly<{ status: "rejected"; reason: string }>;
 
-export function createHotManifest(ir: ProductIR): HotManifest {
+export function createHotReplacementManifest(ir: ApplicationIR): HotReplacementManifest {
   const programs = ir.programs.map((program) => ({
     id: program.id,
-    runtime: program.runtime,
+    environment: program.environment,
     ...(program.ui ? { state: program.ui.state } : {}),
     components: program.ui?.components ?? [],
   }));
   return { revision: stableHash(JSON.stringify(programs)), programs };
 }
 
-export function isHotManifestCompatible(previous: HotManifest, next: HotManifest): boolean {
+export function isHotReplacementCompatible(
+  previous: HotReplacementManifest,
+  next: HotReplacementManifest,
+): boolean {
   const previousPrograms = new Map(previous.programs.map((program) => [program.id, program]));
   for (const program of next.programs) {
     const before = previousPrograms.get(program.id);
     if (!before) continue;
-    if (JSON.stringify(before.runtime) !== JSON.stringify(program.runtime)) return false;
+    if (JSON.stringify(before.environment) !== JSON.stringify(program.environment)) return false;
     if (before.state && program.state && !compatibleType(before.state, program.state)) return false;
     if (Boolean(before.state) !== Boolean(program.state)) return false;
     const beforeComponents = new Map(
@@ -296,13 +299,13 @@ function compatibleComponent(previous: ComponentIR, next: ComponentIR): boolean 
   if (JSON.stringify(previous.propCallbacks) !== JSON.stringify(next.propCallbacks)) return false;
   if (!compatibleType(previous.state, next.state)) return false;
   if (JSON.stringify(previous.elements) !== JSON.stringify(next.elements)) return false;
-  return JSON.stringify(previous.visualValues) === JSON.stringify(next.visualValues);
+  return true;
 }
 
 /** Serializes candidate activation and preserves the last live revision on failure. */
 export class HotUpdateCoordinator<Value, Snapshot> {
   #active: HotActivation<Value, Snapshot> | undefined;
-  #manifest: HotManifest | undefined;
+  #manifest: HotReplacementManifest | undefined;
   #transaction = Promise.resolve();
 
   get value(): Value | undefined {
@@ -327,7 +330,7 @@ export class HotUpdateCoordinator<Value, Snapshot> {
   }
 
   async #replace(candidate: HotCandidate<Value, Snapshot>): Promise<HotUpdateResult<Value>> {
-    if (this.#manifest && !isHotManifestCompatible(this.#manifest, candidate.manifest)) {
+    if (this.#manifest && !isHotReplacementCompatible(this.#manifest, candidate.manifest)) {
       return { status: "rejected", reason: "incompatible-manifest" };
     }
 

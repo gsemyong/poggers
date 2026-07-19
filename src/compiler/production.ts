@@ -2,15 +2,15 @@ import { statSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
-import { compileProduct } from "../frontend";
 import {
-  assertProductIRVersion,
+  assertApplicationIRVersion,
   type ExpressionIR,
-  type ProductIR,
+  type ApplicationIR,
   type ProgramIR,
   type StatementIR,
   type TypeIR,
-} from "../ir";
+} from "./ir";
+import { compileApplication } from "./source";
 
 export type RustFixtureValue =
   | null
@@ -30,7 +30,7 @@ export type RustCapabilityFixture = Readonly<{
 }>;
 
 export type RustBackendOptions = Readonly<{
-  ir: ProductIR;
+  ir: ApplicationIR;
   program: string;
   directory: string;
   fixtures: Readonly<Record<string, RustCapabilityFixture>>;
@@ -45,7 +45,7 @@ export async function buildRustApplication(options: {
 }): Promise<string> {
   const directory = resolve(options.directory);
   const application = applicationEntry(directory);
-  const ir = compileProduct(application);
+  const ir = compileApplication(application);
   const program = selectProgram(ir, options.program);
   const output = resolve(directory, options.outdir ?? ".poggers/rust", program.name);
   await rm(output, { recursive: true, force: true });
@@ -72,7 +72,7 @@ function applicationEntry(directory: string): string {
   throw new Error(`${resolve(directory, "src")} must contain app.tsx or app.ts.`);
 }
 
-function selectProgram(ir: ProductIR, selector?: string): ProgramIR {
+function selectProgram(ir: ApplicationIR, selector?: string): ProgramIR {
   const portable = ir.programs.filter((program) => !program.ui && program.start);
   if (!selector) {
     if (portable.length === 1) return portable[0]!;
@@ -95,7 +95,7 @@ function selectProgram(ir: ProductIR, selector?: string): ProgramIR {
 
 /** Emits one self-contained native artifact project from a headless Program IR. */
 export async function emitRustProgram(options: RustBackendOptions): Promise<string> {
-  assertProductIRVersion(options.ir);
+  assertApplicationIRVersion(options.ir);
   const program = options.ir.programs.find(({ id }) => id === options.program);
   if (!program) throw new Error(`Unknown Program ${JSON.stringify(options.program)}.`);
   preflight(program, options.fixtures, !options.adapterSource);

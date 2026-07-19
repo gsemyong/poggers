@@ -15,8 +15,8 @@ import { resolve } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 
 import { createProject } from "./cli";
-import { buildRustApplication } from "./compiler/backend/production";
-import { buildApplication, validateUIProgramRoot } from "./ui/web/backend";
+import { buildRustApplication } from "./compiler/production";
+import { buildApplication, validateUIProgramRoot } from "./ui/web/toolchain";
 
 const directories: string[] = [];
 afterEach(async () => {
@@ -39,6 +39,7 @@ describe("project template", () => {
       "package.json",
       "src",
       "tsconfig.json",
+      "vitest.config.ts",
     ]);
     expect((await readdir(resolve(target, "src"))).sort()).toEqual([
       "app.tsx",
@@ -54,7 +55,7 @@ describe("project template", () => {
       "satisfies Feature<ShellFeature>",
     );
     expect(await readFile(resolve(target, "src/presentations/clean.ts"), "utf8")).toContain(
-      "satisfies WebPresentation<App, typeof theme>",
+      "satisfies WebPresentation<App, typeof parameters>",
     );
     const packageJson = JSON.parse(await readFile(resolve(target, "package.json"), "utf8")) as {
       dependencies: Record<string, string>;
@@ -107,18 +108,18 @@ describe("project template", () => {
     await buildApplication({ directory: target, outdir: "dist" });
     await expect(access(resolve(target, "dist/app.js"))).resolves.toBeUndefined();
     const manifest = JSON.parse(
-      await readFile(resolve(target, "dist/product.ir.json"), "utf8"),
+      await readFile(resolve(target, "dist/application.ir.json"), "utf8"),
     ) as {
       version: number;
       features: readonly { id: string }[];
-      programs: readonly { id: string; runtime: { name: string }; ui?: unknown }[];
+      programs: readonly { id: string; environment: { name: string }; ui?: unknown }[];
     };
-    expect(manifest.version).toBe(1);
+    expect(manifest.version).toBe(3);
     expect(manifest.features.map(({ id }) => id)).toEqual(["feature/shell"]);
     expect(manifest.programs).toHaveLength(1);
     expect(manifest.programs[0]).toMatchObject({
       id: "feature/shell/program/browser",
-      runtime: { name: "web-main" },
+      environment: { name: "browser-main" },
       ui: { root: "Application" },
     });
     const html = await readFile(resolve(target, "dist/index.html"), "utf8");
@@ -159,9 +160,10 @@ describe("project template", () => {
       await symlink(resolve(import.meta.dirname, ".."), resolve(modules, "@poggers/kit"), "dir");
       await writeFile(
         resolve(target, "src/app.tsx"),
-        `import type { Application, Feature, Program, Server } from "@poggers/kit";
+        `import type { Application, Feature, Program } from "@poggers/kit";
 
-type Worker = { Programs: { cloud: Program<Server> } };
+type Cloud = { readonly Name: "cloud" };
+type Worker = { Programs: { cloud: Program<Cloud> } };
 type App = { Features: { worker: Worker } };
 
 const worker = {
@@ -203,10 +205,11 @@ export default { features: { worker } } satisfies Application<App>;
       await symlink(resolve(import.meta.dirname, ".."), resolve(modules, "@poggers/kit"), "dir");
       await writeFile(
         resolve(target, "src/app.tsx"),
-        `import type { Application, Feature, Program, Server } from "@poggers/kit";
+        `import type { Application, Feature, Program } from "@poggers/kit";
 
 type Output = { write(input: { value: number }): Promise<void> };
-type Worker = { Programs: { cloud: Program<Server, { Requires: { output: Output } }> } };
+type Cloud = { readonly Name: "cloud" };
+type Worker = { Programs: { cloud: Program<Cloud, { Requires: { output: Output } }> } };
 type App = { Features: { worker: Worker } };
 
 const worker = {

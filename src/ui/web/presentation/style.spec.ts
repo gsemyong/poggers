@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { WebPresentationDeclaration } from "./language";
 import { translateWebPresentationStyle } from "./style";
 
-type TestTheme = {
+type TestParameters = {
   size: { compact: { readonly kind: "size"; readonly value: 600 } };
   shadow: {
     lifted: {
@@ -40,7 +40,7 @@ describe("web presentation style translation", () => {
           color: { l: 0.2, c: 0, h: 0 },
           wrap: "balance",
         },
-      } satisfies WebPresentationDeclaration<TestTheme>),
+      } satisfies WebPresentationDeclaration<TestParameters>),
     ).toEqual({
       alignItems: "center",
       backgroundColor: "oklch(0.99 0.002 250)",
@@ -76,7 +76,7 @@ describe("web presentation style translation", () => {
           },
           margin: { inline: { container: { axis: "inline", percent: 4 } } },
         },
-      } satisfies WebPresentationDeclaration<TestTheme>),
+      } satisfies WebPresentationDeclaration<TestParameters>),
     ).toEqual({
       display: "grid",
       gridTemplateColumns: "minmax(120px, 1fr) repeat(auto-fit, 80px)",

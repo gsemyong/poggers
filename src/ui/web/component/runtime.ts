@@ -16,16 +16,16 @@ import {
   setActiveSub as alienSetActiveSub,
 } from "alien-signals";
 
-import type { Child } from "../jsx/types";
+import type { Child } from "./elements";
 import {
   adoptSceneChildren,
-  mountSceneElement,
-  PresenceScene,
+  mountPresenceElement,
+  PresenceGraph,
   setSceneElementPresence,
   setSceneElementVisible,
-  unmountSceneElement,
+  unmountPresenceElement,
   type SceneElementRegistration,
-} from "./scene";
+} from "./presence";
 
 export type VirtualCollectionGeometry = {
   readonly axis: "block" | "inline";
@@ -89,7 +89,7 @@ type Owner = {
   signals: Signal<unknown>[];
   hotRefresh: boolean;
   disposed: boolean;
-  scene: PresenceScene<Element>;
+  scene: PresenceGraph<Element>;
   sceneSequence: number;
 };
 
@@ -104,11 +104,11 @@ let currentOwner: Owner | null = null;
 let currentLifecycleScope: LifecycleScope | null = null;
 let currentChildHost: HTMLElement | null = null;
 
-export function currentPresenceScene(): PresenceScene<Element> | undefined {
+export function currentPresenceGraph(): PresenceGraph<Element> | undefined {
   return currentOwner?.scene;
 }
 
-export function allocateSceneOwner(name: string): string {
+export function allocatePresenceOwner(name: string): string {
   const owner = currentOwner;
   if (!owner) return `${name}:detached`;
   return `${name}:${owner.sceneSequence++}`;
@@ -225,7 +225,7 @@ export function render(child: Child, root: Element, hotState?: HotRenderState): 
   const hotScroll = hotState?.scroll;
   const hotFocus = hotState?.focus;
   if (hotState) hotState.mounted = true;
-  const scene = new PresenceScene<Element>();
+  const scene = new PresenceGraph<Element>();
   const owner: Owner = {
     cleanups: [],
     mounts: [],
@@ -1423,8 +1423,8 @@ function createNode(type: string | ErasedComponent, props: Props): Child {
 
   if (__poggersScene) {
     const registration = __poggersScene as SceneElementRegistration;
-    mountSceneElement(element, registration, currentChildHost);
-    registerCleanup(() => unmountSceneElement(element, registration.scene));
+    mountPresenceElement(element, registration, currentChildHost);
+    registerCleanup(() => unmountPresenceElement(element, registration.scene));
   }
 
   for (const [name, value] of Object.entries(attributes)) {
@@ -2117,4 +2117,4 @@ export type {
   HTMLAttributes,
   IntrinsicElements,
   SVGAttributes,
-} from "../jsx/types";
+} from "./elements";

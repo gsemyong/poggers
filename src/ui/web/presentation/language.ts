@@ -587,83 +587,85 @@ export type WebPresentationTokens = Tokens &
     resources?: Readonly<Record<string, WebPresentationResource>>;
   }>;
 
-type WebThemeResource<Theme extends WebPresentationTokens> = NonNullable<
-  Theme["resources"]
->[keyof NonNullable<Theme["resources"]>];
+type WebParameterResource<Parameters extends WebPresentationTokens> = NonNullable<
+  Parameters["resources"]
+>[keyof NonNullable<Parameters["resources"]>];
 
-export type WebRenderLayer<Theme extends WebPresentationTokens> = Readonly<{
+export type WebRenderLayer<Parameters extends WebPresentationTokens> = Readonly<{
   id: string;
   placement: "background" | "overlay";
-  visual?: VisualFragment<Theme>;
-  resource?: WebThemeResource<Theme>;
+  visual?: VisualFragment<Parameters>;
+  resource?: WebParameterResource<Parameters>;
   uniforms?: Readonly<Record<string, number | readonly number[]>>;
 }>;
 
-type WebPositionVisual<Theme extends WebPresentationTokens> = NonNullable<
-  LayoutVisual<Theme>["position"]
+type WebPositionVisual<Parameters extends WebPresentationTokens> = NonNullable<
+  LayoutVisual<Parameters>["position"]
 > &
   Readonly<{
     anchor?: PresentationTarget;
   }>;
 
-export type WebMotionTarget<Theme extends WebPresentationTokens> = Readonly<{
+export type WebMotionTarget<Parameters extends WebPresentationTokens> = Readonly<{
   target: number;
-  transition: "instant" | TokenValueOfGroup<Theme, "motion">;
+  transition: "instant" | TokenValueOfGroup<Parameters, "motion">;
   velocity?: number;
 }>;
 
-export type WebMotionValue<Theme extends WebPresentationTokens> = number | WebMotionTarget<Theme>;
+export type WebMotionValue<Parameters extends WebPresentationTokens> =
+  | number
+  | WebMotionTarget<Parameters>;
 
-export type WebMotionDeclaration<Theme extends WebPresentationTokens> = Readonly<{
+export type WebMotionDeclaration<Parameters extends WebPresentationTokens> = Readonly<{
   identity?: string;
-  opacity?: WebMotionValue<Theme>;
+  opacity?: WebMotionValue<Parameters>;
   translation?: Readonly<{
-    inline?: WebMotionValue<Theme>;
-    block?: WebMotionValue<Theme>;
-    depth?: WebMotionValue<Theme>;
+    inline?: WebMotionValue<Parameters>;
+    block?: WebMotionValue<Parameters>;
+    depth?: WebMotionValue<Parameters>;
   }>;
-  scale?: WebMotionValue<Theme>;
-  scaleInline?: WebMotionValue<Theme>;
-  scaleBlock?: WebMotionValue<Theme>;
-  rotate?: WebMotionValue<Theme>;
-  radius?: WebMotionValue<Theme>;
-  layout?: "instant" | TokenValueOfGroup<Theme, "motion">;
+  scale?: WebMotionValue<Parameters>;
+  scaleInline?: WebMotionValue<Parameters>;
+  scaleBlock?: WebMotionValue<Parameters>;
+  rotate?: WebMotionValue<Parameters>;
+  radius?: WebMotionValue<Parameters>;
+  layout?: "instant" | TokenValueOfGroup<Parameters, "motion">;
   presence?: Readonly<{
     visible: boolean | "structure";
-    enter?: Readonly<{ from: MotionTargetVisual<Theme> }>;
-    exit?: Readonly<{ to: MotionTargetVisual<Theme> }>;
-    transition?: "instant" | TokenValueOfGroup<Theme, "motion">;
+    enter?: Readonly<{ from: MotionTargetVisual<Parameters> }>;
+    exit?: Readonly<{ to: MotionTargetVisual<Parameters> }>;
+    transition?: "instant" | TokenValueOfGroup<Parameters, "motion">;
     layout?: "preserve" | "pop";
   }>;
   reduceMotion?: "instant" | "crossfade";
 }>;
 
-type WebPresentationFragment<Theme extends WebPresentationTokens> = Omit<
-  VisualFragment<Theme>,
+type WebPresentationFragment<Parameters extends WebPresentationTokens> = Omit<
+  VisualFragment<Parameters>,
   "layout" | "motion"
 > &
   Readonly<{
-    layout?: Omit<LayoutVisual<Theme>, "position"> & {
-      readonly position?: WebPositionVisual<Theme>;
+    layout?: Omit<LayoutVisual<Parameters>, "position"> & {
+      readonly position?: WebPositionVisual<Parameters>;
     };
-    motion?: WebMotionDeclaration<Theme>;
-    resource?: WebThemeResource<Theme>;
-    layers?: readonly WebRenderLayer<Theme>[];
+    motion?: WebMotionDeclaration<Parameters>;
+    resource?: WebParameterResource<Parameters>;
+    layers?: readonly WebRenderLayer<Parameters>[];
   }>;
 
 export type WebTargetCondition = "hovered" | "pressed" | "focusVisible" | "disabled";
 
-type WebConditionRange<Theme extends WebPresentationTokens> = Readonly<{
-  min?: LengthAtom<Theme, Empty, "size">;
-  max?: LengthAtom<Theme, Empty, "size">;
+type WebConditionRange<Parameters extends WebPresentationTokens> = Readonly<{
+  min?: LengthAtom<Parameters, Empty, "size">;
+  max?: LengthAtom<Parameters, Empty, "size">;
 }>;
 
 /** Web observations that an adapter may allocate for a declaration rule. */
-export type WebPresentationCondition<Theme extends WebPresentationTokens> = Readonly<{
+export type WebPresentationCondition<Parameters extends WebPresentationTokens> = Readonly<{
   target?: Readonly<Partial<Record<WebTargetCondition, boolean>>>;
   container?: Readonly<{
-    inline?: WebConditionRange<Theme>;
-    block?: WebConditionRange<Theme>;
+    inline?: WebConditionRange<Parameters>;
+    block?: WebConditionRange<Parameters>;
   }>;
   preferences?: Readonly<{
     reducedMotion?: boolean;
@@ -679,27 +681,27 @@ export type WebPresentationCondition<Theme extends WebPresentationTokens> = Read
 }>;
 
 /** A target-local visual override driven by native web state. */
-export type WebPresentationConditionDeclaration<Theme extends WebPresentationTokens> =
-  WebPresentationFragment<Theme>;
+export type WebPresentationConditionDeclaration<Parameters extends WebPresentationTokens> =
+  WebPresentationFragment<Parameters>;
 
-export type WebPresentationConditionRule<Theme extends WebPresentationTokens> = Readonly<{
-  when: WebPresentationCondition<Theme>;
-  use: WebPresentationConditionDeclaration<Theme>;
+export type WebPresentationConditionRule<Parameters extends WebPresentationTokens> = Readonly<{
+  when: WebPresentationCondition<Parameters>;
+  use: WebPresentationConditionDeclaration<Parameters>;
 }>;
 
 /** The complete semantic visual declaration understood by the web adapter. */
-export type WebPresentationDeclaration<Theme extends WebPresentationTokens> =
-  WebPresentationFragment<Theme> &
+export type WebPresentationDeclaration<Parameters extends WebPresentationTokens> =
+  WebPresentationFragment<Parameters> &
     Readonly<{
-      conditions?: readonly WebPresentationConditionRule<Theme>[];
+      conditions?: readonly WebPresentationConditionRule<Parameters>[];
     }>;
 
-export type WebPresentationLanguage<Theme extends WebPresentationTokens> = {
-  readonly Declaration: WebPresentationDeclaration<Theme>;
+export type WebPresentationLanguage<Parameters extends WebPresentationTokens> = {
+  readonly Declarations: Readonly<Record<string, WebPresentationDeclaration<Parameters>>>;
 };
 
 /** A web Presentation uses the generic outer grammar and the web declaration algebra. */
 export type WebPresentation<
   Root extends ComponentOwner,
-  Theme extends WebPresentationTokens,
-> = CorePresentation<Root, WebPresentationLanguage<Theme>, Theme>;
+  Parameters extends WebPresentationTokens,
+> = CorePresentation<Root, WebPresentationLanguage<Parameters>, Parameters>;

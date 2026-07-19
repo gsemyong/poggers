@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { createWebFontBackend, webFontFamily } from "./font";
+import { createWebFontRegistry, webFontFamily } from "./fonts";
 import type { FontAsset } from "./language";
 
 const font: FontAsset = {
@@ -37,7 +37,7 @@ describe("web font backend", () => {
     const add = vi.fn();
     const remove = vi.fn();
     const document = { fonts: { add, delete: remove } } as unknown as Document;
-    const backend = createWebFontBackend();
+    const backend = createWebFontRegistry();
 
     const first = backend.acquire(document, font);
     const second = backend.acquire(document, font);
@@ -69,7 +69,7 @@ describe("web font backend", () => {
     const remove = vi.fn();
     const document = { fonts: { add, delete: remove } } as unknown as Document;
     const generated = { ...font, family: undefined };
-    const backend = createWebFontBackend();
+    const backend = createWebFontRegistry();
 
     const lease = backend.acquire(document, generated);
     await Promise.resolve();

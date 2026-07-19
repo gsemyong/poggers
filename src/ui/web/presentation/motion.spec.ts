@@ -1,5 +1,6 @@
 import { setTimeout as delay } from "node:timers/promises";
 
+import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -292,6 +293,29 @@ describe("retained motion graph", () => {
     expect(releaseEase(0)).toBe(0);
     expect(releaseEase(0.1)).toBeGreaterThan(restEase(0.1));
     expect(releaseEase(1)).toBe(1);
+  });
+
+  it("keeps arbitrary valid spring trajectories finite and convergent", () => {
+    fc.assert(
+      fc.property(
+        fc.double({ min: 0.05, max: 10, noNaN: true, noDefaultInfinity: true }),
+        fc.double({ min: 1, max: 4_000, noNaN: true, noDefaultInfinity: true }),
+        fc.double({ min: 0.1, max: 300, noNaN: true, noDefaultInfinity: true }),
+        fc.double({ min: -8, max: 8, noNaN: true, noDefaultInfinity: true }),
+        (mass, stiffness, damping, velocity) => {
+          const timing = animeTransitionTiming({ spring: { mass, stiffness, damping } }, velocity);
+          const ease = timing.ease as (progress: number) => number;
+          const samples = Array.from({ length: 21 }, (_, index) => ease(index / 20));
+
+          expect(timing.duration).toBeGreaterThan(0);
+          expect(Number.isFinite(timing.duration)).toBe(true);
+          expect(samples.every(Number.isFinite)).toBe(true);
+          expect(samples[0]).toBe(0);
+          expect(samples.at(-1)).toBe(1);
+        },
+      ),
+      { numRuns: 200 },
+    );
   });
 
   it("installs the initial value synchronously and retains channel identity", () => {

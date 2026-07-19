@@ -1,13 +1,13 @@
 import { describe, expect, test } from "vitest";
 
-import { POGGERS_IR_VERSION, type ComponentIR, type ProductIR, type TypeIR } from "../ir";
 import {
-  createHotManifest,
+  createHotReplacementManifest,
   HotUpdateCoordinator,
-  isHotManifestCompatible,
+  isHotReplacementCompatible,
   type HotCandidate,
-  type HotManifest,
+  type HotReplacementManifest,
 } from "./development";
+import { POGGERS_IR_VERSION, type ComponentIR, type ApplicationIR, type TypeIR } from "./ir";
 
 describe("semantic hot updates", () => {
   test("accepts additive and removed state fields but rejects changed fields", () => {
@@ -18,9 +18,9 @@ describe("semantic hot updates", () => {
     const removed = manifest(record({ count: numberType() }));
     const changed = manifest(record({ count: stringType(), label: stringType() }));
 
-    expect(isHotManifestCompatible(before, added)).toBe(true);
-    expect(isHotManifestCompatible(before, removed)).toBe(true);
-    expect(isHotManifestCompatible(before, changed)).toBe(false);
+    expect(isHotReplacementCompatible(before, added)).toBe(true);
+    expect(isHotReplacementCompatible(before, removed)).toBe(true);
+    expect(isHotReplacementCompatible(before, changed)).toBe(false);
   });
 
   test("keeps the live revision when prepare or activation fails", async () => {
@@ -79,34 +79,28 @@ describe("semantic hot updates", () => {
   });
 
   test("derives a stable manifest from semantic IR rather than source spans", () => {
-    const first = createHotManifest(product("one.ts"));
-    const second = createHotManifest(product("moved.ts"));
+    const first = createHotReplacementManifest(application("one.ts"));
+    const second = createHotReplacementManifest(application("moved.ts"));
     expect(second).toEqual(first);
   });
 
-  test("rejects incompatible Component state, visual units, callback Inputs, and Elements", () => {
+  test("rejects incompatible Component state, callback props, and Elements", () => {
     const before = manifest(record({}), [component()]);
 
     expect(
-      isHotManifestCompatible(
+      isHotReplacementCompatible(
         before,
         manifest(record({}), [component({ state: record({ offset: stringType() }) })]),
       ),
     ).toBe(false);
     expect(
-      isHotManifestCompatible(
-        before,
-        manifest(record({}), [component({ visualValues: [{ name: "offset", kind: "size" }] })]),
-      ),
-    ).toBe(false);
-    expect(
-      isHotManifestCompatible(
+      isHotReplacementCompatible(
         before,
         manifest(record({}), [component({ propCallbacks: ["onDismiss"] })]),
       ),
     ).toBe(false);
     expect(
-      isHotManifestCompatible(
+      isHotReplacementCompatible(
         before,
         manifest(record({}), [component({ elements: [{ name: "Root", element: "main" }] })]),
       ),
@@ -118,17 +112,17 @@ describe("semantic hot updates", () => {
     const next = component({
       state: record({ offset: numberType(), dragging: booleanType() }),
       actions: ["drag", "release"],
-      implementation: { state: true, actions: true, start: true, view: true },
+      implementation: { state: true, actions: true, mount: true, view: true },
     });
 
-    expect(isHotManifestCompatible(before, manifest(record({}), [next]))).toBe(true);
+    expect(isHotReplacementCompatible(before, manifest(record({}), [next]))).toBe(true);
   });
 
-  test("rejects a platform change even when the Runtime name is unchanged", () => {
+  test("rejects a UI Platform change even when the Environment name is unchanged", () => {
     const before = manifest(record({}));
-    const changed = manifest(record({}), [], { name: "web-main", platform: "three" });
+    const changed = manifest(record({}), [], { name: "browser-main", uiPlatform: "three" });
 
-    expect(isHotManifestCompatible(before, changed)).toBe(false);
+    expect(isHotReplacementCompatible(before, changed)).toBe(false);
   });
 });
 
@@ -159,14 +153,14 @@ function candidate(
 function manifest(
   state: TypeIR,
   components: readonly ComponentIR[] = [],
-  runtime: Readonly<{ name: string; platform?: string }> = {
-    name: "web-main",
-    platform: "web",
+  environment: Readonly<{ name: string; uiPlatform?: string }> = {
+    name: "browser-main",
+    uiPlatform: "web",
   },
-): HotManifest {
+): HotReplacementManifest {
   return {
     revision: "test",
-    programs: [{ id: "feature/app/program/browser", runtime, state, components }],
+    programs: [{ id: "feature/app/program/browser", environment, state, components }],
   };
 }
 
@@ -176,14 +170,13 @@ function component(overrides: Partial<ComponentIR> = {}): ComponentIR {
     propCallbacks: [],
     state: record({ offset: numberType() }),
     actions: ["drag"],
-    visualValues: [{ name: "offset", kind: "length" }],
     elements: [{ name: "Root", element: "section" }],
-    implementation: { state: true, actions: true, start: false, view: true },
+    implementation: { state: true, actions: true, mount: false, view: true },
     ...overrides,
   };
 }
 
-function product(file: string): ProductIR {
+function application(file: string): ApplicationIR {
   return {
     version: POGGERS_IR_VERSION,
     application: { id: "application/test", name: "test", presentations: [] },
@@ -193,7 +186,7 @@ function product(file: string): ProductIR {
         id: "feature/app/program/browser",
         feature: "app",
         name: "browser",
-        runtime: { name: "web-main", platform: "web" },
+        environment: { name: "browser-main", uiPlatform: "web" },
         requires: [],
         provides: [],
         ui: { state: record({ count: numberType() }), actions: [], components: [] },

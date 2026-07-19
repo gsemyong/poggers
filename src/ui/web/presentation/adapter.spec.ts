@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { inspectVirtualCollectionHost } from "../structure/runtime";
-import type { WebFontBackend } from "./font";
+import { inspectVirtualCollectionHost } from "../component/runtime";
+import { createWebPresentationAdapter } from "./adapter";
+import type { WebFontRegistry } from "./fonts";
 import type { WebPresentationTokens } from "./language";
 import type { LayoutBackend, MotionBackend, MotionScheduler, MotionTarget } from "./motion";
-import { createWebPresentationAdapter } from "./runtime";
 
-type TestTheme = {
+type TestParameters = {
   motion: {
     sheet: { readonly spring: { readonly stiffness: 900; readonly damping: 60 } };
   };
@@ -114,7 +114,7 @@ describe("web presentation adapter", () => {
   it("translates styles and distinguishes direct writes from velocity-bearing targets", () => {
     const log: Array<Readonly<Record<string, unknown>>> = [];
     const scheduler = createScheduler();
-    const adapter = createWebPresentationAdapter<TestTheme>({
+    const adapter = createWebPresentationAdapter<TestParameters>({
       motionBackend: createMotionBackend(log),
       scheduler,
     });
@@ -177,7 +177,7 @@ describe("web presentation adapter", () => {
     vi.stubGlobal("HTMLElement", TestHTMLElement);
     const target = createElement("collection");
     Object.setPrototypeOf(target, TestHTMLElement.prototype);
-    const session = createWebPresentationAdapter<TestTheme>({
+    const session = createWebPresentationAdapter<TestParameters>({
       motionBackend: createMotionBackend([]),
       scheduler: createScheduler(),
     }).create({ boundary: target, targets: { Root: () => [target] } });
@@ -208,7 +208,7 @@ describe("web presentation adapter", () => {
 
   it("resolves target-local native conditions in deterministic precedence order", async () => {
     const target = createElement("control");
-    const session = createWebPresentationAdapter<TestTheme>({
+    const session = createWebPresentationAdapter<TestParameters>({
       motionBackend: createMotionBackend([]),
       scheduler: createScheduler(),
     }).create({ boundary: target, targets: { Root: () => [target] } });
@@ -264,7 +264,7 @@ describe("web presentation adapter", () => {
     const target = createElement("responsive");
     target.getBoundingClientRect = () =>
       ({ width, height: 480, x: 0, y: 0, top: 0, right: width, bottom: 480, left: 0 }) as DOMRect;
-    const session = createWebPresentationAdapter<TestTheme>({
+    const session = createWebPresentationAdapter<TestParameters>({
       motionBackend: createMotionBackend([]),
       scheduler,
     }).create({ boundary: target, targets: { Root: () => [target] } });
@@ -324,7 +324,7 @@ describe("web presentation adapter", () => {
         listener({ matches, media: query } as MediaQueryListEvent);
     };
     const target = createElement("media-aware");
-    const session = createWebPresentationAdapter<TestTheme>({
+    const session = createWebPresentationAdapter<TestParameters>({
       motionBackend: createMotionBackend([]),
       scheduler: createScheduler(),
     }).create({ boundary: target, targets: { Root: () => [target] } });
@@ -352,7 +352,7 @@ describe("web presentation adapter", () => {
   it("rejects empty and inverted conditions before applying styles", () => {
     const target = createElement("invalid-condition");
     target.style.opacity = "0.25";
-    const session = createWebPresentationAdapter<TestTheme>({
+    const session = createWebPresentationAdapter<TestParameters>({
       motionBackend: createMotionBackend([]),
       scheduler: createScheduler(),
     }).create({ boundary: target, targets: { Root: () => [target] } });
@@ -387,7 +387,7 @@ describe("web presentation adapter", () => {
     second.setAttribute("src", "/second.svg");
     let current: readonly Element[] = [first];
     let resolutions = 0;
-    const session = createWebPresentationAdapter<TestTheme>({
+    const session = createWebPresentationAdapter<TestParameters>({
       motionBackend: createMotionBackend([]),
       scheduler: createScheduler(),
     }).create({
@@ -431,7 +431,7 @@ describe("web presentation adapter", () => {
   });
 
   it("validates shared identities before writes and releases ownership on update", () => {
-    const adapter = createWebPresentationAdapter<TestTheme>({
+    const adapter = createWebPresentationAdapter<TestParameters>({
       motionBackend: createMotionBackend([]),
       scheduler: createScheduler(),
     });
@@ -439,7 +439,7 @@ describe("web presentation adapter", () => {
     const second = createElement("second");
     const firstSession = adapter.create({
       boundary: first,
-      targets: { Root: () => [first], Peer: () => [second] },
+      targets: { Root: () => [first], Sibling: () => [second] },
     });
     firstSession.commit({
       Root: { paint: { opacity: 0.8 }, motion: { identity: "shared-panel" } },
@@ -447,7 +447,7 @@ describe("web presentation adapter", () => {
     expect(() =>
       firstSession.commit({
         Root: { paint: { opacity: 0.4 }, motion: { identity: "shared-panel" } },
-        Peer: { motion: { identity: "shared-panel" } },
+        Sibling: { motion: { identity: "shared-panel" } },
       }),
     ).toThrow('Presentation identity "shared-panel" has multiple targets.');
     expect(first.style.opacity).toBe("0.8");
@@ -469,7 +469,7 @@ describe("web presentation adapter", () => {
   it("hands an entering identity between component sessions without stale ownership", () => {
     const log: Array<Readonly<Record<string, unknown>>> = [];
     const scheduler = createScheduler();
-    const adapter = createWebPresentationAdapter<TestTheme>({
+    const adapter = createWebPresentationAdapter<TestParameters>({
       motionBackend: createMotionBackend(log),
       scheduler,
     });
@@ -540,13 +540,13 @@ describe("web presentation adapter", () => {
   it("rejects invalid declarations and ambiguous Element ownership before writes", () => {
     const first = createElement("first");
     const second = createElement("second");
-    const adapter = createWebPresentationAdapter<TestTheme>({
+    const adapter = createWebPresentationAdapter<TestParameters>({
       motionBackend: createMotionBackend([]),
       scheduler: createScheduler(),
     });
     const session = adapter.create({
       boundary: first,
-      targets: { Root: () => [first], Peer: () => [second] },
+      targets: { Root: () => [first], Sibling: () => [second] },
     });
     session.commit({ Root: { paint: { opacity: 0.8 } } });
 
@@ -569,10 +569,10 @@ describe("web presentation adapter", () => {
 
     const ambiguous = adapter.create({
       boundary: first,
-      targets: { Root: () => [first], Peer: () => [first] },
+      targets: { Root: () => [first], Sibling: () => [first] },
     });
-    expect(() => ambiguous.commit({ Root: {}, Peer: {} })).toThrow(
-      'claimed by two Elements: "Root" and "Peer"',
+    expect(() => ambiguous.commit({ Root: {}, Sibling: {} })).toThrow(
+      'claimed by two Elements: "Root" and "Sibling"',
     );
     ambiguous.dispose();
   });
@@ -605,7 +605,7 @@ describe("web presentation adapter", () => {
         height: 160,
       }) as DOMRect;
     let target: readonly Element[] = [source];
-    const session = createWebPresentationAdapter<TestTheme>({
+    const session = createWebPresentationAdapter<TestParameters>({
       motionBackend: createMotionBackend(log),
       scheduler,
     }).create({ boundary: source, targets: { Hero: () => target } });
@@ -689,7 +689,7 @@ describe("web presentation adapter", () => {
         height: 24,
       }) as DOMRect;
     let targets: readonly Element[] = [source];
-    const session = createWebPresentationAdapter<TestTheme>({
+    const session = createWebPresentationAdapter<TestParameters>({
       motionBackend: createMotionBackend(log),
       scheduler,
     }).create({ boundary: source, targets: { Hero: () => targets } });
@@ -786,10 +786,10 @@ describe("web presentation adapter", () => {
     target.setAttribute("src", "/semantic.png");
     const image = { kind: "image", source: "/themed.png" } as const;
     const shader = { kind: "shader", source: "soft-glass" } as const;
-    type ResourceTheme = TestTheme & {
+    type ResourceParameters = TestParameters & {
       readonly resources: { readonly image: typeof image; readonly shader: typeof shader };
     };
-    const session = createWebPresentationAdapter<ResourceTheme>({
+    const session = createWebPresentationAdapter<ResourceParameters>({
       motionBackend: createMotionBackend([]),
       scheduler: createScheduler(),
     }).create({
@@ -832,7 +832,7 @@ describe("web presentation adapter", () => {
     Object.defineProperty(target, "ownerDocument", { value: document });
     const acquired: string[] = [];
     const released: string[] = [];
-    const fontBackend: WebFontBackend = {
+    const fontRegistry: WebFontRegistry = {
       acquire(owner, font) {
         expect(owner).toBe(document);
         const key = font.family ?? "generated";
@@ -848,8 +848,8 @@ describe("web presentation adapter", () => {
         };
       },
     };
-    const session = createWebPresentationAdapter<TestTheme>({
-      fontBackend,
+    const session = createWebPresentationAdapter<TestParameters>({
+      fontRegistry,
       motionBackend: createMotionBackend([]),
     }).create({ boundary: target, targets: { Root: () => [target] } });
     const font = {
@@ -875,7 +875,7 @@ describe("web presentation adapter", () => {
   it("retains an exit until settlement and then ends rendering and hit testing", async () => {
     const log: Array<Readonly<Record<string, unknown>>> = [];
     const scheduler = createScheduler();
-    const adapter = createWebPresentationAdapter<TestTheme>({
+    const adapter = createWebPresentationAdapter<TestParameters>({
       motionBackend: createMotionBackend(log),
       scheduler,
     });
@@ -930,7 +930,7 @@ describe("web presentation adapter", () => {
     Object.setPrototypeOf(dialog, TestDialog.prototype);
     dialog.showCalls = 0;
     dialog.closeCalls = 0;
-    const session = createWebPresentationAdapter<TestTheme>({
+    const session = createWebPresentationAdapter<TestParameters>({
       motionBackend: createMotionBackend([]),
       scheduler,
     }).create({ boundary: dialog, targets: { Root: () => [dialog] } });
@@ -954,7 +954,7 @@ describe("web presentation adapter", () => {
   it("installs entrance values atomically and does not restart an identical target", () => {
     const log: Array<Readonly<Record<string, unknown>>> = [];
     const scheduler = createScheduler();
-    const adapter = createWebPresentationAdapter<TestTheme>({
+    const adapter = createWebPresentationAdapter<TestParameters>({
       motionBackend: createMotionBackend(log),
       scheduler,
     });
@@ -1007,7 +1007,7 @@ describe("web presentation adapter", () => {
       },
     };
     const panel = createElement("panel");
-    const session = createWebPresentationAdapter<TestTheme>({
+    const session = createWebPresentationAdapter<TestParameters>({
       motionBackend: backend,
       scheduler,
     }).create({ boundary: panel, targets: { Root: () => [panel] } });
@@ -1056,7 +1056,7 @@ describe("web presentation adapter", () => {
       },
     };
     const panel = createElement("panel");
-    const session = createWebPresentationAdapter<TestTheme>({
+    const session = createWebPresentationAdapter<TestParameters>({
       motionBackend: backend,
       scheduler,
     }).create({ boundary: panel, targets: { Root: () => [panel] } });
@@ -1130,7 +1130,7 @@ describe("web presentation adapter", () => {
       },
     };
     const surface = new TestHTMLElement() as unknown as HTMLElement;
-    const adapter = createWebPresentationAdapter<TestTheme>({
+    const adapter = createWebPresentationAdapter<TestParameters>({
       motionBackend: createMotionBackend([]),
       layoutBackend,
       scheduler,
@@ -1183,7 +1183,7 @@ describe("web presentation adapter", () => {
       active.setAttribute("src", "/native.svg");
       let targets: readonly Element[] = [active];
       const retired: FakeElement[] = [];
-      const session = createWebPresentationAdapter<TestTheme>({
+      const session = createWebPresentationAdapter<TestParameters>({
         motionBackend: createMotionBackend(log),
         scheduler,
       }).create({ boundary: active, targets: { Root: () => targets } });

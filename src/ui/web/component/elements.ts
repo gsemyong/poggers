@@ -1,4 +1,16 @@
-export type Child = Node | string | number | boolean | null | undefined | Child[] | (() => Child);
+import type { JSXPlatformRegistration } from "../../jsx/runtime";
+import type { JSXElement } from "../../jsx/types";
+
+export type Child =
+  | Node
+  | JSXElement
+  | string
+  | number
+  | boolean
+  | null
+  | undefined
+  | Child[]
+  | (() => Child);
 
 type AttributeValue<T> = T | null | undefined;
 type PrimitiveAttribute = string | number | boolean | null | undefined;
@@ -683,3 +695,9 @@ export type IntrinsicElements = {
 } & {
   [Tag in `${string}-${string}`]: CustomElementAttributes;
 };
+
+declare module "../../jsx/runtime" {
+  interface JSXPlatforms {
+    web: JSXPlatformRegistration<IntrinsicElements>;
+  }
+}

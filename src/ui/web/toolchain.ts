@@ -13,10 +13,10 @@ import {
   type Plugin,
 } from "vite";
 
-import { createHotManifest } from "../../compiler/backend/development";
-import { compileProduct } from "../../compiler/frontend";
-import { serializeProductIR, type ComponentIR, type ProductIR } from "../../compiler/ir";
-import { transformComponentSource } from "./structure/compiler";
+import { createHotReplacementManifest } from "../../compiler/development";
+import { serializeApplicationIR, type ApplicationIR, type ComponentIR } from "../../compiler/ir";
+import { compileApplication } from "../../compiler/source";
+import { transformComponentSource } from "./component/compiler";
 
 export type ApplicationPaths = Readonly<{
   directory: string;
@@ -32,36 +32,39 @@ export type DevelopmentServer = Readonly<{
 type PreparedApplication = Readonly<{
   candidate: string;
   entry: string;
-  ir: ProductIR;
+  ir: ApplicationIR;
   updateKind: "full" | "presentation";
 }>;
 
-type WebComponentRuntimeContract = Readonly<{
+type WebComponentEnvironmentContract = Readonly<{
   elements: Readonly<Record<string, string>>;
   state: readonly Readonly<{ name: string }>[];
   propCallbacks: readonly string[];
 }>;
 
-function webApplicationContract(ir: ProductIR): Readonly<{
+function webApplicationContract(ir: ApplicationIR): Readonly<{
   uiProgram: string;
-  components: Readonly<Record<string, WebComponentRuntimeContract>>;
+  components: Readonly<Record<string, WebComponentEnvironmentContract>>;
 }> {
   const names = new Set(
     ir.programs
-      .filter(({ runtime, ui }) => runtime.name === "web-main" && ui)
+      .filter(({ environment, ui }) => environment.name === "browser-main" && ui)
       .map(({ name }) => name),
   );
   if (names.size !== 1) {
-    throw new Error(`Application must define exactly one WebMain UI Program; found ${names.size}.`);
+    throw new Error(
+      `Application must define exactly one BrowserMainThread UI Program; found ${names.size}.`,
+    );
   }
   const uiProgram = [...names][0]!;
-  const components: Record<string, WebComponentRuntimeContract> = Object.create(null);
+  const components: Record<string, WebComponentEnvironmentContract> = Object.create(null);
   for (const program of ir.programs) {
-    if (program.name !== uiProgram || program.runtime.name !== "web-main" || !program.ui) continue;
+    if (program.name !== uiProgram || program.environment.name !== "browser-main" || !program.ui)
+      continue;
     for (const component of program.ui.components) {
       const name = runtimeComponentName(program.feature, component.name);
       if (components[name]) throw new Error(`Duplicate runtime Component ${JSON.stringify(name)}.`);
-      components[name] = componentRuntimeContract(component);
+      components[name] = componentEnvironmentContract(component);
     }
   }
   return { uiProgram, components };
@@ -71,7 +74,7 @@ function runtimeComponentName(feature: string, component: string): string {
   return feature ? `@feature/${feature}/component/${component}` : component;
 }
 
-function componentRuntimeContract(component: ComponentIR): WebComponentRuntimeContract {
+function componentEnvironmentContract(component: ComponentIR): WebComponentEnvironmentContract {
   return {
     elements: Object.fromEntries(component.elements.map(({ name, element }) => [name, element])),
     state:
@@ -107,7 +110,7 @@ export async function buildApplication(options: {
   await mkdir(outdir, { recursive: true });
   const prepared = await prepareApplication(paths, work, options.development ?? false);
 
-  await writeFile(resolve(outdir, "product.ir.json"), serializeProductIR(prepared.ir));
+  await writeFile(resolve(outdir, "application.ir.json"), serializeApplicationIR(prepared.ir));
   await build({
     ...viteConfiguration(paths, options.development),
     build: {
@@ -174,7 +177,7 @@ async function prepareApplication(
   updateKind: "full" | "presentation" = "full",
 ): Promise<PreparedApplication> {
   await mkdir(work, { recursive: true });
-  const ir = compileProduct(paths.application);
+  const ir = compileApplication(paths.application);
   const contract = webApplicationContract(ir);
   const application = await loadApplication(paths, work);
   validateUIProgramRoot(application, contract.uiProgram);
@@ -191,10 +194,10 @@ async function prepareApplication(
     candidateSource({
       application: paths.application,
       platformAdapter: resolve(import.meta.dirname, `./platform${moduleExtension()}`),
-      renderer: resolve(import.meta.dirname, `./structure/runtime${moduleExtension()}`),
+      renderer: resolve(import.meta.dirname, `./component/runtime${moduleExtension()}`),
       program: contract.uiProgram,
       components: contract.components,
-      hotManifest: createHotManifest(ir),
+      hotManifest: createHotReplacementManifest(ir),
       updateKind,
     }),
   );
@@ -204,10 +207,7 @@ async function prepareApplication(
     browserSource({
       candidate,
       development,
-      hotRuntime: resolve(
-        import.meta.dirname,
-        `../../compiler/backend/development${moduleExtension()}`,
-      ),
+      hotRuntime: resolve(import.meta.dirname, `../../compiler/development${moduleExtension()}`),
     }),
   );
   return { candidate, entry, ir, updateKind };
@@ -241,11 +241,11 @@ function kitAliases() {
   return [
     {
       find: /^@poggers\/kit\/jsx-dev-runtime$/,
-      replacement: resolve(ui, `web/jsx/development${extension}`),
+      replacement: resolve(ui, `jsx/development${extension}`),
     },
     {
       find: /^@poggers\/kit\/jsx-runtime$/,
-      replacement: resolve(ui, `web/jsx/runtime${extension}`),
+      replacement: resolve(ui, `jsx/runtime${extension}`),
     },
     {
       find: /^@poggers\/kit\/web\/presentation$/,
@@ -390,7 +390,7 @@ function candidateSource(input: {
   updateKind: "full" | "presentation";
 }): string {
   return `import application from ${JSON.stringify(input.application)};
-import { createWebPlatformAdapter } from ${JSON.stringify(input.platformAdapter)};
+import { createWebUIPlatformAdapter } from ${JSON.stringify(input.platformAdapter)};
 import { render } from ${JSON.stringify(input.renderer)};
 
 export const manifest = ${JSON.stringify(input.hotManifest)};
@@ -407,8 +407,8 @@ export async function activate(root, previous = {}) {
     scroll: { ...previous.scroll },
     values: previous.values?.slice(),
   };
-  const platform = createWebPlatformAdapter();
-  const ui = platform.structure.createApplicationUI({
+  const platform = createWebUIPlatformAdapter();
+  const ui = platform.component.createApplicationUI({
     application,
     program: ${JSON.stringify(input.program)},
     presentations: { presentations },

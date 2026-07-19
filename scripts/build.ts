@@ -26,8 +26,8 @@ const entrypoints = [
       .map((target) => resolve(packageDir, target.slice("./dist/".length).replace(/\.js$/, ".ts"))),
   ),
   resolve(packageDir, "src/ui/web/platform.ts"),
-  resolve(packageDir, "src/ui/web/structure/runtime.ts"),
-  resolve(packageDir, "src/compiler/backend/development.ts"),
+  resolve(packageDir, "src/ui/web/component/runtime.ts"),
+  resolve(packageDir, "src/compiler/development.ts"),
 ];
 for (const entrypoint of entrypoints) {
   try {

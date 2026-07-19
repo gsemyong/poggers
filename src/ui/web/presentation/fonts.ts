@@ -5,7 +5,7 @@ export type WebFontLease = Readonly<{
   release(): void;
 }>;
 
-export type WebFontBackend = Readonly<{
+export type WebFontRegistry = Readonly<{
   acquire(document: Document, font: FontAsset): WebFontLease;
 }>;
 
@@ -26,7 +26,7 @@ export function webFontKey(font: FontAsset): string {
 }
 
 /** Shares native FontFace ownership per document and releases the last lease exactly once. */
-export function createWebFontBackend(): WebFontBackend {
+export function createWebFontRegistry(): WebFontRegistry {
   const documents = new WeakMap<Document, Map<string, SharedFont>>();
 
   return {

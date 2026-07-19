@@ -1,27 +1,22 @@
-import type { Application, ApplicationContract } from "../../../application";
+import type { Application, ApplicationContract, PresentationName } from "../../../application";
 import {
+  bindCapabilitiesToScope,
   createProgramContributionInstance,
-  RuntimeScope,
-  scopeCapabilities,
-  type ProgramAddress,
+  ResourceScope,
+  type ProgramContributionAddress,
   type ProgramContributionInstance,
-} from "../../../execution";
-import type {
-  ComponentProps,
-  ComponentName,
-  ComponentState,
-  PresentationAppearance,
-  PresentationName,
-} from "../../component";
-import type { PresentationAdapter, PresentationRegistrationContract } from "../../presentation";
+} from "../../../process";
+import type { ComponentProps, ComponentName, ComponentState } from "../../component";
+import type { PresentationAdapter } from "../../presentation";
 import type {
   WebPresentationDeclaration,
   WebPresentationLanguage,
   WebPresentationTokens,
 } from "../presentation/language";
+import { PresenceGraph } from "./presence";
 import {
-  allocateSceneOwner,
-  currentPresenceScene,
+  allocatePresenceOwner,
+  currentPresenceGraph,
   currentStructuralKey,
   effect,
   jsx,
@@ -34,7 +29,6 @@ import {
   type HotRenderState,
   type Signal,
 } from "./runtime";
-import { PresenceScene } from "./scene";
 
 export type ComponentRuntimeElements<Contract extends ApplicationContract> = {
   [Name in ComponentName<Contract>]?: {
@@ -48,20 +42,16 @@ export type ComponentRuntimeElements<Contract extends ApplicationContract> = {
 
 export type PresentationsDefinition<Contract extends ApplicationContract> = Readonly<{
   defaultPresentation?: PresentationName<Contract>;
-  presentations: Partial<Record<PresentationName<Contract>, PresentationRegistrationContract>>;
+  presentations: Partial<Record<PresentationName<Contract>, object>>;
 }>;
 
-export type ApplicationUI<Contract extends ApplicationContract> = Readonly<{
-  process: Readonly<Record<string, unknown>>;
+export type ApplicationUI = Readonly<{
+  api: Readonly<Record<string, unknown>>;
   features: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
-  presentation: Signal<PresentationAppearance<Contract>>;
-  setPresentation(appearance: PresentationAppearance<Contract>): void;
   components: RuntimeComponentComposition["components"];
   renderRoot(): Child;
   captureHotState(): HotRenderState;
-  updatePresentations(
-    presentations: Readonly<Record<string, PresentationRegistrationContract>>,
-  ): boolean;
+  updatePresentations(presentations: Readonly<Record<string, object>>): boolean;
   dispose(): Promise<void>;
 }>;
 
@@ -71,14 +61,14 @@ export type CreateApplicationUIOptions<Contract extends ApplicationContract> = R
   presentations: PresentationsDefinition<Contract>;
   components?: ComponentRuntimeElements<Contract>;
   hotState?: HotRenderState;
-  resolveCapabilities?(address: ProgramAddress): Readonly<Record<string, unknown>>;
+  resolveCapabilities?(address: ProgramContributionAddress): Readonly<Record<string, unknown>>;
   presentationAdapter: PresentationAdapter<WebPresentationLanguage<WebPresentationTokens>, Element>;
 }>;
 
-export type WebStructureAdapter = Readonly<{
+export type WebComponentAdapter = Readonly<{
   createApplicationUI<Contract extends ApplicationContract>(
     options: Omit<CreateApplicationUIOptions<Contract>, "presentationAdapter">,
-  ): ApplicationUI<Contract>;
+  ): ApplicationUI;
 }>;
 
 type RuntimeComponentConfig = {
@@ -110,17 +100,17 @@ type RuntimeProgramDefinition = Readonly<{
 type RuntimeComponentDefinition = {
   state?:
     | Readonly<Record<string, unknown>>
-    | ((scope: RuntimeComponentStateScope) => Readonly<Record<string, unknown>>);
+    | ((input: RuntimeComponentStateInput) => Readonly<Record<string, unknown>>);
   actions?: Readonly<
     Record<string, (scope: Record<string, unknown>, ...args: readonly unknown[]) => unknown>
   >;
-  start?: (scope: Record<string, unknown>) => unknown;
-  view?: (scope: RuntimeComponentRenderScope) => Child;
+  mount?: (scope: Record<string, unknown>) => unknown;
+  view?: (context: RuntimeComponentViewContext) => Child;
 };
 
-type RuntimeComponentStateScope = {
+type RuntimeComponentStateInput = {
   readonly props: Record<string, unknown>;
-  readonly process: Readonly<Record<string, unknown>>;
+  readonly feature: Readonly<Record<string, unknown>>;
 };
 
 type RuntimeComponentComposition = {
@@ -130,14 +120,14 @@ type RuntimeComponentComposition = {
     Record<string, (props?: RuntimeComponentProps) => Child>
   >;
   readonly componentNamespaces: Record<string, Record<string, unknown>>;
-  readonly surfaces: Record<string, Readonly<Record<string, unknown>>>;
+  readonly apis: Record<string, Readonly<Record<string, unknown>>>;
   readonly capabilities: Record<string, Readonly<Record<string, unknown>>>;
-  readonly lifecycles: Set<RuntimeScope>;
+  readonly lifecycles: Set<ResourceScope>;
 };
 
-type RuntimeComponentRenderScope = {
+type RuntimeComponentViewContext = {
   readonly props: Readonly<Record<string, unknown>>;
-  readonly process: Readonly<Record<string, unknown>>;
+  readonly feature: Readonly<Record<string, unknown>>;
   readonly state: Readonly<Record<string, unknown>>;
   readonly actions: Record<string, (...args: unknown[]) => void>;
   readonly slots: Record<string, unknown>;
@@ -153,21 +143,15 @@ export function createApplicationUI<Contract extends ApplicationContract>({
   hotState,
   resolveCapabilities,
   presentationAdapter,
-}: CreateApplicationUIOptions<Contract>): ApplicationUI<Contract> {
+}: CreateApplicationUIOptions<Contract>): ApplicationUI {
   const runtimeApplication = application as RuntimeApplication;
   const authoredPresentations = {
     ...presentations.presentations,
-  } as Record<string, PresentationRegistrationContract>;
-  validatePresentationRegistrations(authoredPresentations);
-  const materializedPresentations = new Map<string, Readonly<Record<string, unknown>>>();
+  } as Record<string, object>;
+  validatePresentations(authoredPresentations);
   const presentationRevision = signal(0);
   const defaultPresentation = firstPresentation(presentations);
-  const presentation = signal({
-    presentation: defaultPresentation,
-    theme: "default",
-  } as PresentationAppearance<Contract>);
-  const presentationName = () => String(presentation().presentation);
-  const themeName = () => presentation().theme;
+  const presentationName = () => defaultPresentation;
   const runtimeComponents = normalizeRuntimeComponents(components);
   const renderers: Record<string, (props?: RuntimeComponentProps) => Child> = Object.create(null);
   const componentGroups: RuntimeComponentComposition["componentGroups"] = {
@@ -176,32 +160,17 @@ export function createApplicationUI<Contract extends ApplicationContract>({
   const componentNamespaces: RuntimeComponentComposition["componentNamespaces"] = {
     "": Object.create(null),
   };
-  const selectPresentation = (next: PresentationAppearance<Contract>) => {
-    const name = String(next.presentation);
-    if (!(name in authoredPresentations)) {
-      throw new Error(`Unknown Presentation "${name}".`);
-    }
-    if (!presentationSupportsTheme(authoredPresentations, name, next.theme)) {
-      throw new Error(`Presentation "${name}" does not define theme "${next.theme}".`);
-    }
-    presentation(next);
-    updateRootPresentation(name);
-    updateRootTheme(next.theme);
-  };
   const programUI = createProgramUI(
     runtimeApplication,
     program,
-    (address) => ({
-      ...resolveCapabilities?.(address),
-      presentation: { select: selectPresentation },
-    }),
+    (address) => ({ ...resolveCapabilities?.(address) }),
     hotState,
   );
   const composition: RuntimeComponentComposition = {
     components: componentGroups[""]!,
     componentGroups,
     componentNamespaces,
-    surfaces: programUI.surfaces,
+    apis: programUI.apis,
     capabilities: programUI.capabilities,
     lifecycles: new Set(),
   };
@@ -216,10 +185,8 @@ export function createApplicationUI<Contract extends ApplicationContract>({
         application: runtimeApplication,
         program,
         presentationName,
-        themeName,
         config: runtimeComponents[componentName] ?? { elements: {} },
         authoredPresentations,
-        materializedPresentations,
         presentationRevision,
         presentationAdapter,
         props,
@@ -240,10 +207,8 @@ export function createApplicationUI<Contract extends ApplicationContract>({
   updateRootPresentation(defaultPresentation);
 
   return {
-    process: programUI.surface,
+    api: programUI.api,
     features: programUI.features,
-    presentation,
-    setPresentation: selectPresentation,
     components: componentGroups[""]!,
     renderRoot() {
       const rootName = collectProgramRoots(runtimeApplication, program);
@@ -258,10 +223,9 @@ export function createApplicationUI<Contract extends ApplicationContract>({
       ) {
         return false;
       }
-      validatePresentationRegistrations(next);
+      validatePresentations(next);
       for (const name of Object.keys(authoredPresentations)) delete authoredPresentations[name];
       Object.assign(authoredPresentations, next);
-      materializedPresentations.clear();
       presentationRevision(presentationRevision() + 1);
       return true;
     },
@@ -289,10 +253,8 @@ function createComponentInstance(
     application: RuntimeApplication;
     program: string;
     presentationName: () => string;
-    themeName: () => string;
     config: RuntimeComponentConfig;
     authoredPresentations: Readonly<Record<string, unknown>>;
-    materializedPresentations: Map<string, Readonly<Record<string, unknown>>>;
     presentationRevision: () => number;
     presentationAdapter: PresentationAdapter<
       WebPresentationLanguage<WebPresentationTokens>,
@@ -330,11 +292,11 @@ function createComponentInstance(
   const signals = Object.create(null) as Record<string, Signal<unknown>>;
   const refs = Object.create(null) as Record<string, Element | null>;
   const mountedTargets = Object.create(null) as Record<string, Set<Element>>;
-  const sharedScene = currentPresenceScene();
-  const scene = sharedScene ?? new PresenceScene<Element>();
-  const sceneOwner = allocateSceneOwner(componentName);
+  const sharedScene = currentPresenceGraph();
+  const scene = sharedScene ?? new PresenceGraph<Element>();
+  const sceneOwner = allocatePresenceOwner(componentName);
   const owner = componentOwner(componentName) ?? "";
-  const lifecycle = new RuntimeScope();
+  const lifecycle = new ResourceScope();
   options.composition.lifecycles.add(lifecycle);
   let lifecycleDisposal: Promise<void> | undefined;
   const disposeLifecycle = () => {
@@ -343,14 +305,17 @@ function createComponentInstance(
     });
     return lifecycleDisposal;
   };
-  const capabilities = scopeCapabilities(options.composition.capabilities[owner] ?? {}, lifecycle);
+  const capabilities = bindCapabilitiesToScope(
+    options.composition.capabilities[owner] ?? {},
+    lifecycle,
+  );
   const actions = Object.create(null) as Record<string, (...args: unknown[]) => unknown>;
   const services = componentServices({ ...options, componentName });
-  const stateScope = Object.assign(pickServices(services, ["process"]), {
+  const stateInput = Object.assign(pickServices(services, ["feature"]), {
     props,
-  }) as RuntimeComponentStateScope;
+  }) as RuntimeComponentStateInput;
   const stateSource =
-    typeof definition?.state === "function" ? definition.state(stateScope) : definition?.state;
+    typeof definition?.state === "function" ? definition.state(stateInput) : definition?.state;
   const initialState = materializeComponentState(stateSource ?? {});
   const stateNames = options.config.state?.map(({ name }) => name) ?? Object.keys(initialState);
   for (const name of stateNames) {
@@ -360,7 +325,7 @@ function createComponentInstance(
   const state = stateRuntime.read;
   const elements = Object.create(null) as Record<string, Component<Props>>;
 
-  const actionScope = Object.assign(pickServices(services, ["process"]), {
+  const actionContext = Object.assign(pickServices(services, ["feature"]), {
     props,
     capabilities,
     state: stateRuntime.mutable,
@@ -369,7 +334,9 @@ function createComponentInstance(
   const invokeAction = (name: string, args: readonly unknown[]) => {
     const implementation = definition?.actions?.[name];
     if (typeof implementation !== "function") return;
-    return lifecycle.action(() => Reflect.apply(implementation, undefined, [actionScope, ...args]));
+    return lifecycle.action(() =>
+      Reflect.apply(implementation, undefined, [actionContext, ...args]),
+    );
   };
   for (const [name, implementation] of Object.entries(definition?.actions ?? {})) {
     if (typeof implementation === "function") {
@@ -408,12 +375,10 @@ function createComponentInstance(
     mountAuthoredPresentationComponent({
       componentName,
       presentations: options.authoredPresentations,
-      materializedPresentations: options.materializedPresentations,
       presentationRevision: options.presentationRevision,
       presentation: options.presentationName,
-      theme: options.themeName,
       props,
-      state: createPresentationState(services.process as Readonly<Record<string, unknown>>, state),
+      state: createPresentationState(services.feature as Readonly<Record<string, unknown>>, state),
       refs,
       mountedTargets,
       targets: Object.fromEntries(
@@ -421,11 +386,11 @@ function createComponentInstance(
       ),
       adapter: options.presentationAdapter,
     });
-    if (definition.start) {
+    if (definition.mount) {
       onMount(() => {
         lifecycle.adopt(
-          definition.start?.(
-            Object.assign(pickServices(services, ["process"]), {
+          definition.mount?.(
+            Object.assign(pickServices(services, ["feature"]), {
               props,
               capabilities,
               state,
@@ -444,16 +409,16 @@ function createComponentInstance(
       for (const targets of Object.values(mountedTargets)) targets.clear();
       if (!sharedScene) scene.dispose();
     });
-    const renderScope: RuntimeComponentRenderScope = {
+    const viewContext: RuntimeComponentViewContext = {
       props,
-      process: services.process as Readonly<Record<string, unknown>>,
+      feature: services.feature as Readonly<Record<string, unknown>>,
       state,
       actions,
       slots,
       elements,
       components: componentsForComponent(componentName, options.composition),
     };
-    return definition.view(renderScope);
+    return definition.view(viewContext);
   };
 
   return renderComponent;
@@ -464,7 +429,7 @@ function componentServices(options: {
   composition: RuntimeComponentComposition;
 }): Readonly<Record<string, unknown>> {
   return {
-    process: options.composition.surfaces[componentOwner(options.componentName) ?? ""] ?? {},
+    feature: options.composition.apis[componentOwner(options.componentName) ?? ""] ?? {},
   };
 }
 
@@ -558,10 +523,8 @@ type RuntimePresentationComponent = (scope: {
 function mountAuthoredPresentationComponent(options: {
   componentName: string;
   presentations: Readonly<Record<string, unknown>>;
-  materializedPresentations: Map<string, Readonly<Record<string, unknown>>>;
   presentationRevision: () => number;
   presentation: () => string;
-  theme: () => string;
   props: Readonly<Record<string, unknown>>;
   state: Readonly<Record<string, unknown>>;
   refs: Readonly<Record<string, Element | null>>;
@@ -586,12 +549,7 @@ function mountAuthoredPresentationComponent(options: {
     const session = options.adapter.create({ boundary, targets: targetSources });
     const disposeEffect = effect(() => {
       options.presentationRevision();
-      const definition = materializedPresentation(
-        options.presentations,
-        options.materializedPresentations,
-        options.presentation(),
-        options.theme(),
-      );
+      const definition = presentationDefinition(options.presentations, options.presentation());
       if (!definition) return;
       const component = presentationComponent(definition, options.componentName);
       if (!component) {
@@ -613,28 +571,12 @@ function mountAuthoredPresentationComponent(options: {
   });
 }
 
-function materializedPresentation(
+function presentationDefinition(
   presentations: Readonly<Record<string, unknown>>,
-  cache: Map<string, Readonly<Record<string, unknown>>>,
   presentation: string,
-  theme: string,
 ): Readonly<Record<string, unknown>> | undefined {
-  const cacheKey = `${presentation}\u0000${theme}`;
-  const cached = cache.get(cacheKey);
-  if (cached) return cached;
-
-  const registration = record(presentations[presentation]);
-  if (Object.keys(registration).length === 0) return;
-  if (typeof registration.presentation !== "function") {
-    throw new TypeError(`Presentation "${presentation}" does not define a Presentation program.`);
-  }
-  const themes = record(registration.themes);
-  if (!(theme in themes)) {
-    throw new Error(`Presentation "${presentation}" does not define theme "${theme}".`);
-  }
-  const definition = record(Reflect.apply(registration.presentation, undefined, [themes[theme]]));
-  cache.set(cacheKey, definition);
-  return definition;
+  const definition = record(presentations[presentation]);
+  return Object.keys(definition).length ? definition : undefined;
 }
 
 function presentationComponent(
@@ -714,7 +656,7 @@ function createComponentElementComponent(
   options: {
     refs: Record<string, Element | null>;
     mountedTargets: Record<string, Set<Element>>;
-    scene: PresenceScene<Element>;
+    scene: PresenceGraph<Element>;
     sceneOwner: string;
   },
 ) {
@@ -757,27 +699,27 @@ function readStateField(source: Record<string, unknown>, name: string): unknown 
 }
 
 function createPresentationState(
-  process: Readonly<Record<string, unknown>>,
+  feature: Readonly<Record<string, unknown>>,
   component: Readonly<Record<string, unknown>>,
 ): Readonly<Record<string, unknown>> {
   return new Proxy(Object.create(null) as Record<string, unknown>, {
     get(_target, name) {
       if (typeof name !== "string") return undefined;
       if (name in component) return component[name];
-      const value = process[name];
+      const value = feature[name];
       return typeof value === "function" ? undefined : value;
     },
     ownKeys() {
       return [
         ...new Set([
-          ...Object.keys(process).filter((name) => typeof process[name] !== "function"),
+          ...Object.keys(feature).filter((name) => typeof feature[name] !== "function"),
           ...Object.keys(component),
         ]),
       ];
     },
     getOwnPropertyDescriptor(_target, name) {
       return typeof name === "string" &&
-        (name in component || (name in process && typeof process[name] !== "function"))
+        (name in component || (name in feature && typeof feature[name] !== "function"))
         ? { enumerable: true, configurable: true }
         : undefined;
     },
@@ -806,17 +748,17 @@ function normalizeRuntimeComponents<Contract extends ApplicationContract>(
 function createProgramUI(
   application: RuntimeApplication,
   program: string,
-  resolveCapabilities: (address: ProgramAddress) => Readonly<Record<string, unknown>>,
+  resolveCapabilities: (address: ProgramContributionAddress) => Readonly<Record<string, unknown>>,
   hotState?: HotRenderState,
 ): {
-  surface: Readonly<Record<string, unknown>>;
+  api: Readonly<Record<string, unknown>>;
   features: Record<string, Readonly<Record<string, unknown>>>;
-  surfaces: Record<string, Readonly<Record<string, unknown>>>;
+  apis: Record<string, Readonly<Record<string, unknown>>>;
   capabilities: Record<string, Readonly<Record<string, unknown>>>;
   captureHotState(): HotRenderState;
   dispose(): Promise<void>;
 } {
-  const surfaces: Record<string, Readonly<Record<string, unknown>>> = Object.create(null);
+  const apis: Record<string, Readonly<Record<string, unknown>>> = Object.create(null);
   const instances: ProgramContributionInstance[] = [];
   const providedCapabilities: Record<string, unknown> = Object.create(null);
   const uiInstances = new Map<string, ProgramContributionInstance["ui"]>();
@@ -836,7 +778,7 @@ function createProgramUI(
     const definition = feature.programs?.[program];
     if (!definition) {
       const empty = Object.freeze(Object.create(null) as Record<string, unknown>);
-      surfaces[path] = empty;
+      apis[path] = empty;
       return empty;
     }
 
@@ -858,9 +800,9 @@ function createProgramUI(
       }
       providedCapabilities[name] = capability;
     }
-    const surface = instance.ui?.surface ?? Object.freeze({});
-    surfaces[path] = surface;
-    return surface;
+    const api = instance.ui?.api ?? Object.freeze({});
+    apis[path] = api;
+    return api;
   };
 
   try {
@@ -876,15 +818,15 @@ function createProgramUI(
 
   const root = collectProgramRoots(application, program);
   const owner = componentOwner(root);
-  const surface = owner ? (surfaces[owner] ?? Object.freeze({})) : Object.freeze({});
+  const api = owner ? (apis[owner] ?? Object.freeze({})) : Object.freeze({});
 
   let disposed = false;
   return {
-    surface,
+    api,
     features: Object.fromEntries(
-      Object.keys(application.features ?? {}).map((name) => [name, surfaces[name] ?? {}]),
+      Object.keys(application.features ?? {}).map((name) => [name, apis[name] ?? {}]),
     ),
-    surfaces,
+    apis,
     capabilities,
     captureHotState() {
       const state = hotState ?? {};
@@ -966,27 +908,10 @@ function firstPresentation<Contract extends ApplicationContract>(
   return Object.keys(presentations.presentations)[0] ?? "default";
 }
 
-function presentationSupportsTheme(
-  authored: Readonly<Record<string, unknown>>,
-  presentation: string,
-  theme: string,
-): boolean {
-  const registration = record(authored[presentation]);
-  const themes = record(registration.themes);
-  return typeof registration.presentation === "function" && theme in themes;
-}
-
-function validatePresentationRegistrations(
-  registrations: Readonly<Record<string, PresentationRegistrationContract>>,
-): void {
-  for (const [name, value] of Object.entries(registrations)) {
-    const registration = record(value);
-    if (typeof registration.presentation !== "function") {
-      throw new TypeError(`Presentation "${name}" does not define a Presentation program.`);
-    }
-    const themes = record(registration.themes);
-    if (!("default" in themes)) {
-      throw new TypeError(`Presentation "${name}" does not define a default Theme.`);
+function validatePresentations(presentations: Readonly<Record<string, object>>): void {
+  for (const [name, value] of Object.entries(presentations)) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new TypeError(`Presentation "${name}" must be a definition object.`);
     }
   }
 }
@@ -996,15 +921,6 @@ function updateRootPresentation(presentation: string) {
   const root = document.documentElement;
   if (!root) return;
   root.dataset.presentation = presentation;
-}
-
-function updateRootTheme(theme: string) {
-  if (typeof document === "undefined") return;
-  if (!theme || theme === "default") {
-    delete document.documentElement.dataset.theme;
-    return;
-  }
-  document.documentElement.dataset.theme = String(theme);
 }
 
 function capitalize(value: string): string {
