@@ -141,7 +141,9 @@ function paint(result: CSSDeclarations, value: WebPaint | undefined): void {
     result[background.includes("gradient(") ? "background-image" : "background-color"] = background;
   }
   if (value.opacity !== undefined) result.opacity = number(value.opacity, 0, 1);
-  if (value.stroke) {
+  if (value.stroke === "none") {
+    result.border = "none";
+  } else if (value.stroke) {
     result.border = `${length(value.stroke.width)} ${value.stroke.style ?? "solid"} ${color(value.stroke.color)}`;
   }
   if (value.radius !== undefined) {

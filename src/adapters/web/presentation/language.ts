@@ -1,5 +1,7 @@
 import type { ComponentOwner } from "../../../core/component";
 import type { Presentation as CorePresentation } from "../../../core/presentation";
+import type { IntrinsicElements } from "../component/elements";
+import type { WebMotion } from "./motion";
 
 type Empty = Record<never, never>;
 
@@ -149,11 +151,13 @@ export type WebFill =
       }>;
     }>;
 
-export type WebStroke = Readonly<{
-  width: WebLength;
-  style?: "solid" | "dashed" | "dotted" | "double";
-  color: WebColor;
-}>;
+export type WebStroke =
+  | "none"
+  | Readonly<{
+      width: WebLength;
+      style?: "solid" | "dashed" | "dotted" | "double";
+      color: WebColor;
+    }>;
 
 export type WebShadow = Readonly<{
   x?: WebLength;
@@ -291,8 +295,69 @@ export type WebStyle = WebStyleFragment &
     rules?: readonly WebStyleRule[];
   }>;
 
+/** An encoded audio asset interpreted and cached by the web adapter. */
+export type WebAudioAsset = Readonly<{
+  source: string;
+  gain?: number;
+  playbackRate?: number;
+}>;
+
+export type WebAudioAssetOptions = Readonly<{
+  gain?: number;
+  playbackRate?: number;
+}>;
+
+/** Creates typed asset meaning without allocating a native audio resource. */
+export function createAudioAsset(
+  source: string | URL,
+  options: WebAudioAssetOptions = {},
+): WebAudioAsset {
+  const normalized = String(source);
+  if (!normalized) throw new TypeError("A web audio asset source is required.");
+  if (options.gain !== undefined && (!Number.isFinite(options.gain) || options.gain < 0)) {
+    throw new TypeError("A web audio asset gain must be a finite non-negative number.");
+  }
+  if (
+    options.playbackRate !== undefined &&
+    (!Number.isFinite(options.playbackRate) || options.playbackRate <= 0)
+  ) {
+    throw new TypeError("A web audio asset playbackRate must be a finite positive number.");
+  }
+  return Object.freeze({ source: normalized, ...options });
+}
+
+/** An image asset interpreted by the web adapter. */
+export type WebImageAsset = Readonly<{
+  source: string;
+}>;
+
+/** Creates typed image meaning without creating or loading a native image. */
+export function createImageAsset(source: string | URL): WebImageAsset {
+  const normalized = String(source);
+  if (!normalized) throw new TypeError("A web image asset source is required.");
+  return Object.freeze({ source: normalized });
+}
+
+/** Passive sensory feedback observed by the web Presentation adapter. */
+export type WebFeedback = Readonly<{
+  activate?: Readonly<{ audio?: WebAudioAsset }>;
+}>;
+
+export type WebElementPresentation = WebStyle &
+  Readonly<{
+    image?: WebImageAsset;
+    feedback?: WebFeedback;
+    motion?: WebMotion;
+  }>;
+
+type WebPrimitivePresentation<Primitive extends keyof IntrinsicElements> = Primitive extends "img"
+  ? WebElementPresentation
+  : Omit<WebElementPresentation, "image">;
+
 export type WebPresentationLanguage = {
-  readonly Declarations: Readonly<Record<string, WebStyle>>;
+  readonly Declarations: Readonly<{
+    [Primitive in keyof IntrinsicElements]: WebPrimitivePresentation<Primitive>;
+  }>;
 };
 
 /** A parameterized web Presentation. Parameters are ordinary typed product data. */

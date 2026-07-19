@@ -23,6 +23,8 @@
     "${configDir}/src/**/*.ts",
     "${configDir}/src/**/*.tsx",
     "${configDir}/src/**/*.d.ts",
-    "${configDir}/scripts/**/*.ts"
+    "${configDir}/scripts/**/*.ts",
+    "${configDir}/examples/**/*.ts",
+    "${configDir}/examples/**/*.tsx"
   ]
 }

@@ -19,7 +19,7 @@ export type PresentationTarget<Name extends string = string, Owner = unknown> = 
 
 /** A platform's immutable Presentation declarations, indexed by primitive name. */
 export type PresentationLanguage = {
-  readonly Declarations: Readonly<Record<string, object>>;
+  readonly Declarations: Readonly<object>;
 };
 
 type PresentationElementDeclaration<

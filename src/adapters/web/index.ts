@@ -5,7 +5,12 @@ import { createWebUIAdapter, type WebUIAdapter } from "./ui-adapter";
 
 export * from "./public";
 export { createWebPresentationAdapter } from "./presentation/adapter";
-export type { WebPresentationAdapterOptions, WebStyleHost } from "./presentation/adapter";
+export type {
+  WebFeedbackHost,
+  WebImageHost,
+  WebPresentationAdapterOptions,
+  WebStyleHost,
+} from "./presentation/adapter";
 export { compileWebStyle } from "./presentation/compiler";
 export type { CompiledWebStyle } from "./presentation/compiler";
 export { createWebUIAdapter } from "./ui-adapter";

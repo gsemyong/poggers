@@ -55,10 +55,12 @@
   },
   "scripts": {
     "build": "nub scripts/build.ts",
+    "benchmark": "nub scripts/benchmark.ts",
+    "dev:example": "nub src/cli.ts dev --dir examples/web-presentation",
     "typecheck": "tsc --noEmit",
     "fmt": "oxfmt",
     "fmt:check": "oxfmt --check",
-    "lint": "oxlint src scripts vitest.config.ts",
+    "lint": "oxlint src scripts examples vitest.config.ts",
     "test": "vitest run",
     "check": "nub run typecheck && nub run lint && nub run fmt:check && nub run test"
   },

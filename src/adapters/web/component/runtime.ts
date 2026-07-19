@@ -1490,7 +1490,7 @@ function applyProp(element: HTMLElement, name: string, value: unknown) {
     }
     if (attributeName === name && name in element) {
       try {
-        Reflect.set(element, name, next);
+        if (!Object.is(Reflect.get(element, name), next)) Reflect.set(element, name, next);
         return;
       } catch {}
     }
@@ -1515,23 +1515,37 @@ function eventNameForProp(name: string): string {
 }
 
 function bindStyle(element: HTMLElement, value: unknown) {
+  let previousKeys = new Set<string>();
   bindValue((next) => {
     if (typeof next === "string") {
-      element.setAttribute("style", next);
+      setAttributeIfChanged(element, "style", next);
+      previousKeys.clear();
       return;
     }
     if (!next || typeof next !== "object") {
-      element.removeAttribute("style");
+      if (element.hasAttribute("style")) element.removeAttribute("style");
+      previousKeys.clear();
       return;
     }
-    for (const [key, styleValue] of Object.entries(next as Record<string, unknown>)) {
+    const entries = Object.entries(next as Record<string, unknown>);
+    const keys = new Set(entries.map(([key]) => key));
+    for (const key of previousKeys) {
+      if (keys.has(key)) continue;
+      if (key.startsWith("--")) element.style.removeProperty(key);
+      else Reflect.set(element.style, key, "");
+    }
+    for (const [key, styleValue] of entries) {
       if (key.startsWith("--")) {
-        if (styleValue == null) element.style.removeProperty(key);
-        else element.style.setProperty(key, String(styleValue));
+        const resolved = styleValue == null ? "" : String(styleValue);
+        if (element.style.getPropertyValue(key) === resolved) continue;
+        if (!resolved) element.style.removeProperty(key);
+        else element.style.setProperty(key, resolved);
       } else {
-        Reflect.set(element.style, key, styleValue == null ? "" : String(styleValue));
+        const resolved = styleValue == null ? "" : String(styleValue);
+        if (Reflect.get(element.style, key) !== resolved) Reflect.set(element.style, key, resolved);
       }
     }
+    previousKeys = keys;
   }, value);
 }
 
@@ -1961,7 +1975,14 @@ function dynamicNodes(readChild: () => Child): Node[] {
   let rendered: Node[] = [];
 
   blockEffect(() => {
-    const nextNodes = toNodes(readChild());
+    const resolved = resolveChild(readChild());
+    const text = primitiveText(resolved);
+    if (text !== undefined && rendered.length === 1 && rendered[0]?.nodeType === Node.TEXT_NODE) {
+      const current = rendered[0] as Text;
+      if (current.data !== text) current.data = text;
+      return;
+    }
+    const nextNodes = text === undefined ? toNodes(resolved) : [document.createTextNode(text)];
     replaceBetween(start, end, nextNodes);
     rendered = nextNodes;
   });
@@ -1972,6 +1993,10 @@ function dynamicNodes(readChild: () => Child): Node[] {
   });
 
   return [start, ...rendered, end];
+}
+
+function primitiveText(value: Child): string | undefined {
+  return typeof value === "string" || typeof value === "number" ? String(value) : undefined;
 }
 
 function replaceBetween(start: Node, end: Node, nodes: Node[]) {

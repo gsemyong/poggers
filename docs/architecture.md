@@ -135,7 +135,9 @@ Core does not define themes, tokens, color, motion, audio, haptics, or layout.
 A Presentation receives an arbitrary parameter object, so one definition can
 produce several themes or configurations. The adapter decides which
 declarations exist and how they map to native APIs. Presentation cannot invoke
-actions or mutate behavior.
+actions or mutate behavior. Adapter-defined passive feedback may observe a
+semantic interaction such as activation, but it cannot cancel, reorder, or
+replace the Component action.
 
 ## Realization
 
@@ -165,12 +167,72 @@ types but cannot access adapter implementations.
 
 The shipped web adapter owns browser Environments, DOM JSX, direct fine-grained
 updates, Vite development and production, and the web Presentation language.
-Its first Presentation layer is deliberately static and dependency-free: a
-canonical declaration compiles to deterministic native CSS, repeated output is
-deduplicated, and one shared stylesheet is owned by live UI sessions. Motion,
-font loading, generated decoration, and reactive continuous values are not part
-of this baseline. Unsupported web Environments receive a precise diagnostic
-rather than a partial realization.
+Alien Signals is the single reactive graph. Fixed root state uses direct signal
+cells; nested records and arrays create property cells lazily. Actions are the
+batch boundary, primitive text retains its native Text node, and native writes
+are equality-guarded.
+
+Canonical web style declarations compile to deterministic CSS classes.
+Previously realized classes remain warm for the live document, multiple
+sessions share one microtask-coordinated stylesheet flush, and unchanged output
+does not rewrite the stylesheet. The same language can substitute typed image
+assets on semantic `img` Elements and declare passive `feedback`.
+`createImageAsset` and `createAudioAsset` create inert parameter data; the
+adapter owns native source mutation, delegated activation observation, one lazy
+AudioContext per document, encoded/decoded asset caches, playback nodes, and
+disposal. Structure retains accessibility and behavior. Authored Presentation
+declarations contain no event callbacks.
+
+Web motion follows the same boundary. Components own semantic state, actions,
+native listeners, gesture samples, and accessibility. Presentation supplies
+only desired visual values and immutable spring parameters:
+
+```ts
+Panel: {
+  motion: {
+    transform: {
+      value: { translate: { y: state.dragOffset } },
+      velocity: { translate: { y: state.dragVelocity } },
+      transition: state.dragging ? undefined : parameters.motion.return,
+    },
+    layout: { identity: "sheet-panel", transition: parameters.motion.layout },
+    presence: {
+      enter: { from: { opacity: 0 }, transition: parameters.motion.enter },
+      exit: { to: { opacity: 0 }, transition: parameters.motion.exit },
+    },
+  },
+}
+```
+
+An absent transition is a direct native assignment, which is the only path for
+pointer-coupled values. A spring is one analytical position-and-velocity
+trajectory. The adapter renders it with sampled Web Animations when available
+and one shared frame scheduler otherwise. Interruption samples the renderer's
+actual timeline and starts the replacement trajectory from that value and
+velocity. Static CSS and frame-rate values have disjoint ownership.
+
+Layout uses one document-scoped FLIP transaction. It snapshots the canonical
+pre-update visual boxes, lets every fine-grained Structure and Presentation
+mutation settle, realizes cold CSS before measurement, reads final boxes
+together, and then writes native transforms. This avoids measuring either an
+unstyled variant or a partially updated text tree. Presence integrates with the
+retained Structure lifecycle, so exit completion, immediate reversal, focus,
+inertness, and cleanup have one owner.
+
+View Transitions are not an authored motion mode. Snapshot-to-live handoff is a
+valid private optimization only for adapter-owned, passive, bounded captures
+whose intermediate pose can be materialized. Hit-testable and continuously
+retargetable surfaces remain live DOM. Ordinary wrapping uses browser layout and
+container FLIP; predictive line animation would be a private text driver, not a
+second public motion language.
+
+Development performs one exhaustive semantic compilation at startup. A
+Presentation edit is classified from semantic source ownership plus Vite's
+module graph, patches the live Presentation definition, and does not build or
+evaluate a temporary server bundle. Full updates retain the incremental
+TypeScript program, validate the changed source, and use transactional
+candidate replacement with compatible state snapshots. Unsupported web
+Environments receive a precise diagnostic rather than a partial realization.
 
 Product code imports the browser-safe web language from `@poggers/kit/web` and
 its Presentation language from `@poggers/kit/web/presentation`. Concrete
@@ -214,16 +276,20 @@ map and contains no per-adapter branch.
 
 Files are split only for an independent contract, translation, lifecycle, or
 substantial testable engine. `template/` is the canonical generated
-application; this repository maintains no example-application residue.
+application. `examples/` contains focused executable pressure cases and does
+not replace the template.
 
 ## Verification
 
 - TypeScript checks public inference and compile-only negative contracts.
 - Vitest checks focused core invariants, generic adapter selection, concrete
   adapter translation and lifecycle, and the canonical generated application.
-- fast-check is reserved for sequence-heavy invariants where shrinking adds
-  evidence, such as resource ownership and deterministic IR.
+- fast-check covers sequence-heavy invariants where shrinking adds evidence,
+  including fine-grained state mutation and Presentation commit traces.
 - Oxlint and Oxfmt enforce one source convention.
 - The package build emits declarations and runtime entries from public exports.
 - Real-browser acceptance verifies development, interaction, Presentation,
   replacement, cleanup, and production equivalence.
+- The opt-in benchmark reports p50/p95 work for state, 10,000-leaf updates,
+  propagation, and cold/warm Presentation realization; wall-clock timings do
+  not make correctness tests flaky.

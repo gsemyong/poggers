@@ -32,15 +32,30 @@ those two folders without changing the architecture.
 
 ## Develop The Kit
 
-This repository contains the framework package and its canonical template. It
-does not maintain separate example applications.
+This repository contains the framework package, its canonical template, and
+focused examples that pressure-test individual adapter surfaces.
 
 ```sh
 mise install
 nub install
 nub run check
 nub run build
+nub run benchmark
 ```
+
+Run the web Presentation example with:
+
+```sh
+nub run dev:example
+```
+
+The example demonstrates direct fine-grained state updates, semantic
+Presentation HMR with preserved DOM and state, container-aware styling, and a
+Presentation-parameterized control sound and icon. Switching the accent changes
+both assets without changing Structure or remounting its native Elements. Its
+motion sheet demonstrates direct drag values, velocity-aware spring release,
+interruptible presence, coordinated wrapping/layout changes, shared layout
+identity, reduced motion, and native Web Animation realization.
 
 See [the architecture document](docs/architecture.md) for the product model,
 adapter boundaries, repository organization, and testing convention.

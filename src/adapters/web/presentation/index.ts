@@ -1,12 +1,19 @@
 export type { WebUI } from "../platform";
+export { createAudioAsset, createImageAsset } from "./language";
+export { createSpring } from "./motion";
 export type {
   WebAffordance,
+  WebAudioAsset,
+  WebAudioAssetOptions,
   WebColor,
   WebCondition,
+  WebElementPresentation,
+  WebFeedback,
   WebFill,
   WebFontFamily,
   WebGradientStop,
   WebGridTrack,
+  WebImageAsset,
   WebLayout,
   WebLayoutModel,
   WebLength,
@@ -25,3 +32,16 @@ export type {
   WebText,
   WebTransform,
 } from "./language";
+export type {
+  WebLayoutMotion,
+  WebMotion,
+  WebMotionFrame,
+  WebMotionTransform,
+  WebMotionTransformVelocity,
+  WebMotionValue,
+  WebPresenceMotion,
+  WebPerceivedSpring,
+  WebPhysicalSpring,
+  WebSpring,
+  WebSpringOptions,
+} from "./motion";

@@ -1,5 +1,5 @@
 import { statSync } from "node:fs";
-import { dirname, relative, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 
 import * as ts from "@typescript/typescript6";
 
@@ -34,6 +34,15 @@ export type ApplicationPaths = Readonly<{
   application: string;
 }>;
 
+export type ApplicationCompilation = Readonly<{
+  ir: ApplicationIR;
+  presentationSources: ReadonlySet<string>;
+}>;
+
+export type ApplicationCompiler = Readonly<{
+  compile(changedFile?: string): ApplicationCompilation;
+}>;
+
 /** Resolves the one conventional Application entry without executing it. */
 export function resolveApplication(directory: string): ApplicationPaths {
   const root = resolve(directory);
@@ -50,21 +59,51 @@ export function resolveApplication(directory: string): ApplicationPaths {
 }
 
 export function compileApplication(entry: string): ApplicationIR {
+  return compileApplicationProgram(entry).compilation.ir;
+}
+
+/** Retains TypeScript's semantic graph across development compilations. */
+export function createApplicationCompiler(entry: string): ApplicationCompiler {
+  let previous: ts.Program | undefined;
+  return {
+    compile(changedFile) {
+      const result = compileApplicationProgram(entry, previous, changedFile);
+      previous = result.program;
+      return result.compilation;
+    },
+  };
+}
+
+function compileApplicationProgram(
+  entry: string,
+  previous?: ts.Program,
+  changedFile?: string,
+): Readonly<{ compilation: ApplicationCompilation; program: ts.Program }> {
   const file = resolve(entry);
   const configuration = ts.findConfigFile(dirname(file), ts.sys.fileExists, "tsconfig.json");
   const configured = configuration ? readCompilerOptions(configuration) : undefined;
-  const program = ts.createProgram([file], {
-    ...configured,
-    allowImportingTsExtensions: true,
-    jsx: ts.JsxEmit.Preserve,
-    module: ts.ModuleKind.Preserve,
-    moduleResolution: ts.ModuleResolutionKind.Bundler,
-    noEmit: true,
-    skipLibCheck: true,
-    strict: true,
-    target: ts.ScriptTarget.ESNext,
+  const program = ts.createProgram({
+    rootNames: [file],
+    options: {
+      ...configured,
+      allowImportingTsExtensions: true,
+      jsx: ts.JsxEmit.Preserve,
+      module: ts.ModuleKind.Preserve,
+      moduleResolution: ts.ModuleResolutionKind.Bundler,
+      noEmit: true,
+      skipLibCheck: true,
+      strict: true,
+      target: ts.ScriptTarget.ESNext,
+    },
+    oldProgram: previous,
   });
-  const diagnostics = ts.getPreEmitDiagnostics(program);
+  const changedSource = changedFile ? program.getSourceFile(resolve(changedFile)) : undefined;
+  const diagnostics = changedSource
+    ? [
+        ...program.getSyntacticDiagnostics(changedSource),
+        ...program.getSemanticDiagnostics(changedSource),
+      ]
+    : ts.getPreEmitDiagnostics(program);
   const first = diagnostics.find(
     (diagnostic) => diagnostic.category === ts.DiagnosticCategory.Error,
   );
@@ -108,7 +147,8 @@ export function compileApplication(entry: string): ApplicationIR {
 
   const platforms = [...new Set(programs.map(({ environment }) => environment.platform))].sort();
 
-  return normalizeSourceFiles(
+  const root = dirname(file);
+  const ir = normalizeSourceFiles(
     {
       version: POGGERS_IR_VERSION,
       application: {
@@ -120,8 +160,100 @@ export function compileApplication(entry: string): ApplicationIR {
       features: features.sort(byId),
       programs: programs.sort(byId),
     },
-    configuration ? dirname(configuration) : dirname(file),
+    configuration ? dirname(configuration) : root,
   );
+  return {
+    compilation: {
+      ir,
+      presentationSources: presentationImplementationSources(
+        program,
+        checker,
+        applicationObject,
+        root,
+      ),
+    },
+    program,
+  };
+}
+
+function presentationImplementationSources(
+  program: ts.Program,
+  checker: ts.TypeChecker,
+  application: ts.ObjectLiteralExpression,
+  root: string,
+): ReadonlySet<string> {
+  const presentations = objectExpression(
+    checker,
+    objectMember(checker, application, "presentations"),
+  );
+  if (!presentations) return new Set();
+  const sources = new Set<string>();
+  const pending: ts.SourceFile[] = [];
+
+  for (const property of presentations.properties) {
+    const expression = propertyExpression(property);
+    if (!expression) continue;
+    for (const declaration of expressionDeclarations(checker, expression)) {
+      const source = declaration.getSourceFile();
+      if (source.isDeclarationFile || !inside(root, source.fileName)) continue;
+      pending.push(source);
+    }
+  }
+
+  while (pending.length) {
+    const source = pending.pop()!;
+    const file = resolve(source.fileName);
+    if (sources.has(file)) continue;
+    sources.add(file);
+    for (const statement of source.statements) {
+      if (!ts.isImportDeclaration(statement) || statement.importClause?.isTypeOnly) continue;
+      if (
+        statement.importClause?.namedBindings &&
+        ts.isNamedImports(statement.importClause.namedBindings) &&
+        statement.importClause.namedBindings.elements.every((element) => element.isTypeOnly)
+      ) {
+        continue;
+      }
+      const symbol = checker.getSymbolAtLocation(statement.moduleSpecifier);
+      for (const declaration of symbol?.declarations ?? []) {
+        const imported = declaration.getSourceFile();
+        if (!imported.isDeclarationFile && inside(root, imported.fileName)) pending.push(imported);
+      }
+    }
+  }
+
+  // Keep only files TypeScript actually included in this Program.
+  const included = new Set(program.getSourceFiles().map((source) => resolve(source.fileName)));
+  return new Set([...sources].filter((source) => included.has(source)));
+}
+
+function propertyExpression(property: ts.ObjectLiteralElementLike): ts.Expression | undefined {
+  if (ts.isPropertyAssignment(property)) return property.initializer;
+  if (ts.isShorthandPropertyAssignment(property)) return property.name;
+  return undefined;
+}
+
+function expressionDeclarations(
+  checker: ts.TypeChecker,
+  expression: ts.Expression,
+): readonly ts.Node[] {
+  const unwrapped = unwrapExpression(expression);
+  if (!ts.isIdentifier(unwrapped) && !ts.isPropertyAccessExpression(unwrapped)) {
+    return [unwrapped];
+  }
+  let symbol =
+    ts.isIdentifier(unwrapped) && ts.isShorthandPropertyAssignment(unwrapped.parent)
+      ? checker.getShorthandAssignmentValueSymbol(unwrapped.parent)
+      : checker.getSymbolAtLocation(
+          ts.isPropertyAccessExpression(unwrapped) ? unwrapped.name : unwrapped,
+        );
+  if (symbol && symbol.flags & ts.SymbolFlags.Alias) symbol = checker.getAliasedSymbol(symbol);
+  return symbol?.declarations ?? [unwrapped];
+}
+
+function inside(root: string, file: string): boolean {
+  const path = relative(root, resolve(file));
+  return path === "" || (!path.startsWith("..") && !isAbsolute(path));
 }
 
 function extractFeatures(

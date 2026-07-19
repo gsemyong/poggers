@@ -2,6 +2,7 @@ import { endBatch, signal as createSignal, startBatch } from "alien-signals";
 
 import type { CapabilityResolver, ProgramContributionAddress } from "../contracts/capability";
 import type { Application, ApplicationContract } from "./application";
+import { createReactiveState } from "./state";
 
 type ResourceCleanup = () => void | Promise<void>;
 type ResourceIterator = AsyncIterator<unknown>;
@@ -86,7 +87,7 @@ export function createUIContributionInstance(
       Object.hasOwn(options.initialState ?? {}, key) ? options.initialState![key] : value,
     ]),
   );
-  const state = createReactiveRecord(initialState, () => disposed);
+  const state = createReactiveState(initialState, createSignal, () => !disposed);
   const capabilities = options.capabilities ?? {};
   const features = options.features ?? {};
   const ownsScope = !options.scope;
@@ -97,7 +98,9 @@ export function createUIContributionInstance(
   for (const [actionName, implementation] of Object.entries(definition.actions ?? {})) {
     actions[actionName] = (...args: readonly unknown[]) => {
       if (disposed) throw new Error(`UI contribution "${name}" is disposed.`);
-      return scope.action(() => implementation({ capabilities, features, state }, ...args));
+      return scope.action(() =>
+        implementation({ capabilities, features, state: state.mutable }, ...args),
+      );
     };
   }
 
@@ -108,17 +111,17 @@ export function createUIContributionInstance(
     }
     Object.defineProperty(api, stateName, {
       enumerable: true,
-      get: () => state[stateName],
+      get: state.cells[stateName],
     });
   }
   Object.assign(api, actions);
 
   return {
     api,
-    state,
+    state: state.read,
     actions,
     snapshot() {
-      return Object.fromEntries(Object.keys(initialState).map((key) => [key, state[key]]));
+      return state.snapshot();
     },
     async dispose() {
       disposed = true;
@@ -457,36 +460,6 @@ export async function startProcess<Contract extends ApplicationContract>(
   };
 }
 
-function createReactiveRecord(
-  initial: Readonly<Record<string, unknown>>,
-  isDisposed: () => boolean,
-): Record<string, unknown> {
-  const values = new Map(
-    Object.entries(cloneRecord(initial)).map(([name, value]) => [name, createSignal(value)]),
-  );
-  return new Proxy(Object.create(null) as Record<string, unknown>, {
-    get(_target, name) {
-      return typeof name === "string" ? values.get(name)?.() : undefined;
-    },
-    set(_target, name, value) {
-      if (typeof name !== "string") return false;
-      if (isDisposed()) return true;
-      const current = values.get(name);
-      if (!current) throw new Error(`Unknown UI state "${name}".`);
-      current(value);
-      return true;
-    },
-    ownKeys() {
-      return [...values.keys()];
-    },
-    getOwnPropertyDescriptor(_target, name) {
-      return typeof name === "string" && values.has(name)
-        ? { configurable: true, enumerable: true }
-        : undefined;
-    },
-  });
-}
-
 function hasRuntimeUI(definition: RuntimeProgramDefinition): boolean {
   return Boolean(
     definition.state || definition.actions || definition.components || definition.root,
@@ -579,14 +552,6 @@ function qualify(parent: string, name: string): string {
 
 function formatAddress(address: ProgramContributionAddress): string {
   return `Program "${address.program}" Feature "${address.feature}"`;
-}
-
-function cloneRecord(value: Readonly<Record<string, unknown>>): Record<string, unknown> {
-  try {
-    return structuredClone(value);
-  } catch {
-    return { ...value };
-  }
 }
 
 function isPromiseLike(value: unknown): value is PromiseLike<unknown> {

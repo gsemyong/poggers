@@ -1,5 +1,5 @@
 import { accessSync, rmSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -20,8 +20,9 @@ import {
   type ComponentIR,
 } from "../../core/compiler/ir";
 import {
-  compileApplication,
+  createApplicationCompiler,
   resolveApplication,
+  type ApplicationCompiler,
   type ApplicationPaths,
 } from "../../core/compiler/source";
 import { createHotReplacementManifest } from "../../core/development";
@@ -36,6 +37,7 @@ type PreparedApplication = Readonly<{
   candidate: string;
   entry: string;
   ir: ApplicationIR;
+  presentationSources: ReadonlySet<string>;
   updateKind: "full" | "presentation";
 }>;
 
@@ -93,8 +95,10 @@ export async function buildApplication(options: {
 }): Promise<string> {
   const paths = resolveApplication(options.directory);
   const outdir = resolve(paths.directory, options.outdir);
-  const work = await mkdtemp(
-    resolve(tmpdir(), options.development ? "poggers-web-dev-build-" : "poggers-web-build-"),
+  const work = await realpath(
+    await mkdtemp(
+      resolve(tmpdir(), options.development ? "poggers-web-dev-build-" : "poggers-web-build-"),
+    ),
   );
   await rm(outdir, { recursive: true, force: true });
   await mkdir(outdir, { recursive: true });
@@ -134,14 +138,15 @@ export async function runApplication(options: {
   port?: number;
 }): Promise<DevelopmentServer> {
   const paths = resolveApplication(options.directory);
-  const work = await mkdtemp(resolve(tmpdir(), "poggers-web-dev-"));
-  await prepareApplication(paths, work, true);
+  const work = await realpath(await mkdtemp(resolve(tmpdir(), "poggers-web-dev-")));
+  const compiler = createApplicationCompiler(paths.application);
+  const prepared = await prepareApplication(paths, work, true, "full", compiler);
   await writeFile(resolve(work, "index.html"), htmlSource("/browser.generated.ts"));
 
   const server = await createServer({
     ...viteConfiguration(paths, true),
     appType: "spa",
-    plugins: [visualContractPlugin(paths, work), ...vitePlugins(paths)],
+    plugins: [visualContractPlugin(paths, work, compiler, prepared), ...vitePlugins(paths)],
     root: work,
     server: {
       fs: { allow: [work, paths.directory, resolve(import.meta.dirname, "../../..")] },
@@ -151,6 +156,7 @@ export async function runApplication(options: {
     },
   });
   await server.listen();
+  await server.watcher.unwatch([prepared.candidate, prepared.entry]);
   const address = server.httpServer?.address();
   const port = typeof address === "object" && address ? address.port : (options.port ?? 3000);
   const cleanupOnExit = () => rmSync(work, { recursive: true, force: true });
@@ -175,16 +181,25 @@ async function prepareApplication(
   work: string,
   development: boolean,
   updateKind: "full" | "presentation" = "full",
+  compiler: ApplicationCompiler = createApplicationCompiler(paths.application),
+  previous?: PreparedApplication,
+  changedFile?: string,
 ): Promise<PreparedApplication> {
   await mkdir(work, { recursive: true });
-  const ir = compileApplication(paths.application);
+  const compilation =
+    updateKind === "presentation" && previous
+      ? { ir: previous.ir, presentationSources: previous.presentationSources }
+      : compiler.compile(changedFile);
+  const { ir } = compilation;
   const contract = webApplicationContract(ir);
-  const application = await loadApplication(paths, work);
-  validateUIProgramRoot(application, contract.uiProgram);
-  const authored = record(application.presentations);
-  for (const presentation of ir.application.presentations) {
-    if (!authored[presentation]) {
-      throw new Error(`Application is missing Presentation "${presentation}".`);
+  if (!development) {
+    const application = await loadApplication(paths, work);
+    validateUIProgramRoot(application, contract.uiProgram);
+    const authored = record(application.presentations);
+    for (const presentation of ir.application.presentations) {
+      if (!authored[presentation]) {
+        throw new Error(`Application is missing Presentation "${presentation}".`);
+      }
     }
   }
 
@@ -197,7 +212,6 @@ async function prepareApplication(
       program: contract.uiProgram,
       components: contract.components,
       hotManifest: createHotReplacementManifest(ir),
-      updateKind,
     }),
   );
   const entry = resolve(work, "browser.generated.ts");
@@ -209,7 +223,13 @@ async function prepareApplication(
       runtime: resolve(import.meta.dirname, `./ui-adapter${moduleExtension()}`),
     }),
   );
-  return { candidate, entry, ir, updateKind };
+  return {
+    candidate,
+    entry,
+    ir,
+    presentationSources: compilation.presentationSources,
+    updateKind,
+  };
 }
 
 async function writeIfChanged(path: string, contents: string): Promise<boolean> {
@@ -299,11 +319,17 @@ function sourceAliasPlugin(source: string): Plugin {
   };
 }
 
-function visualContractPlugin(paths: ApplicationPaths, work: string): Plugin {
+function visualContractPlugin(
+  paths: ApplicationPaths,
+  work: string,
+  compiler: ApplicationCompiler,
+  initial: PreparedApplication,
+): Plugin {
   const generated = [
     resolve(work, "application.generated.ts"),
     resolve(work, "browser.generated.ts"),
   ];
+  let prepared = initial;
   let updates = Promise.resolve();
   const refresh = async (context: HmrContext): Promise<ModuleNode[] | undefined> => {
     if (generated.includes(context.file)) return [];
@@ -311,12 +337,22 @@ function visualContractPlugin(paths: ApplicationPaths, work: string): Plugin {
     let modules: ModuleNode[] = [];
     updates = updates.then(async () => {
       try {
-        const presentationRoot = `${resolve(paths.source, "presentations")}/`;
-        const prepared = await prepareApplication(
+        const started = performance.now();
+        const updateKind = presentationUpdate(context, prepared.presentationSources)
+          ? "presentation"
+          : "full";
+        prepared = await prepareApplication(
           paths,
           work,
           true,
-          context.file.startsWith(presentationRoot) ? "presentation" : "full",
+          updateKind,
+          compiler,
+          prepared,
+          context.file,
+        );
+        context.server.config.logger.info(
+          `[poggers] ${updateKind} semantic update ${Math.round((performance.now() - started) * 10) / 10}ms`,
+          { timestamp: true },
         );
         const candidateModules = [
           ...(context.server.moduleGraph.getModulesByFile(prepared.candidate) ?? []),
@@ -324,7 +360,14 @@ function visualContractPlugin(paths: ApplicationPaths, work: string): Plugin {
         for (const module of candidateModules) {
           context.server.moduleGraph.invalidateModule(module);
         }
-        modules = [...new Set([...context.modules, ...candidateModules])];
+        context.server.ws.send({
+          type: "custom",
+          event: "poggers:update-kind",
+          data: { kind: updateKind },
+        });
+        // The browser entry accepts the generated candidate, not arbitrary authored leaves.
+        // Returning that boundary lets Vite replace Presentation modules without reloading.
+        modules = candidateModules;
       } catch (error) {
         context.server.config.logger.error(error instanceof Error ? error.message : String(error));
         modules = [];
@@ -339,6 +382,23 @@ function visualContractPlugin(paths: ApplicationPaths, work: string): Plugin {
       return refresh(context);
     },
   };
+}
+
+function presentationUpdate(
+  context: HmrContext,
+  presentationSources: ReadonlySet<string>,
+): boolean {
+  if (presentationSources.has(resolve(context.file))) return true;
+  const pending = [...context.modules];
+  const visited = new Set<ModuleNode>();
+  while (pending.length) {
+    const module = pending.pop()!;
+    if (visited.has(module)) continue;
+    visited.add(module);
+    if (module.file && presentationSources.has(resolve(module.file))) return true;
+    pending.push(...module.importers);
+  }
+  return false;
 }
 
 async function loadApplication(
@@ -381,13 +441,11 @@ function candidateSource(input: {
   program: string;
   components: unknown;
   hotManifest: unknown;
-  updateKind: "full" | "presentation";
 }): string {
   return `import application from ${JSON.stringify(input.application)};
 import { createWebUIAdapter, render } from ${JSON.stringify(input.runtime)};
 
 export const manifest = ${JSON.stringify(input.hotManifest)};
-export const updateKind = ${JSON.stringify(input.updateKind)};
 export const presentations = application.presentations ?? {};
 
 export async function activate(root, previous = {}) {
@@ -456,35 +514,57 @@ import { HotUpdateCoordinator } from ${JSON.stringify(input.runtime)};
 const root = document.querySelector("#app");
 if (!root) throw new Error("Missing application root.");
 const coordinator = import.meta.hot?.data.coordinator ?? new HotUpdateCoordinator();
-const apply = async (candidate) => {
-  if (
-    candidate.updateKind === "presentation" &&
-    coordinator.value?.updatePresentations(candidate.presentations)
-  ) {
-    return;
-  }
-  const result = await coordinator.replace({
-    manifest: candidate.manifest,
-    async prepare(previous) {
-      return { activate: () => candidate.activate(root, previous) };
-    },
-  });
-  if (result.status === "rejected") {
-    if (result.reason === "incompatible-manifest") {
-      location.reload();
+let applications = 0;
+const apply = async (candidate, updateKind) => {
+  const started = performance.now();
+  const initial = applications++ === 0;
+  let status = "applied";
+  try {
+    if (
+      updateKind === "presentation" &&
+      coordinator.value?.updatePresentations(candidate.presentations)
+    ) {
       return;
     }
-    console.error("[poggers] hot update rejected: " + result.reason);
+    const result = await coordinator.replace({
+      manifest: candidate.manifest,
+      async prepare(previous) {
+        return { activate: () => candidate.activate(root, previous) };
+      },
+    });
+    status = result.status;
+    if (result.status === "rejected") {
+      if (result.reason === "incompatible-manifest") {
+        location.reload();
+        return;
+      }
+      console.error("[poggers] hot update rejected: " + result.reason);
+    }
+  } finally {
+    const detail = {
+      initial,
+      kind: updateKind,
+      status,
+      milliseconds: Math.round((performance.now() - started) * 100) / 100,
+    };
+    globalThis.__poggersHotUpdate = detail;
+    dispatchEvent(new CustomEvent("poggers:hot-update", { detail }));
   }
 };
-await apply(initialCandidate);
+await apply(initialCandidate, "full");
 const dispose = () => void coordinator.dispose();
 addEventListener("pagehide", dispose, { once: true });
 
 if (import.meta.hot) {
+  let pendingUpdateKind;
   import.meta.hot.data.coordinator = coordinator;
+  import.meta.hot.on("poggers:update-kind", ({ kind }) => {
+    pendingUpdateKind = pendingUpdateKind === "full" || kind === "full" ? "full" : kind;
+  });
   import.meta.hot.accept(${JSON.stringify(candidate)}, async (next) => {
-    if (next) await apply(next);
+    const updateKind = pendingUpdateKind ?? "full";
+    pendingUpdateKind = undefined;
+    if (next) await apply(next, updateKind);
   });
   import.meta.hot.dispose(() => removeEventListener("pagehide", dispose));
 }

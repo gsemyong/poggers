@@ -6,7 +6,7 @@ import { afterEach, describe, expect, test } from "vitest";
 
 import { executeProgramIR } from "../development";
 import { serializeApplicationIR, type TypeIR } from "./ir";
-import { compileApplication, ApplicationDiagnostic } from "./source";
+import { compileApplication, createApplicationCompiler, ApplicationDiagnostic } from "./source";
 
 const temporaryDirectories: string[] = [];
 
@@ -92,6 +92,26 @@ describe("Poggers Application compiler", () => {
       ],
       implementation: { state: true, actions: true, mount: true, view: true },
     });
+  });
+
+  test("retains an incremental Program and identifies Presentation implementation sources", async () => {
+    const entry = await fixture(
+      `import { clean } from "./presentation";\n${componentApplicationSource().replace(
+        "presentations: { clean: {} },",
+        "presentations: { clean },",
+      )}`,
+    );
+    const presentation = resolve(entry, "../presentation.ts");
+    await writeFile(presentation, "export const clean = {};\n");
+    const compiler = createApplicationCompiler(entry);
+
+    const first = compiler.compile();
+    await writeFile(presentation, "export const clean = Object.freeze({});\n");
+    const second = compiler.compile();
+
+    expect(first.presentationSources).toEqual(new Set([presentation]));
+    expect(second.presentationSources).toEqual(new Set([presentation]));
+    expect(serializeApplicationIR(second.ir)).toBe(serializeApplicationIR(first.ir));
   });
 
   test("rejects undeclared runtime calls at their source location", async () => {

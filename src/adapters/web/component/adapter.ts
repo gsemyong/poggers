@@ -8,10 +8,12 @@ import {
   ResourceScope,
   type ProgramContributionInstance,
 } from "../../../core/process";
-import type { WebPresentationLanguage, WebStyle } from "../presentation/language";
+import { createReactiveState } from "../../../core/state";
+import type { WebElementPresentation, WebPresentationLanguage } from "../presentation/language";
 import { PresenceGraph } from "./presence";
 import {
   allocatePresenceOwner,
+  captureSignalOnHotRefresh,
   currentPresenceGraph,
   currentStructuralKey,
   effect,
@@ -23,7 +25,6 @@ import {
   type Component,
   type Props,
   type HotRenderState,
-  type Signal,
 } from "./runtime";
 
 export type ComponentRuntimeElements<Contract extends ApplicationContract> = {
@@ -282,7 +283,6 @@ function createComponentInstance(
     componentEntry && typeof componentEntry === "object"
       ? (componentEntry as RuntimeComponentDefinition)
       : undefined;
-  const signals = Object.create(null) as Record<string, Signal<unknown>>;
   const refs = Object.create(null) as Record<string, Element | null>;
   const mountedTargets = Object.create(null) as Record<string, Set<Element>>;
   const sharedScene = currentPresenceGraph();
@@ -311,10 +311,14 @@ function createComponentInstance(
     typeof definition?.state === "function" ? definition.state(stateInput) : definition?.state;
   const initialState = materializeComponentState(stateSource ?? {});
   const stateNames = options.config.state?.map(({ name }) => name) ?? Object.keys(initialState);
-  for (const name of stateNames) {
-    signals[name] = signal(initialState[name], `component:${componentName}:state:${name}`);
+  const stateRuntime = createReactiveState(
+    Object.fromEntries(stateNames.map((name) => [name, initialState[name]])),
+    (value, path) => signal(value, `component:${componentName}:state:${path}`),
+    () => lifecycle.active,
+  );
+  for (const [name, cell] of Object.entries(stateRuntime.cells)) {
+    captureSignalOnHotRefresh(cell, () => stateRuntime.snapshot()[name]);
   }
-  const stateRuntime = createComponentState(signals, stateNames, () => lifecycle.active);
   const state = stateRuntime.read;
   const elements = Object.create(null) as Record<string, Component<Props>>;
 
@@ -511,7 +515,7 @@ type RuntimePresentationComponent = (scope: {
   readonly props: Readonly<Record<string, unknown>>;
   readonly state: Readonly<Record<string, unknown>>;
   readonly targets: Readonly<Record<string, Readonly<{ name: string }>>>;
-}) => Readonly<Record<string, WebStyle>>;
+}) => Readonly<Record<string, WebElementPresentation>>;
 
 function mountAuthoredPresentationComponent(options: {
   componentName: string;
@@ -613,33 +617,6 @@ function pickServices(
     if (descriptor) Object.defineProperty(selected, name, descriptor);
   }
   return selected;
-}
-
-function createComponentState(
-  signals: Readonly<Record<string, Signal<unknown>>>,
-  names: readonly string[],
-  active: () => boolean,
-): {
-  readonly read: Readonly<Record<string, unknown>>;
-  readonly mutable: Record<string, unknown>;
-} {
-  const read = Object.create(null) as Record<string, unknown>;
-  const mutable = Object.create(null) as Record<string, unknown>;
-
-  for (const name of names) {
-    const value = signals[name];
-    if (!value) continue;
-    Object.defineProperty(read, name, { enumerable: true, get: value });
-    Object.defineProperty(mutable, name, {
-      enumerable: true,
-      get: value,
-      set(next) {
-        if (active()) value(next);
-      },
-    });
-  }
-
-  return { read: Object.freeze(read), mutable };
 }
 
 function createComponentElementComponent(
