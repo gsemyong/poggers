@@ -7,36 +7,10 @@
   },
   "files": [
     "dist",
-    "src/application.ts",
-    "src/cli.ts",
-    "src/compiler/development.ts",
-    "src/compiler/production.ts",
-    "src/compiler/source.ts",
-    "src/compiler/ir.ts",
-    "src/process.ts",
-    "src/index.ts",
-    "src/ui/component.ts",
-    "src/ui/index.ts",
-    "src/ui/platform.ts",
-    "src/ui/presentation.ts",
-    "src/ui/web/toolchain.ts",
-    "src/ui/web/index.ts",
-    "src/ui/jsx/development.ts",
-    "src/ui/jsx/runtime.ts",
-    "src/ui/jsx/types.ts",
-    "src/ui/web/platform.ts",
-    "src/ui/web/presentation/fonts.ts",
-    "src/ui/web/presentation/index.ts",
-    "src/ui/web/presentation/language.ts",
-    "src/ui/web/presentation/motion.ts",
-    "src/ui/web/presentation/adapter.ts",
-    "src/ui/web/presentation/style.ts",
-    "src/ui/web/component/adapter.ts",
-    "src/ui/web/component/compiler.ts",
-    "src/ui/web/component/elements.ts",
-    "src/ui/web/component/interaction.ts",
-    "src/ui/web/component/presence.ts",
-    "src/ui/web/component/runtime.ts",
+    "src",
+    "!src/**/*.spec.ts",
+    "!src/**/*.typecheck.ts",
+    "!src/**/*.typecheck.tsx",
     "template",
     "template/.gitignore",
     "tsconfig.json"
@@ -50,24 +24,29 @@
       "default": "./dist/src/index.js"
     },
     "./jsx-dev-runtime": {
-      "poggers-source": "./src/ui/jsx/development.ts",
-      "types": "./dist/src/ui/jsx/development.d.ts",
-      "default": "./dist/src/ui/jsx/development.js"
+      "poggers-source": "./src/core/jsx/development.ts",
+      "types": "./dist/src/core/jsx/development.d.ts",
+      "default": "./dist/src/core/jsx/development.js"
     },
     "./jsx-runtime": {
-      "poggers-source": "./src/ui/jsx/runtime.ts",
-      "types": "./dist/src/ui/jsx/runtime.d.ts",
-      "default": "./dist/src/ui/jsx/runtime.js"
+      "poggers-source": "./src/core/jsx/runtime.ts",
+      "types": "./dist/src/core/jsx/runtime.d.ts",
+      "default": "./dist/src/core/jsx/runtime.js"
     },
     "./web": {
-      "poggers-source": "./src/ui/web/index.ts",
-      "types": "./dist/src/ui/web/index.d.ts",
-      "default": "./dist/src/ui/web/index.js"
+      "poggers-source": "./src/adapters/web/public.ts",
+      "types": "./dist/src/adapters/web/public.d.ts",
+      "default": "./dist/src/adapters/web/public.js"
+    },
+    "./adapters/web": {
+      "poggers-source": "./src/adapters/web/index.ts",
+      "types": "./dist/src/adapters/web/index.d.ts",
+      "default": "./dist/src/adapters/web/index.js"
     },
     "./web/presentation": {
-      "poggers-source": "./src/ui/web/presentation/index.ts",
-      "types": "./dist/src/ui/web/presentation/index.d.ts",
-      "default": "./dist/src/ui/web/presentation/index.js"
+      "poggers-source": "./src/adapters/web/presentation/index.ts",
+      "types": "./dist/src/adapters/web/presentation/index.d.ts",
+      "default": "./dist/src/adapters/web/presentation/index.js"
     },
     "./tsconfig": "./tsconfig.json"
   },

@@ -4,8 +4,9 @@ import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 import process from "node:process";
 
-import { buildRustApplication } from "./compiler/production";
-import { buildApplication, runApplication } from "./ui/web/toolchain";
+import { platformAdapters } from "./adapters/index";
+import { selectPlatformAdapters, type DevelopmentSession } from "./contracts/platform";
+import { compileApplication, resolveApplication } from "./core/compiler/source";
 
 export async function runCli(arguments_ = process.argv.slice(2)): Promise<void> {
   const [command = "dev", ...commandArguments] = arguments_;
@@ -14,38 +15,50 @@ export async function runCli(arguments_ = process.argv.slice(2)): Promise<void> 
   if (command === "create") {
     await createProject(commandArguments);
   } else if (command === "dev") {
-    const server = await runApplication({
-      directory,
-      port: numberFlag(readFlag(commandArguments, "port")),
-    });
-    console.log(`poggers dev running on http://localhost:${server.port}`);
+    const realization = resolveRealization(directory);
+    const sessions: DevelopmentSession[] = [];
+    try {
+      for (const adapter of realization.adapters) {
+        sessions.push(
+          await adapter.develop({
+            ...realization.input,
+            platform: adapter.name,
+            programs: realization.ir.programs.filter(
+              ({ environment }) => environment.platform === adapter.name,
+            ),
+          }),
+        );
+      }
+    } catch (error) {
+      await disposeSessions(sessions);
+      throw error;
+    }
+    for (const location of sessions.flatMap((session) => session.locations)) {
+      console.log(`poggers dev running on ${location}`);
+    }
     const stop = async () => {
-      await server.stop();
+      await disposeSessions(sessions);
       process.exit();
     };
     process.on("SIGINT", () => void stop());
     process.on("SIGTERM", () => void stop());
   } else if (command === "build") {
-    const target = readFlag(commandArguments, "target") ?? "web";
-    if (target === "web") {
-      const output = await buildApplication({
-        directory,
-        outdir:
-          readFlag(commandArguments, "outdir") ?? readFlag(commandArguments, "outfile") ?? "dist",
+    const realization = resolveRealization(directory);
+    const root = resolve(
+      directory,
+      readFlag(commandArguments, "outdir") ?? readFlag(commandArguments, "outfile") ?? "dist",
+    );
+    for (const adapter of realization.adapters) {
+      const output = realization.adapters.length === 1 ? root : resolve(root, adapter.name);
+      const artifacts = await adapter.build({
+        ...realization.input,
+        platform: adapter.name,
+        programs: realization.ir.programs.filter(
+          ({ environment }) => environment.platform === adapter.name,
+        ),
+        output,
       });
-      console.log(`built ${output}`);
-    } else if (target === "rust") {
-      const output = await buildRustApplication({
-        directory,
-        outdir: readFlag(commandArguments, "outdir"),
-        program: readFlag(commandArguments, "program"),
-        adapter: readFlag(commandArguments, "adapter"),
-      });
-      const code = await run(["cargo", "build", "--release"], output);
-      process.exitCode = code;
-      if (code === 0) console.log(`built ${output}/target/release/poggers_program`);
-    } else {
-      throw new TypeError(`Unknown build target ${JSON.stringify(target)}.`);
+      console.log(`built ${artifacts.directory}`);
     }
   } else if (command === "typecheck") {
     process.exitCode = await run(
@@ -72,7 +85,7 @@ export async function runCli(arguments_ = process.argv.slice(2)): Promise<void> 
       }
     }
   } else {
-    console.error("Usage: poggers <dev|build|typecheck|test|check|create> [--target web|rust]");
+    console.error("Usage: poggers <dev|build|typecheck|test|check|create>");
     process.exitCode = 1;
   }
 }
@@ -163,13 +176,27 @@ function readFlag(arguments_: readonly string[], name: string): string | undefin
   return index < 0 ? undefined : arguments_[index + 1];
 }
 
-function numberFlag(value: string | undefined): number | undefined {
-  if (value === undefined) return;
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65_535) {
-    throw new TypeError(`Invalid port ${JSON.stringify(value)}.`);
-  }
-  return parsed;
+function resolveRealization(directory: string) {
+  const paths = resolveApplication(directory);
+  const ir = compileApplication(paths.application);
+  return {
+    ir,
+    adapters: selectPlatformAdapters(ir, platformAdapters),
+    input: {
+      directory: paths.directory,
+      application: paths.application,
+      ir,
+    },
+  };
+}
+
+async function disposeSessions(sessions: readonly DevelopmentSession[]): Promise<void> {
+  const results = await Promise.allSettled(
+    [...sessions].reverse().map((session) => session[Symbol.asyncDispose]()),
+  );
+  const errors = results.flatMap((result) => (result.status === "rejected" ? [result.reason] : []));
+  if (errors.length === 1) throw errors[0];
+  if (errors.length > 1) throw new AggregateError(errors, "Platform disposal failed.");
 }
 
 async function run(command: readonly string[], cwd: string): Promise<number> {

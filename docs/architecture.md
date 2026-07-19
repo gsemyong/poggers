@@ -1,73 +1,49 @@
 # Poggers architecture
 
-Poggers is a portable TypeScript product language. An Application composes
-reusable Features into Programs for explicit Environments. Everything outside
-authored product logic crosses a typed Capability contract.
+Poggers is a TypeScript product language for applications made of portable
+Programs, typed Capabilities, and platform-native user interfaces. It owns the
+authoring model and adapter boundaries. It does not prescribe storage,
+transport, synchronization, authentication, topology, or deployment.
 
-Poggers does not prescribe storage, transport, synchronization,
-authentication, queues, topology, or distributed-state semantics. Those are
-Capabilities supplied when a Program becomes a running Process.
+## Product model
 
-## Language
-
-- **Application** is the complete authored composition.
-- **Feature** is a reusable vertical product slice. It can contribute to
-  several Programs and compose child Features.
-- **Environment** is an authored execution-context kind. `browser-main`,
-  `browser-service-worker`, and an application-defined `cloud` are examples.
-- **Program** is prepared application logic assembled from every same-named
-  Feature contribution targeting one Environment.
-- **Process** is one running Program instance.
-- **Capability** is typed authority crossing the product boundary. Host APIs,
-  effects, communication, and external systems enter only through
-  Capabilities.
-- **Component** owns local state, actions, mount lifetime, native hierarchy,
-  accessibility, listeners, and composition.
+- **Application** composes the complete product from reusable Features.
+- **Feature** is a vertical slice that may contribute to several Programs and
+  compose child Features.
+- **Program** is authored logic assembled from every same-named Feature
+  contribution.
+- **Environment** is one execution context for a Program. It belongs to exactly
+  one Platform and may opt into that Platform's UI.
+- **Platform** is one technical realization family. Every Platform realizes
+  Processes; some also define one UI language.
+- **Process** is one live Program execution.
+- **Capability** is typed external authority. Host APIs, communication, and
+  effects cross this boundary.
+- **Component** owns UI state, actions, lifetime, hierarchy, native listeners,
+  accessibility, and composition.
 - **Element** is a named structural endpoint exposed by a Component.
-- **Presentation** maps adapter-defined parameters plus Component props and
-  state to declarations for named Elements.
-- **UI Platform** is a compatible pair of Component primitives and a
-  Presentation language.
-- **Adapter** realizes an explicit contract.
-
-`Program` and `Process` retain their conventional distinction: source logic is
-a Program; one live execution is a Process. Runtime placement and topology are
-not core nouns. A Capability can expose those facts when a product needs them.
+- **Presentation** enriches Elements from Component input and state without
+  changing behavior.
 
 ```text
 Application
 `- Features
-   `- Program contributions targeting Environments
+   `- Program contributions
+      |- Environment -> Platform
       |- required and provided Capabilities
-      `- optional Components
-         |- state + actions + mount
-         |- platform-native JSX
-         `- named Elements
-            `- parameterized Presentation declarations
-
-Application source -> Application IR -> development or production realization
+      `- optional UI
+         `- Components -> named Elements -> Presentation declarations
 ```
 
-## Programs
-
-Generic contract parameters supply contextual type safety. Wrapper functions
-are not required merely to recover inference.
+Generic contract parameters carry product meaning and contextual type safety.
+Wrapper functions are not required only to recover inference.
 
 ```tsx
 import type { Application, Feature, Program } from "@poggers/kit";
 import type { BrowserMainThread } from "@poggers/kit/web";
 
-type Cloud = { readonly Name: "cloud" };
-
 type OrdersFeature = {
   Programs: {
-    cloud: Program<
-      Cloud,
-      {
-        Requires: { database: OrdersDatabase };
-        Provides: { orders: Orders };
-      }
-    >;
     browser: Program<
       BrowserMainThread,
       {
@@ -78,9 +54,7 @@ type OrdersFeature = {
           open(input: { id: string }): void;
         };
         Components: {
-          OrderList: {
-            Elements: { Root: "main"; Row: "button"; Name: "span" };
-          };
+          OrderList: { Elements: { Root: "main"; Row: "button"; Name: "span" } };
         };
       }
     >;
@@ -89,11 +63,6 @@ type OrdersFeature = {
 
 const orders = {
   programs: {
-    cloud: {
-      start({ capabilities }) {
-        return { orders: createOrders(capabilities.database) };
-      },
-    },
     browser: {
       state: { orders: [], status: "loading" },
       actions: {
@@ -106,6 +75,7 @@ const orders = {
         },
       },
       start({ actions, capabilities }) {
+        actions.refresh();
         return capabilities.orders.subscribe(actions.refresh);
       },
       components: {
@@ -136,155 +106,124 @@ export default {
 } satisfies Application<App>;
 ```
 
-`start` establishes a Program contribution's long-lived relationships.
-Actions handle finite input. Capability resources, subscriptions, promises
-resolving to resources, and async iterators are owned by a `ResourceScope` and
-disposed in reverse order. A `CapabilityResolver` supplies external
-Capabilities; Feature-provided Capabilities are assembled inside the Process.
+`start` establishes long-lived Program relationships. Actions handle finite
+input. Returned disposables, async disposables, async iterables, and promises
+resolving to owned resources are disposed once in reverse acquisition order.
+Features coordinate through Capabilities; direct APIs exposed to Components
+are assembled only from contributions to the same Program.
 
-Child Feature Components are exposed through capitalized namespaces. Features
-coordinate through typed Capabilities rather than reaching into sibling or host
-internals. Navigation is therefore a Capability supplied by a Feature or
-adapter, not a universal router.
+## UI boundary
 
-## Components
+Each UI-capable Platform defines its own JSX Elements, native properties,
+targets, and Child type. Components therefore retain full access to native
+structure and accessibility without a lowest-common-denominator widget layer.
+Several platform JSX languages may extend the same project-wide JSX registry.
 
-The Component boundary has one data direction:
+The JSX runtime invokes Components directly and delegates intrinsic creation
+to the active UI adapter. It has no virtual DOM and retains no tree. Renderer
+activation is owned by the live UI and removed on disposal.
 
-1. Program state and actions form the Feature API available to Components.
-2. Component state and actions coordinate one mounted interaction.
-3. `mount` owns Component-lifetime resources.
-4. `view` defines platform-native JSX, accessibility, listeners, slots, and
-   Component composition.
-5. Named Elements expose exact structural endpoints to Presentation.
-
-The shared JSX runtime invokes Components directly and delegates intrinsic
-creation to the active UI Platform. It has no DOM dependency and retains no
-virtual tree. Different UI Platforms can therefore be authored in one TSX
-project without a platform-neutral widget abstraction.
-
-## Presentation
-
-Presentation is the universal enrichment stage, not a universal styling
-taxonomy. Core knows only that a Presentation:
-
-- is configured by an arbitrary parameter object;
-- receives typed Component props, merged Feature and Component state, and
-  symbolic Element targets;
-- returns declarations indexed by the platform's primitive names; and
-- cannot call actions or mutate behavior.
-
-```ts
-type Parameters = Readonly<{ canvas: OklchColor }>;
-const parameters = { canvas: { l: 0.98, c: 0.004, h: 250 } } satisfies Parameters;
-
-const presentation = ((parameters) => ({
-  Orders: {
-    OrderList({ state }) {
-      return {
-        Root: { paint: { fill: parameters.canvas } },
-        Row: { motion: { opacity: state.status === "ready" ? 1 : 0.6 } },
-      };
-    },
-  },
-})) satisfies WebPresentation<App, Parameters>;
-
-export const clean = presentation(parameters);
-```
-
-Core does not define themes, tokens, motion, style, audio, or rendering. A web
-Presentation can choose design-token-shaped parameters; another adapter can
-define audio, haptic, scene-graph, terminal, or native declarations. Ordinary
-function application creates multiple configured Presentations from the same
-program.
-
-The UI Platform adapter pairs two implementations:
+Presentation is a pure, platform-specific enrichment stage:
 
 ```text
-UI Platform adapter
-|- Component adapter    JSX primitives, native events, lifecycle, hierarchy
-`- Presentation adapter declaration realization, replacement, disposal
+parameters + Component props + Feature/Component state + symbolic targets
+`- Presentation
+   `- declarations in the Platform's Presentation language
 ```
 
-The web adapter uses fine-grained signals and direct DOM writes. Its
-Presentation language owns web-specific style, assets, responsive conditions,
-fonts, and motion. Those concepts do not leak into generic contracts.
+Core does not define themes, tokens, color, motion, audio, haptics, or layout.
+A Presentation receives an arbitrary parameter object, so one definition can
+produce several themes or configurations. The adapter decides which
+declarations exist and how they map to native APIs. Presentation cannot invoke
+actions or mutate behavior.
 
-## Compilation
+## Realization
 
 ```text
 TypeScript Application source
-`- compiler/source.ts
+`- semantic compiler
    `- deterministic, versioned Application IR
-      |- compiler/development.ts -> interpretation and semantic HMR
-      `- compiler/production.ts  -> current optimized production realization
+      `- explicit Platform Adapter map
+         |- develop -> owned DevelopmentSession
+         `- build   -> deterministic ProductionArtifacts
 ```
 
-The source compiler reads generic contracts and implementations without
-executing application behavior. Development and production are realization
-modes, not output languages. The current web realization uses Vite/Rolldown;
-the current headless production realization emits a selected Program as Rust.
-Future adapters can emit other artifacts without changing product source.
+`PlatformAdapter` is the only top-level implementation contract. A
+process-only adapter implements development and production. A UI-capable
+adapter additionally owns one `UIAdapter`, which pairs Component and
+Presentation realization. Adapter-specific engines are private drivers, not
+additional framework concepts.
 
-TypeScript 7 provides the native `tsc` used by project checks. TypeScript 7.0
-does not yet expose a programmatic API, so the source compiler deliberately uses
-the official `@typescript/typescript6` compatibility package until the new API
-ships. The two dependencies therefore own different, non-overlapping jobs.
+Adapter scratch work belongs to the operating-system temp directory and is
+owned by its live session or build operation. Generated applications contain
+only authored source and requested production artifacts.
 
-Mise installs Nub and Rust. Nub owns the Node pin in `.node-version`. Poggers
-adds transactional semantic replacement over Vite HMR: compatible Program and
-Component state plus native UI state survive replacement, while failed
-compilation or activation leaves the previous revision live.
+Adapter selection uses Platform identities extracted into IR. Environment
+names never select implementations. A missing or mismatched adapter fails
+before native work starts. Product source can mention semantic Platform and UI
+types but cannot access adapter implementations.
 
-## Repository
+The shipped web adapter owns browser Environments, DOM JSX, direct fine-grained
+updates, Vite development and production, and the web Presentation language.
+Its first Presentation layer is deliberately static and dependency-free: a
+canonical declaration compiles to deterministic native CSS, repeated output is
+deduplicated, and one shared stylesheet is owned by live UI sessions. Motion,
+font loading, generated decoration, and reactive continuous values are not part
+of this baseline. Unsupported web Environments receive a precise diagnostic
+rather than a partial realization.
+
+Product code imports the browser-safe web language from `@poggers/kit/web` and
+its Presentation language from `@poggers/kit/web/presentation`. Concrete
+realization is isolated at `@poggers/kit/adapters/web`; application source does
+not need or receive that implementation entry.
+
+## Source graph
 
 ```text
 src/
-  application.ts
-  process.ts
-  cli.ts
-  compiler/
-    source.ts
-    ir.ts
-    development.ts
-    production.ts
-  ui/
+  core/
+    application.ts
+    process.ts
     component.ts
-    platform.ts
+    ui.ts
     presentation.ts
+    development.ts
+    compiler/
     jsx/
+  contracts/
+    capability.ts
+    platform.ts
+  adapters/
+    index.ts
     web/
+      index.ts
+      public.ts
       platform.ts
       toolchain.ts
+      ui-adapter.ts
       component/
-        adapter.ts
-        compiler.ts
-        elements.ts
-        interaction.ts
-        presence.ts
-        runtime.ts
       presentation/
-        adapter.ts
-        fonts.ts
-        language.ts
-        motion.ts
-        style.ts
-template/
+  cli.ts
+  index.ts
 ```
 
-Generic modules never import web. Files exist only for an independent contract,
-lifecycle, translation, or focused test. `template/` is the canonical generated
-application; the repository maintains no residue examples.
+Core contains product meaning and technology-independent machinery. Contracts
+are extension boundaries. Adapters co-locate everything for one concrete
+Platform and never import one another. The CLI depends on an explicit adapter
+map and contains no per-adapter branch.
+
+Files are split only for an independent contract, translation, lifecycle, or
+substantial testable engine. `template/` is the canonical generated
+application; this repository maintains no example-application residue.
 
 ## Verification
 
-- `tsc --noEmit` checks the entire product language and compile-only
-  `*.typecheck.ts(x)` contracts.
-- Vitest runs colocated `*.spec.ts` behavior, integration, and adapter tests.
-- fast-check properties cover lifecycle ownership, deterministic IR,
-  interruption-safe motion, and other sequence-heavy invariants with shrinking.
+- TypeScript checks public inference and compile-only negative contracts.
+- Vitest checks focused core invariants, generic adapter selection, concrete
+  adapter translation and lifecycle, and the canonical generated application.
+- fast-check is reserved for sequence-heavy invariants where shrinking adds
+  evidence, such as resource ownership and deterministic IR.
 - Oxlint and Oxfmt enforce one source convention.
-- The CLI integration test generates a fresh application, typechecks it, builds
-  development and production artifacts, and checks the emitted IR.
-- Real-browser acceptance verifies loading, interaction, Presentation,
-  disposal, HMR preservation, production equivalence, and console cleanliness.
+- The package build emits declarations and runtime entries from public exports.
+- Real-browser acceptance verifies development, interaction, Presentation,
+  replacement, cleanup, and production equivalence.

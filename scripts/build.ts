@@ -25,9 +25,8 @@ const entrypoints = [
       .filter(isBuildTarget)
       .map((target) => resolve(packageDir, target.slice("./dist/".length).replace(/\.js$/, ".ts"))),
   ),
-  resolve(packageDir, "src/ui/web/platform.ts"),
-  resolve(packageDir, "src/ui/web/component/runtime.ts"),
-  resolve(packageDir, "src/compiler/development.ts"),
+  // Generated web applications import this adapter-owned runtime directly.
+  resolve(packageDir, "src/adapters/web/ui-adapter.ts"),
 ];
 for (const entrypoint of entrypoints) {
   try {

@@ -1,40 +1,51 @@
-import type { WebPresentation, WebPresentationTokens } from "@poggers/kit/web/presentation";
+import type { WebPresentation, WebStyle } from "@poggers/kit/web/presentation";
 import type { App } from "src/app";
 
 const parameters = {
   color: {
-    canvas: { l: 0.98, c: 0.004, h: 250 },
-    text: { l: 0.2, c: 0.01, h: 250 },
+    canvas: { oklch: [0.98, 0.004, 250] },
+    content: { oklch: [0.2, 0.01, 250] },
   },
-  space: {
-    page: { kind: "space", value: 24 },
-  },
-  font: {
-    body: { fallback: ["system-ui", "sans-serif"] },
-  },
-} as const satisfies WebPresentationTokens;
+  space: { page: 24, controlBlock: 12, controlInline: 18 },
+  radius: { control: 999 },
+} as const;
 
-const presentation = ((parameters) => ({
-  Shell: {
-    Application: () => ({
-      Root: {
-        layout: {
-          flow: { axis: "block", align: "center", distribute: "center" },
-          size: { block: { min: { viewport: { axis: "block", percent: 100 } } } },
-          padding: parameters.space.page,
+const presentation = ((values) => {
+  const control = {
+    layout: {
+      padding: { block: values.space.controlBlock, inline: values.space.controlInline },
+    },
+    paint: { radius: values.radius.control },
+    text: { weight: "semibold" },
+  } satisfies WebStyle;
+
+  return {
+    Shell: {
+      Application: () => ({
+        Root: {
+          layout: {
+            model: { kind: "flow", direction: "block", align: "center", distribute: "center" },
+            minBlockSize: { viewport: { axis: "block", percent: 100 } },
+            padding: values.space.page,
+          },
+          paint: { fill: values.color.canvas },
+          text: { family: "system", color: values.color.content },
         },
-        paint: { fill: parameters.color.canvas },
-        typography: { font: parameters.font.body, color: parameters.color.text },
-      },
-      Title: { typography: { size: 32, weight: 650 } },
-      Increment: {
-        layout: { padding: { block: 12, inline: 18 } },
-        shape: { radius: 999 },
-        paint: { fill: parameters.color.text },
-        typography: { color: parameters.color.canvas, weight: 650 },
-      },
-    }),
-  },
-})) satisfies WebPresentation<App, typeof parameters>;
+        Title: { text: { size: 32, weight: 650 } },
+        Increment: {
+          ...control,
+          paint: { ...control.paint, fill: values.color.content },
+          text: { ...control.text, color: values.color.canvas },
+          rules: [
+            {
+              when: { pseudo: "hover", pointer: { hover: true } },
+              use: { paint: { opacity: 0.85 } },
+            },
+          ],
+        },
+      }),
+    },
+  };
+}) satisfies WebPresentation<App, typeof parameters>;
 
 export const clean = presentation(parameters);

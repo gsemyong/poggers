@@ -14,13 +14,22 @@
   "overrides": [
     {
       "files": [
-        "src/ui/component.ts",
-        "src/ui/index.ts",
-        "src/ui/platform.ts",
-        "src/ui/presentation.ts"
+        "src/core/application.ts",
+        "src/core/component.ts",
+        "src/core/development.ts",
+        "src/core/ui.ts",
+        "src/core/presentation.ts",
+        "src/core/process.ts",
+        "src/core/compiler/ir.ts",
+        "src/core/compiler/source.ts",
+        "src/core/jsx/development.ts",
+        "src/core/jsx/runtime.ts",
+        "src/core/jsx/types.ts",
+        "src/contracts/capability.ts",
+        "src/contracts/platform.ts"
       ],
       "rules": {
-        "no-restricted-imports": ["error", { "patterns": ["**/web/**"] }]
+        "no-restricted-imports": ["error", { "patterns": ["**/adapters/**"] }]
       }
     }
   ],

@@ -14,9 +14,8 @@ import { resolve } from "node:path";
 
 import { afterEach, describe, expect, test } from "vitest";
 
-import { createProject } from "./cli";
-import { buildRustApplication } from "./compiler/production";
-import { buildApplication, validateUIProgramRoot } from "./ui/web/toolchain";
+import { validateUIProgramRoot } from "./adapters/web/toolchain";
+import { createProject, runCli } from "./cli";
 
 const directories: string[] = [];
 afterEach(async () => {
@@ -80,7 +79,6 @@ describe("project template", () => {
     expect(await readFile(resolve(target, "mise.toml"), "utf8")).toContain(
       '"github:nubjs/nub" = "0.4.13"',
     );
-    expect(await readFile(resolve(target, "mise.toml"), "utf8")).toContain('rust = "1.97.1"');
     expect(await readFile(resolve(target, ".gitignore"), "utf8")).not.toContain("app.d.ts");
     expect(
       await run(
@@ -105,21 +103,28 @@ describe("project template", () => {
       ),
     ).toBe(0);
 
-    await buildApplication({ directory: target, outdir: "dist" });
+    await runCli(["build", "--dir", target, "--outdir", "dist"]);
     await expect(access(resolve(target, "dist/app.js"))).resolves.toBeUndefined();
+    await expect(access(resolve(target, ".poggers"))).rejects.toHaveProperty("code", "ENOENT");
     const manifest = JSON.parse(
       await readFile(resolve(target, "dist/application.ir.json"), "utf8"),
     ) as {
       version: number;
       features: readonly { id: string }[];
-      programs: readonly { id: string; environment: { name: string }; ui?: unknown }[];
+      platforms: readonly string[];
+      programs: readonly {
+        id: string;
+        environment: { name: string; platform: string };
+        ui?: unknown;
+      }[];
     };
-    expect(manifest.version).toBe(3);
+    expect(manifest.version).toBe(4);
+    expect(manifest.platforms).toEqual(["web"]);
     expect(manifest.features.map(({ id }) => id)).toEqual(["feature/shell"]);
     expect(manifest.programs).toHaveLength(1);
     expect(manifest.programs[0]).toMatchObject({
       id: "feature/shell/program/browser",
-      environment: { name: "browser-main" },
+      environment: { name: "browser-main", platform: "web" },
       ui: { root: "Application" },
     });
     const html = await readFile(resolve(target, "dist/index.html"), "utf8");
@@ -146,115 +151,6 @@ describe("project template", () => {
     await expect(access(resolve(target, "residue.txt"))).rejects.toThrow();
     await expect(access(resolve(target, "src/app.tsx"))).resolves.toBeUndefined();
   });
-
-  test(
-    "builds a portable headless Program through the public Rust target",
-    { timeout: 30_000 },
-    async () => {
-      const parent = await mkdtemp(resolve(tmpdir(), "poggers-rust-"));
-      directories.push(parent);
-      const target = resolve(parent, "example");
-      await createProject([target, "--no-install"]);
-      const modules = resolve(target, "node_modules");
-      await mkdir(resolve(modules, "@poggers"), { recursive: true });
-      await symlink(resolve(import.meta.dirname, ".."), resolve(modules, "@poggers/kit"), "dir");
-      await writeFile(
-        resolve(target, "src/app.tsx"),
-        `import type { Application, Feature, Program } from "@poggers/kit";
-
-type Cloud = { readonly Name: "cloud" };
-type Worker = { Programs: { cloud: Program<Cloud> } };
-type App = { Features: { worker: Worker } };
-
-const worker = {
-  programs: {
-    cloud: {
-      start() {
-        const values = [1, 2, 3];
-        let total = 0;
-        for (const value of values) {
-          total += value;
-        }
-        if (total !== 6) return;
-      },
-    },
-  },
-} satisfies Feature<Worker>;
-
-export default { features: { worker } } satisfies Application<App>;
-`,
-      );
-
-      const output = await buildRustApplication({ directory: target, program: "cloud" });
-      expect(await run("cargo", ["fmt", "--check"], output)).toBe(0);
-      expect(await run("cargo", ["clippy", "--", "-D", "warnings"], output)).toBe(0);
-      expect(await run("cargo", ["run", "--quiet", "--release"], output)).toBe(0);
-    },
-  );
-
-  test(
-    "builds a headless Program against a production Rust adapter",
-    { timeout: 30_000 },
-    async () => {
-      const parent = await mkdtemp(resolve(tmpdir(), "poggers-rust-adapter-"));
-      directories.push(parent);
-      const target = resolve(parent, "example");
-      await createProject([target, "--no-install"]);
-      const modules = resolve(target, "node_modules");
-      await mkdir(resolve(modules, "@poggers"), { recursive: true });
-      await symlink(resolve(import.meta.dirname, ".."), resolve(modules, "@poggers/kit"), "dir");
-      await writeFile(
-        resolve(target, "src/app.tsx"),
-        `import type { Application, Feature, Program } from "@poggers/kit";
-
-type Output = { write(input: { value: number }): Promise<void> };
-type Cloud = { readonly Name: "cloud" };
-type Worker = { Programs: { cloud: Program<Cloud, { Requires: { output: Output } }> } };
-type App = { Features: { worker: Worker } };
-
-const worker = {
-  programs: {
-    cloud: {
-      async start({ capabilities }) {
-        await capabilities.output.write({ value: 42 });
-      },
-    },
-  },
-} satisfies Feature<Worker>;
-
-export default { features: { worker } } satisfies Application<App>;
-`,
-      );
-      await mkdir(resolve(target, "src/adapters"), { recursive: true });
-      await writeFile(
-        resolve(target, "src/adapters/cloud.rs"),
-        `use crate::generated::Capabilities;
-
-struct Adapter;
-
-pub fn create() -> impl Capabilities {
-    Adapter
-}
-
-impl Capabilities for Adapter {
-    fn output_write(&self, input: (f64,)) -> impl std::future::Future<Output = Result<(), String>> {
-        println!("value:{}", input.0);
-        std::future::ready(Ok(()))
-    }
-}
-`,
-      );
-
-      const output = await buildRustApplication({
-        directory: target,
-        program: "cloud",
-        adapter: "src/adapters/cloud.rs",
-      });
-      expect(await run("cargo", ["fmt", "--check"], output)).toBe(0);
-      expect(await run("cargo", ["clippy", "--", "-D", "warnings"], output)).toBe(0);
-      expect(await run("cargo", ["run", "--quiet", "--release"], output)).toBe(0);
-    },
-  );
 });
 
 function run(command: string, arguments_: readonly string[], cwd: string): Promise<number> {
