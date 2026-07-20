@@ -314,7 +314,7 @@ describe("web interaction toolkit", () => {
     expect(setX).toBe(0);
     expect(setY).toBe(2);
     expect(releases).toHaveLength(1);
-    expect(releases[0]).toMatchObject({ offset: 40, velocity: 0.72, progress: 0.4 });
+    expect(releases[0]).toMatchObject({ offset: 40, velocity: 720, progress: 0.4 });
     expect(stopped).toBe(1);
     expect(reverted).toBe(1);
     expect(target).toBe(drag.proxy);

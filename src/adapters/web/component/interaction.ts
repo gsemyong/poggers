@@ -29,6 +29,7 @@ export type DragOptions = {
   readonly axis: DragAxis;
   readonly bounds: () => DragBounds;
   readonly threshold?: number;
+  /** Maximum reported velocity in logical pixels per second. */
   readonly maxVelocity?: number;
   readonly resistance?: number;
   readonly cursor?: { readonly idle: string; readonly active: string } | false;
@@ -127,8 +128,8 @@ export function createAnimeDragDriver(
       const sample = (draggable: AnimeDraggable): DragSample => {
         const inline = clamp(draggable.x, ...currentBounds.inline);
         const block = clamp(draggable.y, ...currentBounds.block);
-        const velocityInline = Math.cos(draggable.angle) * draggable.velocity;
-        const velocityBlock = Math.sin(draggable.angle) * draggable.velocity;
+        const velocityInline = Math.cos(draggable.angle) * draggable.velocity * 1_000;
+        const velocityBlock = Math.sin(draggable.angle) * draggable.velocity * 1_000;
         const primary = primarySample(options.axis, {
           inline,
           block,
@@ -163,7 +164,7 @@ export function createAnimeDragDriver(
             ? false
             : { modifier: (value) => clamp(value, ...currentBounds.block) },
         dragThreshold: Math.max(0, finiteOr(options.threshold, 3)),
-        maxVelocity: Math.max(0, finiteOr(options.maxVelocity, 3)),
+        maxVelocity: Math.max(0, finiteOr(options.maxVelocity, 3_000)) / 1_000,
         dragSpeed: Math.max(0, finiteOr(options.resistance, 1)),
         cursor:
           options.cursor === false

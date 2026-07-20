@@ -4,12 +4,16 @@ import {
   createWebPresentationAdapter,
   type WebStyleHost,
 } from "../src/adapters/web/presentation/adapter";
-import { compileWebStyle } from "../src/adapters/web/presentation/compiler";
+import { createWebAnimationHost } from "../src/adapters/web/presentation/animation";
+import { compileWebDynamicStyle, compileWebStyle } from "../src/adapters/web/presentation/compiler";
+import { createDynamicsTrajectory, sampleTrack } from "../src/adapters/web/presentation/dynamics";
+import { planWebExecution } from "../src/adapters/web/presentation/execution";
 import {
-  createSpring,
+  spring,
   createSpringTrajectory,
   sampleSpringTrajectory,
-} from "../src/adapters/web/presentation/motion";
+} from "../src/adapters/web/presentation/spring";
+import { evaluatePresentationFrame } from "../src/core/presentation";
 import { createReactiveState } from "../src/core/state";
 
 type Result = Readonly<{
@@ -20,7 +24,7 @@ type Result = Readonly<{
   work: string;
 }>;
 
-const samples = 15;
+const samples = benchmarkSamples();
 const results: Result[] = [];
 
 function measure(
@@ -192,6 +196,10 @@ const ownerDocument = {};
 const classes = new Set<string>();
 const target = {
   ownerDocument,
+  isConnected: true,
+  addEventListener() {},
+  removeEventListener() {},
+  getBoundingClientRect: () => ({ width: 0, height: 0, left: 0, top: 0 }),
   classList: {
     add: (...values: string[]) => values.forEach((value) => classes.add(value)),
     remove: (...values: string[]) => values.forEach((value) => classes.delete(value)),
@@ -203,18 +211,22 @@ const target = {
   },
 } as unknown as Element;
 const host: WebStyleHost = { replace() {}, dispose() {} };
-const session = createWebPresentationAdapter({ createStyleHost: () => host }).create({
+const presentation = createWebPresentationAdapter({ createStyleHost: () => host }).mount({
   boundary: target,
-  targets: { Root: () => [target] },
+});
+const session = presentation.create({
+  boundary: target,
+  elements: { Root: () => [target] },
 });
 const warmDeclaration = { Root: { paint: { opacity: 0.7 } } } as const;
-session.commit(warmDeclaration);
-measure("web Presentation warm commit", () => session.commit(warmDeclaration), {
+session.render(() => warmDeclaration);
+measure("web Presentation warm commit", () => session.render(() => warmDeclaration), {
   work: "identity cache hit and zero native mutation",
 });
 session.dispose();
+presentation.dispose();
 
-const motionSpring = createSpring({ stiffness: 520, damping: 42 });
+const motionSpring = spring({ stiffness: 520, damping: 42 });
 let motionTarget = 1;
 measure(
   "spring trajectory creation",
@@ -235,6 +247,43 @@ const motionTrajectory = createSpringTrajectory({
   velocity: 1_200,
   spring: motionSpring,
 });
+const interruptedMotion = motionTrajectory.at(80);
+let interruptionTarget = -320;
+measure(
+  "spring interruption planning",
+  () => {
+    createSpringTrajectory({
+      from: interruptedMotion.value,
+      to: interruptionTarget,
+      velocity: interruptedMotion.velocity,
+      spring: motionSpring,
+    });
+    interruptionTarget = interruptionTarget === 0 ? -320 : 0;
+  },
+  { iterations: 2_000, work: "retarget from displayed value and incoming velocity" },
+);
+
+let animationHostTime = 0;
+const animationHost = createWebAnimationHost({
+  now: () => animationHostTime,
+  reducedMotion: () => false,
+});
+measure(
+  "Presentation frame for 1,000 Animation bindings",
+  () => {
+    animationHostTime += 1_000 / 120;
+    animationHost.begin(animationHostTime);
+    evaluatePresentationFrame(animationHost, () => {
+      for (let target = 0; target < 1_000; target += 1) {
+        animationHost.sample(`binding:${target}`, 1, motionSpring);
+      }
+    });
+    animationHost.end();
+  },
+  { iterations: 1_000, work: "lookup, sample, and settle 1,000 retained bindings" },
+);
+animationHost.dispose();
+
 let motionTime = 0;
 measure(
   "spring trajectory sample",
@@ -269,6 +318,93 @@ measure(
   { iterations: 2_000, work: "native WAAPI keyframe approximation" },
 );
 
+const plannerSamples = Array.from(
+  { length: Math.ceil(motionTrajectory.duration / (1_000 / 480)) + 1 },
+  (_, index) => {
+    const time = Math.min(motionTrajectory.duration, index * (1_000 / 480));
+    const value = motionTrajectory.at(time).value;
+    return {
+      time,
+      declarations: {
+        Root: {
+          paint: { opacity: Math.max(0, Math.min(1, 1 + value / 320)) },
+          transform: { translate: { y: value } },
+        },
+      },
+    } as const;
+  },
+);
+measure(
+  "web native execution planning",
+  () => planWebExecution(plannerSamples, { Root: () => [target] }),
+  { iterations: 500, work: `${plannerSamples.length} canonical declaration samples` },
+);
+const fallbackSamples = plannerSamples.map((sample) => ({
+  ...sample,
+  declarations: {
+    Root: {
+      ...sample.declarations.Root,
+      paint: {
+        ...sample.declarations.Root.paint,
+        radius: 8 + 8 * Number(sample.declarations.Root.paint.opacity),
+      },
+    },
+  },
+}));
+measure(
+  "web canonical fallback planning",
+  () => planWebExecution(fallbackSamples, { Root: () => [target] }),
+  { iterations: 500, work: `${fallbackSamples.length} samples rejected for changing paint` },
+);
+
+const sampledDynamics = sampleTrack({
+  duration: 1_200,
+  count: 241,
+  sample: (progress) => progress + Math.sin(progress * Math.PI * 8) * (1 - progress) * 0.08,
+});
+const sampledTrajectory = createDynamicsTrajectory({
+  from: 0,
+  target: 1,
+  velocity: 0,
+  dynamics: sampledDynamics,
+});
+let sampledTime = 0;
+measure("sampled track lookup", () => sampledTrajectory.at((sampledTime++ % 144) * (1_000 / 120)), {
+  work: `${sampledDynamics.samples.length} samples, binary search and cubic interpolation`,
+});
+measure(
+  "sampled track creation",
+  () =>
+    sampleTrack({
+      duration: 1_200,
+      count: 241,
+      sample: (progress) => progress + Math.sin(progress * Math.PI * 8) * (1 - progress) * 0.08,
+    }),
+  { iterations: 2_000, work: "authoring-time bake, validation, velocity estimation and freeze" },
+);
+let sampledFrame = 0;
+measure(
+  "sampled track frame for 1,000 targets",
+  () => {
+    const time = (sampledFrame++ % 144) * (1_000 / 120);
+    for (let target = 0; target < 1_000; target += 1) sampledTrajectory.at(time);
+  },
+  { iterations: 1_000, work: "1,000 canonical 120 Hz trajectory samples" },
+);
+
+let presentationFrame = 0;
+measure(
+  "Presentation dynamic frame compilation",
+  () => {
+    const openness = (presentationFrame++ % 1_000) / 1_000;
+    compileWebDynamicStyle({
+      paint: { opacity: openness, radius: 36 - 8 * openness },
+      transform: { translate: { y: 720 * (1 - openness) }, scale: 0.96 + 0.04 * openness },
+    });
+  },
+  { iterations: 20_000, work: "stable CSS template and four sampled custom properties" },
+);
+
 console.log(`${process.version} ${process.platform}/${process.arch}; ${samples} samples per case`);
 console.table(
   results.map((result) => ({
@@ -282,4 +418,12 @@ console.table(
 
 function percentile(values: readonly number[], quantile: number): number {
   return values[Math.min(values.length - 1, Math.floor(values.length * quantile))]!;
+}
+
+function benchmarkSamples(): number {
+  const configured = Number(process.env.POGGERS_BENCHMARK_SAMPLES ?? 15);
+  if (!Number.isInteger(configured) || configured <= 0) {
+    throw new TypeError("POGGERS_BENCHMARK_SAMPLES must be a positive integer.");
+  }
+  return configured;
 }

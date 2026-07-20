@@ -1,4 +1,8 @@
-import type { WebPresentation, WebStyle } from "@poggers/kit/web/presentation";
+import type {
+  ConfiguredWebPresentation,
+  WebPresentation,
+  WebStyle,
+} from "@poggers/kit/web/presentation";
 import type { App } from "src/app";
 
 const parameters = {
@@ -10,7 +14,7 @@ const parameters = {
   radius: { control: 999 },
 } as const;
 
-const presentation = ((values) => {
+const createClean = (({ parameters: values }) => {
   const control = {
     layout: {
       padding: { block: values.space.controlBlock, inline: values.space.controlInline },
@@ -20,7 +24,7 @@ const presentation = ((values) => {
   } satisfies WebStyle;
 
   return {
-    Shell: {
+    Shell: () => ({
       Application: () => ({
         Root: {
           layout: {
@@ -44,8 +48,11 @@ const presentation = ((values) => {
           ],
         },
       }),
-    },
+    }),
   };
 }) satisfies WebPresentation<App, typeof parameters>;
 
-export const clean = presentation(parameters);
+export const clean = {
+  parameters,
+  create: createClean,
+} satisfies ConfiguredWebPresentation<App, typeof parameters>;

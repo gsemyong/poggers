@@ -1,7 +1,11 @@
 import type { ProgramContributionAddress } from "../../../contracts/capability";
 import type { Application, ApplicationContract, PresentationName } from "../../../core/application";
 import type { ComponentProps, ComponentName, ComponentState } from "../../../core/component";
-import type { PresentationAdapter } from "../../../core/presentation";
+import {
+  createActionEventLedger,
+  type PresentationAdapter,
+  type PresentationAdapterInstance,
+} from "../../../core/presentation";
 import {
   bindCapabilitiesToScope,
   createProgramContributionInstance,
@@ -25,6 +29,7 @@ import {
   type Component,
   type Props,
   type HotRenderState,
+  type Signal,
 } from "./runtime";
 
 export type ComponentRuntimeElements<Contract extends ApplicationContract> = {
@@ -39,8 +44,18 @@ export type ComponentRuntimeElements<Contract extends ApplicationContract> = {
 
 export type PresentationsDefinition<Contract extends ApplicationContract> = Readonly<{
   defaultPresentation?: PresentationName<Contract>;
-  presentations: Partial<Record<PresentationName<Contract>, object>>;
+  presentations: Partial<Record<PresentationName<Contract>, RuntimeConfiguredPresentation>>;
 }>;
+
+export type PresentationDependencyManifest = Readonly<
+  Record<
+    string,
+    readonly Readonly<{
+      destination: string;
+      animations: readonly Readonly<{ id: string; scope: string }>[];
+    }>[]
+  >
+>;
 
 export type ApplicationUI = Readonly<{
   api: Readonly<Record<string, unknown>>;
@@ -48,7 +63,9 @@ export type ApplicationUI = Readonly<{
   components: RuntimeComponentComposition["components"];
   renderRoot(): Child;
   captureHotState(): HotRenderState;
-  updatePresentations(presentations: Readonly<Record<string, object>>): boolean;
+  updatePresentations(
+    presentations: Readonly<Record<string, RuntimeConfiguredPresentation>>,
+  ): boolean;
   dispose(): Promise<void>;
 }>;
 
@@ -56,9 +73,12 @@ export type CreateApplicationUIOptions<Contract extends ApplicationContract> = R
   application: Application<Contract>;
   program: string;
   presentations: PresentationsDefinition<Contract>;
+  /** @internal Compiler-derived temporal dependencies by runtime Component. */
+  presentationDependencies?: PresentationDependencyManifest;
   components?: ComponentRuntimeElements<Contract>;
   hotState?: HotRenderState;
   resolveCapabilities?(address: ProgramContributionAddress): Readonly<Record<string, unknown>>;
+  boundary: Element;
   presentationAdapter: PresentationAdapter<WebPresentationLanguage, Element>;
 }>;
 
@@ -82,6 +102,16 @@ type RuntimeFeature = Readonly<{
 }>;
 type RuntimeApplication = Readonly<{
   features?: Readonly<Record<string, RuntimeFeature>>;
+}>;
+
+type RuntimeConfiguredPresentation = Readonly<{
+  parameters: Readonly<Record<string, unknown>>;
+  create(configuration: {
+    readonly parameters: Readonly<Record<string, unknown>>;
+    readonly environment: WebPresentationLanguage["Environment"];
+    readonly state: Readonly<Record<string, unknown>>;
+    readonly events: Readonly<Record<string, unknown>>;
+  }): Readonly<Record<string, unknown>>;
 }>;
 
 type RuntimeProgramDefinition = Readonly<{
@@ -119,6 +149,8 @@ type RuntimeComponentComposition = {
   readonly componentNamespaces: Record<string, Record<string, unknown>>;
   readonly apis: Record<string, Readonly<Record<string, unknown>>>;
   readonly capabilities: Record<string, Readonly<Record<string, unknown>>>;
+  readonly events: Record<string, Readonly<Record<string, unknown>>>;
+  readonly actionEventRevision: () => void;
   readonly lifecycles: Set<ResourceScope>;
 };
 
@@ -136,17 +168,25 @@ export function createApplicationUI<Contract extends ApplicationContract>({
   application,
   program,
   presentations,
+  presentationDependencies,
   components,
   hotState,
   resolveCapabilities,
+  boundary,
   presentationAdapter,
 }: CreateApplicationUIOptions<Contract>): ApplicationUI {
   const runtimeApplication = application as RuntimeApplication;
-  const authoredPresentations = {
+  const configuredPresentations = {
     ...presentations.presentations,
-  } as Record<string, object>;
-  validatePresentations(authoredPresentations);
+  } as Record<string, RuntimeConfiguredPresentation>;
+  validatePresentations(configuredPresentations);
+  const presentationInstance = presentationAdapter.mount({
+    boundary,
+    snapshot: hotState?.presentation,
+  });
   const presentationRevision = signal(0);
+  const eventRevision = signal(0);
+  const notifyActionEvent = () => eventRevision(eventRevision() + 1);
   const defaultPresentation = firstPresentation(presentations);
   const presentationName = () => defaultPresentation;
   const runtimeComponents = normalizeRuntimeComponents(components);
@@ -162,6 +202,7 @@ export function createApplicationUI<Contract extends ApplicationContract>({
     program,
     (address) => ({ ...resolveCapabilities?.(address) }),
     hotState,
+    notifyActionEvent,
   );
   const composition: RuntimeComponentComposition = {
     components: componentGroups[""]!,
@@ -169,8 +210,24 @@ export function createApplicationUI<Contract extends ApplicationContract>({
     componentNamespaces,
     apis: programUI.apis,
     capabilities: programUI.capabilities,
+    events: programUI.events,
+    actionEventRevision: notifyActionEvent,
     lifecycles: new Set(),
   };
+  const presentationGraph = createPresentationGraph({
+    application: runtimeApplication,
+    program,
+    presentations: configuredPresentations,
+    presentationRevision,
+    presentation: presentationName,
+    adapter: presentationInstance,
+    boundary,
+    featureAPIs: programUI.apis,
+    featureEvents: programUI.events,
+    eventRevision,
+    rootComponents: Object.keys(runtimeComponents).filter((name) => !name.startsWith("@feature/")),
+    dependencies: presentationDependencies,
+  });
 
   for (const componentName of collectComponentNames(
     runtimeApplication,
@@ -181,11 +238,10 @@ export function createApplicationUI<Contract extends ApplicationContract>({
       createComponentInstance(componentName, {
         application: runtimeApplication,
         program,
-        presentationName,
         config: runtimeComponents[componentName] ?? { elements: {} },
-        authoredPresentations,
         presentationRevision,
-        presentationAdapter,
+        presentationInstance,
+        presentationGraph,
         props,
         composition,
       })(props as Props);
@@ -213,16 +269,21 @@ export function createApplicationUI<Contract extends ApplicationContract>({
       if (!root) throw new Error(`Unknown root Component "${rootName}".`);
       return root();
     },
-    captureHotState: programUI.captureHotState,
+    captureHotState() {
+      const state = programUI.captureHotState();
+      state.presentation = presentationInstance.snapshot();
+      return state;
+    },
     updatePresentations(next) {
       if (
-        Object.keys(authoredPresentations).sort().join("\n") !== Object.keys(next).sort().join("\n")
+        Object.keys(configuredPresentations).sort().join("\n") !==
+        Object.keys(next).sort().join("\n")
       ) {
         return false;
       }
       validatePresentations(next);
-      for (const name of Object.keys(authoredPresentations)) delete authoredPresentations[name];
-      Object.assign(authoredPresentations, next);
+      for (const name of Object.keys(configuredPresentations)) delete configuredPresentations[name];
+      Object.assign(configuredPresentations, next);
       presentationRevision(presentationRevision() + 1);
       return true;
     },
@@ -234,7 +295,17 @@ export function createApplicationUI<Contract extends ApplicationContract>({
         result.status === "rejected" ? [result.reason] : [],
       );
       try {
+        presentationGraph.dispose();
+      } catch (error) {
+        errors.push(error);
+      }
+      try {
         await programUI.dispose();
+      } catch (error) {
+        errors.push(error);
+      }
+      try {
+        presentationInstance.dispose();
       } catch (error) {
         errors.push(error);
       }
@@ -249,11 +320,10 @@ function createComponentInstance(
   options: {
     application: RuntimeApplication;
     program: string;
-    presentationName: () => string;
     config: RuntimeComponentConfig;
-    authoredPresentations: Readonly<Record<string, unknown>>;
     presentationRevision: () => number;
-    presentationAdapter: PresentationAdapter<WebPresentationLanguage, Element>;
+    presentationInstance: PresentationAdapterInstance<WebPresentationLanguage, Element>;
+    presentationGraph: RuntimePresentationGraph;
     props: RuntimeComponentProps;
     composition: RuntimeComponentComposition;
   },
@@ -287,7 +357,10 @@ function createComponentInstance(
   const mountedTargets = Object.create(null) as Record<string, Set<Element>>;
   const sharedScene = currentPresenceGraph();
   const scene = sharedScene ?? new PresenceGraph<Element>();
-  const sceneOwner = allocatePresenceOwner(componentName);
+  const structuralKey = currentStructuralKey();
+  const sceneOwner = structuralKey
+    ? `${componentName}:key:${structuralKey}`
+    : allocatePresenceOwner(componentName);
   const owner = componentOwner(componentName) ?? "";
   const lifecycle = new ResourceScope();
   options.composition.lifecycles.add(lifecycle);
@@ -303,6 +376,10 @@ function createComponentInstance(
     lifecycle,
   );
   const actions = Object.create(null) as Record<string, (...args: unknown[]) => unknown>;
+  const eventLedger = createActionEventLedger(
+    Object.keys(definition?.actions ?? {}),
+    options.composition.actionEventRevision,
+  );
   const services = componentServices({ ...options, componentName });
   const stateInput = Object.assign(pickServices(services, ["feature"]), {
     props,
@@ -331,8 +408,8 @@ function createComponentInstance(
   const invokeAction = (name: string, args: readonly unknown[]) => {
     const implementation = definition?.actions?.[name];
     if (typeof implementation !== "function") return;
-    return lifecycle.action(() =>
-      Reflect.apply(implementation, undefined, [actionContext, ...args]),
+    return eventLedger.invoke(name, args, () =>
+      lifecycle.action(() => Reflect.apply(implementation, undefined, [actionContext, ...args])),
     );
   };
   for (const [name, implementation] of Object.entries(definition?.actions ?? {})) {
@@ -371,17 +448,22 @@ function createComponentInstance(
     });
     mountAuthoredPresentationComponent({
       componentName,
-      presentations: options.authoredPresentations,
+      identity: sceneOwner,
       presentationRevision: options.presentationRevision,
-      presentation: options.presentationName,
       props,
       state: createPresentationState(services.feature as Readonly<Record<string, unknown>>, state),
       refs,
       mountedTargets,
-      targets: Object.fromEntries(
+      elements: Object.fromEntries(
         Object.keys(options.config.elements).map((name) => [name, { name }]),
       ),
-      adapter: options.presentationAdapter,
+      events: Object.assign(
+        Object.create(null),
+        options.composition.events[owner] ?? {},
+        eventLedger.events,
+      ),
+      adapter: options.presentationInstance,
+      graph: options.presentationGraph,
     });
     if (definition.mount) {
       onMount(() => {
@@ -514,26 +596,39 @@ function componentsForComponent(
 type RuntimePresentationComponent = (scope: {
   readonly props: Readonly<Record<string, unknown>>;
   readonly state: Readonly<Record<string, unknown>>;
-  readonly targets: Readonly<Record<string, Readonly<{ name: string }>>>;
+  readonly events: Readonly<Record<string, unknown>>;
+  readonly elements: Readonly<Record<string, Readonly<{ name: string }>>>;
 }) => Readonly<Record<string, WebElementPresentation>>;
+
+type RuntimePresentationGraph = Readonly<{
+  revision(component: string): number;
+  acknowledge(component: string): void;
+  dynamic(component: string): boolean;
+  mount(): void;
+  component(name: string): RuntimePresentationComponent | undefined;
+  scopes(component: string): readonly object[];
+  dispose(): void;
+}>;
 
 function mountAuthoredPresentationComponent(options: {
   componentName: string;
-  presentations: Readonly<Record<string, unknown>>;
+  identity: string;
   presentationRevision: () => number;
-  presentation: () => string;
   props: Readonly<Record<string, unknown>>;
   state: Readonly<Record<string, unknown>>;
   refs: Readonly<Record<string, Element | null>>;
   mountedTargets: Readonly<Record<string, ReadonlySet<Element>>>;
-  targets: Readonly<Record<string, Readonly<{ name: string }>>>;
-  adapter: PresentationAdapter<WebPresentationLanguage, Element>;
+  elements: Readonly<Record<string, Readonly<{ name: string }>>>;
+  events: Readonly<Record<string, unknown>>;
+  adapter: PresentationAdapterInstance<WebPresentationLanguage, Element>;
+  graph: RuntimePresentationGraph;
 }): void {
   onMount(() => {
     const boundary = options.mountedTargets.Root?.values().next().value ?? options.refs.Root;
     if (!(boundary instanceof Element)) return;
+    options.graph.mount();
     const targetSources = Object.fromEntries(
-      Object.keys(options.targets).map((name) => [
+      Object.keys(options.elements).map((name) => [
         name,
         () => {
           const repeated = options.mountedTargets[name];
@@ -543,23 +638,43 @@ function mountAuthoredPresentationComponent(options: {
         },
       ]),
     );
-    const session = options.adapter.create({ boundary, targets: targetSources });
+    const session = options.adapter.create({
+      boundary,
+      identity: options.identity,
+      elements: targetSources,
+      scopes: options.graph.scopes(options.componentName),
+    });
+    let currentPresentationRevision: number | undefined;
+    let currentGraphDynamic: boolean | undefined;
     const disposeEffect = effect(() => {
-      options.presentationRevision();
-      const definition = presentationDefinition(options.presentations, options.presentation());
-      if (!definition) return;
-      const component = presentationComponent(definition, options.componentName);
-      if (!component) {
-        session.commit({});
-        return;
+      const revision = options.presentationRevision();
+      void options.graph.revision(options.componentName);
+      const graphDynamic = options.graph.dynamic(options.componentName);
+      if (
+        (currentPresentationRevision !== undefined && revision !== currentPresentationRevision) ||
+        (currentGraphDynamic !== undefined && graphDynamic !== currentGraphDynamic)
+      ) {
+        session.reconfigure();
       }
-      session.commit(
-        component({
-          props: options.props,
-          state: options.state,
-          targets: options.targets,
-        }),
+      currentPresentationRevision = revision;
+      currentGraphDynamic = graphDynamic;
+      session.render(
+        ({ elements }) => {
+          const component = options.graph.component(options.componentName);
+          if (!component) return {};
+          return component({
+            props: options.props,
+            state: options.state,
+            events: options.events,
+            elements,
+          });
+        },
+        {
+          dynamic: graphDynamic,
+          behavior: { state: options.state, props: options.props },
+        },
       );
+      queueMicrotask(() => options.graph.acknowledge(options.componentName));
     });
     return () => {
       disposeEffect();
@@ -568,27 +683,256 @@ function mountAuthoredPresentationComponent(options: {
   });
 }
 
-function presentationDefinition(
-  presentations: Readonly<Record<string, unknown>>,
-  presentation: string,
-): Readonly<Record<string, unknown>> | undefined {
-  const definition = record(presentations[presentation]);
-  return Object.keys(definition).length ? definition : undefined;
+/** @internal Creates the single Application/Feature Presentation evaluation graph. */
+export function createPresentationGraph(options: {
+  application: RuntimeApplication;
+  program: string;
+  presentations: Readonly<Record<string, RuntimeConfiguredPresentation>>;
+  presentationRevision: () => number;
+  presentation: () => string;
+  adapter: PresentationAdapterInstance<WebPresentationLanguage, Element>;
+  boundary: Element;
+  featureAPIs: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
+  featureEvents: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
+  eventRevision: () => number;
+  rootComponents: readonly string[];
+  dependencies?: PresentationDependencyManifest;
+}): RuntimePresentationGraph {
+  const scopeIdentities = collectPresentationScopes(options.application.features);
+  const scopePaths = Object.keys(scopeIdentities).sort();
+  const scopeIndexes = new Map(scopePaths.map((path, index) => [path, index]));
+  const revisions = new Map<string, Signal<number>>();
+  const acknowledgements = new Map<string, number>();
+  const pendingConsumers = new Set<string>();
+  const sharedConsumers = sharedPresentationConsumers(options.dependencies);
+  let notifyQueued = false;
+  let components = new Map<string, RuntimePresentationComponent>();
+  let session: ReturnType<typeof options.adapter.create> | undefined;
+  let disposeEffect: (() => void) | undefined;
+  let currentPresentationRevision: number | undefined;
+  let authoredEvaluation = false;
+  let disposed = false;
+  let generation = 0;
+
+  const revisionFor = (component: string) => {
+    let current = revisions.get(component);
+    if (!current) {
+      current = signal(0);
+      revisions.set(component, current);
+    }
+    return current;
+  };
+  const notifyConsumers = () => {
+    generation += 1;
+    for (const component of sharedConsumers) pendingConsumers.add(component);
+    if (notifyQueued || pendingConsumers.size === 0) return;
+    notifyQueued = true;
+    queueMicrotask(() => {
+      queueMicrotask(() => {
+        notifyQueued = false;
+        if (disposed) return;
+        for (const component of pendingConsumers) {
+          if (acknowledgements.get(component) === generation) continue;
+          const current = revisionFor(component);
+          current(current() + 1);
+        }
+        pendingConsumers.clear();
+      });
+    });
+  };
+
+  const mount = () => {
+    if (disposed) throw new Error("Cannot mount a disposed Presentation graph.");
+    if (session) return;
+    session = options.adapter.create({
+      boundary: options.boundary,
+      identity: "@presentation",
+      elements: {},
+      scopes: scopePaths.map((path) => scopeIdentities[path]!),
+    });
+    disposeEffect = effect(() => {
+      const nextPresentationRevision = options.presentationRevision();
+      void options.eventRevision();
+      if (
+        currentPresentationRevision !== undefined &&
+        nextPresentationRevision !== currentPresentationRevision
+      ) {
+        session?.reconfigure({ scopes: true });
+      }
+      currentPresentationRevision = nextPresentationRevision;
+      authoredEvaluation = true;
+      try {
+        session?.render(({ scopes }) => {
+          const next = new Map<string, RuntimePresentationComponent>();
+          const configured = options.presentations[options.presentation()];
+          if (configured) {
+            const rootScope = scopes[scopeIndexes.get("")!];
+            const tree = rootScope!.evaluate(() =>
+              configured.create({
+                parameters: configured.parameters,
+                environment: options.adapter.environment,
+                state: createPresentationState(options.featureAPIs[""] ?? {}, {}),
+                events: options.featureEvents[""] ?? {},
+              }),
+            );
+            for (const name of options.rootComponents) {
+              const component = tree[name];
+              if (typeof component === "function") {
+                next.set(name, component as RuntimePresentationComponent);
+              }
+            }
+            collectPresentationComponents({
+              features: options.application.features,
+              program: options.program,
+              tree,
+              parent: "",
+              scopeIndexes,
+              scopes,
+              featureAPIs: options.featureAPIs,
+              featureEvents: options.featureEvents,
+              previous: components,
+              refreshAll: authoredEvaluation,
+              sharedConsumers,
+              result: next,
+            });
+          }
+          components = next;
+          notifyConsumers();
+          return {};
+        });
+      } finally {
+        authoredEvaluation = false;
+      }
+    });
+  };
+
+  return {
+    revision: (component) => revisionFor(component)(),
+    acknowledge(component) {
+      if (disposed) return;
+      acknowledgements.set(component, generation);
+    },
+    dynamic(component) {
+      if (!options.dependencies) return true;
+      return Boolean(options.dependencies[component]?.length);
+    },
+    mount,
+    component: (name) => components.get(name),
+    scopes(component) {
+      const owner = componentOwner(component);
+      if (owner === undefined) return [scopeIdentities[""]!];
+      const result = [scopeIdentities[""]!];
+      let path = "";
+      for (const name of owner.split(".")) {
+        path = path ? `${path}.${name}` : name;
+        const identity = scopeIdentities[path];
+        if (identity) result.push(identity);
+      }
+      return result;
+    },
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      disposeEffect?.();
+      disposeEffect = undefined;
+      session?.dispose();
+      session = undefined;
+      components.clear();
+      revisions.clear();
+      acknowledgements.clear();
+      pendingConsumers.clear();
+    },
+  };
 }
 
-function presentationComponent(
-  definition: Readonly<Record<string, unknown>>,
-  component: string,
-): RuntimePresentationComponent | undefined {
-  let components = definition;
-  const owner = componentOwner(component);
-  if (owner) {
-    for (const name of owner.split(".")) components = record(components[capitalize(name)]);
+function collectPresentationComponents(options: {
+  features: Readonly<Record<string, RuntimeFeature>> | undefined;
+  program: string;
+  tree: Readonly<Record<string, unknown>>;
+  parent: string;
+  scopeIndexes: ReadonlyMap<string, number>;
+  scopes: readonly Readonly<{ evaluate<Value>(read: () => Value): Value }>[];
+  featureAPIs: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
+  featureEvents: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
+  previous: ReadonlyMap<string, RuntimePresentationComponent>;
+  refreshAll: boolean;
+  sharedConsumers: ReadonlySet<string>;
+  result: Map<string, RuntimePresentationComponent>;
+}): void {
+  for (const [name, feature] of Object.entries(options.features ?? {}).sort(([left], [right]) =>
+    left.localeCompare(right),
+  )) {
+    const path = options.parent ? `${options.parent}.${name}` : name;
+    if (!options.refreshAll && !hasPresentationConsumer(options.sharedConsumers, path)) {
+      copyPresentationSubtree(options.previous, options.result, path);
+      continue;
+    }
+    const createFeature = options.tree[capitalize(name)];
+    const scopeIndex = options.scopeIndexes.get(path);
+    const scope = scopeIndex === undefined ? undefined : options.scopes[scopeIndex];
+    if (typeof createFeature !== "function" || !scope) continue;
+    const tree = scope.evaluate(
+      () =>
+        createFeature({
+          state: createPresentationState(options.featureAPIs[path] ?? {}, {}),
+          events: options.featureEvents[path] ?? {},
+        }) as Readonly<Record<string, unknown>>,
+    );
+    for (const componentName of Object.keys(
+      feature.programs?.[options.program]?.components ?? {},
+    )) {
+      const component = tree[componentName];
+      if (typeof component === "function") {
+        options.result.set(
+          featureComponentName(path, componentName),
+          component as RuntimePresentationComponent,
+        );
+      }
+    }
+    collectPresentationComponents({ ...options, features: feature.features, tree, parent: path });
   }
-  const separator = component.indexOf("/component/");
-  const name = separator < 0 ? component : component.slice(separator + "/component/".length);
-  const factory = components[name];
-  return typeof factory === "function" ? (factory as RuntimePresentationComponent) : undefined;
+}
+
+function hasPresentationConsumer(consumers: ReadonlySet<string>, path: string): boolean {
+  for (const component of consumers) {
+    const owner = componentOwner(component);
+    if (owner === path || owner?.startsWith(`${path}.`)) return true;
+  }
+  return false;
+}
+
+function sharedPresentationConsumers(
+  dependencies: PresentationDependencyManifest | undefined,
+): ReadonlySet<string> {
+  const result = new Set<string>();
+  for (const [component, declarations] of Object.entries(dependencies ?? {})) {
+    const semantic = semanticComponentName(component);
+    if (
+      declarations.some(({ animations }) =>
+        animations.some(({ scope }) => !scope.endsWith(semantic)),
+      )
+    ) {
+      result.add(component);
+    }
+  }
+  return result;
+}
+
+function semanticComponentName(component: string): string {
+  const match = component.match(/^@feature\/(.+)\/component\/([^/]+)$/);
+  if (!match) return component;
+  return `${match[1]!.split(".").map(capitalize).join("/")}/${match[2]!}`;
+}
+
+function copyPresentationSubtree(
+  previous: ReadonlyMap<string, RuntimePresentationComponent>,
+  result: Map<string, RuntimePresentationComponent>,
+  path: string,
+): void {
+  for (const [component, declaration] of previous) {
+    const owner = componentOwner(component);
+    if (owner === path || owner?.startsWith(`${path}.`)) result.set(component, declaration);
+  }
 }
 
 function materializeComponentState(
@@ -720,11 +1064,13 @@ function createProgramUI(
   program: string,
   resolveCapabilities: (address: ProgramContributionAddress) => Readonly<Record<string, unknown>>,
   hotState?: HotRenderState,
+  onActionEvent: () => void = () => undefined,
 ): {
   api: Readonly<Record<string, unknown>>;
   features: Record<string, Readonly<Record<string, unknown>>>;
   apis: Record<string, Readonly<Record<string, unknown>>>;
   capabilities: Record<string, Readonly<Record<string, unknown>>>;
+  events: Record<string, Readonly<Record<string, unknown>>>;
   captureHotState(): HotRenderState;
   dispose(): Promise<void>;
 } {
@@ -733,6 +1079,7 @@ function createProgramUI(
   const providedCapabilities: Record<string, unknown> = Object.create(null);
   const uiInstances = new Map<string, ProgramContributionInstance["ui"]>();
   const capabilities: Record<string, Readonly<Record<string, unknown>>> = Object.create(null);
+  const events: Record<string, Readonly<Record<string, unknown>>> = Object.create(null);
 
   const instantiate = (
     feature: RuntimeFeature,
@@ -749,6 +1096,7 @@ function createProgramUI(
     if (!definition) {
       const empty = Object.freeze(Object.create(null) as Record<string, unknown>);
       apis[path] = empty;
+      events[path] = empty;
       return empty;
     }
 
@@ -759,10 +1107,12 @@ function createProgramUI(
       capabilities: { ...externalCapabilities, ...providedCapabilities },
       features: children,
       initialState: hotState?.programs?.[path],
+      onActionEvent,
     });
     instances.push(instance);
     uiInstances.set(path, instance.ui);
     capabilities[path] = instance.capabilities;
+    events[path] = instance.ui?.events ?? Object.freeze({});
     const provided = instance.start();
     for (const [name, capability] of Object.entries(provided)) {
       if (Object.hasOwn(providedCapabilities, name)) {
@@ -798,6 +1148,7 @@ function createProgramUI(
     ),
     apis,
     capabilities,
+    events,
     captureHotState() {
       const state = hotState ?? {};
       state.programs = Object.fromEntries(
@@ -878,12 +1229,40 @@ function firstPresentation<Contract extends ApplicationContract>(
   return Object.keys(presentations.presentations)[0] ?? "default";
 }
 
-function validatePresentations(presentations: Readonly<Record<string, object>>): void {
+function validatePresentations(
+  presentations: Readonly<Record<string, RuntimeConfiguredPresentation>>,
+): void {
   for (const [name, value] of Object.entries(presentations)) {
-    if (!value || typeof value !== "object" || Array.isArray(value)) {
-      throw new TypeError(`Presentation "${name}" must be a definition object.`);
+    if (
+      !value ||
+      typeof value !== "object" ||
+      Array.isArray(value) ||
+      typeof value.create !== "function" ||
+      !value.parameters ||
+      typeof value.parameters !== "object" ||
+      Array.isArray(value.parameters)
+    ) {
+      throw new TypeError(`Presentation "${name}" must provide parameters and a create function.`);
     }
   }
+}
+
+function collectPresentationScopes(
+  features: Readonly<Record<string, RuntimeFeature>> | undefined,
+): Record<string, object> {
+  const scopes: Record<string, object> = { "": Object.freeze({}) };
+  const visit = (
+    children: Readonly<Record<string, RuntimeFeature>> | undefined,
+    parent: string,
+  ) => {
+    for (const [name, feature] of Object.entries(children ?? {})) {
+      const path = parent ? `${parent}.${name}` : name;
+      scopes[path] = Object.freeze({});
+      visit(feature.features, path);
+    }
+  };
+  visit(features, "");
+  return scopes;
 }
 
 function updateRootPresentation(presentation: string) {
@@ -895,10 +1274,4 @@ function updateRootPresentation(presentation: string) {
 
 function capitalize(value: string): string {
   return value.length === 0 ? value : value[0]!.toUpperCase() + value.slice(1);
-}
-
-function record(value: unknown): Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {};
 }

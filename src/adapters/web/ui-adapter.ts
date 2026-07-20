@@ -1,23 +1,17 @@
 import type { UIAdapter } from "../../contracts/platform";
 import { activateJSXRenderer } from "../../core/jsx/runtime";
-import type { PresentationAdapter } from "../../core/presentation";
 import { createApplicationUI, type WebComponentAdapter } from "./component/adapter";
 import { jsx as webJSX } from "./component/runtime";
 import type { WebUI } from "./platform";
 
 export { HotUpdateCoordinator } from "../../core/development";
 export { render } from "./component/runtime";
-import { createWebPresentationAdapter } from "./presentation/adapter";
-import type { WebPresentationLanguage } from "./presentation/language";
+import { createWebPresentationAdapter, type WebPresentationAdapter } from "./presentation/adapter";
 
 const renderWebIntrinsic = (type: string, props: Readonly<Record<string, unknown>>) =>
   webJSX(type, props as Parameters<typeof webJSX>[1]);
 
-export type WebUIAdapter = UIAdapter<
-  WebUI,
-  WebComponentAdapter,
-  PresentationAdapter<WebPresentationLanguage, Element>
->;
+export type WebUIAdapter = UIAdapter<WebUI, WebComponentAdapter, WebPresentationAdapter>;
 
 /** Creates the paired web structure and Presentation implementation. */
 export function createWebUIAdapter(): WebUIAdapter {

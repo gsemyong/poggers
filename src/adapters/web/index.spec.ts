@@ -10,7 +10,7 @@ describe("web Platform Adapter", () => {
     expect(adapter.name).toBe("web");
     expect(adapter.ui.name).toBe("web");
     expect(adapter.ui.component.createApplicationUI).toBeTypeOf("function");
-    expect(adapter.ui.presentation.create).toBeTypeOf("function");
+    expect(adapter.ui.presentation.mount).toBeTypeOf("function");
   });
 
   test("rejects unsupported Environments before starting native work", async () => {
@@ -22,6 +22,7 @@ describe("web Platform Adapter", () => {
       platforms: ["web"],
       features: [],
       programs: [program],
+      presentations: [],
     } as const;
 
     await expect(

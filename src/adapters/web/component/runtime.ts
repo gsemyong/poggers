@@ -16,6 +16,8 @@ import {
   setActiveSub as alienSetActiveSub,
 } from "alien-signals";
 
+import type { JSXElement } from "../../../core/jsx/types";
+import { hasPresentationPresence, onPresentationExit } from "../lifecycle";
 import type { Child } from "./elements";
 import {
   adoptSceneChildren,
@@ -70,6 +72,7 @@ export type HotRenderState = {
   }>;
   keyed?: Record<string, unknown>;
   programs?: Record<string, Record<string, unknown>>;
+  presentation?: unknown;
   scroll?: Record<string, { left: number; top: number }>;
   values?: unknown[];
   mounted?: boolean;
@@ -441,18 +444,6 @@ const retainedPresenceSemantics = new WeakMap<
   HTMLElement,
   { readonly ariaHidden: string | null; readonly inert: boolean }
 >();
-const poppedPresenceStyles = new WeakMap<
-  HTMLElement,
-  {
-    readonly position: string;
-    readonly inset: string;
-    readonly insetInlineStart: string;
-    readonly insetBlockStart: string;
-    readonly inlineSize: string;
-    readonly blockSize: string;
-  }
->();
-
 type KeyedScopedNodes<Item> = ScopedNodes & {
   item: Item;
   update(item: Item, index: number): boolean;
@@ -478,8 +469,8 @@ function withStructuralKey<T>(key: string, fn: () => T): T {
 export function For<
   Items extends readonly unknown[],
   Key extends VirtualPropertyKey<Items> = VirtualPropertyKey<Items>,
->(props: ForProps<Items> | VirtualForProps<Items, Key>): Child {
-  if (props.virtual) return virtualFor(props as VirtualForProps<Items>);
+>(props: ForProps<Items> | VirtualForProps<Items, Key>): JSXElement {
+  if (props.virtual) return virtualFor(props as VirtualForProps<Items>) as JSXElement;
   const start = document.createComment("for");
   const end = document.createComment("/for");
   const parent = document.createDocumentFragment();
@@ -543,14 +534,10 @@ export function For<
       return;
     }
     let retention: RetainedPresence;
-    retention = retainForExit(
-      entry.nodes,
-      () => {
-        entry.dispose();
-        if (exiting.get(itemKey)?.retention === retention) exiting.delete(itemKey);
-      },
-      2,
-    );
+    retention = retainForExit(entry.nodes, () => {
+      entry.dispose();
+      if (exiting.get(itemKey)?.retention === retention) exiting.delete(itemKey);
+    });
     exiting.set(itemKey, { entry, retention });
   };
 
@@ -658,7 +645,7 @@ export function For<
     clearKeyed();
   });
 
-  return parent;
+  return parent as unknown as JSXElement;
 }
 
 type VirtualKeyedScopedNodes<Item> = KeyedScopedNodes<Item> & {
@@ -822,15 +809,11 @@ function virtualFor<Items extends readonly unknown[]>(props: VirtualForProps<Ite
       return;
     }
     let retention: RetainedPresence;
-    retention = retainForExit(
-      entry.nodes,
-      () => {
-        entry.dispose();
-        virtualizer.measureElement(null);
-        if (exiting.get(key)?.retention === retention) exiting.delete(key);
-      },
-      2,
-    );
+    retention = retainForExit(entry.nodes, () => {
+      entry.dispose();
+      virtualizer.measureElement(null);
+      if (exiting.get(key)?.retention === retention) exiting.delete(key);
+    });
     exiting.set(key, { entry, retention });
   };
 
@@ -1129,7 +1112,7 @@ export function virtualItemPosition(
   };
 }
 
-export function Show(props: { when: unknown; children: Child; fallback?: Child }): Child {
+export function Show(props: { when: unknown; children: Child; fallback?: Child }): JSXElement {
   const start = document.createComment("show");
   const end = document.createComment("/show");
   const parent = document.createDocumentFragment();
@@ -1149,14 +1132,10 @@ export function Show(props: { when: unknown; children: Child; fallback?: Child }
       return;
     }
     let retention: RetainedPresence;
-    retention = retainForExit(
-      scope.nodes,
-      () => {
-        scope.dispose();
-        if (exiting.get(branch)?.retention === retention) exiting.delete(branch);
-      },
-      1,
-    );
+    retention = retainForExit(scope.nodes, () => {
+      scope.dispose();
+      if (exiting.get(branch)?.retention === retention) exiting.delete(branch);
+    });
     exiting.set(branch, { scope, retention });
   };
 
@@ -1191,7 +1170,7 @@ export function Show(props: { when: unknown; children: Child; fallback?: Child }
     exiting.clear();
   });
 
-  return parent;
+  return parent as unknown as JSXElement;
 }
 
 function readCondition(value: unknown): boolean {
@@ -1200,16 +1179,11 @@ function readCondition(value: unknown): boolean {
 
 function shouldRetainForExit(nodes: Node[]): boolean {
   if (prefersReducedMotion()) return false;
-  return presenceElements(nodes).some((element) => {
-    const lifecycle = element.getAttribute("data-motion-lifecycle") ?? "";
-    return lifecycle.includes("exit") && lifecycle.includes("exit-finished");
-  });
+  return presenceElements(nodes).length > 0;
 }
 
-function retainForExit(nodes: Node[], onDone: () => void, priority = 1): RetainedPresence {
-  const elements = presenceElements(nodes).filter((element) => {
-    return (element.getAttribute("data-motion-lifecycle") ?? "").includes("exit");
-  });
+function retainForExit(nodes: Node[], onDone: () => void): RetainedPresence {
+  const elements = presenceElements(nodes);
   markPresenceState(nodes, "exiting");
 
   let settled = false;
@@ -1222,7 +1196,7 @@ function retainForExit(nodes: Node[], onDone: () => void, priority = 1): Retaine
     onDone();
   };
 
-  waiting = waitForPresenceFinish(elements, finish, priority);
+  waiting = waitForPresenceFinish(elements, finish);
   return {
     finish,
     restore() {
@@ -1239,11 +1213,7 @@ type PresenceWait = {
   restore(): void;
 };
 
-function waitForPresenceFinish(
-  elements: HTMLElement[],
-  onDone: () => void,
-  _priority = 1,
-): PresenceWait {
+function waitForPresenceFinish(elements: HTMLElement[], onDone: () => void): PresenceWait {
   const roots = elements.filter(
     (element) => !elements.some((parent) => parent !== element && parent.contains(element)),
   );
@@ -1262,36 +1232,21 @@ function waitForPresenceFinish(
 }
 
 function waitForLifecycleFinish(elements: HTMLElement[], onDone: () => void): () => void {
-  let finished = false;
-  let timeout: ReturnType<typeof setTimeout> | undefined;
+  let remaining = elements.length;
+  let stopped = false;
   const finish = () => {
-    if (finished) return;
-    finished = true;
-    if (timeout) clearTimeout(timeout);
-    for (const element of elements) {
-      element.removeEventListener("transitionend", finish);
-      element.removeEventListener("animationend", finish);
-      element.removeEventListener("poggersmotionfinish", finish);
-    }
+    if (stopped) return;
+    remaining -= 1;
+    if (remaining > 0) return;
+    stopped = true;
+    for (const stop of stops) stop();
     onDone();
   };
-
-  for (const element of elements) {
-    element.addEventListener("transitionend", finish);
-    element.addEventListener("animationend", finish);
-    element.addEventListener("poggersmotionfinish", finish);
-  }
-
-  timeout = setTimeout(finish, Math.max(maxLifecycleDurationMs(elements) + 50, 240));
+  const stops = elements.map((element) => onPresentationExit(element, finish));
   return () => {
-    if (finished) return;
-    finished = true;
-    if (timeout) clearTimeout(timeout);
-    for (const element of elements) {
-      element.removeEventListener("transitionend", finish);
-      element.removeEventListener("animationend", finish);
-      element.removeEventListener("poggersmotionfinish", finish);
-    }
+    if (stopped) return;
+    stopped = true;
+    for (const stop of stops) stop();
   };
 }
 
@@ -1305,9 +1260,7 @@ function markPresenceState(
       element,
       state === "entered" ? "present" : state === "exiting" ? "exiting" : "entering",
     );
-    element.setAttribute("data-motion-state", state);
     if (state === "exiting") {
-      popPresenceElement(element);
       if (!retainedPresenceSemantics.has(element)) {
         retainedPresenceSemantics.set(element, {
           ariaHidden: element.getAttribute("aria-hidden"),
@@ -1317,7 +1270,6 @@ function markPresenceState(
       element.setAttribute("aria-hidden", "true");
       element.setAttribute("inert", "");
     } else {
-      restorePoppedPresenceElement(element);
       const semantics = retainedPresenceSemantics.get(element);
       if (!semantics) continue;
       retainedPresenceSemantics.delete(element);
@@ -1328,42 +1280,6 @@ function markPresenceState(
   }
 }
 
-function popPresenceElement(element: HTMLElement): void {
-  if (element.getAttribute("data-motion-layout") !== "pop" || poppedPresenceStyles.has(element)) {
-    return;
-  }
-  const parent = element.parentElement;
-  if (!parent) return;
-  const rectangle = element.getBoundingClientRect();
-  const parentRectangle = parent.getBoundingClientRect();
-  poppedPresenceStyles.set(element, {
-    position: element.style.position,
-    inset: element.style.inset,
-    insetInlineStart: element.style.insetInlineStart,
-    insetBlockStart: element.style.insetBlockStart,
-    inlineSize: element.style.inlineSize,
-    blockSize: element.style.blockSize,
-  });
-  element.style.position = "absolute";
-  element.style.inset = "auto";
-  element.style.insetInlineStart = `${rectangle.left - parentRectangle.left}px`;
-  element.style.insetBlockStart = `${rectangle.top - parentRectangle.top}px`;
-  element.style.inlineSize = `${rectangle.width}px`;
-  element.style.blockSize = `${rectangle.height}px`;
-}
-
-function restorePoppedPresenceElement(element: HTMLElement): void {
-  const styles = poppedPresenceStyles.get(element);
-  if (!styles) return;
-  poppedPresenceStyles.delete(element);
-  element.style.position = styles.position;
-  element.style.inset = styles.inset;
-  element.style.insetInlineStart = styles.insetInlineStart;
-  element.style.insetBlockStart = styles.insetBlockStart;
-  element.style.inlineSize = styles.inlineSize;
-  element.style.blockSize = styles.blockSize;
-}
-
 function presenceElements(nodes: Node[]): HTMLElement[] {
   const elements: HTMLElement[] = [];
   for (const node of nodes) collectPresenceElements(node, elements);
@@ -1372,38 +1288,12 @@ function presenceElements(nodes: Node[]): HTMLElement[] {
 
 function collectPresenceElements(node: Node, elements: HTMLElement[]) {
   if (!isHtmlElement(node)) return;
-  if (node.getAttribute("data-motion-lifecycle")) elements.push(node);
+  if (hasPresentationPresence(node)) elements.push(node);
   for (const child of Array.from(node.childNodes)) collectPresenceElements(child, elements);
 }
 
 function isHtmlElement(node: unknown): node is HTMLElement {
   return typeof HTMLElement !== "undefined" && node instanceof HTMLElement;
-}
-
-function maxLifecycleDurationMs(elements: HTMLElement[]): number {
-  if (typeof getComputedStyle !== "function") return 0;
-  let max = 0;
-  for (const element of elements) {
-    const style = getComputedStyle(element);
-    max = Math.max(
-      max,
-      maxTimeListMs(style.transitionDuration) + maxTimeListMs(style.transitionDelay),
-      maxTimeListMs(style.animationDuration) + maxTimeListMs(style.animationDelay),
-    );
-  }
-  return max;
-}
-
-function maxTimeListMs(value: string): number {
-  let max = 0;
-  for (const item of value.split(",")) max = Math.max(max, timeMs(item.trim()));
-  return max;
-}
-
-function timeMs(value: string): number {
-  if (value.endsWith("ms")) return Number(value.slice(0, -2)) || 0;
-  if (value.endsWith("s")) return (Number(value.slice(0, -1)) || 0) * 1000;
-  return 0;
 }
 
 function queuePresenceTarget(fn: () => void) {
@@ -1490,12 +1380,24 @@ function applyProp(element: HTMLElement, name: string, value: unknown) {
     }
     if (attributeName === name && name in element) {
       try {
-        if (!Object.is(Reflect.get(element, name), next)) Reflect.set(element, name, next);
+        const current = Reflect.get(element, name);
+        if (needsNativePropertyWrite(current, next, element.getAttribute(attributeName))) {
+          Reflect.set(element, name, next);
+        }
         return;
       } catch {}
     }
     setAttributeIfChanged(element, attributeName, next === true ? "" : stringify(next));
   }, value);
+}
+
+/** @internal Distinguishes an authored empty reflected attribute from a missing one. */
+export function needsNativePropertyWrite(
+  current: unknown,
+  next: unknown,
+  attribute: string | null,
+): boolean {
+  return !Object.is(current, next) || (typeof next === "string" && attribute !== next);
 }
 
 function attributeNameForProp(name: string): string {
@@ -1731,7 +1633,6 @@ export function mountDialog(
       setSceneElementVisible(element, true);
       element.removeAttribute("aria-hidden");
       element.removeAttribute("inert");
-      element.setAttribute("data-motion-state", "entered");
       if (mode === "modal" && !element.contains(document.activeElement)) {
         focusDialogDefault(element);
       }
@@ -1796,15 +1697,11 @@ export function mountDialog(
 
     focusDialogDefault(element);
     if (entering) {
-      element.setAttribute("data-motion-state", "entering");
       notifyVirtualCollectionsOpened(element);
       queuePresenceTarget(() => {
         if (!element.open || currentMode !== "modal") return;
         if (!element.contains(document.activeElement)) focusDialogDefault(element);
-        element.setAttribute("data-motion-state", "entered");
       });
-    } else {
-      element.setAttribute("data-motion-state", "entered");
     }
   };
   const close = () => {
@@ -1813,40 +1710,27 @@ export function mountDialog(
     currentMode = false;
     element.removeAttribute("aria-hidden");
     element.removeAttribute("inert");
-    element.removeAttribute("data-motion-state");
     restoreLayerFocus(invoker);
     setSceneElementVisible(element, false);
     element.hidden = true;
   };
   const beginClose = (currentRevision: number) => {
-    const lifecycle = element.getAttribute("data-motion-lifecycle") ?? "";
-    if (
-      prefersReducedMotion() ||
-      !lifecycle.includes("exit") ||
-      !lifecycle.includes("exit-finished") ||
-      element.hidden
-    ) {
+    if (prefersReducedMotion() || !hasPresentationPresence(element) || element.hidden) {
       close();
       return;
     }
 
     cancelExit();
     if (element.open && browserMode === "modal") show("nonmodal");
-    element.setAttribute("data-motion-state", "exiting");
     element.setAttribute("aria-hidden", "true");
     element.setAttribute("inert", "");
     const finish = () => {
       if (targetMode || currentRevision !== revision) return;
       close();
     };
-    const onMotionFinish = (event: Event) => {
-      if (event.target === element) finish();
-    };
-    element.addEventListener("poggersmotionfinish", onMotionFinish);
-    const timeout = setTimeout(finish, 2_000);
+    const stopPresentation = onPresentationExit(element, finish);
     cancelPendingExit = () => {
-      element.removeEventListener("poggersmotionfinish", onMotionFinish);
-      clearTimeout(timeout);
+      stopPresentation();
     };
   };
 
@@ -1928,8 +1812,7 @@ function restoreLayerFocus(invoker: HTMLElement | null): void {
 
 function shouldRetainElementForExit(element: HTMLElement): boolean {
   if (prefersReducedMotion()) return false;
-  const lifecycle = element.getAttribute("data-motion-lifecycle") ?? "";
-  return lifecycle.includes("exit") && lifecycle.includes("exit-finished");
+  return hasPresentationPresence(element);
 }
 
 function setHiddenAttribute(element: HTMLElement, hidden: boolean) {

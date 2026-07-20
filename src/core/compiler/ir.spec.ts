@@ -18,6 +18,7 @@ test("serializes arbitrary valid Application IR deterministically", () => {
           platforms: [],
           features,
           programs: [],
+          presentations: [],
         };
 
         const first = serializeApplicationIR(ir);

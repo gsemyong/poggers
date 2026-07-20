@@ -19,6 +19,7 @@ import {
   type ApplicationIR,
   type ComponentIR,
 } from "../../core/compiler/ir";
+import { compilePresentationSource } from "../../core/compiler/presentation";
 import {
   createApplicationCompiler,
   resolveApplication,
@@ -27,6 +28,7 @@ import {
 } from "../../core/compiler/source";
 import { createHotReplacementManifest } from "../../core/development";
 import { transformComponentSource } from "./component/compiler";
+import { validateWebPresentationSource } from "./presentation/compiler";
 
 export type DevelopmentServer = Readonly<{
   port: number;
@@ -38,6 +40,7 @@ type PreparedApplication = Readonly<{
   entry: string;
   ir: ApplicationIR;
   presentationSources: ReadonlySet<string>;
+  revision: number;
   updateKind: "full" | "presentation";
 }>;
 
@@ -146,7 +149,7 @@ export async function runApplication(options: {
   const server = await createServer({
     ...viteConfiguration(paths, true),
     appType: "spa",
-    plugins: [visualContractPlugin(paths, work, compiler, prepared), ...vitePlugins(paths)],
+    plugins: [presentationContractPlugin(paths, work, compiler, prepared), ...vitePlugins(paths)],
     root: work,
     server: {
       fs: { allow: [work, paths.directory, resolve(import.meta.dirname, "../../..")] },
@@ -192,6 +195,7 @@ async function prepareApplication(
       : compiler.compile(changedFile);
   const { ir } = compilation;
   const contract = webApplicationContract(ir);
+  const revision = (previous?.revision ?? -1) + 1;
   if (!development) {
     const application = await loadApplication(paths, work);
     validateUIProgramRoot(application, contract.uiProgram);
@@ -208,9 +212,12 @@ async function prepareApplication(
     candidate,
     candidateSource({
       application: paths.application,
+      development,
+      revision,
       runtime: resolve(import.meta.dirname, `./ui-adapter${moduleExtension()}`),
       program: contract.uiProgram,
       components: contract.components,
+      presentationDependencies: collectPresentationDependencies(ir, contract.uiProgram),
       hotManifest: createHotReplacementManifest(ir),
     }),
   );
@@ -228,6 +235,7 @@ async function prepareApplication(
     entry,
     ir,
     presentationSources: compilation.presentationSources,
+    revision,
     updateKind,
   };
 }
@@ -280,7 +288,27 @@ function moduleExtension(): ".ts" | ".js" {
 }
 
 function vitePlugins(paths: ApplicationPaths): Plugin[] {
-  return [sourceAliasPlugin(paths.source), componentTransformPlugin(paths.source)];
+  return [
+    sourceAliasPlugin(paths.source),
+    presentationTransformPlugin(paths.source),
+    componentTransformPlugin(paths.source),
+  ];
+}
+
+function presentationTransformPlugin(source: string): Plugin {
+  return {
+    name: "poggers-presentations",
+    enforce: "pre",
+    transform(code, rawId) {
+      const id = cleanId(rawId);
+      if (!id.startsWith(source) || !/\.[cm]?[jt]sx?$/.test(id) || !code.includes("animate(")) {
+        return;
+      }
+      const compilation = compilePresentationSource(code, id);
+      validateWebPresentationSource(compilation.ir);
+      return { code: compilation.code, map: null };
+    },
+  };
 }
 
 function componentTransformPlugin(source: string): Plugin {
@@ -319,7 +347,7 @@ function sourceAliasPlugin(source: string): Plugin {
   };
 }
 
-function visualContractPlugin(
+function presentationContractPlugin(
   paths: ApplicationPaths,
   work: string,
   compiler: ApplicationCompiler,
@@ -357,8 +385,13 @@ function visualContractPlugin(
         const candidateModules = [
           ...(context.server.moduleGraph.getModulesByFile(prepared.candidate) ?? []),
         ];
+        const invalidated = new Set<ModuleNode>();
+        const timestamp = Date.now();
+        for (const module of context.modules) {
+          context.server.moduleGraph.invalidateModule(module, invalidated, timestamp, true);
+        }
         for (const module of candidateModules) {
-          context.server.moduleGraph.invalidateModule(module);
+          context.server.moduleGraph.invalidateModule(module, invalidated, timestamp, true);
         }
         context.server.ws.send({
           type: "custom",
@@ -377,7 +410,7 @@ function visualContractPlugin(
     return modules;
   };
   return {
-    name: "poggers-visual-contract",
+    name: "poggers-presentation-contract",
     async handleHotUpdate(context) {
       return refresh(context);
     },
@@ -437,12 +470,18 @@ async function loadApplication(
 
 function candidateSource(input: {
   application: string;
+  development: boolean;
+  revision: number;
   runtime: string;
   program: string;
   components: unknown;
+  presentationDependencies: unknown;
   hotManifest: unknown;
 }): string {
-  return `import application from ${JSON.stringify(input.application)};
+  const application = input.development
+    ? `${input.application}?poggers-revision=${input.revision}`
+    : input.application;
+  return `import application from ${JSON.stringify(application)};
 import { createWebUIAdapter, render } from ${JSON.stringify(input.runtime)};
 
 export const manifest = ${JSON.stringify(input.hotManifest)};
@@ -455,6 +494,7 @@ export async function activate(root, previous = {}) {
     programs: Object.fromEntries(
       Object.entries(previous.programs ?? {}).map(([name, state]) => [name, { ...state }]),
     ),
+    presentation: previous.presentation,
     scroll: { ...previous.scroll },
     values: previous.values?.slice(),
   };
@@ -464,7 +504,9 @@ export async function activate(root, previous = {}) {
     program: ${JSON.stringify(input.program)},
     presentations: { presentations },
     components: ${JSON.stringify(input.components)},
+    presentationDependencies: ${JSON.stringify(input.presentationDependencies)},
     hotState,
+    boundary: root,
   });
   let disposeRender;
   try {
@@ -490,6 +532,112 @@ export async function activate(root, previous = {}) {
   };
 }
 `;
+}
+
+/** @internal Lowers source-level temporal provenance to runtime Component identities. */
+export function collectPresentationDependencies(
+  ir: ApplicationIR,
+  programName: string,
+): Readonly<
+  Record<
+    string,
+    readonly Readonly<{
+      destination: string;
+      animations: readonly Readonly<{ id: string; scope: string }>[];
+    }>[]
+  >
+> {
+  const components = ir.programs
+    .filter(
+      ({ name, environment, ui }) =>
+        name === programName && environment.name === "browser-main" && Boolean(ui),
+    )
+    .flatMap((program) =>
+      (program.ui?.components ?? []).map((component) => {
+        const semantic = [
+          ...program.feature.split(".").filter(Boolean).map(capitalize),
+          component.name,
+        ].join("/");
+        return {
+          semantic,
+          runtime: runtimeComponentName(program.feature, component.name),
+        };
+      }),
+    )
+    .sort((left, right) => right.semantic.length - left.semantic.length);
+  const animationScopes = new Map(
+    ir.presentations.flatMap(({ animations }) =>
+      animations.map(({ id, scope }) => [id, scope] as const),
+    ),
+  );
+  const dependencies = new Map<
+    string,
+    Array<{
+      destination: string;
+      animations: Array<{ id: string; scope: string }>;
+    }>
+  >();
+  const referenced = new Set<string>();
+  for (const source of ir.presentations) {
+    for (const declaration of source.declarations) {
+      const component = components.find(({ semantic }) =>
+        declaration.destination.startsWith(`${semantic}/`),
+      );
+      if (!component) continue;
+      const animations = declaration.animations.flatMap((id) => {
+        const scope = animationScopes.get(id);
+        if (!scope) return [];
+        referenced.add(id);
+        return [{ id, scope }];
+      });
+      if (!animations.length) continue;
+      const entries = dependencies.get(component.runtime) ?? [];
+      entries.push({ destination: declaration.destination, animations });
+      dependencies.set(component.runtime, entries);
+    }
+  }
+
+  // An Animation used outside a declaration leaf cannot yet be classified
+  // precisely. Keep every Component canonical instead of guessing static.
+  const unresolved = [...animationScopes].filter(([id]) => !referenced.has(id));
+  if (unresolved.length) {
+    for (const component of components) {
+      const entries = dependencies.get(component.runtime) ?? [];
+      entries.push({
+        destination: "*",
+        animations: unresolved.map(([id, scope]) => ({ id, scope })),
+      });
+      dependencies.set(component.runtime, entries);
+    }
+  }
+
+  return Object.freeze(
+    Object.fromEntries(
+      [...dependencies]
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([component, entries]) => [
+          component,
+          Object.freeze(
+            entries
+              .sort(({ destination: left }, { destination: right }) => left.localeCompare(right))
+              .map(({ destination, animations }) =>
+                Object.freeze({
+                  destination,
+                  animations: Object.freeze(
+                    animations
+                      .sort(({ id: left }, { id: right }) => left.localeCompare(right))
+                      .map((animation) => Object.freeze(animation)),
+                  ),
+                }),
+              ),
+          ),
+        ]),
+    ),
+  );
+}
+
+function capitalize(value: string): string {
+  return value ? `${value[0]!.toUpperCase()}${value.slice(1)}` : value;
 }
 
 function browserSource(input: {
@@ -538,7 +686,7 @@ const apply = async (candidate, updateKind) => {
         location.reload();
         return;
       }
-      console.error("[poggers] hot update rejected: " + result.reason);
+      console.error("[poggers] hot update rejected: " + result.reason, result.cause);
     }
   } finally {
     const detail = {

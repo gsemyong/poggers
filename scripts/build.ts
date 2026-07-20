@@ -63,6 +63,7 @@ for (const pattern of ["**/*.spec.d.ts", "**/*.typecheck.d.ts"]) {
   }
 }
 await rm(resolve(distDir, "scripts"), { force: true, recursive: true });
+await rm(resolve(distDir, "examples"), { force: true, recursive: true });
 
 await build({
   configFile: false,

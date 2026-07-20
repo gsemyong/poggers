@@ -118,7 +118,7 @@ describe("project template", () => {
         ui?: unknown;
       }[];
     };
-    expect(manifest.version).toBe(4);
+    expect(manifest.version).toBe(5);
     expect(manifest.platforms).toEqual(["web"]);
     expect(manifest.features.map(({ id }) => id)).toEqual(["feature/shell"]);
     expect(manifest.programs).toHaveLength(1);

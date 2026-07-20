@@ -1,4 +1,9 @@
+import type { PresentationSourceIR } from "../../../core/compiler/presentation";
 import type {
+  WebElementPresentation,
+  WebFeedback,
+  WebImageAsset,
+  WebLayoutContinuity,
   WebColor,
   WebCondition,
   WebFill,
@@ -17,14 +22,175 @@ import type {
 } from "./language";
 
 type CSSDeclarations = Record<string, string>;
+const webStyleRoots = new Set([
+  "layout",
+  "paint",
+  "text",
+  "media",
+  "transform",
+  "affordance",
+  "rules",
+  "image",
+  "feedback",
+  "presence",
+  "continuity",
+]);
+
+/** Rejects temporal web output that cannot remain on the compositor-safe path. */
+export function validateWebPresentationSource(source: PresentationSourceIR): void {
+  for (const declaration of source.declarations) {
+    if (isCompositorTemporalDestination(declaration.destination)) continue;
+    const { file, line, column } = declaration.span;
+    throw new TypeError(
+      `${file}:${line}:${column}: Web temporal output ${JSON.stringify(declaration.destination)} ` +
+        "is not compositor-safe. Change layout and paint discretely, then use layout " +
+        "continuity or animate only presence, opacity, translate, scale, and rotate.",
+    );
+  }
+}
+
+function isCompositorTemporalDestination(destination: string): boolean {
+  const path = destination.split("/");
+  const root = path.findLastIndex((segment) => webStyleRoots.has(segment));
+  if (path[root] === "presence") return true;
+  if (path[root] === "paint" && path[root + 1] === "opacity") return true;
+  return (
+    path[root] === "transform" && ["translate", "scale", "rotate"].includes(path[root + 1] ?? "")
+  );
+}
 
 export type CompiledWebStyle = Readonly<{
   className: string;
   css: string;
 }>;
 
+export type CompiledWebDynamicStyle = Readonly<{
+  compiled: CompiledWebStyle;
+  variables: Readonly<Record<string, string>>;
+}>;
+
+export type WebArtifactExecution =
+  | Readonly<{ kind: "static" }>
+  | Readonly<{ kind: "canonical"; reason: "dynamic-declaration" }>;
+
+export type WebElementArtifact = Readonly<{
+  className: string;
+  css: string;
+  variables: Readonly<Record<string, string>>;
+  properties: readonly string[];
+  ownership: Readonly<Record<string, "presentation" | "layout">>;
+  execution: WebArtifactExecution;
+  image?: WebImageAsset;
+  feedback?: WebFeedback;
+  presence?: WebElementPresentation["presence"];
+  continuity?: WebLayoutContinuity;
+}>;
+
+export type WebPresentationArtifactPlan<ElementName extends string = string> = Readonly<{
+  dynamic: boolean;
+  elements: Readonly<Partial<Record<ElementName, WebElementArtifact>>>;
+}>;
+
+type DynamicCollector = { readonly values: string[] };
+let dynamicCollector: DynamicCollector | undefined;
+
 /** Compiles one canonical declaration into deterministic, minified native CSS. */
 export function compileWebStyle(style: WebStyle): CompiledWebStyle {
+  const template = styleTemplate(style);
+  const className = `p${hash(template)}`;
+  return Object.freeze({ className, css: template.replaceAll("&", `.${className}`) });
+}
+
+/** @internal Compiles one stable CSS template and its frame-local numeric channels. */
+export function compileWebDynamicStyle(style: WebStyle): CompiledWebDynamicStyle {
+  if (dynamicCollector) throw new Error("Dynamic web Presentation compilation is not reentrant.");
+  const collector: DynamicCollector = { values: [] };
+  dynamicCollector = collector;
+  let template: string;
+  try {
+    template = styleTemplate(style);
+  } finally {
+    dynamicCollector = undefined;
+  }
+  const className = `p${hash(template)}`;
+  const placeholder = "--poggers-value-";
+  const prefix = `--${className}-`;
+  const css = template.replaceAll(placeholder, prefix).replaceAll("&", `.${className}`);
+  return Object.freeze({
+    compiled: Object.freeze({ className, css }),
+    variables: Object.freeze(
+      Object.fromEntries(collector.values.map((value, index) => [`${prefix}${index}`, value])),
+    ),
+  });
+}
+
+/** Plans one complete web Presentation frame without creating a native resource. */
+export function planWebPresentationArtifacts<ElementName extends string>(
+  declarations: Readonly<Partial<Record<ElementName, Readonly<WebElementPresentation>>>>,
+  options: Readonly<{ dynamic: boolean }>,
+): WebPresentationArtifactPlan<ElementName> {
+  const elements: Partial<Record<ElementName, WebElementArtifact>> = {};
+  for (const name of Object.keys(declarations).sort() as ElementName[]) {
+    const declaration = declarations[name];
+    if (!declaration) continue;
+    const style = options.dynamic ? compileWebDynamicStyle(declaration) : undefined;
+    const compiled = style?.compiled ?? compileWebStyle(declaration);
+    const properties = authoredProperties(declaration);
+    const ownership: Record<string, "presentation" | "layout"> = Object.fromEntries(
+      properties.map((property) => [property, "presentation" as const]),
+    );
+    const continuity = declaration.continuity
+      ? Object.freeze({
+          ...declaration.continuity,
+          strategy: declaration.continuity.strategy ?? "position",
+        })
+      : undefined;
+    if (continuity) {
+      claim(ownership, "transform", "layout", name);
+      claim(ownership, "transform-origin", "layout", name);
+    }
+    elements[name] = Object.freeze({
+      className: compiled.className,
+      css: compiled.css,
+      variables: style?.variables ?? Object.freeze({}),
+      properties,
+      ownership: Object.freeze(ownership),
+      execution: options.dynamic
+        ? Object.freeze({ kind: "canonical", reason: "dynamic-declaration" })
+        : Object.freeze({ kind: "static" }),
+      ...(declaration.image ? { image: declaration.image } : {}),
+      ...(declaration.feedback ? { feedback: declaration.feedback } : {}),
+      ...(declaration.presence !== undefined ? { presence: declaration.presence } : {}),
+      ...(continuity ? { continuity } : {}),
+    });
+  }
+  return Object.freeze({ dynamic: options.dynamic, elements: Object.freeze(elements) });
+}
+
+function authoredProperties(style: WebStyle): readonly string[] {
+  const result = new Set(Object.keys(declarations(style)));
+  for (const rule of style.rules ?? []) {
+    for (const property of Object.keys(declarations(rule.use))) result.add(property);
+  }
+  return Object.freeze([...result].sort());
+}
+
+function claim(
+  ownership: Record<string, "presentation" | "layout">,
+  property: string,
+  owner: "presentation" | "layout",
+  element: string,
+): void {
+  const current = ownership[property];
+  if (current && current !== owner) {
+    throw new TypeError(
+      `Web Presentation Element ${JSON.stringify(element)} gives ${JSON.stringify(property)} to both ${current} and ${owner}.`,
+    );
+  }
+  ownership[property] = owner;
+}
+
+function styleTemplate(style: WebStyle): string {
   const templates: string[] = [];
   const base = declarations(style);
   if (Object.keys(base).length) templates.push(rule("&", base));
@@ -36,10 +202,14 @@ export function compileWebStyle(style: WebStyle): CompiledWebStyle {
     }
     templates.push(conditionalRule(conditional.when, applied));
   }
+  return templates.join("");
+}
 
-  const template = templates.join("");
-  const className = `p${hash(template)}`;
-  return { className, css: template.replaceAll("&", `.${className}`) };
+/** @internal Compiles one dynamic frame without allocating a class or stylesheet rule. */
+export function compileWebStyleDeclarations(
+  style: WebStyleFragment,
+): Readonly<Record<string, string>> {
+  return Object.freeze(declarations(style));
 }
 
 function declarations(style: WebStyleFragment): CSSDeclarations {
@@ -240,7 +410,7 @@ function transform(result: CSSDeclarations, value: WebStyleFragment["transform"]
         ? number(value.scale)
         : `${number(value.scale.x)} ${number(value.scale.y)}`;
   }
-  if (value.rotate !== undefined) result.rotate = `${number(value.rotate)}deg`;
+  if (value.rotate !== undefined) result.rotate = numericToken(value.rotate, "deg");
   if (value.origin)
     result["transform-origin"] = `${ratioPercent(value.origin.x)} ${ratioPercent(value.origin.y)}`;
 }
@@ -263,10 +433,12 @@ function conditionalRule(condition: WebCondition, value: CSSDeclarations): strin
 
   if (condition.container) {
     const query: string[] = [];
-    containerRange(query, "inline-size", ">=", condition.container.minInlineSize);
-    containerRange(query, "inline-size", "<=", condition.container.maxInlineSize);
-    containerRange(query, "block-size", ">=", condition.container.minBlockSize);
-    containerRange(query, "block-size", "<=", condition.container.maxBlockSize);
+    withoutDynamicValues(() => {
+      containerRange(query, "inline-size", ">=", condition.container?.minInlineSize);
+      containerRange(query, "inline-size", "<=", condition.container?.maxInlineSize);
+      containerRange(query, "block-size", ">=", condition.container?.minBlockSize);
+      containerRange(query, "block-size", "<=", condition.container?.maxBlockSize);
+    });
     if (!query.length) throw new TypeError("A container condition must define a size range.");
     const name = condition.container.name ? ` ${identifier(condition.container.name)}` : "";
     result = `@container${name} (${query.join(") and (")}){${result}}`;
@@ -329,7 +501,7 @@ function logicalBox<Value>(
 
 function gridTrack(value: WebGridTrack): string {
   if (typeof value === "object" && value !== null && "fraction" in value) {
-    return `${number(value.fraction)}fr`;
+    return numericToken(value.fraction, "fr");
   }
   if (typeof value === "object" && value !== null && "fit" in value) {
     return `fit-content(${requiredLength(value.fit)})`;
@@ -355,12 +527,12 @@ function fill(value: WebFill | undefined): string | undefined {
   if (value === undefined) return;
   if (typeof value === "string" || "oklch" in value || "srgb" in value) return color(value);
   if ("linear" in value) {
-    return `linear-gradient(${number(value.linear.angle ?? 180)}deg,${stops(value.linear.stops)})`;
+    return `linear-gradient(${numericToken(value.linear.angle ?? 180, "deg")},${stops(value.linear.stops)})`;
   }
   if ("radial" in value) {
     return `radial-gradient(${value.radial.shape ?? "ellipse"},${stops(value.radial.stops)})`;
   }
-  return `conic-gradient(from ${number(value.conic.angle ?? 0)}deg,${stops(value.conic.stops)})`;
+  return `conic-gradient(from ${numericToken(value.conic.angle ?? 0, "deg")},${stops(value.conic.stops)})`;
 }
 
 function stops(values: readonly WebGradientStop[]): string {
@@ -404,21 +576,21 @@ function filter(
 
 function length(value: WebLength | undefined): string | undefined {
   if (value === undefined) return;
-  if (typeof value === "number") return value === 0 ? "0" : `${number(value)}px`;
-  if ("percent" in value) return `${number(value.percent)}%`;
-  if ("font" in value) return `${number(value.font)}em`;
-  if ("rootFont" in value) return `${number(value.rootFont)}rem`;
+  if (typeof value === "number") return numericToken(value, "px", true);
+  if ("percent" in value) return numericToken(value.percent, "%");
+  if ("font" in value) return numericToken(value.font, "em");
+  if ("rootFont" in value) return numericToken(value.rootFont, "rem");
   if ("viewport" in value) {
     const prefix = { small: "s", large: "l", dynamic: "d" }[value.viewport.mode ?? "dynamic"];
     const suffix = { inline: "vi", block: "vb", minimum: "vmin", maximum: "vmax" }[
       value.viewport.axis
     ];
-    return `${number(value.viewport.percent)}${prefix}${suffix}`;
+    return numericToken(value.viewport.percent, `${prefix}${suffix}`);
   }
   const unit = { inline: "cqi", block: "cqb", minimum: "cqmin", maximum: "cqmax" }[
     value.container.axis
   ];
-  return `${number(value.container.percent)}${unit}`;
+  return numericToken(value.container.percent, unit);
 }
 
 function requiredLength(value: WebLength): string {
@@ -491,6 +663,16 @@ function isLength(value: unknown): value is WebLength {
 }
 
 function number(value: number, minimum?: number, maximum?: number): string {
+  return numericToken(value, "", false, minimum, maximum);
+}
+
+function numericToken(
+  value: number,
+  unit = "",
+  zeroUnitless = false,
+  minimum?: number,
+  maximum?: number,
+): string {
   if (!Number.isFinite(value)) throw new RangeError(`Expected a finite number, received ${value}.`);
   if (minimum !== undefined && value < minimum) {
     throw new RangeError(`Expected ${value} to be at least ${minimum}.`);
@@ -498,11 +680,28 @@ function number(value: number, minimum?: number, maximum?: number): string {
   if (maximum !== undefined && value > maximum) {
     throw new RangeError(`Expected ${value} to be at most ${maximum}.`);
   }
-  return String(Object.is(value, -0) ? 0 : value);
+  const normalized = Object.is(value, -0) ? 0 : value;
+  const result = `${normalized}${zeroUnitless && normalized === 0 ? "" : unit}`;
+  if (!dynamicCollector) return result;
+  const index = dynamicCollector.values.push(result) - 1;
+  return `var(--poggers-value-${index})`;
 }
 
 function ratioPercent(value: number): string {
-  return `${number(value, 0, 1) === "0" ? "0" : number(value * 100)}%`;
+  if (!Number.isFinite(value) || value < 0 || value > 1) {
+    throw new RangeError(`Expected ${value} to be between 0 and 1.`);
+  }
+  return numericToken(value * 100, "%", true);
+}
+
+function withoutDynamicValues<Output>(run: () => Output): Output {
+  const current = dynamicCollector;
+  dynamicCollector = undefined;
+  try {
+    return run();
+  } finally {
+    dynamicCollector = current;
+  }
 }
 
 function identifier(value: string): string {

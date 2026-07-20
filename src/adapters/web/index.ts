@@ -8,11 +8,26 @@ export { createWebPresentationAdapter } from "./presentation/adapter";
 export type {
   WebFeedbackHost,
   WebImageHost,
+  WebPresentationAdapter,
+  WebPresentationAdapterInstance,
   WebPresentationAdapterOptions,
+  WebPresentationAdapterSession,
+  WebPresentationFrameElement,
+  WebPresentationFrameInspection,
   WebStyleHost,
 } from "./presentation/adapter";
-export { compileWebStyle } from "./presentation/compiler";
-export type { CompiledWebStyle } from "./presentation/compiler";
+export {
+  compileWebDynamicStyle,
+  compileWebStyle,
+  planWebPresentationArtifacts,
+} from "./presentation/compiler";
+export type {
+  CompiledWebDynamicStyle,
+  CompiledWebStyle,
+  WebArtifactExecution,
+  WebElementArtifact,
+  WebPresentationArtifactPlan,
+} from "./presentation/compiler";
 export { createWebUIAdapter } from "./ui-adapter";
 export type { WebUIAdapter } from "./ui-adapter";
 

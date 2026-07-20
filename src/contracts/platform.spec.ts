@@ -58,5 +58,6 @@ function application(platforms: readonly string[]): ApplicationIR {
     platforms,
     features: [],
     programs: [],
+    presentations: [],
   };
 }

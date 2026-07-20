@@ -1,13 +1,16 @@
 export type { WebUI } from "../platform";
 export { createAudioAsset, createImageAsset } from "./language";
-export { createSpring } from "./motion";
+export { decay, follow, pulse, sampleTrack, track, tween } from "./dynamics";
+export { spring } from "./spring";
 export type {
+  ConfiguredWebPresentation,
   WebAffordance,
   WebAudioAsset,
   WebAudioAssetOptions,
   WebColor,
   WebCondition,
   WebElementPresentation,
+  WebAnimationSample,
   WebFeedback,
   WebFill,
   WebFontFamily,
@@ -15,6 +18,9 @@ export type {
   WebGridTrack,
   WebImageAsset,
   WebLayout,
+  WebLayoutBox,
+  WebLayoutContinuity,
+  WebLayoutSample,
   WebLayoutModel,
   WebLength,
   WebLogicalBox,
@@ -22,7 +28,10 @@ export type {
   WebMedia,
   WebPaint,
   WebPresentation,
+  WebPresentationElement,
+  WebPresentationEnvironment,
   WebPresentationLanguage,
+  WebPresenceSample,
   WebQueryLength,
   WebShadow,
   WebStroke,
@@ -33,15 +42,18 @@ export type {
   WebTransform,
 } from "./language";
 export type {
-  WebLayoutMotion,
-  WebMotion,
-  WebMotionFrame,
-  WebMotionTransform,
-  WebMotionTransformVelocity,
-  WebMotionValue,
-  WebPresenceMotion,
-  WebPerceivedSpring,
-  WebPhysicalSpring,
-  WebSpring,
-  WebSpringOptions,
-} from "./motion";
+  WebDecay,
+  WebDecayOptions,
+  WebDynamics,
+  WebFollow,
+  WebPulse,
+  WebPulseOptions,
+  WebScalarAnimation,
+  WebTrajectory,
+  WebTween,
+  WebTweenOptions,
+  WebTrack,
+  WebTrackOptions,
+  WebTrackPoint,
+} from "./dynamics";
+export type { WebPerceivedSpring, WebPhysicalSpring, WebSpring, WebSpringOptions } from "./spring";

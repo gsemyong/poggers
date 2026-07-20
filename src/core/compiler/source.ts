@@ -17,6 +17,7 @@ import {
   type StatementIR,
   type TypeIR,
 } from "./ir";
+import { compilePresentationSource } from "./presentation";
 
 export class ApplicationDiagnostic extends Error {
   readonly span: SourceSpan;
@@ -148,6 +149,20 @@ function compileApplicationProgram(
   const platforms = [...new Set(programs.map(({ environment }) => environment.platform))].sort();
 
   const root = dirname(file);
+  const implementationSources = presentationImplementationSources(
+    program,
+    checker,
+    applicationObject,
+    root,
+  );
+  const presentationIR = [...implementationSources]
+    .map((path) => {
+      const implementation = program.getSourceFile(path);
+      if (!implementation) throw new Error(`Cannot read Presentation source ${path}.`);
+      return compilePresentationSource(implementation.text, relative(root, path)).ir;
+    })
+    .filter(({ animations, declarations }) => animations.length || declarations.length)
+    .sort(({ file: left }, { file: right }) => left.localeCompare(right));
   const ir = normalizeSourceFiles(
     {
       version: POGGERS_IR_VERSION,
@@ -159,18 +174,14 @@ function compileApplicationProgram(
       platforms,
       features: features.sort(byId),
       programs: programs.sort(byId),
+      presentations: presentationIR,
     },
     configuration ? dirname(configuration) : root,
   );
   return {
     compilation: {
       ir,
-      presentationSources: presentationImplementationSources(
-        program,
-        checker,
-        applicationObject,
-        root,
-      ),
+      presentationSources: implementationSources,
     },
     program,
   };

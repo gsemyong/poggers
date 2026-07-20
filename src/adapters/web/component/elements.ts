@@ -12,7 +12,7 @@ export type Child =
   | Child[]
   | (() => Child);
 
-type AttributeValue<T> = T | null | undefined;
+type AttributeValue<T> = T | (() => T | null | undefined) | null | undefined;
 type PrimitiveAttribute = string | number | boolean | null | undefined;
 type Booleanish = boolean | "true" | "false";
 type CrossOrigin = "anonymous" | "use-credentials" | "";

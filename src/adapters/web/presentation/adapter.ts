@@ -1,17 +1,54 @@
-import type {
-  PresentationAdapter,
-  PresentationAdapterSession,
-  PresentationTargetResolver,
+import {
+  createPresentationFrame,
+  evaluatePresentationFrame,
+  isPresentationTemporalValue,
+  type PresentationAdapter,
+  type PresentationAdapterInstance,
+  type PresentationAdapterSession,
+  type PresentationElementResolver,
+  type PresentationFrame,
 } from "../../../core/presentation";
-import { compileWebStyle, type CompiledWebStyle } from "./compiler";
+import { readPresentationPresence, setPresentationPresence } from "../lifecycle";
+import {
+  createWebAnimationHost,
+  type WebAnimationHost,
+  type WebAnimationHostSnapshot,
+  type WebAnimationInspection,
+} from "./animation";
+import {
+  planWebPresentationArtifacts,
+  type CompiledWebStyle,
+  type WebPresentationArtifactPlan,
+} from "./compiler";
+import {
+  planAdaptiveWebExecution,
+  startWebNativeExecution,
+  type WebExecutionPlan,
+  type WebExecutionSample,
+  type WebNativeAnimationFactory,
+  type WebNativeExecution,
+  type WebNativeExecutionPlan,
+} from "./execution";
+import { createNativeWebFrameHost, type WebFrameHost } from "./frame";
 import type {
   WebAudioAsset,
   WebElementPresentation,
   WebFeedback,
   WebImageAsset,
+  WebLayoutContinuity,
   WebPresentationLanguage,
 } from "./language";
-import { createNativeMotionHost, type WebMotion, type WebMotionHost } from "./motion";
+import { createWebLayoutHost, type WebLayoutHost } from "./layout";
+import {
+  createWebElementObservationHost,
+  createWebEnvironmentHost,
+  type WebElementSnapshot,
+} from "./observations";
+
+export type WebPresentationHotSnapshot = Readonly<{
+  shared: readonly WebAnimationHostSnapshot[];
+  sessions: Readonly<Record<string, readonly WebAnimationHostSnapshot[]>>;
+}>;
 
 export type WebStyleHost = {
   replace(css: string): void;
@@ -22,7 +59,10 @@ export type WebPresentationAdapterOptions = Readonly<{
   createStyleHost?: (boundary: Element) => WebStyleHost;
   createImageHost?: (boundary: Element) => WebImageHost;
   createFeedbackHost?: (boundary: Element) => WebFeedbackHost;
-  createMotionHost?: (boundary: Element) => WebMotionHost;
+  /** @internal Injectable native animation boundary for conformance and host specialization. */
+  createNativeAnimation?: WebNativeAnimationFactory;
+  /** @internal Enables bounded output sampling in conformance experiments only. */
+  adaptiveNativeExecution?: boolean;
 }>;
 
 export type WebImageHost = {
@@ -35,28 +75,102 @@ export type WebFeedbackHost = {
   dispose(): void;
 };
 
+export type WebPresentationFrameElement = Readonly<{
+  target: Element;
+  className: string;
+  properties: Readonly<Record<string, string>>;
+  image?: WebImageAsset;
+  feedback?: WebFeedback;
+  presence?: WebElementPresentation["presence"];
+}>;
+
+export type WebPresentationFrameInspection<ElementName extends string> = Readonly<{
+  time: number;
+  frame: PresentationFrame;
+  dynamic: boolean;
+  behavior?: Readonly<{ state: Readonly<object>; props?: Readonly<object> }>;
+  observations: Readonly<Record<ElementName, WebElementSnapshot>>;
+  animations: WebAnimationInspection;
+  scopes: readonly WebAnimationInspection[];
+  declarations: Readonly<Partial<Record<ElementName, Readonly<WebElementPresentation>>>>;
+  artifacts: WebPresentationArtifactPlan<ElementName>;
+  elements: Readonly<Record<ElementName, readonly WebPresentationFrameElement[]>>;
+  execution: Readonly<{
+    kind: "canonical" | "native";
+    mode?: "off-thread" | "hybrid";
+    reason?: string;
+    duration?: number;
+    samples?: number;
+    effects?: readonly Readonly<{ properties: readonly string[]; keyframes: number }>[];
+  }>;
+}>;
+
+export type WebPresentationAdapterSession<ElementName extends string> = PresentationAdapterSession<
+  WebPresentationLanguage,
+  ElementName
+> &
+  Readonly<{
+    inspect(): WebPresentationFrameInspection<ElementName>;
+    /** @internal Captures canonical temporal continuity for development replacement. */
+    snapshot(): WebAnimationHostSnapshot;
+  }>;
+
+export type WebPresentationAdapterInstance = Omit<
+  PresentationAdapterInstance<WebPresentationLanguage, Element>,
+  "create"
+> &
+  Readonly<{
+    create<const ElementName extends string>(options: {
+      readonly boundary: Element;
+      readonly elements: PresentationElementResolver<ElementName, Element>;
+      readonly identity?: string;
+      readonly scopes?: readonly object[];
+    }): WebPresentationAdapterSession<ElementName>;
+  }>;
+
+export type WebPresentationAdapter = Omit<
+  PresentationAdapter<WebPresentationLanguage, Element>,
+  "mount"
+> &
+  Readonly<{
+    mount(options: {
+      readonly boundary: Element;
+      readonly snapshot?: unknown;
+    }): WebPresentationAdapterInstance;
+  }>;
+
 type RegistryEntry = {
   readonly css: string;
   references: number;
 };
 
-type CompiledSource = Readonly<{
-  source: Readonly<WebElementPresentation>;
-  compiled: CompiledWebStyle;
-}>;
-
 type AppliedStyle = Readonly<{
   className: string;
   image?: WebImageAsset;
   feedback?: WebFeedback;
-  motion?: WebMotion;
+  presence?: WebElementPresentation["presence"];
 }>;
+
+type AppliedVariables = {
+  readonly original: Map<string, Readonly<{ value: string; priority: string }>>;
+  readonly rendered: Map<string, string>;
+};
 
 type ResolvedPresentation = Readonly<{
   compiled: CompiledWebStyle;
+  variables?: Readonly<Record<string, string>>;
   image?: WebImageAsset;
   feedback?: WebFeedback;
-  motion?: WebMotion;
+  presence?: WebElementPresentation["presence"];
+  continuity?: WebLayoutContinuity;
+}>;
+
+type RenderedPresentation<ElementName extends string> = Readonly<{
+  time: number;
+  dynamic: boolean;
+  behavior?: Readonly<{ state: Readonly<object>; props?: Readonly<object> }>;
+  declarations: Readonly<Partial<Record<ElementName, Readonly<WebElementPresentation>>>>;
+  artifacts: WebPresentationArtifactPlan<ElementName>;
 }>;
 
 const webReset =
@@ -71,115 +185,561 @@ const webReset =
 /** Realizes web Presentation declarations through document-scoped native hosts. */
 export function createWebPresentationAdapter(
   options: WebPresentationAdapterOptions = {},
-): PresentationAdapter<WebPresentationLanguage, Element> {
+): WebPresentationAdapter {
   const registries = new WeakMap<object, WebStyleRegistry>();
 
   return {
-    create<const ElementName extends string>(input: {
-      readonly boundary: Element;
-      readonly targets: PresentationTargetResolver<ElementName, Element>;
-    }): PresentationAdapterSession<WebPresentationLanguage, ElementName> {
-      const key = styleScope(input.boundary);
-      let registry = registries.get(key);
-      if (!registry) {
-        registry = new WebStyleRegistry(
-          input.boundary,
-          options.createStyleHost ?? createNativeStyleHost,
-          options.createImageHost ?? createNativeImageHost,
-          options.createFeedbackHost ?? createNativeFeedbackHost,
-          options.createMotionHost ?? createNativeMotionHost,
-          () => registries.delete(key),
-        );
-        registries.set(key, registry);
-      }
-      registry.retainSession();
-      return createSession(input.targets, registry);
+    mount(input) {
+      const restored = readHotSnapshot(input.snapshot);
+      const restoredSessions = new Map(
+        Object.entries(restored?.sessions ?? {}).map(([identity, snapshots]) => [
+          identity,
+          [...snapshots],
+        ]),
+      );
+      let restoredShared = 0;
+      let anonymousSession = 0;
+      const environment = createWebEnvironmentHost(input.boundary);
+      const frames = createNativeWebFrameHost(input.boundary);
+      const layouts = createWebLayoutHost(
+        frames,
+        () => environment.value.preferences.reducedMotion,
+        input.boundary,
+      );
+      const sessions = new Map<WebPresentationAdapterSession<string>, string>();
+      const scopedAnimations = new Map<object, WebAnimationHost>();
+      let disposed = false;
+
+      const animationsFor = (identity: object) => {
+        let store = scopedAnimations.get(identity);
+        if (!store) {
+          store = createWebAnimationHost({
+            now: frames.now,
+            reducedMotion: () => environment.value.preferences.reducedMotion,
+            restore: restored?.shared[restoredShared++],
+          });
+          scopedAnimations.set(identity, store);
+        }
+        return store;
+      };
+
+      return {
+        environment: environment.value,
+        create<const ElementName extends string>(component: {
+          readonly boundary: Element;
+          readonly elements: PresentationElementResolver<ElementName, Element>;
+          readonly identity?: string;
+          readonly scopes?: readonly object[];
+        }): WebPresentationAdapterSession<ElementName> {
+          if (disposed) throw new Error("Cannot create a disposed web Presentation instance.");
+          const key = styleScope(component.boundary);
+          let registry = registries.get(key);
+          if (!registry) {
+            registry = new WebStyleRegistry(
+              component.boundary,
+              options.createStyleHost ?? createNativeStyleHost,
+              options.createImageHost ?? createNativeImageHost,
+              options.createFeedbackHost ?? createNativeFeedbackHost,
+              () => registries.delete(key),
+            );
+            registries.set(key, registry);
+          }
+          registry.retainSession();
+          const identity = component.identity ?? `@anonymous:${++anonymousSession}`;
+          const queue = restoredSessions.get(identity);
+          const restore = queue?.shift();
+          if (queue?.length === 0) restoredSessions.delete(identity);
+          let registered: WebPresentationAdapterSession<ElementName>;
+          const session = createSession(
+            component.boundary,
+            component.elements,
+            registry,
+            frames,
+            layouts,
+            (component.scopes ?? []).map(animationsFor),
+            () => environment.value.preferences.reducedMotion,
+            environment.geometryRevision,
+            () => sessions.delete(registered as WebPresentationAdapterSession<string>),
+            restore,
+            options.createNativeAnimation,
+            options.adaptiveNativeExecution ?? options.createNativeAnimation !== undefined,
+          );
+          registered = session;
+          sessions.set(registered as WebPresentationAdapterSession<string>, identity);
+          return session;
+        },
+        snapshot() {
+          const grouped: Record<string, WebAnimationHostSnapshot[]> = Object.create(null);
+          for (const [session, identity] of sessions) {
+            (grouped[identity] ??= []).push(session.snapshot());
+          }
+          return Object.freeze({
+            shared: Object.freeze(
+              [...scopedAnimations.values()].map((animations) => animations.snapshot()),
+            ),
+            sessions: Object.freeze(
+              Object.fromEntries(
+                Object.entries(grouped).map(([identity, snapshots]) => [
+                  identity,
+                  Object.freeze(snapshots),
+                ]),
+              ),
+            ),
+          }) satisfies WebPresentationHotSnapshot;
+        },
+        dispose() {
+          if (disposed) return;
+          disposed = true;
+          for (const session of sessions.keys()) session.dispose();
+          sessions.clear();
+          for (const animations of scopedAnimations.values()) animations.dispose();
+          scopedAnimations.clear();
+          layouts.dispose();
+          frames.dispose();
+          environment.dispose();
+        },
+      };
     },
   };
 }
 
 function createSession<ElementName extends string>(
-  targets: PresentationTargetResolver<ElementName, Element>,
+  boundary: Element,
+  elements: PresentationElementResolver<ElementName, Element>,
   registry: WebStyleRegistry,
-): PresentationAdapterSession<WebPresentationLanguage, ElementName> {
+  frames: WebFrameHost,
+  layouts: WebLayoutHost,
+  scopedAnimations: readonly WebAnimationHost[],
+  reducedMotion: () => boolean,
+  environmentGeometryRevision: () => number,
+  onDispose: () => void,
+  restore?: WebAnimationHostSnapshot,
+  createNativeAnimation?: WebNativeAnimationFactory,
+  adaptiveNativeExecution = false,
+): WebPresentationAdapterSession<ElementName> {
+  const layoutOwner = {};
+  const observations = createWebElementObservationHost(boundary, elements, {
+    layout: (target) => layouts.sample(target),
+    presence: readPresentationPresence,
+  });
+  const documentPerformance = boundary.ownerDocument?.defaultView?.performance;
+  const planningNow = documentPerformance ? () => documentPerformance.now() : planningTime;
   const applied = new Map<Element, AppliedStyle>();
-  const compiledSources = new Map<ElementName, CompiledSource>();
+  const variables = new Map<Element, AppliedVariables>();
+  const presences = new Set<Element>();
+  let currentFrame:
+    | Readonly<{
+        evaluate: Parameters<
+          PresentationAdapterSession<WebPresentationLanguage, ElementName>["render"]
+        >[0];
+        dynamic: boolean;
+        behavior?: Readonly<{ state: Readonly<object>; props?: Readonly<object> }>;
+      }>
+    | undefined;
+  let temporalDeclarations:
+    | Readonly<Partial<Record<ElementName, Readonly<WebElementPresentation>>>>
+    | undefined;
+  let rendered: RenderedPresentation<ElementName> | undefined;
+  let inspected: WebPresentationFrameInspection<ElementName> | undefined;
+  let rendering = false;
+  let dynamicMode: boolean | undefined;
   let disposed = false;
+  let lastRenderedTime: number | undefined;
+  let lastRenderedLayoutRevision: number | undefined;
+  let lastEnvironmentGeometryRevision: number | undefined;
+  let executionPlan: WebExecutionPlan = Object.freeze({
+    kind: "canonical",
+    reason: "no-animation",
+  });
+  let nativeExecution:
+    | Readonly<{ plan: WebNativeExecutionPlan; execution: WebNativeExecution }>
+    | undefined;
+  const setExecutionPlan = (next: WebExecutionPlan) => {
+    executionPlan = next;
+    inspected = undefined;
+  };
+
+  const commit = (
+    declarations: Readonly<Partial<Record<ElementName, Readonly<WebElementPresentation>>>>,
+    dynamic: boolean,
+    measureLayout: boolean,
+    frameTime: number,
+    layoutTransition: "animate" | "synchronize",
+  ): WebPresentationArtifactPlan<ElementName> => {
+    const { resolved: next, artifacts } = resolveStyles(
+      elements,
+      declarations,
+      dynamic,
+      layouts,
+      frameTime,
+    );
+    for (const [target, declaration] of next) {
+      const { compiled, image, feedback, presence } = declaration;
+      const nextClassName = compiled.css ? compiled.className : "";
+      const current = applied.get(target);
+      if (current?.className !== nextClassName) {
+        if (nextClassName) registry.acquire(compiled);
+        if (current?.className && nextClassName) {
+          target.classList.replace(current.className, nextClassName);
+        } else if (current?.className) {
+          target.classList.remove(current.className);
+        } else if (nextClassName) {
+          target.classList.add(nextClassName);
+        }
+      }
+      if (!sameImage(current?.image, image)) registry.setImage(target, image);
+      if (!sameFeedback(current?.feedback, feedback)) registry.setFeedback(target, feedback);
+      applyPresence(target, presences, presence);
+      applyVariables(target, variables, declaration.variables);
+    }
+
+    for (const [target, current] of applied) {
+      const replacement = next.get(target);
+      const replacementClassName = replacement?.compiled.css ? replacement.compiled.className : "";
+      if (replacementClassName !== current.className) {
+        if (!replacement && current.className) target.classList.remove(current.className);
+        if (current.className) registry.release(current.className);
+      }
+      if (!replacement && current.feedback) registry.setFeedback(target, undefined);
+      if (!replacement && current.image) registry.setImage(target, undefined);
+      if (!replacement) applyPresence(target, presences, undefined);
+      if (!replacement) applyVariables(target, variables, undefined);
+    }
+
+    applied.clear();
+    for (const [target, { compiled, image, feedback, presence }] of next) {
+      applied.set(target, {
+        className: compiled.css ? compiled.className : "",
+        image,
+        feedback,
+        presence,
+      });
+    }
+    registry.scheduleFlush();
+    if (measureLayout) {
+      const continuity = new Map(
+        [...next].flatMap(([target, declaration]) =>
+          declaration.continuity ? [[target, declaration.continuity] as const] : [],
+        ),
+      );
+      if (continuity.size) {
+        layouts.update(layoutOwner, continuity, renderLayoutFrame, layoutTransition);
+      } else layouts.remove(layoutOwner);
+    }
+    return artifacts;
+  };
+  const renderCurrent = (time?: number, measureLayout = true) => {
+    if (!currentFrame || disposed) return;
+    if (rendering) throw new Error("Web Presentation frame evaluation is not reentrant.");
+    rendering = true;
+    const frameTime = time ?? frames.time();
+    const layoutRevision = layouts.inspect().revision;
+    const environmentRevision = environmentGeometryRevision();
+    const environmentChanged =
+      lastEnvironmentGeometryRevision !== undefined &&
+      lastEnvironmentGeometryRevision !== environmentRevision;
+    const animationTransition = environmentChanged ? "synchronize" : "animate";
+    const layoutTransition =
+      lastEnvironmentGeometryRevision === undefined || environmentChanged
+        ? "synchronize"
+        : "animate";
+    if (
+      !measureLayout &&
+      lastRenderedTime === frameTime &&
+      lastRenderedLayoutRevision === layoutRevision
+    ) {
+      rendering = false;
+      return;
+    }
+    for (const scoped of scopedAnimations) scoped.begin(frameTime, animationTransition);
+    animations.begin(frameTime, animationTransition);
+    let active = false;
+    try {
+      const declarations = evaluatePresentationFrame(animations, () => {
+        const authored =
+          temporalDeclarations ??
+          currentFrame!.evaluate({
+            elements: observations.elements as never,
+            scopes: scopedAnimations.map((scope) => ({
+              evaluate: <Value>(read: () => Value) => evaluatePresentationFrame(scope, read),
+            })),
+          });
+        if (!temporalDeclarations) {
+          if (!hasPresentationTemporalValue(authored)) return authored;
+          assertCompositorTemporalDeclarations(authored);
+          temporalDeclarations = authored;
+        }
+        return resolvePresentationTemporalValues(authored);
+      });
+      const dynamic =
+        currentFrame.dynamic || animations.used() || scopedAnimations.some((scope) => scope.used());
+      if (dynamicMode === undefined) dynamicMode = dynamic;
+      else if (dynamicMode !== dynamic) {
+        throw new Error("A Component Presentation cannot conditionally resolve values.");
+      }
+      const artifacts = commit(declarations, dynamic, measureLayout, frameTime, layoutTransition);
+      lastRenderedTime = frameTime;
+      lastRenderedLayoutRevision = layoutRevision;
+      lastEnvironmentGeometryRevision = environmentRevision;
+      rendered = Object.freeze({
+        time: frameTime,
+        dynamic,
+        ...(currentFrame.behavior ? { behavior: currentFrame.behavior } : {}),
+        declarations,
+        artifacts,
+      });
+      inspected = undefined;
+    } finally {
+      active = animations.end();
+      for (const scoped of [...scopedAnimations].reverse()) active = scoped.end() || active;
+      rendering = false;
+    }
+    const drivesFrames =
+      temporalDeclarations !== undefined || Object.keys(rendered?.declarations ?? {}).length > 0;
+    if (!active || !drivesFrames) {
+      setExecutionPlan(Object.freeze({ kind: "canonical", reason: "no-animation" }));
+      frames.deactivate(renderAnimationFrame);
+      return;
+    }
+    if (measureLayout && startNativePlan(frameTime)) {
+      if (nativeExecution?.plan.mode === "hybrid") frames.activate(renderAnimationFrame);
+      else frames.deactivate(renderAnimationFrame);
+      return;
+    }
+    frames.activate(renderAnimationFrame);
+  };
+  const animations = createWebAnimationHost({
+    now: frames.now,
+    reducedMotion,
+    parents: scopedAnimations,
+    restore,
+  });
+  const renderAnimationFrame = (time: number) => renderCurrent(time, false);
+  const renderLayoutFrame = (time: number) => renderCurrent(time, false);
+
+  const cancelNativeExecution = () => {
+    const current = nativeExecution;
+    if (!current) return;
+    nativeExecution = undefined;
+    current.execution.cancel();
+  };
+
+  const startNativePlan = (started: number): boolean => {
+    cancelNativeExecution();
+    if (!adaptiveNativeExecution && !temporalDeclarations) {
+      setExecutionPlan(Object.freeze({ kind: "canonical", reason: "direct-lowering-required" }));
+      return false;
+    }
+    if (!createNativeAnimation && !hasNativeAnimationTarget(elements)) {
+      setExecutionPlan(Object.freeze({ kind: "canonical", reason: "native-unavailable" }));
+      return false;
+    }
+    if (layouts.inspect().moving > 0) {
+      setExecutionPlan(Object.freeze({ kind: "canonical", reason: "layout-active" }));
+      return false;
+    }
+    const plan = planNativeExecution(started);
+    setExecutionPlan(plan);
+    if (plan.kind !== "native") {
+      return false;
+    }
+    const execution = startWebNativeExecution(
+      plan,
+      createNativeAnimation,
+      Math.max(0, frames.now() - started),
+    );
+    if (!execution) {
+      setExecutionPlan(Object.freeze({ kind: "canonical", reason: "native-unavailable" }));
+      return false;
+    }
+    const owned = Object.freeze({ plan, execution });
+    nativeExecution = owned;
+    void execution.finished.then(
+      () => {
+        if (disposed || nativeExecution !== owned) return;
+        nativeExecution = undefined;
+        renderCurrent(plan.started + plan.duration, false);
+        execution.cancel();
+      },
+      () => {
+        if (nativeExecution !== owned) return;
+        nativeExecution = undefined;
+        setExecutionPlan(Object.freeze({ kind: "canonical", reason: "native-unavailable" }));
+        frames.activate(renderAnimationFrame);
+      },
+    );
+    return true;
+  };
+
+  const planNativeExecution = (started: number): WebExecutionPlan => {
+    const simulationScopes = scopedAnimations.map((scope) =>
+      scope.fork({
+        now: () => started,
+        reducedMotion,
+      }),
+    );
+    const simulation = animations.fork({
+      now: () => started,
+      reducedMotion,
+      parents: simulationScopes,
+    });
+    const activeAnimations = new Set(
+      [
+        simulation.inspectFrame(started),
+        ...simulationScopes.map((scope) => scope.inspectFrame(started)),
+      ]
+        .flatMap((inspection) => Object.entries(inspection.animations))
+        .filter(([, animation]) => !animation.settled)
+        .map(([identity]) => identity),
+    );
+    const direct = temporalDeclarations
+      ? createNativeTemporalDeclarationSampler(temporalDeclarations, activeAnimations)
+      : undefined;
+    if (temporalDeclarations && !direct) {
+      simulation.dispose();
+      for (const scope of simulationScopes) scope.dispose();
+      return Object.freeze({ kind: "canonical", reason: "non-compositor-output" });
+    }
+    const plannedElements = direct
+      ? (Object.fromEntries(direct.elements.map((name) => [name, elements[name]])) as Readonly<
+          Record<ElementName, () => readonly Element[]>
+        >)
+      : elements;
+    const samples = new Map<number, WebExecutionSample>();
+    const sample = (time: number): WebExecutionSample => {
+      const previous = samples.get(time);
+      if (previous) return previous;
+      for (const scope of simulationScopes) scope.begin(time);
+      simulation.begin(time);
+      try {
+        const declarations = evaluatePresentationFrame(simulation, () => {
+          if (direct) {
+            return direct.sample();
+          }
+          return currentFrame!.evaluate({
+            elements: observations.elements as never,
+            scopes: simulationScopes.map((scope) => ({
+              evaluate: <Value>(read: () => Value) => evaluatePresentationFrame(scope, read),
+            })),
+          });
+        });
+        const result = Object.freeze({
+          time,
+          declarations: snapshotPlainData(declarations) as Readonly<
+            Partial<Record<string, Readonly<WebElementPresentation>>>
+          >,
+        });
+        samples.set(time, result);
+        return result;
+      } finally {
+        simulation.end();
+        for (const scope of [...simulationScopes].reverse()) scope.end();
+      }
+    };
+    try {
+      sample(started);
+      const finished = nativeExecutionEnd(
+        started,
+        simulation.inspectFrame(started),
+        simulationScopes.map((scope) => scope.inspectFrame(started)),
+      );
+      if (finished === undefined) {
+        return Object.freeze({ kind: "canonical", reason: "planning-limit" });
+      }
+      const plan = planAdaptiveWebExecution({
+        started,
+        finished,
+        sample,
+        elements: plannedElements,
+        planning: { budget: 8, now: planningNow },
+      });
+      return plan.kind === "native" && direct?.canonical
+        ? Object.freeze({ ...plan, mode: "hybrid" as const })
+        : plan;
+    } finally {
+      simulation.dispose();
+      for (const scope of simulationScopes) scope.dispose();
+    }
+  };
 
   return {
-    commit(declarations) {
-      if (disposed) throw new Error("Cannot commit a disposed web Presentation session.");
-      const next = resolveStyles(targets, declarations, compiledSources);
-      const motionUpdates = new Map<Element, WebMotion | undefined>();
-      for (const [target, current] of applied) {
-        const replacement = next.get(target);
-        const replacementClass = replacement?.compiled.css ? replacement.compiled.className : "";
-        if (
-          replacementClass !== current.className ||
-          !sameMotion(current.motion, replacement?.motion)
-        ) {
-          motionUpdates.set(target, replacement?.motion);
-        }
-      }
-      for (const [target, declaration] of next) {
-        if (!applied.has(target)) motionUpdates.set(target, declaration.motion);
-      }
-      const measuresLayout = [...motionUpdates].some(
-        ([target, motion]) => motion?.layout || applied.get(target)?.motion?.layout,
+    render(frame, options) {
+      if (disposed) throw new Error("Cannot render a disposed web Presentation session.");
+      cancelNativeExecution();
+      setExecutionPlan(Object.freeze({ kind: "canonical", reason: "no-animation" }));
+      currentFrame = Object.freeze({
+        evaluate: frame,
+        dynamic: options?.dynamic ?? false,
+        ...(options?.behavior ? { behavior: options.behavior } : {}),
+      });
+      temporalDeclarations = undefined;
+      renderCurrent(frames.time());
+    },
+    inspect() {
+      if (inspected) return inspected;
+      if (!rendered) throw new Error("The web Presentation session has not rendered a frame.");
+      const current = rendered;
+      const behavior = current.behavior ? snapshotBehavior(current.behavior) : undefined;
+      const observationSnapshot = observations.inspect();
+      const animationSnapshot = animations.inspectFrame(current.time);
+      const scopeSnapshots = Object.freeze(
+        scopedAnimations.map((scope) => scope.inspectFrame(current.time)),
       );
-      registry.beginMotion(motionUpdates);
-      try {
-        for (const [target, declaration] of next) {
-          const { compiled, image, feedback, motion } = declaration;
-          const nextClassName = compiled.css ? compiled.className : "";
-          const current = applied.get(target);
-          if (current?.className !== nextClassName) {
-            if (nextClassName) registry.acquire(compiled);
-            if (current?.className && nextClassName) {
-              target.classList.replace(current.className, nextClassName);
-            } else if (current?.className) {
-              target.classList.remove(current.className);
-            } else if (nextClassName) {
-              target.classList.add(nextClassName);
-            }
-          }
-          if (!sameImage(current?.image, image)) registry.setImage(target, image);
-          if (!sameFeedback(current?.feedback, feedback)) registry.setFeedback(target, feedback);
-          if (!sameMotion(current?.motion, motion)) registry.setMotion(target, motion);
-        }
-
-        for (const [target, current] of applied) {
-          const replacement = next.get(target);
-          const replacementClassName = replacement?.compiled.css
-            ? replacement.compiled.className
-            : "";
-          if (replacementClassName !== current.className) {
-            if (!replacement && current.className) target.classList.remove(current.className);
-            if (current.className) registry.release(current.className);
-          }
-          if (!replacement && current.feedback) registry.setFeedback(target, undefined);
-          if (!replacement && current.image) registry.setImage(target, undefined);
-          if (!replacement && current.motion) registry.setMotion(target, undefined);
-        }
-
-        if (measuresLayout) registry.flushStylesNow();
-        applied.clear();
-        for (const [target, { compiled, image, feedback, motion }] of next) {
-          applied.set(target, {
-            className: compiled.css ? compiled.className : "",
-            image,
-            feedback,
-            motion,
-          });
-        }
-      } finally {
-        registry.completeMotion();
+      const declarationSnapshot = snapshotPlainData(current.declarations);
+      const frame = createPresentationFrame({
+        time: current.time,
+        input: snapshotPlainData({
+          ...(behavior ? { behavior } : {}),
+          observations: observationSnapshot,
+        }) as never,
+        temporal: snapshotTemporalData(animationSnapshot, scopeSnapshots) as never,
+        declarations: declarationSnapshot as never,
+      });
+      inspected = Object.freeze({
+        time: current.time,
+        frame,
+        dynamic: current.dynamic,
+        ...(behavior ? { behavior } : {}),
+        observations: observationSnapshot,
+        animations: animationSnapshot,
+        scopes: scopeSnapshots,
+        declarations: declarationSnapshot,
+        artifacts: current.artifacts,
+        elements: inspectFrameElements(elements, applied, variables),
+        execution: inspectExecution(executionPlan),
+      });
+      return inspected;
+    },
+    snapshot() {
+      return animations.snapshot();
+    },
+    reconfigure(options) {
+      if (disposed) throw new Error("Cannot reconfigure a disposed web Presentation session.");
+      cancelNativeExecution();
+      animations.reconfigure();
+      if (options?.scopes) {
+        for (const scoped of scopedAnimations) scoped.reconfigure();
       }
-      registry.scheduleFlush();
+      dynamicMode = undefined;
+      temporalDeclarations = undefined;
+      lastRenderedTime = undefined;
+      lastRenderedLayoutRevision = undefined;
     },
     dispose() {
       if (disposed) return;
       disposed = true;
+      currentFrame = undefined;
+      temporalDeclarations = undefined;
+      rendered = undefined;
+      inspected = undefined;
+      cancelNativeExecution();
+      frames.deactivate(renderAnimationFrame);
+      animations.dispose();
+      observations.dispose();
+      layouts.remove(layoutOwner);
+      for (const target of variables.keys()) applyVariables(target, variables, undefined);
+      for (const target of presences) setPresentationPresence(target, undefined);
+      presences.clear();
       for (const [target, current] of applied) {
         if (current.className) {
           target.classList.remove(current.className);
@@ -187,53 +747,468 @@ function createSession<ElementName extends string>(
         }
         if (current.image) registry.setImage(target, undefined);
         if (current.feedback) registry.setFeedback(target, undefined);
-        if (current.motion) registry.setMotion(target, undefined);
       }
       applied.clear();
       registry.releaseSession();
+      onDispose();
     },
   };
 }
 
-function resolveStyles<ElementName extends string>(
-  targets: PresentationTargetResolver<ElementName, Element>,
+function hasNativeAnimationTarget<ElementName extends string>(
+  elements: PresentationElementResolver<ElementName, Element>,
+): boolean {
+  return Object.values(elements).some((source) =>
+    (source as () => readonly Element[])().some(
+      (target) => typeof (target as Element & { animate?: unknown }).animate === "function",
+    ),
+  );
+}
+
+function hasPresentationTemporalValue(value: unknown, seen = new WeakSet<object>()): boolean {
+  if (isPresentationTemporalValue(value)) return true;
+  if (!value || typeof value !== "object" || seen.has(value)) return false;
+  seen.add(value);
+  if (Array.isArray(value)) return value.some((item) => hasPresentationTemporalValue(item, seen));
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return false;
+  return Object.values(value).some((item) => hasPresentationTemporalValue(item, seen));
+}
+
+function assertCompositorTemporalDeclarations(
+  declarations: Readonly<Record<string, unknown>>,
+): void {
+  for (const [element, declaration] of Object.entries(declarations)) {
+    visitTemporalDeclaration(declaration, [element], new WeakSet());
+  }
+}
+
+function visitTemporalDeclaration(
+  value: unknown,
+  path: readonly string[],
+  seen: WeakSet<object>,
+): void {
+  if (isPresentationTemporalValue(value)) {
+    if (!isCompositorTemporalPath(path)) {
+      throw new TypeError(
+        `Web temporal output ${JSON.stringify(path.join("."))} is not compositor-safe. ` +
+          "Change layout and paint discretely, then use layout continuity or animate only " +
+          "presence, opacity, translate, scale, and rotate.",
+      );
+    }
+    return;
+  }
+  if (!value || typeof value !== "object" || seen.has(value)) return;
+  seen.add(value);
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => visitTemporalDeclaration(item, [...path, String(index)], seen));
+    return;
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return;
+  for (const [name, item] of Object.entries(value)) {
+    visitTemporalDeclaration(item, [...path, name], seen);
+  }
+}
+
+function isCompositorTemporalPath(path: readonly string[]): boolean {
+  const use = path.lastIndexOf("use");
+  const style = path.slice(use >= 0 ? use + 1 : 1);
+  if (style[0] === "presence") return true;
+  if (style[0] === "paint" && style[1] === "opacity") return true;
+  return (
+    style[0] === "transform" &&
+    (style[1] === "translate" || style[1] === "scale" || style[1] === "rotate")
+  );
+}
+
+function resolvePresentationTemporalValues<Value>(
+  value: Value,
+  seen = new WeakMap<object, unknown>(),
+): Value {
+  if (isPresentationTemporalValue(value)) return value.sample() as Value;
+  if (!value || typeof value !== "object") return value;
+  const previous = seen.get(value);
+  if (previous) return previous as Value;
+  if (Array.isArray(value)) {
+    const result: unknown[] = [];
+    seen.set(value, result);
+    let changed = false;
+    for (const item of value) {
+      const resolved = resolvePresentationTemporalValues(item, seen);
+      result.push(resolved);
+      changed ||= resolved !== item;
+    }
+    const resolved = changed ? Object.freeze(result) : value;
+    seen.set(value, resolved);
+    return resolved as Value;
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return value;
+  const result: Record<string, unknown> = {};
+  seen.set(value, result);
+  let changed = false;
+  for (const [name, item] of Object.entries(value)) {
+    const resolved = resolvePresentationTemporalValues(item, seen);
+    result[name] = resolved;
+    changed ||= resolved !== item;
+  }
+  const resolved = changed ? Object.freeze(result) : value;
+  seen.set(value, resolved);
+  return resolved as Value;
+}
+
+type NativeTemporalDeclarationSampler<ElementName extends string> = Readonly<{
+  elements: readonly ElementName[];
+  canonical: boolean;
+  sample(): Readonly<Partial<Record<ElementName, Readonly<WebElementPresentation>>>>;
+}>;
+
+function createNativeTemporalDeclarationSampler<ElementName extends string>(
   declarations: Readonly<Partial<Record<ElementName, Readonly<WebElementPresentation>>>>,
-  compiledSources: Map<ElementName, CompiledSource>,
-): Map<Element, ResolvedPresentation> {
+  active: ReadonlySet<string>,
+): NativeTemporalDeclarationSampler<ElementName> | undefined {
+  const records: Array<
+    Readonly<{
+      name: ElementName;
+      paint?: Readonly<{ opacity: unknown }>;
+      transform?: Readonly<{
+        translate?: Readonly<{ x: unknown; y: unknown }>;
+        scale?: unknown;
+        rotate?: unknown;
+      }>;
+    }>
+  > = [];
+  let canonical = false;
+
+  for (const [name, declaration] of Object.entries(declarations) as Array<
+    [ElementName, Readonly<WebElementPresentation>]
+  >) {
+    const paths = activeTemporalPaths(declaration, active);
+    if (paths.some((path) => !isNativeTemporalPath(path))) {
+      canonical = true;
+      continue;
+    }
+    const nativePaths = paths.filter((path) => path[0] !== "presence");
+    if (nativePaths.length === 0) continue;
+    const paint = nativePaths.some((path) => path[0] === "paint")
+      ? Object.freeze({ opacity: declaration.paint?.opacity })
+      : undefined;
+    const source = declaration.transform;
+    const translate = nativePaths.some((path) => path[0] === "transform" && path[1] === "translate")
+      ? Object.freeze({ x: source?.translate?.x ?? 0, y: source?.translate?.y ?? 0 })
+      : undefined;
+    const scale = nativePaths.some((path) => path[0] === "transform" && path[1] === "scale")
+      ? source?.scale
+      : undefined;
+    const rotate = nativePaths.some((path) => path[0] === "transform" && path[1] === "rotate")
+      ? source?.rotate
+      : undefined;
+    records.push(
+      Object.freeze({
+        name,
+        ...(paint ? { paint } : {}),
+        ...(translate || scale !== undefined || rotate !== undefined
+          ? {
+              transform: Object.freeze({
+                ...(translate ? { translate } : {}),
+                ...(scale !== undefined ? { scale } : {}),
+                ...(rotate !== undefined ? { rotate } : {}),
+              }),
+            }
+          : {}),
+      }),
+    );
+  }
+
+  if (records.length === 0) return;
+  return Object.freeze({
+    elements: Object.freeze(records.map(({ name }) => name)),
+    canonical,
+    sample() {
+      return Object.freeze(
+        Object.fromEntries(
+          records.map(({ name, paint, transform }) => {
+            const resolvedScale = resolvePresentationTemporalValues(transform?.scale);
+            const declaration = Object.freeze({
+              ...(paint
+                ? {
+                    paint: Object.freeze({
+                      opacity: resolvePresentationTemporalValues(paint.opacity),
+                    }),
+                  }
+                : {}),
+              ...(transform
+                ? {
+                    transform: Object.freeze({
+                      ...(transform.translate
+                        ? {
+                            translate: Object.freeze({
+                              x: resolvePresentationTemporalValues(transform.translate.x),
+                              y: resolvePresentationTemporalValues(transform.translate.y),
+                            }),
+                          }
+                        : {}),
+                      ...(resolvedScale !== undefined ? { scale: resolvedScale } : {}),
+                      ...(transform.rotate !== undefined
+                        ? { rotate: resolvePresentationTemporalValues(transform.rotate) }
+                        : {}),
+                    }),
+                  }
+                : {}),
+            }) as Readonly<WebElementPresentation>;
+            return [name, declaration] as const;
+          }),
+        ) as Partial<Record<ElementName, Readonly<WebElementPresentation>>>,
+      );
+    },
+  });
+}
+
+function activeTemporalPaths(
+  value: unknown,
+  active: ReadonlySet<string>,
+  path: readonly string[] = [],
+  result: string[][] = [],
+  seen = new WeakSet<object>(),
+): readonly (readonly string[])[] {
+  if (isPresentationTemporalValue(value)) {
+    if (value.animations.some((identity) => active.has(identity))) result.push([...path]);
+    return result;
+  }
+  if (!value || typeof value !== "object" || seen.has(value)) return result;
+  seen.add(value);
+  if (Array.isArray(value)) {
+    value.forEach((item, index) =>
+      activeTemporalPaths(item, active, [...path, `${index}`], result, seen),
+    );
+    return result;
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return result;
+  for (const [name, item] of Object.entries(value)) {
+    activeTemporalPaths(item, active, [...path, name], result, seen);
+  }
+  return result;
+}
+
+function isNativeTemporalPath(path: readonly string[]): boolean {
+  if (path[0] === "presence") return true;
+  if (path.length === 2 && path[0] === "paint" && path[1] === "opacity") return true;
+  if (path[0] !== "transform") return false;
+  if (path.length === 2 && (path[1] === "scale" || path[1] === "rotate")) return true;
+  return (
+    path.length === 3 &&
+    ((path[1] === "translate" && (path[2] === "x" || path[2] === "y")) ||
+      (path[1] === "scale" && (path[2] === "x" || path[2] === "y")))
+  );
+}
+
+function planningTime(): number {
+  return globalThis.performance?.now() ?? Date.now();
+}
+
+function inspectExecution(
+  plan: WebExecutionPlan,
+): WebPresentationFrameInspection<string>["execution"] {
+  return plan.kind === "native"
+    ? Object.freeze({
+        kind: "native",
+        mode: plan.mode,
+        duration: plan.duration,
+        samples: plan.samples,
+        effects: Object.freeze(
+          plan.effects.map((effect) =>
+            Object.freeze({ properties: effect.properties, keyframes: effect.keyframes.length }),
+          ),
+        ),
+      })
+    : Object.freeze({ kind: "canonical", reason: plan.reason });
+}
+
+function readHotSnapshot(value: unknown): WebPresentationHotSnapshot | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const candidate = value as Partial<WebPresentationHotSnapshot>;
+  if (
+    !Array.isArray(candidate.shared) ||
+    !candidate.sessions ||
+    typeof candidate.sessions !== "object"
+  ) {
+    return undefined;
+  }
+  return candidate as WebPresentationHotSnapshot;
+}
+
+function snapshotBehavior(
+  behavior: Readonly<{ state: Readonly<object>; props?: Readonly<object> }>,
+): Readonly<{ state: Readonly<object>; props?: Readonly<object> }> {
+  return Object.freeze({
+    state: snapshotPlainData(behavior.state),
+    ...(behavior.props ? { props: snapshotPlainData(behavior.props) } : {}),
+  });
+}
+
+function snapshotTemporalData(
+  local: WebAnimationInspection,
+  scopes: readonly WebAnimationInspection[],
+): Readonly<object> {
+  return Object.freeze({
+    local: snapshotAnimationSamples(local),
+    scopes: Object.freeze(scopes.map(snapshotAnimationSamples)),
+  });
+}
+
+function nativeExecutionEnd(
+  started: number,
+  local: WebAnimationInspection,
+  scopes: readonly WebAnimationInspection[],
+): number | undefined {
+  const active = [local, ...scopes].flatMap((inspection) =>
+    Object.values(inspection.animations).filter((animation) => !animation.settled),
+  );
+  if (!active.length) return;
+  const ends = active.map(({ endsAt }) => endsAt);
+  if (ends.some((time) => !Number.isFinite(time) || time <= started)) return;
+  return Math.max(...ends);
+}
+
+function snapshotAnimationSamples(inspection: WebAnimationInspection): Readonly<object> {
+  return Object.freeze({
+    time: inspection.time,
+    settled: inspection.settled,
+    animations: Object.freeze(
+      Object.fromEntries(
+        Object.entries(inspection.animations)
+          .sort(([left], [right]) => left.localeCompare(right))
+          .map(([identity, animation]) => [
+            identity,
+            Object.freeze({
+              source: animation.source,
+              started: animation.started,
+              duration: animation.duration,
+              endsAt: animation.endsAt,
+              value: animation.value,
+              velocity: animation.velocity,
+              settled: animation.settled,
+            }),
+          ]),
+      ),
+    ),
+  });
+}
+
+function snapshotPlainData<Value>(value: Value, seen = new WeakMap<object, unknown>()): Value {
+  if (value === null || typeof value !== "object") return value;
+  const existing = seen.get(value);
+  if (existing) return existing as Value;
+  if (Array.isArray(value)) {
+    const result: unknown[] = [];
+    seen.set(value, result);
+    for (const item of value) result.push(snapshotPlainData(item, seen));
+    return Object.freeze(result) as Value;
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return value;
+  const result: Record<string, unknown> = {};
+  seen.set(value, result);
+  for (const key of Object.keys(value)) {
+    result[key] = snapshotPlainData(Reflect.get(value, key), seen);
+  }
+  return Object.freeze(result) as Value;
+}
+
+function inspectFrameElements<ElementName extends string>(
+  elements: PresentationElementResolver<ElementName, Element>,
+  applied: ReadonlyMap<Element, AppliedStyle>,
+  variables: ReadonlyMap<Element, AppliedVariables>,
+): Readonly<Record<ElementName, readonly WebPresentationFrameElement[]>> {
+  return Object.freeze(
+    Object.fromEntries(
+      (Object.entries(elements) as Array<[ElementName, () => readonly Element[]]>).map(
+        ([name, source]) => [
+          name,
+          Object.freeze(
+            source().map((target) => {
+              const style = applied.get(target);
+              return Object.freeze({
+                target,
+                className: style?.className ?? "",
+                properties: Object.freeze(
+                  Object.fromEntries(variables.get(target)?.rendered ?? []),
+                ),
+                ...(style?.image ? { image: style.image } : {}),
+                ...(style?.feedback ? { feedback: style.feedback } : {}),
+                ...(style?.presence !== undefined ? { presence: style.presence } : {}),
+              });
+            }),
+          ),
+        ],
+      ),
+    ),
+  ) as Readonly<Record<ElementName, readonly WebPresentationFrameElement[]>>;
+}
+
+function resolveStyles<ElementName extends string>(
+  elements: PresentationElementResolver<ElementName, Element>,
+  declarations: Readonly<Partial<Record<ElementName, Readonly<WebElementPresentation>>>>,
+  dynamic: boolean,
+  layouts: WebLayoutHost,
+  frameTime: number,
+): Readonly<{
+  resolved: Map<Element, ResolvedPresentation>;
+  artifacts: WebPresentationArtifactPlan<ElementName>;
+}> {
+  const artifacts = planWebPresentationArtifacts(declarations, { dynamic });
   const result = new Map<Element, ResolvedPresentation>();
-  for (const [name, source] of Object.entries(targets) as Array<
+  for (const [name, source] of Object.entries(elements) as Array<
     [ElementName, () => readonly Element[]]
   >) {
     const declaration = declarations[name];
-    if (!declaration) continue;
-    const cached = compiledSources.get(name);
-    validateMotionOwnership(declaration);
-    const compiled =
-      cached?.source === declaration ? cached.compiled : compileWebStyle(declaration);
-    if (cached?.source !== declaration)
-      compiledSources.set(name, { source: declaration, compiled });
+    const artifact = artifacts.elements[name];
+    if (!declaration || !artifact) continue;
+    const compiled = Object.freeze({ className: artifact.className, css: artifact.css });
+    const authoredVariables = Object.keys(artifact.variables).length
+      ? artifact.variables
+      : undefined;
     for (const target of source()) {
+      const variables = mergeProperties(
+        authoredVariables,
+        artifact.continuity ? layouts.resolve(target, frameTime) : undefined,
+      );
       const current = result.get(target);
       if (
         current &&
         (current.compiled.className !== compiled.className ||
-          !sameImage(current.image, declaration.image) ||
-          !sameFeedback(current.feedback, declaration.feedback) ||
-          !sameMotion(current.motion, declaration.motion))
+          !sameImage(current.image, artifact.image) ||
+          !sameFeedback(current.feedback, artifact.feedback) ||
+          current.presence !== artifact.presence ||
+          !sameStructuredValue(current.continuity, artifact.continuity) ||
+          !sameStructuredValue(current.variables, variables))
       ) {
         throw new TypeError(
-          `Web Presentation target ${String(name)} resolves to an Element already styled by another target.`,
+          `Web Presentation Element ${String(name)} resolves to a native Element already owned by another name.`,
         );
       }
       result.set(target, {
         compiled,
-        image: declaration.image,
-        feedback: declaration.feedback,
-        motion: declaration.motion,
+        variables,
+        image: artifact.image,
+        feedback: artifact.feedback,
+        presence: artifact.presence,
+        continuity: artifact.continuity,
       });
     }
   }
-  return result;
+  return Object.freeze({ resolved: result, artifacts });
+}
+
+function mergeProperties(
+  declarations: Readonly<Record<string, string>> | undefined,
+  runtime: Readonly<Record<string, string>> | undefined,
+): Readonly<Record<string, string>> | undefined {
+  if (!declarations) return runtime;
+  if (!runtime) return declarations;
+  return Object.freeze({ ...declarations, ...runtime });
 }
 
 class WebStyleRegistry {
@@ -242,12 +1217,10 @@ class WebStyleRegistry {
   readonly #createHost: (boundary: Element) => WebStyleHost;
   readonly #createImageHost: (boundary: Element) => WebImageHost;
   readonly #createFeedbackHost: (boundary: Element) => WebFeedbackHost;
-  readonly #createMotionHost: (boundary: Element) => WebMotionHost;
   readonly #onUnused: () => void;
   #host: WebStyleHost | undefined;
   #imageHost: WebImageHost | undefined;
   #feedbackHost: WebFeedbackHost | undefined;
-  #motionHost: WebMotionHost | undefined;
   #sessions = 0;
   #dirty = false;
   #scheduled = false;
@@ -258,14 +1231,12 @@ class WebStyleRegistry {
     createHost: (boundary: Element) => WebStyleHost,
     createImageHost: (boundary: Element) => WebImageHost,
     createFeedbackHost: (boundary: Element) => WebFeedbackHost,
-    createMotionHost: (boundary: Element) => WebMotionHost,
     onUnused: () => void,
   ) {
     this.#boundary = boundary;
     this.#createHost = createHost;
     this.#createImageHost = createImageHost;
     this.#createFeedbackHost = createFeedbackHost;
-    this.#createMotionHost = createMotionHost;
     this.#onUnused = onUnused;
   }
 
@@ -322,29 +1293,6 @@ class WebStyleRegistry {
     }
   }
 
-  setMotion(target: Element, motion: WebMotion | undefined): void {
-    if (motion) {
-      this.#motionHost ??= this.#createMotionHost(this.#boundary);
-      this.#motionHost.set(target, motion);
-    } else {
-      this.#motionHost?.set(target, undefined);
-    }
-  }
-
-  beginMotion(updates: ReadonlyMap<Element, WebMotion | undefined>): void {
-    const needsMotion = [...updates.values()].some(Boolean);
-    if (needsMotion) this.#motionHost ??= this.#createMotionHost(this.#boundary);
-    this.#motionHost?.begin(updates);
-  }
-
-  completeMotion(): void {
-    this.#motionHost?.complete();
-  }
-
-  flushStylesNow(): void {
-    this.#flush();
-  }
-
   #flush(): void {
     if (!this.#dirty || !this.#sessions) return;
     this.#dirty = false;
@@ -371,11 +1319,9 @@ class WebStyleRegistry {
     this.#host?.dispose();
     this.#imageHost?.dispose();
     this.#feedbackHost?.dispose();
-    this.#motionHost?.dispose();
     this.#host = undefined;
     this.#imageHost = undefined;
     this.#feedbackHost = undefined;
-    this.#motionHost = undefined;
     this.#entries.clear();
     this.#dirty = false;
     this.#emitted = "";
@@ -389,17 +1335,6 @@ function sameImage(left: WebImageAsset | undefined, right: WebImageAsset | undef
 
 function sameFeedback(left: WebFeedback | undefined, right: WebFeedback | undefined): boolean {
   return left?.activate?.audio === right?.activate?.audio;
-}
-
-function sameMotion(left: WebMotion | undefined, right: WebMotion | undefined): boolean {
-  if (left === right) return true;
-  if (!left || !right) return false;
-  return (
-    sameStructuredValue(left.opacity, right.opacity) &&
-    sameStructuredValue(left.transform, right.transform) &&
-    sameStructuredValue(left.layout, right.layout) &&
-    sameStructuredValue(left.presence, right.presence)
-  );
 }
 
 function sameStructuredValue(left: unknown, right: unknown): boolean {
@@ -417,22 +1352,65 @@ function sameStructuredValue(left: unknown, right: unknown): boolean {
   );
 }
 
-function validateMotionOwnership(declaration: WebElementPresentation): void {
-  if (!declaration.motion) return;
-  const fragments = [declaration, ...(declaration.rules?.map((rule) => rule.use) ?? [])];
-  if (
-    declaration.motion.opacity &&
-    fragments.some((fragment) => fragment.paint?.opacity !== undefined)
-  ) {
-    throw new TypeError(
-      "A web Presentation target cannot assign opacity through both style and motion.",
-    );
+function applyVariables(
+  target: Element,
+  applied: Map<Element, AppliedVariables>,
+  variables: Readonly<Record<string, string>> | undefined,
+): void {
+  const current = applied.get(target);
+  if (!variables) {
+    if (!current) return;
+    const style = elementStyle(target);
+    for (const [name, original] of current.original) {
+      if (original.value) style.setProperty(name, original.value, original.priority);
+      else style.removeProperty(name);
+    }
+    applied.delete(target);
+    return;
   }
-  if (declaration.motion.transform && fragments.some((fragment) => fragment.transform)) {
-    throw new TypeError(
-      "A web Presentation target cannot assign transform through both style and motion.",
-    );
+
+  const style = elementStyle(target);
+  const state = current ?? { original: new Map(), rendered: new Map() };
+  for (const [name, value] of Object.entries(variables)) {
+    if (!state.original.has(name)) {
+      state.original.set(name, {
+        value: style.getPropertyValue(name),
+        priority: style.getPropertyPriority(name),
+      });
+    }
+    if (state.rendered.get(name) === value) continue;
+    style.setProperty(name, value);
+    state.rendered.set(name, value);
   }
+  for (const name of state.rendered.keys()) {
+    if (Object.hasOwn(variables, name)) continue;
+    const original = state.original.get(name);
+    if (original?.value) style.setProperty(name, original.value, original.priority);
+    else style.removeProperty(name);
+    state.rendered.delete(name);
+    state.original.delete(name);
+  }
+  applied.set(target, state);
+}
+
+function elementStyle(target: Element): CSSStyleDeclaration {
+  const style = (target as Element & { style?: CSSStyleDeclaration }).style;
+  if (!style) throw new TypeError("A dynamic web Presentation Element must expose native style.");
+  return style;
+}
+
+function applyPresence(
+  target: Element,
+  applied: Set<Element>,
+  value: WebElementPresentation["presence"] | undefined,
+): void {
+  if (value === undefined) {
+    if (!applied.delete(target)) return;
+    setPresentationPresence(target, undefined);
+    return;
+  }
+  applied.add(target);
+  setPresentationPresence(target, value);
 }
 
 function styleScope(boundary: Element): object {

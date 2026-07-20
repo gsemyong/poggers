@@ -68,17 +68,31 @@ export type {
   UITarget,
 } from "./core/ui";
 export type {
+  ActionCompleted,
+  ActionEvent,
+  ActionEvents,
+  ActionFailed,
+  ActionStarted,
+  Animation,
+  AnimationSample,
+  ConfiguredPresentation,
+  Event,
+  InvocationId,
   Presentation,
   PresentationAdapter,
+  PresentationAdapterInstance,
   PresentationAdapterSession,
   PresentationComponentDeclaration,
   PresentationComponentInput,
   PresentationComponentTree,
   PresentationDefinition,
+  PresentationData,
+  PresentationElement,
+  PresentationElementResolver,
+  PresentationFrame,
   PresentationLanguage,
-  PresentationTarget,
-  PresentationTargetResolver,
 } from "./core/presentation";
+export { animate, createPresentationFrame, settled, velocity } from "./core/presentation";
 export { selectPlatformAdapters } from "./contracts/platform";
 export type {
   DevelopmentSession,

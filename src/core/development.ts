@@ -261,7 +261,7 @@ export type HotCandidate<Value, Snapshot> = Readonly<{
 
 export type HotUpdateResult<Value> =
   | Readonly<{ status: "activated"; value: Value }>
-  | Readonly<{ status: "rejected"; reason: string }>;
+  | Readonly<{ status: "rejected"; reason: string; cause?: unknown }>;
 
 export function createHotReplacementManifest(ir: ApplicationIR): HotReplacementManifest {
   const programs = ir.programs.map((program) => ({
@@ -337,16 +337,16 @@ export class HotUpdateCoordinator<Value, Snapshot> {
     let prepared: Awaited<ReturnType<typeof candidate.prepare>>;
     try {
       prepared = await candidate.prepare(this.#active?.snapshot);
-    } catch {
-      return { status: "rejected", reason: "prepare-failed" };
+    } catch (cause) {
+      return { status: "rejected", reason: "prepare-failed", cause };
     }
 
     let activated: HotActivation<Value, Snapshot>;
     try {
       activated = await prepared.activate();
-    } catch {
+    } catch (cause) {
       await prepared.rollback?.();
-      return { status: "rejected", reason: "activation-failed" };
+      return { status: "rejected", reason: "activation-failed", cause };
     }
 
     const previous = this.#active;

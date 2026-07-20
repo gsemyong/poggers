@@ -83,7 +83,7 @@ export class PresenceGraph<Target = unknown> {
 
   detach(node: PresenceNode<Target>): void {
     if (!this.#nodes.has(node.id)) return;
-    for (const child of node.children) this.detach(child);
+    while (node.children.length) this.detach(node.children[0]!);
     this.#detachFromParent(node);
     node.target = null;
     node.presence = "detached";

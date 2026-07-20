@@ -115,7 +115,7 @@ are assembled only from contributions to the same Program.
 ## UI boundary
 
 Each UI-capable Platform defines its own JSX Elements, native properties,
-targets, and Child type. Components therefore retain full access to native
+and Child type. Components therefore retain full access to native
 structure and accessibility without a lowest-common-denominator widget layer.
 Several platform JSX languages may extend the same project-wide JSX registry.
 
@@ -126,18 +126,33 @@ activation is owned by the live UI and removed on disposal.
 Presentation is a pure, platform-specific enrichment stage:
 
 ```text
-parameters + Component props + Feature/Component state + symbolic targets
-`- Presentation
-   `- declarations in the Platform's Presentation language
+Application scope  { parameters, environment, state, events }
+`- Feature scope   { state, events }
+   `- Component    { props, state, events, elements }
+      `- complete declarations in the Platform's Presentation language
 ```
 
-Core does not define themes, tokens, color, motion, audio, haptics, or layout.
-A Presentation receives an arbitrary parameter object, so one definition can
-produce several themes or configurations. The adapter decides which
-declarations exist and how they map to native APIs. Presentation cannot invoke
-actions or mutate behavior. Adapter-defined passive feedback may observe a
-semantic interaction such as activation, but it cannot cancel, reorder, or
-replace the Component action.
+Core defines only `Animation<Source, Output, Velocity>`, the compiler intrinsic
+`animate(source, animation)`, `velocity(value)`, `settled(value)`, and read-only
+ordered `Event<Payload>`. It does not define a spring, gesture, layout, CSS,
+asset, audio, haptic, or scene vocabulary. Each UI adapter defines its own
+primitive-indexed declarations and observations, immutable Animation
+constructors, and any useful pure equation helpers.
+
+A configured Presentation pairs one pure definition with typed `parameters`.
+Parameters may contain constants, assets, and immutable Animation descriptions;
+the kernel does not rename them themes or tokens. The mounted adapter supplies
+one live read-only Environment per UI boundary. Application and Feature
+animations are shared through ordinary lexical closure, while Component
+animations are isolated by mounted and keyed structural identity.
+
+Presentation observes correlated action start/completion/failure Events but
+cannot invoke actions, emit or subscribe to Events, mutate Behavior, perform
+I/O, schedule work, or access native handles. A Component receives only its
+typed props, merged reactive state, read-only Events, and named Elements enriched
+with primitive-specific observations. It returns one complete declaration frame
+for those Elements. Ordinary TypeScript is the equation language; retained
+temporal state is allocated only by a directly named `const value = animate(...)`.
 
 ## Realization
 
@@ -183,48 +198,108 @@ AudioContext per document, encoded/decoded asset caches, playback nodes, and
 disposal. Structure retains accessibility and behavior. Authored Presentation
 declarations contain no event callbacks.
 
-Web motion follows the same boundary. Components own semantic state, actions,
-native listeners, gesture samples, and accessibility. Presentation supplies
-only desired visual values and immutable spring parameters:
+Web temporal presentation follows the same boundary. Components own semantic
+state, actions, native listeners, gesture samples, accessibility, and desired
+membership. The web adapter supplies immutable scalar Animation constructors;
+pure utilities such as `clamp` and `rubberBand` remain ordinary functions:
 
 ```ts
-Panel: {
-  motion: {
-    transform: {
-      value: { translate: { y: state.dragOffset } },
-      velocity: { translate: { y: state.dragVelocity } },
-      transition: state.dragging ? undefined : parameters.motion.return,
+const clean = (({ parameters, environment, events }) => {
+  const confirmation = animate(events.save.completed, parameters.confirmation);
+
+  return {
+    Sheet({ state, elements }) {
+      const travel = Math.max(elements.Panel.box.blockSize, 1);
+      const target = state.dragging
+        ? rubberBand(state.dragOffset, travel)
+        : state.open
+          ? 0
+          : travel;
+      const position = animate(
+        target,
+        state.dragging ? follow(state.dragVelocity, { relative: true }) : parameters.sheet,
+      );
+      const openness = clamp(1 - position / travel, 0, 1);
+
+      return {
+        Backdrop: { paint: { opacity: 0.3 * openness } },
+        Panel: { transform: { translate: { y: position } } },
+        Status: { paint: { opacity: confirmation } },
+      };
     },
-    layout: { identity: "sheet-panel", transition: parameters.motion.layout },
-    presence: {
-      enter: { from: { opacity: 0 }, transition: parameters.motion.enter },
-      exit: { to: { opacity: 0 }, transition: parameters.motion.exit },
-    },
-  },
-}
+  };
+}) satisfies Presentation<App, WebPresentationLanguage, Parameters>;
 ```
 
-An absent transition is a direct native assignment, which is the only path for
-pointer-coupled values. A spring is one analytical position-and-velocity
-trajectory. The adapter renders it with sampled Web Animations when available
-and one shared frame scheduler otherwise. Interruption samples the renderer's
-actual timeline and starts the replacement trajectory from that value and
-velocity. Static CSS and frame-rate values have disjoint ownership.
+The web constructors currently cover direct following, analytical springs,
+bounded inertial decay, finite/repeating/autoreversing tween tracks, sampled
+tracks, and repeated Event pulses. Retargeting starts from the displayed value
+and compatible velocity. Reduced motion resolves deterministically to the
+semantic destination. Ordinary equations derive stagger, overlap, crossfade,
+rubber-band response, velocity blur, and Element declarations from one or more
+animated coordinates. A different Animation domain can be added by extending
+the web adapter without changing the shared kernel contract.
 
-Layout uses one document-scoped FLIP transaction. It snapshots the canonical
-pre-update visual boxes, lets every fine-grained Structure and Presentation
-mutation settle, realizes cold CSS before measurement, reads final boxes
-together, and then writes native transforms. This avoids measuring either an
-unstyled variant or a partially updated text tree. Presence integrates with the
-retained Structure lifecycle, so exit completion, immediate reversal, focus,
-inertness, and cleanup have one owner.
+One frame host belongs to each mounted Presentation root. It schedules at most
+one native animation frame, gives every active Component the same timestamp,
+and stops when no Animation or layout transaction remains active. Every affected
+Element in a Component commits from one invocation. Independent roots remain
+isolated. Long finite frame gaps are sampled analytically rather than integrated
+through invented intermediate frames. The Application scope owns shared lexical
+animations. Compiler-derived consumers ensure adapter-owned frames reevaluate
+only affected Feature scopes and Components; authored state or Presentation
+replacement still reevaluates the complete graph.
 
-View Transitions are not an authored motion mode. Snapshot-to-live handoff is a
-valid private optimization only for adapter-owned, passive, bounded captures
-whose intermediate pose can be materialized. Hit-testable and continuously
-retargetable surfaces remain live DOM. Ordinary wrapping uses browser layout and
-container FLIP; predictive line animation would be a private text driver, not a
-second public motion language.
+`continuity` opts a web Element into root-owned layout continuity. The adapter
+flushes new CSS, removes authored and runtime transforms, reads every target
+geometry in one batch, and restores authored transform layers before publishing
+an immutable FLIP correction to the current frame. The layout host never owns a
+persistent visual mutation: the Presentation session merges that correction
+with its declarations and performs the sole DOM commit. An optional identity connects structural
+replacement. Interruption begins from displayed geometry and velocity.
+Resize, scroll, font-loading, and media-loading notifications schedule the same
+geometry transaction, so intrinsic changes do not require a behavior update.
+Zero-size axes retain scale one; a target without native style or finite DOM
+geometry fails at the adapter boundary instead of silently jumping.
+Viewport geometry is canonical. Nested scroll is a direct coordinate-frame
+change and updates the baseline without animation. Axis-aligned ancestor scaling
+is converted to the target's local transform coordinates while public samples
+remain in viewport coordinates. The current web driver rejects rotated or
+skewed ancestors precisely; supporting them is an isolated future quad/matrix
+driver improvement, not a second Presentation mechanism.
+`presence` is a presentation-authored visual-retention declaration. Semantic modality,
+accessibility, focus, and hit testing change immediately; retained outgoing DOM
+is inert and removed exactly when presence settles at zero.
+
+Static and frame-dependent declarations share this authoring surface. The web
+adapter compiles static meaning to stable classes and frame-dependent numeric
+channels to a stable CSS template with equality-guarded custom-property writes.
+Compositor properties use individual transforms and stable variables; paint is
+updated only when its sample changes; layout continuity uses the batched FLIP
+host as a pure geometry and trajectory source. Layout uses the same canonical
+dynamics and root logical clock, not a second authored controller API. Every
+committed frame is inspectable as one immutable record containing behavior
+input, observations, Event consumption ranges, animation identities and
+samples, declarations, and final native class/property output.
+
+The default adapter executes the analytical canonical trajectory once per
+display frame. An isolated planner can prove and exercise WAAPI traces through
+an explicit adapter boundary, but sampled future-frame planning is not a
+production path: replaying arbitrary Presentation code before the first frame
+caused measurable input stalls. Production compositor lowering therefore
+remains bounded work: it must compile directly from retained animation data,
+preserve the canonical value and velocity for interruption, and commit the
+semantic destination before removing native fill. Unsupported output stays on
+the canonical path with an inspectable reason. Reduced motion never starts
+native work.
+
+View Transitions are not an active execution path. Their captured snapshots do
+not provide the continuously interruptible geometry required by this contract.
+Ordinary text remains browser-shaped and participates in staged geometry
+invalidation for text, font, media, resize, and scroll changes. A predictive
+text driver is deferred until it can declare and prove an exact supported
+domain; it is not a second authored animation mechanism. Backend selection is
+never authored.
 
 Development performs one exhaustive semantic compilation at startup. A
 Presentation edit is classified from semantic source ownership plus Vite's
@@ -285,7 +360,7 @@ not replace the template.
 - Vitest checks focused core invariants, generic adapter selection, concrete
   adapter translation and lifecycle, and the canonical generated application.
 - fast-check covers sequence-heavy invariants where shrinking adds evidence,
-  including fine-grained state mutation and Presentation commit traces.
+  including fine-grained state mutation and Presentation frame traces.
 - Oxlint and Oxfmt enforce one source convention.
 - The package build emits declarations and runtime entries from public exports.
 - Real-browser acceptance verifies development, interaction, Presentation,

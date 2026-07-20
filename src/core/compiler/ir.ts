@@ -1,4 +1,6 @@
-export const POGGERS_IR_VERSION = 4 as const;
+import type { PresentationSourceIR } from "./presentation";
+
+export const POGGERS_IR_VERSION = 5 as const;
 
 export type SourceSpan = Readonly<{
   file: string;
@@ -137,6 +139,7 @@ export type ApplicationIR = Readonly<{
   platforms: readonly string[];
   features: readonly FeatureIR[];
   programs: readonly ProgramIR[];
+  presentations: readonly PresentationSourceIR[];
 }>;
 
 export function serializeApplicationIR(ir: ApplicationIR): string {

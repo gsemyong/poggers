@@ -50,12 +50,15 @@ nub run dev:example
 ```
 
 The example demonstrates direct fine-grained state updates, semantic
-Presentation HMR with preserved DOM and state, container-aware styling, and a
-Presentation-parameterized control sound and icon. Switching the accent changes
+Presentation HMR with preserved DOM, state, temporal values, and Event cursors;
+container-aware styling; and parameterized control sound and icon assets.
+Switching the accent changes
 both assets without changing Structure or remounting its native Elements. Its
-motion sheet demonstrates direct drag values, velocity-aware spring release,
-interruptible presence, coordinated wrapping/layout changes, shared layout
-identity, reduced motion, and native Web Animation realization.
+sheet demonstrates direct drag following, velocity-aware spring release,
+rubber-band overscroll, interruptible presence, contextual crossfade, keyed
+reorder and layout continuity, repeated action feedback, shared environment
+observations, reduced motion, frame inspection, and deterministic realization
+of each frame.
 
 See [the architecture document](docs/architecture.md) for the product model,
 adapter boundaries, repository organization, and testing convention.

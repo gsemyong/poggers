@@ -1,10 +1,14 @@
 import { describe, expect, test } from "vitest";
 
 import type { Application, Feature, Program } from "../../../core/application";
+import type { PresentationAdapterInstance } from "../../../core/presentation";
 import type { BrowserMainThread } from "../platform";
+import type { WebPresentationLanguage } from "../presentation/language";
 import { createWebUIAdapter } from "../ui-adapter";
+import { createPresentationGraph } from "./adapter";
 
 const createApplicationUI = createWebUIAdapter().component.createApplicationUI;
+const boundary = {} as Element;
 
 type Counter = {
   Programs: {
@@ -74,6 +78,7 @@ describe("Program UI composition", () => {
       application,
       program: "browser",
       presentations: { presentations: {} },
+      boundary,
     });
     const increment = ui.api.increment as (input: {
       feature: "first" | "second";
@@ -102,6 +107,7 @@ describe("Program UI composition", () => {
         application,
         program: "browser",
         presentations: { presentations: {} },
+        boundary,
       }),
     ).toThrow("exactly one root");
   });
@@ -123,7 +129,7 @@ describe("Program UI composition", () => {
         },
       },
     };
-    const family = {};
+    const family = { parameters: {}, create: () => ({}) };
     type AppearanceContract = Contract & { Presentations: "family" };
     const application = {
       features: { shell },
@@ -133,16 +139,60 @@ describe("Program UI composition", () => {
       application,
       program: "browser",
       presentations: { presentations: { family } },
+      boundary,
     });
 
     expect(ui.api.total).toBe(0);
     expect(ui.updatePresentations({ family })).toBe(true);
     expect(
       ui.updatePresentations({
-        studio: {},
+        studio: family,
       }),
     ).toBe(false);
 
+    await ui.dispose();
+  });
+
+  test("evaluates Presentation meaning only inside mounted adapter frames", async () => {
+    const shell: Feature<Shell> = {
+      features: { first: counter(1), second: counter(10) },
+      programs: {
+        browser: {
+          state: { total: 0 },
+          actions: {
+            increment({ state }, { by }) {
+              state.total += by;
+              return state.total;
+            },
+          },
+          components: { Root: { view: () => null } },
+          root: "Root",
+        },
+      },
+    };
+    const environments: object[] = [];
+    const family = {
+      parameters: {},
+      create: ({ environment }: { environment: object }) => {
+        environments.push(environment);
+        return {};
+      },
+    };
+    type AppearanceContract = Contract & { Presentations: "family" };
+    const application = {
+      features: { shell },
+      presentations: { family },
+    } satisfies Application<AppearanceContract>;
+    const ui = createApplicationUI<AppearanceContract>({
+      application,
+      program: "browser",
+      presentations: { presentations: { family } },
+      boundary,
+    });
+
+    expect(environments).toHaveLength(0);
+    expect(ui.updatePresentations({ family })).toBe(true);
+    expect(environments).toHaveLength(0);
     await ui.dispose();
   });
 
@@ -173,6 +223,7 @@ describe("Program UI composition", () => {
         application,
         program: "browser",
         presentations: { presentations: {} },
+        boundary,
       }),
     ).toThrow("found 2");
   });
@@ -228,6 +279,7 @@ describe("Program UI composition", () => {
       application,
       program: "browser",
       presentations: { presentations: {} },
+      boundary,
     });
 
     expect(ui.api.value).toBe("provided");
@@ -259,6 +311,7 @@ describe("Program UI composition", () => {
       program: "browser",
       presentations: { presentations: {} },
       hotState,
+      boundary,
     });
     (first.api.increment as (input: { feature: "first"; by: number }) => number)({
       feature: "first",
@@ -272,6 +325,7 @@ describe("Program UI composition", () => {
       program: "browser",
       presentations: { presentations: {} },
       hotState,
+      boundary,
     });
     expect(second.api.total).toBe(15);
     expect(
@@ -283,4 +337,307 @@ describe("Program UI composition", () => {
     expect(second.api.total).toBe(16);
     await second.dispose();
   });
+});
+
+test("evaluates each Application and Feature Presentation scope once per root frame", () => {
+  let applicationEvaluations = 0;
+  let featureEvaluations = 0;
+  const adapter = {
+    environment: {} as WebPresentationLanguage["Environment"],
+    create(options: { readonly scopes?: readonly object[] }) {
+      return {
+        render(
+          frame: (input: {
+            elements: Record<string, never>;
+            scopes: readonly { evaluate<Value>(read: () => Value): Value }[];
+          }) => unknown,
+        ) {
+          frame({
+            elements: {},
+            scopes: (options.scopes ?? []).map(() => ({
+              evaluate: <Value>(read: () => Value) => read(),
+            })),
+          });
+        },
+        reconfigure() {},
+        dispose() {},
+      };
+    },
+    dispose() {},
+  } as unknown as PresentationAdapterInstance<WebPresentationLanguage, Element>;
+  const graph = createPresentationGraph({
+    application: {
+      features: {
+        dashboard: {
+          programs: {
+            browser: { components: { First: {}, Second: {} } },
+          },
+        },
+      },
+    },
+    program: "browser",
+    presentations: {
+      clean: {
+        parameters: {},
+        create: () => {
+          applicationEvaluations += 1;
+          return {
+            Dashboard: () => {
+              featureEvaluations += 1;
+              return {
+                First: () => ({ Root: { paint: { opacity: 0.4 } } }),
+                Second: () => ({ Root: { paint: { opacity: 0.4 } } }),
+              };
+            },
+          };
+        },
+      },
+    },
+    presentationRevision: () => 0,
+    presentation: () => "clean",
+    adapter,
+    boundary,
+    featureAPIs: { dashboard: {} },
+    featureEvents: { dashboard: {} },
+    eventRevision: () => 0,
+    rootComponents: [],
+  });
+
+  graph.mount();
+  expect(applicationEvaluations).toBe(1);
+  expect(featureEvaluations).toBe(1);
+  expect(graph.component("@feature/dashboard/component/First")?.({} as never)).toEqual({
+    Root: { paint: { opacity: 0.4 } },
+  });
+  expect(graph.component("@feature/dashboard/component/Second")?.({} as never)).toEqual({
+    Root: { paint: { opacity: 0.4 } },
+  });
+  expect(graph.scopes("@feature/dashboard/component/First")).toHaveLength(2);
+  expect(featureEvaluations).toBe(1);
+  graph.dispose();
+});
+
+test("invalidates only compiler-identified consumers of shared Presentation motion", async () => {
+  const adapter = {
+    environment: {} as WebPresentationLanguage["Environment"],
+    create(options: { readonly scopes?: readonly object[] }) {
+      return {
+        render(
+          frame: (input: {
+            elements: Record<string, never>;
+            scopes: readonly { evaluate<Value>(read: () => Value): Value }[];
+          }) => unknown,
+        ) {
+          frame({
+            elements: {},
+            scopes: (options.scopes ?? []).map(() => ({
+              evaluate: <Value>(read: () => Value) => read(),
+            })),
+          });
+        },
+        reconfigure() {},
+        dispose() {},
+      };
+    },
+    dispose() {},
+  } as unknown as PresentationAdapterInstance<WebPresentationLanguage, Element>;
+  const first = "@feature/dashboard/component/First";
+  const second = "@feature/dashboard/component/Second";
+  const graph = createPresentationGraph({
+    application: {
+      features: {
+        dashboard: {
+          programs: { browser: { components: { First: {}, Second: {} } } },
+        },
+      },
+    },
+    program: "browser",
+    presentations: {
+      clean: {
+        parameters: {},
+        create: () => ({ Dashboard: () => ({ First: () => ({}), Second: () => ({}) }) }),
+      },
+    },
+    presentationRevision: () => 0,
+    presentation: () => "clean",
+    adapter,
+    boundary,
+    featureAPIs: { dashboard: {} },
+    featureEvents: { dashboard: {} },
+    eventRevision: () => 0,
+    rootComponents: [],
+    dependencies: {
+      [first]: [
+        {
+          destination: "Dashboard/First/Root/paint/opacity",
+          animations: [{ id: "Presentation/Dashboard::shared", scope: "Presentation/Dashboard" }],
+        },
+      ],
+    },
+  });
+
+  expect(graph.dynamic(first)).toBe(true);
+  expect(graph.dynamic(second)).toBe(false);
+  expect(graph.revision(first)).toBe(0);
+  expect(graph.revision(second)).toBe(0);
+  graph.mount();
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(graph.revision(first)).toBe(1);
+  expect(graph.revision(second)).toBe(0);
+  graph.dispose();
+});
+
+test("coalesces shared-scope invalidation when the consumer already rendered that generation", async () => {
+  let replay: (() => void) | undefined;
+  const adapter = {
+    environment: {} as WebPresentationLanguage["Environment"],
+    create(options: { readonly scopes?: readonly object[] }) {
+      return {
+        render(
+          frame: (input: {
+            elements: Record<string, never>;
+            scopes: readonly { evaluate<Value>(read: () => Value): Value }[];
+          }) => unknown,
+        ) {
+          replay = () =>
+            frame({
+              elements: {},
+              scopes: (options.scopes ?? []).map(() => ({
+                evaluate: <Value>(read: () => Value) => read(),
+              })),
+            });
+          replay();
+        },
+        reconfigure() {},
+        dispose() {},
+      };
+    },
+    dispose() {},
+  } as unknown as PresentationAdapterInstance<WebPresentationLanguage, Element>;
+  const component = "@feature/dashboard/component/Panel";
+  const graph = createPresentationGraph({
+    application: {
+      features: {
+        dashboard: { programs: { browser: { components: { Panel: {} } } } },
+      },
+    },
+    program: "browser",
+    presentations: {
+      clean: { parameters: {}, create: () => ({ Dashboard: () => ({ Panel: () => ({}) }) }) },
+    },
+    presentationRevision: () => 0,
+    presentation: () => "clean",
+    adapter,
+    boundary,
+    featureAPIs: { dashboard: {} },
+    featureEvents: { dashboard: {} },
+    eventRevision: () => 0,
+    rootComponents: [],
+    dependencies: {
+      [component]: [
+        {
+          destination: "Dashboard/Panel/Root/paint/opacity",
+          animations: [{ id: "Presentation/Dashboard::shared", scope: "Presentation/Dashboard" }],
+        },
+      ],
+    },
+  });
+
+  graph.mount();
+  graph.acknowledge(component);
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(graph.revision(component)).toBe(0);
+
+  replay?.();
+  queueMicrotask(() => graph.acknowledge(component));
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(graph.revision(component)).toBe(0);
+
+  replay?.();
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(graph.revision(component)).toBe(1);
+  graph.dispose();
+});
+
+test("does not reevaluate unrelated Feature Presentation scopes on adapter-owned frames", () => {
+  let replay: (() => void) | undefined;
+  const adapter = {
+    environment: {} as WebPresentationLanguage["Environment"],
+    create(options: { readonly scopes?: readonly object[] }) {
+      return {
+        render(
+          frame: (input: {
+            elements: Record<string, never>;
+            scopes: readonly { evaluate<Value>(read: () => Value): Value }[];
+          }) => unknown,
+        ) {
+          const run = () =>
+            frame({
+              elements: {},
+              scopes: (options.scopes ?? []).map(() => ({
+                evaluate: <Value>(read: () => Value) => read(),
+              })),
+            });
+          replay = run;
+          run();
+        },
+        reconfigure() {},
+        dispose() {},
+      };
+    },
+    dispose() {},
+  } as unknown as PresentationAdapterInstance<WebPresentationLanguage, Element>;
+  const dashboard = "@feature/dashboard/component/First";
+  let dashboardEvaluations = 0;
+  let analyticsEvaluations = 0;
+  const graph = createPresentationGraph({
+    application: {
+      features: {
+        dashboard: { programs: { browser: { components: { First: {} } } } },
+        analytics: { programs: { browser: { components: { Report: {} } } } },
+      },
+    },
+    program: "browser",
+    presentations: {
+      clean: {
+        parameters: {},
+        create: () => ({
+          Dashboard: () => {
+            dashboardEvaluations += 1;
+            return { First: () => ({}) };
+          },
+          Analytics: () => {
+            analyticsEvaluations += 1;
+            return { Report: () => ({}) };
+          },
+        }),
+      },
+    },
+    presentationRevision: () => 0,
+    presentation: () => "clean",
+    adapter,
+    boundary,
+    featureAPIs: { dashboard: {}, analytics: {} },
+    featureEvents: { dashboard: {}, analytics: {} },
+    eventRevision: () => 0,
+    rootComponents: [],
+    dependencies: {
+      [dashboard]: [
+        {
+          destination: "Dashboard/First/Root/paint/opacity",
+          animations: [{ id: "Presentation/Dashboard::shared", scope: "Presentation/Dashboard" }],
+        },
+      ],
+    },
+  });
+
+  graph.mount();
+  expect([dashboardEvaluations, analyticsEvaluations]).toEqual([1, 1]);
+  replay?.();
+  expect([dashboardEvaluations, analyticsEvaluations]).toEqual([2, 1]);
+  graph.dispose();
 });

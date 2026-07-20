@@ -1,9 +1,89 @@
 import type { ComponentOwner } from "../../../core/component";
-import type { Presentation as CorePresentation } from "../../../core/presentation";
+import type {
+  ConfiguredPresentation as CoreConfiguredPresentation,
+  Presentation as CorePresentation,
+} from "../../../core/presentation";
 import type { IntrinsicElements } from "../component/elements";
-import type { WebMotion } from "./motion";
+import type { WebTrack, WebTween } from "./dynamics";
+import type { WebSpring } from "./spring";
 
 type Empty = Record<never, never>;
+
+/** Live web observations shared by every Presentation under one mounted UI root. */
+export type WebPresentationEnvironment = Readonly<{
+  viewport: Readonly<{
+    inlineSize: number;
+    blockSize: number;
+    scale: number;
+  }>;
+  safeArea: Readonly<{
+    blockStart: number;
+    blockEnd: number;
+    inlineStart: number;
+    inlineEnd: number;
+  }>;
+  preferences: Readonly<{
+    reducedMotion: boolean;
+    contrast: "normal" | "more" | "less";
+    colorScheme: "light" | "dark";
+  }>;
+  input: Readonly<{
+    hover: boolean;
+    pointer: "none" | "coarse" | "fine";
+  }>;
+}>;
+
+/** Cached read-only observations for one named web Element. */
+export type WebPresentationElement = Readonly<{
+  box: Readonly<{
+    inlineSize: number;
+    blockSize: number;
+    inlineStart: number;
+    blockStart: number;
+  }>;
+  scroll: Readonly<{
+    inlineOffset: number;
+    blockOffset: number;
+  }>;
+  visibility: Readonly<{
+    intersecting: boolean;
+    ratio: number;
+  }>;
+  layout: WebLayoutSample;
+  presence: WebPresenceSample;
+}>;
+
+/** One inspected scalar animation sample. */
+export type WebAnimationSample = Readonly<{
+  value: number;
+  velocity: number;
+  settled: boolean;
+}>;
+
+export type WebLayoutBox = Readonly<{
+  inlineStart: number;
+  blockStart: number;
+  inlineSize: number;
+  blockSize: number;
+}>;
+
+/** Adapter-owned continuity feedback for one Element's displayed geometry. */
+export type WebLayoutSample = Readonly<{
+  current: WebLayoutBox;
+  destination: WebLayoutBox;
+  velocity: Readonly<{
+    inlineStart: number;
+    blockStart: number;
+    inlineSize: number;
+    blockSize: number;
+  }>;
+  progress: number;
+  kind: "idle" | "layout" | "replacement";
+  settled: boolean;
+}>;
+
+export type WebPresenceSample = WebAnimationSample &
+  Readonly<{ direction: "idle" | "entering" | "exiting" }>;
 
 /** A device-independent color value interpreted by the web adapter. */
 export type WebColor =
@@ -343,11 +423,20 @@ export type WebFeedback = Readonly<{
   activate?: Readonly<{ audio?: WebAudioAsset }>;
 }>;
 
+/** Requests adapter-owned visual continuity across web layout changes. */
+export type WebLayoutContinuity = Readonly<{
+  identity?: string;
+  dynamics: WebSpring | WebTween | WebTrack;
+  strategy?: "transform" | "position";
+}>;
+
 export type WebElementPresentation = WebStyle &
   Readonly<{
+    /** Replaces the current image source immediately; crossfades use explicit overlapping Elements. */
     image?: WebImageAsset;
     feedback?: WebFeedback;
-    motion?: WebMotion;
+    presence?: WebAnimationSample;
+    continuity?: WebLayoutContinuity;
   }>;
 
 type WebPrimitivePresentation<Primitive extends keyof IntrinsicElements> = Primitive extends "img"
@@ -358,10 +447,20 @@ export type WebPresentationLanguage = {
   readonly Declarations: Readonly<{
     [Primitive in keyof IntrinsicElements]: WebPrimitivePresentation<Primitive>;
   }>;
+  readonly Environment: WebPresentationEnvironment;
+  readonly Observations: Readonly<{
+    [Primitive in keyof IntrinsicElements]: WebPresentationElement;
+  }>;
 };
 
-/** A parameterized web Presentation. Parameters are ordinary typed product data. */
+/** A web Presentation definition with typed Application-selected parameters. */
 export type WebPresentation<
   Root extends ComponentOwner,
   Parameters extends object = Empty,
 > = CorePresentation<Root, WebPresentationLanguage, Parameters>;
+
+/** A web Presentation paired with its Application-selected parameters. */
+export type ConfiguredWebPresentation<
+  Root extends ComponentOwner,
+  Parameters extends object = Empty,
+> = CoreConfiguredPresentation<Root, WebPresentationLanguage, Parameters>;

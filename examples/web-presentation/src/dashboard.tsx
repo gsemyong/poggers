@@ -1,5 +1,25 @@
 import type { Feature, Program } from "@poggers/kit";
-import { createPress, mountDialog, mountDrag, type BrowserMainThread } from "@poggers/kit/web";
+import { createPress, For, mountDialog, mountDrag, type BrowserMainThread } from "@poggers/kit/web";
+
+type SheetView = "summary" | "detail";
+
+export type SheetState =
+  | Readonly<{
+      status: "closed";
+      view: SheetView;
+      via:
+        | Readonly<{ kind: "initial" }>
+        | Readonly<{ kind: "dismiss"; source: "button" | "backdrop" | "escape" }>
+        | Readonly<{ kind: "drag"; offset: number; velocity: number }>;
+    }>
+  | Readonly<{
+      status: "open";
+      view: SheetView;
+      interaction:
+        | Readonly<{ kind: "idle" }>
+        | Readonly<{ kind: "dragging"; offset: number; velocity: number }>
+        | Readonly<{ kind: "released"; offset: number; velocity: number }>;
+    }>;
 
 export type DashboardFeature = {
   Programs: {
@@ -8,18 +28,16 @@ export type DashboardFeature = {
       {
         State: {
           compact: boolean;
+          reversed: boolean;
           warm: boolean;
-          sheetOpen: boolean;
-          sheetView: "summary" | "detail";
-          sheetDragging: boolean;
-          sheetOffset: number;
-          sheetVelocity: number;
+          sheet: SheetState;
         };
         Actions: {
           toggleDensity(): void;
+          reorderMetrics(): void;
           toggleAccent(): void;
           openSheet(): void;
-          closeSheet(): void;
+          closeSheet(input: { source: "button" | "backdrop" | "escape" }): void;
           toggleSheetView(): void;
           beginSheetDrag(): void;
           updateSheetDrag(input: { offset: number; velocity: number }): void;
@@ -39,12 +57,16 @@ export type DashboardFeature = {
               Accent: "button";
               AccentIcon: "img";
               AccentMode: "output";
+              Reorder: "button";
               OpenSheet: "button";
               Sheet: "dialog";
+              SheetBackdrop: "div";
               SheetPanel: "section";
               SheetHandle: "button";
               SheetTitle: "h2";
-              SheetBody: "p";
+              SheetContent: "div";
+              SheetSummary: "p";
+              SheetDetail: "p";
               SheetSwitch: "button";
               SheetClose: "button";
               Gallery: "section";
@@ -76,53 +98,75 @@ export const dashboard: Feature<DashboardFeature> = {
     browser: {
       state: {
         compact: false,
+        reversed: false,
         warm: true,
-        sheetOpen: false,
-        sheetView: "summary",
-        sheetDragging: false,
-        sheetOffset: 0,
-        sheetVelocity: 0,
+        sheet: { status: "closed", view: "summary", via: { kind: "initial" } },
       },
       actions: {
         toggleDensity({ state }) {
           state.compact = !state.compact;
         },
+        reorderMetrics({ state }) {
+          state.reversed = !state.reversed;
+        },
         toggleAccent({ state }) {
           state.warm = !state.warm;
         },
         openSheet({ state }) {
-          state.sheetOpen = true;
-          state.sheetDragging = false;
-          state.sheetOffset = 0;
-          state.sheetVelocity = 0;
+          const sheet = state.sheet;
+          if (sheet.status === "open") return;
+          state.sheet = { status: "open", view: sheet.view, interaction: { kind: "idle" } };
         },
-        closeSheet({ state }) {
-          state.sheetOpen = false;
-          state.sheetDragging = false;
-          state.sheetVelocity = 0;
+        closeSheet({ state }, { source }) {
+          const sheet = state.sheet;
+          if (sheet.status === "closed") return;
+          state.sheet = {
+            status: "closed",
+            view: sheet.view,
+            via: { kind: "dismiss", source },
+          };
         },
         toggleSheetView({ state }) {
-          state.sheetView = state.sheetView === "summary" ? "detail" : "summary";
+          const sheet = state.sheet;
+          state.sheet = {
+            ...sheet,
+            view: sheet.view === "summary" ? "detail" : "summary",
+          };
         },
         beginSheetDrag({ state }) {
-          state.sheetDragging = true;
-          state.sheetVelocity = 0;
+          const sheet = state.sheet;
+          if (sheet.status !== "open") return;
+          state.sheet = {
+            status: "open",
+            view: sheet.view,
+            interaction: { kind: "dragging", offset: 0, velocity: 0 },
+          };
         },
         updateSheetDrag({ state }, { offset, velocity }) {
-          state.sheetOffset = Math.max(0, offset);
-          state.sheetVelocity = velocity;
+          const sheet = state.sheet;
+          if (sheet.status !== "open" || sheet.interaction.kind !== "dragging") return;
+          state.sheet = {
+            status: "open",
+            view: sheet.view,
+            interaction: { kind: "dragging", offset, velocity },
+          };
         },
         releaseSheet({ state }, { offset, velocity }) {
-          state.sheetDragging = false;
-          state.sheetOffset = Math.max(0, offset);
-          state.sheetVelocity = velocity;
-          if (offset > 140 || velocity > 850) state.sheetOpen = false;
-          else state.sheetOffset = 0;
+          const sheet = state.sheet;
+          if (sheet.status !== "open" || sheet.interaction.kind !== "dragging") return;
+          state.sheet =
+            offset > 140 || velocity > 850
+              ? { status: "closed", view: sheet.view, via: { kind: "drag", offset, velocity } }
+              : {
+                  status: "open",
+                  view: sheet.view,
+                  interaction: { kind: "released", offset, velocity },
+                };
         },
         cancelSheetDrag({ state }) {
-          state.sheetDragging = false;
-          state.sheetOffset = 0;
-          state.sheetVelocity = 0;
+          const sheet = state.sheet;
+          if (sheet.status !== "open") return;
+          state.sheet = { status: "open", view: sheet.view, interaction: { kind: "idle" } };
         },
       },
       components: {
@@ -139,20 +183,25 @@ export const dashboard: Feature<DashboardFeature> = {
               Accent,
               AccentIcon,
               AccentMode,
+              Reorder,
               OpenSheet,
               Sheet,
+              SheetBackdrop,
               SheetPanel,
               SheetHandle,
               SheetTitle,
-              SheetBody,
+              SheetContent,
+              SheetSummary,
+              SheetDetail,
               SheetSwitch,
               SheetClose,
               Gallery,
             } = elements;
             const density = createPress(() => feature.toggleDensity());
             const accent = createPress(() => feature.toggleAccent());
+            const reorder = createPress(() => feature.reorderMetrics());
             const openSheet = createPress(() => feature.openSheet());
-            const closeSheet = createPress(() => feature.closeSheet());
+            const closeSheet = createPress(() => feature.closeSheet({ source: "button" }));
             const switchSheet = createPress(() => feature.toggleSheetView());
             return (
               <Root>
@@ -171,6 +220,9 @@ export const dashboard: Feature<DashboardFeature> = {
                     <AccentMode aria-live="polite">
                       {() => (feature.warm ? "Bright click" : "Deep click")}
                     </AccentMode>
+                    <Reorder type="button" {...reorder}>
+                      Reorder metrics
+                    </Reorder>
                     <OpenSheet type="button" aria-controls="motion-sheet" {...openSheet}>
                       Open motion sheet
                     </OpenSheet>
@@ -180,16 +232,22 @@ export const dashboard: Feature<DashboardFeature> = {
                   id="motion-sheet"
                   aria-labelledby="motion-sheet-title"
                   ref={(element) =>
-                    mountDialog(element, () => (feature.sheetOpen ? "modal" : false))
+                    mountDialog(element, () => (feature.sheet.status === "open" ? "modal" : false))
                   }
                   onCancel={(event) => {
                     event.preventDefault();
-                    feature.closeSheet();
+                    feature.closeSheet({ source: "escape" });
                   }}
                   onPointerDown={(event) => {
-                    if (event.target === event.currentTarget) feature.closeSheet();
+                    if (event.target === event.currentTarget) {
+                      feature.closeSheet({ source: "backdrop" });
+                    }
                   }}
                 >
+                  <SheetBackdrop
+                    aria-hidden="true"
+                    onPointerDown={() => feature.closeSheet({ source: "backdrop" })}
+                  />
                   <SheetPanel>
                     <SheetHandle
                       type="button"
@@ -197,7 +255,10 @@ export const dashboard: Feature<DashboardFeature> = {
                       ref={(element) => {
                         const drag = mountDrag(element, {
                           axis: "block",
-                          bounds: () => ({ block: [0, Math.max(320, innerHeight)] }),
+                          bounds: () => {
+                            const extent = Math.max(320, innerHeight);
+                            return { block: [-extent, extent] };
+                          },
                           start: () => feature.beginSheetDrag(),
                           change: ({ block, velocityBlock }) =>
                             feature.updateSheetDrag({ offset: block, velocity: velocityBlock }),
@@ -210,19 +271,22 @@ export const dashboard: Feature<DashboardFeature> = {
                     />
                     <SheetTitle id="motion-sheet-title">
                       {() =>
-                        feature.sheetView === "summary" ? "Motion continuity" : "Layout response"
+                        feature.sheet.view === "summary" ? "Motion continuity" : "Layout response"
                       }
                     </SheetTitle>
-                    <SheetBody>
-                      {() =>
-                        feature.sheetView === "summary"
-                          ? "Drag this surface, reverse it mid-flight, or change its content while it remains mounted."
-                          : "This longer view deliberately wraps across several lines so the panel geometry changes without remounting its native element."
-                      }
-                    </SheetBody>
+                    <SheetContent>
+                      <SheetSummary aria-hidden={() => feature.sheet.view !== "summary"}>
+                        Drag this surface, reverse it mid-flight, or change its content while it
+                        remains mounted.
+                      </SheetSummary>
+                      <SheetDetail aria-hidden={() => feature.sheet.view !== "detail"}>
+                        This longer view deliberately wraps across several lines so the panel
+                        geometry changes without remounting its native element.
+                      </SheetDetail>
+                    </SheetContent>
                     <SheetSwitch type="button" {...switchSheet}>
                       {() =>
-                        feature.sheetView === "summary" ? "Show layout case" : "Show summary"
+                        feature.sheet.view === "summary" ? "Show layout case" : "Show summary"
                       }
                     </SheetSwitch>
                     <SheetClose type="button" autoFocus {...closeSheet}>
@@ -231,19 +295,12 @@ export const dashboard: Feature<DashboardFeature> = {
                   </SheetPanel>
                 </Sheet>
                 <Gallery aria-label="Service metrics">
-                  <Metric
-                    label="Availability"
-                    value="99.997%"
-                    detail="Rolling 30 days"
-                    tone="accent"
-                  />
-                  <Metric label="Edge latency" value="38 ms" detail="Global p95" tone="neutral" />
-                  <Metric
-                    label="Active regions"
-                    value="24"
-                    detail="All systems nominal"
-                    tone="neutral"
-                  />
+                  <For
+                    each={() => (feature.reversed ? [...metrics].reverse() : metrics)}
+                    by="label"
+                  >
+                    {(metric) => <Metric {...metric} />}
+                  </For>
                 </Gallery>
               </Root>
             );
@@ -266,3 +323,19 @@ export const dashboard: Feature<DashboardFeature> = {
     },
   },
 };
+
+const metrics = [
+  {
+    label: "Availability",
+    value: "99.997%",
+    detail: "Rolling 30 days",
+    tone: "accent",
+  },
+  { label: "Edge latency", value: "38 ms", detail: "Global p95", tone: "neutral" },
+  {
+    label: "Active regions",
+    value: "24",
+    detail: "All systems nominal",
+    tone: "neutral",
+  },
+] as const;

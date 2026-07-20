@@ -146,8 +146,7 @@ const _invalidInputType = <input type="mailbox" />;
 // @ts-expect-error className must be renderable.
 const _invalidClassName = <div className={{ no: true }} />;
 
-// @ts-expect-error attributes are values; functions are reserved for events and components.
-const _invalidFunctionAttribute = <div className={() => "nope"} />;
+const reactiveAttributeOk = <div className={() => "ready"} aria-hidden={() => false} />;
 
 // @ts-expect-error style property names are checked.
 const _invalidStyleProp = <div style={{ definitelyNotCss: "red" }} />;
@@ -157,3 +156,4 @@ void htmlOk;
 void popoverOk;
 void svgOk;
 void customElementOk;
+void reactiveAttributeOk;

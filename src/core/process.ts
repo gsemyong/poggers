@@ -2,6 +2,7 @@ import { endBatch, signal as createSignal, startBatch } from "alien-signals";
 
 import type { CapabilityResolver, ProgramContributionAddress } from "../contracts/capability";
 import type { Application, ApplicationContract } from "./application";
+import { createActionEventLedger, type ActionEvent } from "./presentation";
 import { createReactiveState } from "./state";
 
 type ResourceCleanup = () => void | Promise<void>;
@@ -46,6 +47,7 @@ export type UIContributionInstance = Readonly<{
   api: Readonly<Record<string, unknown>>;
   state: Readonly<Record<string, unknown>>;
   actions: Readonly<Record<string, (...args: readonly unknown[]) => unknown>>;
+  events: Readonly<Record<string, ActionEvent<(...args: never[]) => unknown>>>;
   snapshot(): Record<string, unknown>;
   dispose(): Promise<void>;
 }>;
@@ -72,6 +74,7 @@ type UIContributionOptions = Readonly<{
   name?: string;
   initialState?: Readonly<Record<string, unknown>>;
   scope?: ResourceScope;
+  onActionEvent?: () => void;
 }>;
 
 /** Creates one live Feature-local UI API inside a Process. */
@@ -94,12 +97,18 @@ export function createUIContributionInstance(
   const scope = options.scope ?? new ResourceScope();
   let disposal: Promise<void> | undefined;
   const actions: Record<string, (...args: readonly unknown[]) => unknown> = Object.create(null);
+  const eventLedger = createActionEventLedger(
+    Object.keys(definition.actions ?? {}),
+    options.onActionEvent,
+  );
 
   for (const [actionName, implementation] of Object.entries(definition.actions ?? {})) {
     actions[actionName] = (...args: readonly unknown[]) => {
       if (disposed) throw new Error(`UI contribution "${name}" is disposed.`);
-      return scope.action(() =>
-        implementation({ capabilities, features, state: state.mutable }, ...args),
+      return eventLedger.invoke(actionName, args, () =>
+        scope.action(() =>
+          implementation({ capabilities, features, state: state.mutable }, ...args),
+        ),
       );
     };
   }
@@ -120,6 +129,7 @@ export function createUIContributionInstance(
     api,
     state: state.read,
     actions,
+    events: eventLedger.events,
     snapshot() {
       return state.snapshot();
     },
@@ -137,6 +147,7 @@ type ProgramContributionOptions = Readonly<{
   capabilities?: Readonly<Record<string, unknown>>;
   features?: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
   initialState?: Readonly<Record<string, unknown>>;
+  onActionEvent?: () => void;
 }>;
 
 export class ResourceScope {
@@ -293,6 +304,7 @@ export function createProgramContributionInstance(
         features: options.features,
         initialState: options.initialState,
         scope,
+        onActionEvent: options.onActionEvent,
       })
     : undefined;
 

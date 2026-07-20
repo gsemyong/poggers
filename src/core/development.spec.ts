@@ -40,9 +40,10 @@ describe("semantic hot updates", () => {
         throw new Error("invalid source");
       },
     };
-    expect(await coordinator.replace(prepareFailed)).toEqual({
+    expect(await coordinator.replace(prepareFailed)).toMatchObject({
       status: "rejected",
       reason: "prepare-failed",
+      cause: expect.objectContaining({ message: "invalid source" }),
     });
     expect(coordinator.value).toBe("first");
 
@@ -59,9 +60,10 @@ describe("semantic hot updates", () => {
         };
       },
     };
-    expect(await coordinator.replace(activationFailed)).toEqual({
+    expect(await coordinator.replace(activationFailed)).toMatchObject({
       status: "rejected",
       reason: "activation-failed",
+      cause: expect.objectContaining({ message: "mount failed" }),
     });
     expect(coordinator.value).toBe("first");
     expect(events).toEqual(["activate:first:0", "rollback"]);
@@ -204,6 +206,7 @@ function application(file: string): ApplicationIR {
         span: { file, line: 1, column: 1 },
       },
     ],
+    presentations: [],
   };
 }
 
