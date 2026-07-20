@@ -8,12 +8,14 @@ import {
   type PresentationElementResolver,
   type PresentationFrame,
 } from "../../../core/presentation";
-import { readPresentationPresence, setPresentationPresence } from "../lifecycle";
+import { readPresentationPresence, setPresentationPresence } from "../presence";
 import {
+  createNativeWebFrameHost,
   createWebAnimationHost,
   type WebAnimationHost,
   type WebAnimationHostSnapshot,
   type WebAnimationInspection,
+  type WebFrameHost,
 } from "./animation";
 import {
   planWebPresentationArtifacts,
@@ -29,7 +31,6 @@ import {
   type WebNativeExecution,
   type WebNativeExecutionPlan,
 } from "./execution";
-import { createNativeWebFrameHost, type WebFrameHost } from "./frame";
 import type {
   WebAudioAsset,
   WebElementPresentation,
@@ -61,8 +62,6 @@ export type WebPresentationAdapterOptions = Readonly<{
   createFeedbackHost?: (boundary: Element) => WebFeedbackHost;
   /** @internal Injectable native animation boundary for conformance and host specialization. */
   createNativeAnimation?: WebNativeAnimationFactory;
-  /** @internal Enables bounded output sampling in conformance experiments only. */
-  adaptiveNativeExecution?: boolean;
 }>;
 
 export type WebImageHost = {
@@ -262,7 +261,6 @@ export function createWebPresentationAdapter(
             () => sessions.delete(registered as WebPresentationAdapterSession<string>),
             restore,
             options.createNativeAnimation,
-            options.adaptiveNativeExecution ?? options.createNativeAnimation !== undefined,
           );
           registered = session;
           sessions.set(registered as WebPresentationAdapterSession<string>, identity);
@@ -315,7 +313,6 @@ function createSession<ElementName extends string>(
   onDispose: () => void,
   restore?: WebAnimationHostSnapshot,
   createNativeAnimation?: WebNativeAnimationFactory,
-  adaptiveNativeExecution = false,
 ): WebPresentationAdapterSession<ElementName> {
   const layoutOwner = {};
   const observations = createWebElementObservationHost(boundary, elements, {
@@ -526,7 +523,7 @@ function createSession<ElementName extends string>(
 
   const startNativePlan = (started: number): boolean => {
     cancelNativeExecution();
-    if (!adaptiveNativeExecution && !temporalDeclarations) {
+    if (!temporalDeclarations) {
       setExecutionPlan(Object.freeze({ kind: "canonical", reason: "direct-lowering-required" }));
       return false;
     }
@@ -592,19 +589,15 @@ function createSession<ElementName extends string>(
         .filter(([, animation]) => !animation.settled)
         .map(([identity]) => identity),
     );
-    const direct = temporalDeclarations
-      ? createNativeTemporalDeclarationSampler(temporalDeclarations, activeAnimations)
-      : undefined;
-    if (temporalDeclarations && !direct) {
+    const direct = createNativeTemporalDeclarationSampler(temporalDeclarations!, activeAnimations);
+    if (!direct) {
       simulation.dispose();
       for (const scope of simulationScopes) scope.dispose();
       return Object.freeze({ kind: "canonical", reason: "non-compositor-output" });
     }
-    const plannedElements = direct
-      ? (Object.fromEntries(direct.elements.map((name) => [name, elements[name]])) as Readonly<
-          Record<ElementName, () => readonly Element[]>
-        >)
-      : elements;
+    const plannedElements = Object.fromEntries(
+      direct.elements.map((name) => [name, elements[name]]),
+    ) as Readonly<Record<ElementName, () => readonly Element[]>>;
     const samples = new Map<number, WebExecutionSample>();
     const sample = (time: number): WebExecutionSample => {
       const previous = samples.get(time);
@@ -612,17 +605,7 @@ function createSession<ElementName extends string>(
       for (const scope of simulationScopes) scope.begin(time);
       simulation.begin(time);
       try {
-        const declarations = evaluatePresentationFrame(simulation, () => {
-          if (direct) {
-            return direct.sample();
-          }
-          return currentFrame!.evaluate({
-            elements: observations.elements as never,
-            scopes: simulationScopes.map((scope) => ({
-              evaluate: <Value>(read: () => Value) => evaluatePresentationFrame(scope, read),
-            })),
-          });
-        });
+        const declarations = evaluatePresentationFrame(simulation, direct.sample);
         const result = Object.freeze({
           time,
           declarations: snapshotPlainData(declarations) as Readonly<
@@ -653,7 +636,7 @@ function createSession<ElementName extends string>(
         elements: plannedElements,
         planning: { budget: 8, now: planningNow },
       });
-      return plan.kind === "native" && direct?.canonical
+      return plan.kind === "native" && direct.canonical
         ? Object.freeze({ ...plan, mode: "hybrid" as const })
         : plan;
     } finally {

@@ -1,7 +1,7 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 
-import { createWebFrameHost } from "./frame";
+import { createWebFrameHost } from "./animation";
 import { createWebLayoutHost, readWebLayoutGeometry } from "./layout";
 import { spring } from "./spring";
 

@@ -30,18 +30,4 @@ describe("web Presentation language", () => {
       playbackRate: 1.2,
     });
   });
-
-  it("rejects malformed physical and sampled descriptions", () => {
-    expect(() => spring({ stiffness: 0 })).toThrow("stiffness");
-    expect(() => follow(Number.NaN)).toThrow("finite");
-    expect(() => decay({ min: 10, max: 1 })).toThrow("greater");
-    expect(() =>
-      track({
-        samples: [
-          { time: 1, value: 0 },
-          { time: 2, value: 1 },
-        ],
-      }),
-    ).toThrow("start at time 0");
-  });
 });

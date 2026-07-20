@@ -17,17 +17,18 @@ import {
 } from "alien-signals";
 
 import type { JSXElement } from "../../../core/jsx/types";
-import { hasPresentationPresence, onPresentationExit } from "../lifecycle";
-import type { Child } from "./elements";
 import {
   adoptSceneChildren,
+  hasPresentationPresence,
   mountPresenceElement,
+  onPresentationExit,
   PresenceGraph,
   setSceneElementPresence,
   setSceneElementVisible,
   unmountPresenceElement,
   type SceneElementRegistration,
-} from "./presence";
+} from "../presence";
+import type { Child } from "./elements";
 
 export type VirtualCollectionGeometry = {
   readonly axis: "block" | "inline";

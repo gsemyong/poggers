@@ -492,58 +492,6 @@ describe("web Presentation adapter", () => {
     mounted.dispose();
   });
 
-  it("uses the mounted Element WAAPI boundary without adapter injection", () => {
-    const ownerDocument = {
-      defaultView: {
-        innerWidth: 1_280,
-        innerHeight: 720,
-        performance: { now: () => 0 },
-        requestAnimationFrame: () => 1,
-        cancelAnimationFrame() {},
-        addEventListener() {},
-        removeEventListener() {},
-      },
-    };
-    const target = createElement(ownerDocument);
-    const effects: Keyframe[][] = [];
-    let cancelled = false;
-    Object.assign(target, {
-      animate(keyframes: Keyframe[]) {
-        effects.push(keyframes);
-        return {
-          finished: new Promise(() => undefined),
-          currentTime: null,
-          cancel() {
-            cancelled = true;
-          },
-        };
-      },
-    });
-    const mounted = createAdapter({
-      createStyleHost: () => createHost([]),
-      adaptiveNativeExecution: true,
-    }).mount({ boundary: target });
-    const session = mounted.create({ boundary: target, elements: { Root: () => [target] } });
-
-    session.render(() => {
-      const opacity = samplePresentationAnimation(
-        "Fixture::opacity",
-        1,
-        spring({ initial: 0, duration: 260 }),
-      );
-      return { Root: { paint: { opacity: opacity.value } } };
-    });
-
-    expect(session.inspect().execution.kind).toBe("native");
-    expect(effects).toHaveLength(1);
-    expect(effects[0]?.[0]).toMatchObject({ opacity: "0", offset: 0 });
-    expect(effects[0]?.at(-1)).toMatchObject({ opacity: "1", offset: 1 });
-
-    session.dispose();
-    mounted.dispose();
-    expect(cancelled).toBe(true);
-  });
-
   it("does not replay future Presentation frames on the default execution path", () => {
     let requested = 0;
     const ownerDocument = {
@@ -759,12 +707,23 @@ describe("web Presentation adapter", () => {
     let destination = 120;
     const render = () =>
       session.render(() => {
+        const identity = "Fixture::position";
         const position = samplePresentationAnimation(
-          "Fixture::position",
+          identity,
           destination,
           spring({ initial: 0, stiffness: 500, damping: 42 }),
         );
-        return { Root: { transform: { translate: { y: position.value } } } };
+        return {
+          Root: {
+            transform: {
+              translate: {
+                y: animate.temporal(position.value, () => animate.value<number>(identity), [
+                  identity,
+                ]) as unknown as number,
+              },
+            },
+          },
+        };
       });
 
     render();
@@ -790,50 +749,6 @@ describe("web Presentation adapter", () => {
     session.dispose();
     mounted.dispose();
     expect(native[1]!.cancelled).toBe(true);
-  });
-
-  it("keeps paint-producing motion on the canonical frame path with an exact reason", () => {
-    let requested = 0;
-    const ownerDocument = {
-      defaultView: {
-        innerWidth: 1_280,
-        innerHeight: 720,
-        performance: { now: () => 0 },
-        requestAnimationFrame() {
-          requested += 1;
-          return requested;
-        },
-        cancelAnimationFrame() {},
-        addEventListener() {},
-        removeEventListener() {},
-      },
-    };
-    const target = createElement(ownerDocument);
-    const mounted = createAdapter({
-      createStyleHost: () => createHost([]),
-      createNativeAnimation: () => undefined,
-    }).mount({ boundary: target });
-    const session = mounted.create({
-      boundary: target,
-      elements: { Root: () => [target] },
-    });
-
-    session.render(() => {
-      const progress = samplePresentationAnimation(
-        "Fixture::progress",
-        1,
-        spring({ initial: 0, stiffness: 500, damping: 42 }),
-      );
-      return { Root: { paint: { radius: 8 + progress.value * 8 } } };
-    });
-
-    expect(session.inspect().execution).toEqual({
-      kind: "canonical",
-      reason: "non-compositor-output",
-    });
-    expect(requested).toBeGreaterThan(0);
-    session.dispose();
-    mounted.dispose();
   });
 
   it("realizes animated values through one stable CSS template", async () => {

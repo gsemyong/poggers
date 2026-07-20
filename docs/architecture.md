@@ -282,16 +282,14 @@ committed frame is inspectable as one immutable record containing behavior
 input, observations, Event consumption ranges, animation identities and
 samples, declarations, and final native class/property output.
 
-The default adapter executes the analytical canonical trajectory once per
-display frame. An isolated planner can prove and exercise WAAPI traces through
-an explicit adapter boundary, but sampled future-frame planning is not a
-production path: replaying arbitrary Presentation code before the first frame
-caused measurable input stalls. Production compositor lowering therefore
-remains bounded work: it must compile directly from retained animation data,
-preserve the canonical value and velocity for interruption, and commit the
-semantic destination before removing native fill. Unsupported output stays on
-the canonical path with an inspectable reason. Reduced motion never starts
-native work.
+The analytical frame evaluator is the reference execution path. Compiler-owned
+temporal slices let the adapter sample only retained numeric channels, without
+replaying authored Presentation code. A bounded planner lowers equivalent
+opacity and transform traces to WAAPI; layout-active, unsupported, or
+over-budget output remains on the shared frame host with an inspectable reason.
+Both paths preserve the canonical displayed value and velocity for
+interruption, and native completion commits the semantic destination before
+removing fill. Reduced motion never starts native work.
 
 View Transitions are not an active execution path. Their captured snapshots do
 not provide the continuously interruptible geometry required by this contract.
@@ -336,10 +334,11 @@ src/
       index.ts
       public.ts
       platform.ts
+      presence.ts
       toolchain.ts
       ui-adapter.ts
-      component/
-      presentation/
+      component/       # JSX, native elements, interaction, compilation
+      presentation/    # language, compilation, dynamics, execution, layout
   cli.ts
   index.ts
 ```
@@ -349,8 +348,9 @@ are extension boundaries. Adapters co-locate everything for one concrete
 Platform and never import one another. The CLI depends on an explicit adapter
 map and contains no per-adapter branch.
 
-Files are split only for an independent contract, translation, lifecycle, or
-substantial testable engine. `template/` is the canonical generated
+Files are split only for an independent contract, translation, or substantial
+testable engine. Cross-layer web presence is intentionally co-located once at
+the adapter root. `template/` is the canonical generated
 application. `examples/` contains focused executable pressure cases and does
 not replace the template.
 

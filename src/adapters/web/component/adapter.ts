@@ -13,8 +13,8 @@ import {
   type ProgramContributionInstance,
 } from "../../../core/process";
 import { createReactiveState } from "../../../core/state";
+import { PresenceGraph } from "../presence";
 import type { WebElementPresentation, WebPresentationLanguage } from "../presentation/language";
-import { PresenceGraph } from "./presence";
 import {
   allocatePresenceOwner,
   captureSignalOnHotRefresh,

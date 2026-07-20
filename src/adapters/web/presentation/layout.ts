@@ -1,5 +1,5 @@
+import type { WebFrameHost } from "./animation";
 import { createDynamicsTrajectory, type WebTrajectory } from "./dynamics";
-import type { WebFrameHost } from "./frame";
 import type { WebLayoutContinuity, WebLayoutSample } from "./language";
 
 type LayoutOwner = object;

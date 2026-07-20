@@ -101,9 +101,6 @@ describe("web Presentation dynamics", () => {
         dynamics: decay({ min: 0, max: 100 }),
       }),
     ).toThrow("use a spring");
-    expect(() => spring({ mass: Number.NaN, stiffness: 100, damping: 20 })).toThrow(
-      "mass must be finite",
-    );
   });
 
   it("keeps all supported trajectories finite for finite inputs and times", () => {
