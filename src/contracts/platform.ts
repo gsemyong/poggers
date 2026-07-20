@@ -1,6 +1,7 @@
 import type { PlatformContract } from "../core/application";
 import type { ApplicationIR, ProgramIR } from "../core/compiler/ir";
-import type { UIContract, UIDefinition } from "../core/ui";
+import type { PresentationAdapter, PresentationLanguage } from "../core/presentation";
+import type { UIChild, UIContract, UIDefinition, UITarget } from "../core/ui";
 
 export type PlatformInput<Platform extends PlatformContract = PlatformContract> = Readonly<{
   directory: string;
@@ -33,6 +34,54 @@ export type ProductionArtifacts = Readonly<{
   entries: readonly ProductionArtifact[];
 }>;
 
+/** The common mounted result required from every UI Component implementation. */
+export type ComponentAdapterSession<UI extends UIContract> = Readonly<{
+  renderRoot(): UIChild<UI>;
+  dispose(): void | PromiseLike<void>;
+}>;
+
+/** The minimal cross-platform Component implementation boundary. */
+export type ComponentAdapter<
+  UI extends UIContract,
+  Input = unknown,
+  Session extends ComponentAdapterSession<UI> = ComponentAdapterSession<UI>,
+> = Readonly<{
+  createApplicationUI(input: Input): Session;
+}>;
+
+type ComponentBinding<UI extends UIContract, Implementation> = unknown extends Implementation
+  ? Implementation
+  : Implementation extends ComponentAdapter<UI, never, ComponentAdapterSession<UI>>
+    ? Implementation
+    : never;
+
+type SameKeys<Left, Right> =
+  Exclude<keyof Left, keyof Right> extends never
+    ? Exclude<keyof Right, keyof Left> extends never
+      ? true
+      : false
+    : false;
+
+type LanguageMatchesUI<UI extends UIContract, Language extends PresentationLanguage> =
+  SameKeys<Language["Declarations"], UI["Elements"]> extends true
+    ? SameKeys<Language["Observations"], UI["Elements"]> extends true
+      ? true
+      : false
+    : false;
+
+type PresentationBinding<UI extends UIContract, Implementation> = unknown extends Implementation
+  ? Implementation
+  : Implementation extends PresentationAdapter<
+        infer Language extends PresentationLanguage,
+        infer NativeTarget
+      >
+    ? LanguageMatchesUI<UI, Language> extends true
+      ? UITarget<UI> extends NativeTarget
+        ? Implementation
+        : never
+      : never
+    : never;
+
 type DefaultUIAdapter<Platform extends PlatformContract> = Platform extends {
   UI: infer UI extends UIContract;
 }
@@ -58,13 +107,16 @@ export type PlatformAdapter<
 }> &
   PlatformUIBinding<Platform, UIAdapter>;
 
-/** The conditional UI implementation owned by a UI-capable Platform Adapter. */
+/**
+ * The conditional UI implementation owned by a UI-capable Platform Adapter.
+ * Both halves are checked against the same structural Element language.
+ */
 export type UIAdapter<UI extends UIContract, Component, Presentation> =
   UI extends UIDefinition<UI>
     ? Readonly<{
         name: UI["Name"];
-        component: Component;
-        presentation: Presentation;
+        component: ComponentBinding<UI, Component>;
+        presentation: PresentationBinding<UI, Presentation>;
       }>
     : never;
 

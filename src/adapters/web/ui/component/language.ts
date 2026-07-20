@@ -1,5 +1,4 @@
-import type { JSXPlatformRegistration } from "../../../core/jsx/runtime";
-import type { JSXElement } from "../../../core/jsx/types";
+import type { JSXElement, JSXPlatformRegistration } from "../../../../core/jsx/runtime";
 
 export type Child =
   | Node
@@ -696,7 +695,7 @@ export type IntrinsicElements = {
   [Tag in `${string}-${string}`]: CustomElementAttributes;
 };
 
-declare module "../../../core/jsx/runtime" {
+declare module "../../../../core/jsx/runtime" {
   interface JSXPlatforms {
     web: JSXPlatformRegistration<IntrinsicElements>;
   }

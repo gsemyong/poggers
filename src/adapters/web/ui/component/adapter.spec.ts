@@ -1,10 +1,10 @@
 import { describe, expect, test } from "vitest";
 
-import type { Application, Feature, Program } from "../../../core/application";
-import type { PresentationAdapterInstance } from "../../../core/presentation";
-import type { BrowserMainThread } from "../platform";
+import type { Application, Feature, Program } from "../../../../core/application";
+import type { PresentationAdapterInstance } from "../../../../core/presentation";
+import type { BrowserMainThread } from "../../platform";
+import { createWebUIAdapter } from "../adapter";
 import type { WebPresentationLanguage } from "../presentation/language";
-import { createWebUIAdapter } from "../ui-adapter";
 import { createPresentationGraph } from "./adapter";
 
 const createApplicationUI = createWebUIAdapter().component.createApplicationUI;

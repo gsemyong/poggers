@@ -1,18 +1,22 @@
-import type { ProgramContributionAddress } from "../../../contracts/capability";
-import type { Application, ApplicationContract, PresentationName } from "../../../core/application";
-import type { ComponentProps, ComponentName, ComponentState } from "../../../core/component";
+import type { ProgramContributionAddress } from "../../../../contracts/capability";
+import type {
+  Application,
+  ApplicationContract,
+  PresentationName,
+} from "../../../../core/application";
+import type { ComponentProps, ComponentName, ComponentState } from "../../../../core/component";
 import {
   createActionEventLedger,
   type PresentationAdapter,
   type PresentationAdapterInstance,
-} from "../../../core/presentation";
+} from "../../../../core/presentation";
 import {
   bindCapabilitiesToScope,
   createProgramContributionInstance,
   ResourceScope,
   type ProgramContributionInstance,
-} from "../../../core/process";
-import { createReactiveState } from "../../../core/state";
+} from "../../../../core/process";
+import { createReactiveState } from "../../../../core/state";
 import { PresenceGraph } from "../presence";
 import type { WebElementPresentation, WebPresentationLanguage } from "../presentation/language";
 import {

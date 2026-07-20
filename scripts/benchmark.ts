@@ -3,16 +3,20 @@ import { computed, effect, endBatch, signal, startBatch } from "alien-signals";
 import {
   createWebPresentationAdapter,
   type WebStyleHost,
-} from "../src/adapters/web/presentation/adapter";
-import { createWebAnimationHost } from "../src/adapters/web/presentation/animation";
-import { compileWebDynamicStyle, compileWebStyle } from "../src/adapters/web/presentation/compiler";
-import { createDynamicsTrajectory, sampleTrack } from "../src/adapters/web/presentation/dynamics";
-import { planWebExecution } from "../src/adapters/web/presentation/execution";
+} from "../src/adapters/web/ui/presentation/adapter";
 import {
-  spring,
+  compileWebDynamicStyle,
+  compileWebStyle,
+} from "../src/adapters/web/ui/presentation/compiler";
+import {
+  createDynamicsTrajectory,
   createSpringTrajectory,
   sampleSpringTrajectory,
-} from "../src/adapters/web/presentation/spring";
+  sampleTrack,
+  spring,
+} from "../src/adapters/web/ui/presentation/dynamics";
+import { createWebAnimationHost } from "../src/adapters/web/ui/presentation/runtime/animation";
+import { planWebExecution } from "../src/adapters/web/ui/presentation/runtime/execution";
 import { evaluatePresentationFrame } from "../src/core/presentation";
 import { createReactiveState } from "../src/core/state";
 

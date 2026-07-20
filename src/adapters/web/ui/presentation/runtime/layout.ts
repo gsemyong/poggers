@@ -1,6 +1,6 @@
+import { createDynamicsTrajectory, type WebTrajectory } from "../dynamics";
+import type { WebLayoutContinuity, WebLayoutSample } from "../language";
 import type { WebFrameHost } from "./animation";
-import { createDynamicsTrajectory, type WebTrajectory } from "./dynamics";
-import type { WebLayoutContinuity, WebLayoutSample } from "./language";
 
 type LayoutOwner = object;
 type LayoutKey = Element | string;

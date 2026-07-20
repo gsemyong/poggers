@@ -27,8 +27,8 @@ import {
   type ApplicationPaths,
 } from "../../core/compiler/source";
 import { createHotReplacementManifest } from "../../core/development";
-import { transformComponentSource } from "./component/compiler";
-import { validateWebPresentationSource } from "./presentation/compiler";
+import { transformComponentSource } from "./ui/component/compiler";
+import { validateWebPresentationSource } from "./ui/presentation/compiler";
 
 export type DevelopmentServer = Readonly<{
   port: number;
@@ -214,7 +214,7 @@ async function prepareApplication(
       application: paths.application,
       development,
       revision,
-      runtime: resolve(import.meta.dirname, `./ui-adapter${moduleExtension()}`),
+      runtime: resolve(import.meta.dirname, `./ui/adapter${moduleExtension()}`),
       program: contract.uiProgram,
       components: contract.components,
       presentationDependencies: collectPresentationDependencies(ir, contract.uiProgram),
@@ -227,7 +227,7 @@ async function prepareApplication(
     browserSource({
       candidate,
       development,
-      runtime: resolve(import.meta.dirname, `./ui-adapter${moduleExtension()}`),
+      runtime: resolve(import.meta.dirname, `./ui/adapter${moduleExtension()}`),
     }),
   );
   return {
@@ -275,10 +275,7 @@ function kitAliases() {
       find: /^@poggers\/kit\/jsx-runtime$/,
       replacement: resolve(core, `jsx/runtime${extension}`),
     },
-    {
-      find: /^@poggers\/kit\/web\/presentation$/,
-      replacement: resolve(web, `presentation/index${extension}`),
-    },
+    { find: /^@poggers\/kit\/web$/, replacement: resolve(web, `platform${extension}`) },
     { find: /^@poggers\/kit$/, replacement: resolve(kit, `index${extension}`) },
   ];
 }

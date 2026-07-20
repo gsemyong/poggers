@@ -1,6 +1,6 @@
 import { signal } from "alien-signals";
 
-import type { WebPresentationElement, WebPresentationEnvironment } from "./language";
+import type { WebPresentationElement, WebPresentationEnvironment } from "../language";
 
 export type WebEnvironmentHost = Readonly<{
   value: WebPresentationEnvironment;

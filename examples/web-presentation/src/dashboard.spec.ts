@@ -4,11 +4,11 @@ import { createPresentationFrame, createUIContributionInstance } from "@poggers/
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 
-import { createWebAnimationHost } from "../../../src/adapters/web/presentation/animation";
 import {
   planWebPresentationArtifacts,
   validateWebPresentationSource,
-} from "../../../src/adapters/web/presentation/compiler";
+} from "../../../src/adapters/web/ui/presentation/compiler";
+import { createWebAnimationHost } from "../../../src/adapters/web/ui/presentation/runtime/animation";
 import { compilePresentationSource } from "../../../src/core/compiler/presentation";
 import { createActionEventLedger, evaluatePresentationFrame } from "../../../src/core/presentation";
 import { dashboard, type SheetState } from "./dashboard";

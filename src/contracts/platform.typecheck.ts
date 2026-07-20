@@ -1,4 +1,5 @@
 import type { Program } from "../core/application";
+import type { PresentationAdapter } from "../core/presentation";
 import type { UIElement } from "../core/ui";
 import type {
   DevelopmentSession,
@@ -8,20 +9,35 @@ import type {
   UIAdapter,
 } from "./platform";
 
+type NativeTarget = { readonly kind: "native" };
+type OtherTarget = { readonly kind: "other" };
+
 type NativeUI = {
   readonly Name: "native";
-  readonly Child: unknown;
+  readonly Child: string;
   readonly Elements: {
-    readonly stack: UIElement;
+    readonly stack: UIElement<object, NativeTarget>;
   };
 };
 
 type OtherUI = {
   readonly Name: "other";
-  readonly Child: unknown;
+  readonly Child: number;
   readonly Elements: {
-    readonly surface: UIElement;
+    readonly surface: UIElement<object, OtherTarget>;
   };
+};
+
+type NativePresentation = {
+  readonly Declarations: { readonly stack: Readonly<{ color?: string }> };
+  readonly Environment: Readonly<{ scale: number }>;
+  readonly Observations: { readonly stack: Readonly<{ size: number }> };
+};
+
+type OtherPresentation = {
+  readonly Declarations: { readonly surface: Readonly<{ material?: string }> };
+  readonly Environment: Readonly<Record<never, never>>;
+  readonly Observations: { readonly surface: Readonly<{ visible: boolean }> };
 };
 
 type ServerPlatform = { readonly Name: "server" };
@@ -70,11 +86,53 @@ void headlessUIProgram;
 
 const session = {} as DevelopmentSession;
 const artifacts = {} as ProductionArtifacts;
+const nativeComponentAdapter = {
+  createApplicationUI() {
+    return {
+      renderRoot() {
+        return "native";
+      },
+      dispose() {},
+    };
+  },
+};
+const nativePresentationAdapter = {} as PresentationAdapter<NativePresentation, NativeTarget>;
 const nativeUIAdapter = {
   name: "native",
-  component: {},
-  presentation: {},
-} satisfies UIAdapter<NativeUI, object, object>;
+  component: nativeComponentAdapter,
+  presentation: nativePresentationAdapter,
+} satisfies UIAdapter<NativeUI, typeof nativeComponentAdapter, typeof nativePresentationAdapter>;
+
+const wrongComponentAdapter = {
+  createApplicationUI() {
+    return { renderRoot: () => 1, dispose() {} };
+  },
+};
+const wrongComponentUIAdapter = {
+  name: "native",
+  // @ts-expect-error A Component adapter must render the UI language's Child type.
+  component: wrongComponentAdapter,
+  presentation: nativePresentationAdapter,
+} satisfies UIAdapter<NativeUI, typeof wrongComponentAdapter, typeof nativePresentationAdapter>;
+void wrongComponentUIAdapter;
+
+const wrongPresentationLanguage = {} as PresentationAdapter<OtherPresentation, NativeTarget>;
+const wrongPresentationUIAdapter = {
+  name: "native",
+  component: nativeComponentAdapter,
+  // @ts-expect-error Presentation declarations and observations must cover the same UI Elements.
+  presentation: wrongPresentationLanguage,
+} satisfies UIAdapter<NativeUI, typeof nativeComponentAdapter, typeof wrongPresentationLanguage>;
+void wrongPresentationUIAdapter;
+
+const wrongPresentationTarget = {} as PresentationAdapter<NativePresentation, OtherTarget>;
+const wrongTargetUIAdapter = {
+  name: "native",
+  component: nativeComponentAdapter,
+  // @ts-expect-error Presentation native targets must accept every target exposed by the UI language.
+  presentation: wrongPresentationTarget,
+} satisfies UIAdapter<NativeUI, typeof nativeComponentAdapter, typeof wrongPresentationTarget>;
+void wrongTargetUIAdapter;
 
 const serverAdapter = {
   name: "server",
@@ -124,11 +182,20 @@ const wrongAdapter = {
 } satisfies PlatformAdapters<NativePlatform | ServerPlatform>;
 void wrongAdapter;
 
+const otherComponentAdapter = {
+  createApplicationUI() {
+    return { renderRoot: () => 1, dispose() {} };
+  },
+};
 const crossedUIAdapter = {
   name: "other",
-  component: {},
-  presentation: {},
-} satisfies UIAdapter<OtherUI, object, object>;
+  component: otherComponentAdapter,
+  presentation: {} as PresentationAdapter<OtherPresentation, OtherTarget>,
+} satisfies UIAdapter<
+  OtherUI,
+  typeof otherComponentAdapter,
+  PresentationAdapter<OtherPresentation, OtherTarget>
+>;
 
 const crossedPlatformAdapter = {
   name: "native",

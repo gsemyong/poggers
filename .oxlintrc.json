@@ -24,7 +24,6 @@
         "src/core/compiler/source.ts",
         "src/core/jsx/development.ts",
         "src/core/jsx/runtime.ts",
-        "src/core/jsx/types.ts",
         "src/contracts/capability.ts",
         "src/contracts/platform.ts"
       ],

@@ -34,19 +34,14 @@
       "default": "./dist/src/core/jsx/runtime.js"
     },
     "./web": {
-      "poggers-source": "./src/adapters/web/public.ts",
-      "types": "./dist/src/adapters/web/public.d.ts",
-      "default": "./dist/src/adapters/web/public.js"
+      "poggers-source": "./src/adapters/web/platform.ts",
+      "types": "./dist/src/adapters/web/platform.d.ts",
+      "default": "./dist/src/adapters/web/platform.js"
     },
     "./adapters/web": {
-      "poggers-source": "./src/adapters/web/index.ts",
-      "types": "./dist/src/adapters/web/index.d.ts",
-      "default": "./dist/src/adapters/web/index.js"
-    },
-    "./web/presentation": {
-      "poggers-source": "./src/adapters/web/presentation/index.ts",
-      "types": "./dist/src/adapters/web/presentation/index.d.ts",
-      "default": "./dist/src/adapters/web/presentation/index.js"
+      "poggers-source": "./src/adapters/web/adapter.ts",
+      "types": "./dist/src/adapters/web/adapter.d.ts",
+      "default": "./dist/src/adapters/web/adapter.js"
     },
     "./tsconfig": "./tsconfig.json"
   },

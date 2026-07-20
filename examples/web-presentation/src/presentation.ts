@@ -9,7 +9,7 @@ import {
   type WebColor,
   type WebPresentation,
   type WebStyle,
-} from "@poggers/kit/web/presentation";
+} from "@poggers/kit/web";
 
 import type { App } from "./app";
 import type { SheetState } from "./dashboard";

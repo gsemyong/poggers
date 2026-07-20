@@ -7,30 +7,13 @@ import {
   type PresentationAdapterSession,
   type PresentationElementResolver,
   type PresentationFrame,
-} from "../../../core/presentation";
+} from "../../../../core/presentation";
 import { readPresentationPresence, setPresentationPresence } from "../presence";
-import {
-  createNativeWebFrameHost,
-  createWebAnimationHost,
-  type WebAnimationHost,
-  type WebAnimationHostSnapshot,
-  type WebAnimationInspection,
-  type WebFrameHost,
-} from "./animation";
 import {
   planWebPresentationArtifacts,
   type CompiledWebStyle,
   type WebPresentationArtifactPlan,
 } from "./compiler";
-import {
-  planAdaptiveWebExecution,
-  startWebNativeExecution,
-  type WebExecutionPlan,
-  type WebExecutionSample,
-  type WebNativeAnimationFactory,
-  type WebNativeExecution,
-  type WebNativeExecutionPlan,
-} from "./execution";
 import type {
   WebAudioAsset,
   WebElementPresentation,
@@ -39,12 +22,29 @@ import type {
   WebLayoutContinuity,
   WebPresentationLanguage,
 } from "./language";
-import { createWebLayoutHost, type WebLayoutHost } from "./layout";
+import {
+  createNativeWebFrameHost,
+  createWebAnimationHost,
+  type WebAnimationHost,
+  type WebAnimationHostSnapshot,
+  type WebAnimationInspection,
+  type WebFrameHost,
+} from "./runtime/animation";
+import {
+  planAdaptiveWebExecution,
+  startWebNativeExecution,
+  type WebExecutionPlan,
+  type WebExecutionSample,
+  type WebNativeAnimationFactory,
+  type WebNativeExecution,
+  type WebNativeExecutionPlan,
+} from "./runtime/execution";
+import { createWebLayoutHost, type WebLayoutHost } from "./runtime/layout";
 import {
   createWebElementObservationHost,
   createWebEnvironmentHost,
   type WebElementSnapshot,
-} from "./observations";
+} from "./runtime/observations";
 
 export type WebPresentationHotSnapshot = Readonly<{
   shared: readonly WebAnimationHostSnapshot[];

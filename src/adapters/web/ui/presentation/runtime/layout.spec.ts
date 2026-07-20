@@ -1,9 +1,9 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 
+import { spring } from "../dynamics";
 import { createWebFrameHost } from "./animation";
 import { createWebLayoutHost, readWebLayoutGeometry } from "./layout";
-import { spring } from "./spring";
 
 const continuity = { dynamics: spring({ stiffness: 500, damping: 40 }) } as const;
 

@@ -307,10 +307,23 @@ TypeScript program, validate the changed source, and use transactional
 candidate replacement with compatible state snapshots. Unsupported web
 Environments receive a precise diagnostic rather than a partial realization.
 
-Product code imports the browser-safe web language from `@poggers/kit/web` and
-its Presentation language from `@poggers/kit/web/presentation`. Concrete
-realization is isolated at `@poggers/kit/adapters/web`; application source does
-not need or receive that implementation entry.
+Product code imports the complete browser-safe structure and Presentation
+language from `@poggers/kit/web`. Concrete realization is isolated at
+`@poggers/kit/adapters/web`; application source does not need or receive that
+implementation entry.
+
+Every concrete adapter shares one minimal shape. A Platform adapter owns
+development and production realization. A UI-capable Platform additionally
+owns one paired Component and Presentation realization. The Component result
+must render the Platform UI's `Child` type. Presentation declarations and
+observations must cover exactly the same primitive Elements, and its native
+target must accept every target exposed by those Elements. TypeScript rejects
+crossed halves before an adapter can be registered.
+
+Private runtime mechanisms are not part of this convention. A process-only
+adapter has no `ui/` directory. A UI adapter may add native animation, layout,
+media, graphics, or observation machinery beneath its own runtime when those
+concepts have independent lifecycle and invariants.
 
 ## Source graph
 
@@ -329,16 +342,30 @@ src/
     capability.ts
     platform.ts
   adapters/
-    index.ts
+    registry.ts
     web/
-      index.ts
-      public.ts
-      platform.ts
-      presence.ts
-      toolchain.ts
-      ui-adapter.ts
-      component/       # JSX, native elements, interaction, compilation
-      presentation/    # language, compilation, dynamics, execution, layout
+      adapter.ts        # concrete Platform adapter
+      platform.ts       # web UI language and public API
+      toolchain.ts      # development and production realization
+      ui/
+        adapter.ts      # paired Component and Presentation realization
+        presence.ts     # shared structural and visual retention
+        component/
+          adapter.ts    # Feature and Component composition
+          compiler.ts   # component source transform
+          interaction.ts # browser interaction primitives
+          language.ts   # DOM JSX language
+          runtime.ts    # fine-grained DOM runtime
+        presentation/
+          adapter.ts    # declaration evaluation and native commit
+          compiler.ts   # CSS and artifact compilation
+          dynamics.ts   # public immutable Animation descriptions
+          language.ts   # public web Presentation language
+          runtime/
+            animation.ts    # temporal state and shared frame clock
+            execution.ts    # canonical-to-WAAPI planning
+            layout.ts       # layout continuity
+            observations.ts # browser observations
   cli.ts
   index.ts
 ```
@@ -349,10 +376,14 @@ Platform and never import one another. The CLI depends on an explicit adapter
 map and contains no per-adapter branch.
 
 Files are split only for an independent contract, translation, or substantial
-testable engine. Cross-layer web presence is intentionally co-located once at
-the adapter root. `template/` is the canonical generated
-application. `examples/` contains focused executable pressure cases and does
-not replace the template.
+testable engine. `platform.ts`, `adapter.ts`, and `toolchain.ts` are the common
+Platform convention; `ui/` exists only when the Platform defines a UI.
+`language.ts` and `adapter.ts` are the common UI subsystem convention, while
+compiler and runtime modules exist only when required by that implementation.
+Package exports point directly at real modules; there are no forwarding
+entrypoint files. `template/` is the canonical generated application.
+`examples/` contains focused executable pressure cases and does not replace
+the template.
 
 ## Verification
 

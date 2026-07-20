@@ -19,12 +19,8 @@ export default defineConfig({
   resolve: {
     alias: [
       {
-        find: /^@poggers\/kit\/web\/presentation$/,
-        replacement: resolve(import.meta.dirname, "src/adapters/web/presentation/index.ts"),
-      },
-      {
         find: /^@poggers\/kit\/web$/,
-        replacement: resolve(import.meta.dirname, "src/adapters/web/public.ts"),
+        replacement: resolve(import.meta.dirname, "src/adapters/web/platform.ts"),
       },
       {
         find: /^@poggers\/kit\/jsx-dev-runtime$/,

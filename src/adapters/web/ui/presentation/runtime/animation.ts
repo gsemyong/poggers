@@ -5,13 +5,13 @@ import {
   type AnimationSample,
   type Event,
   type PresentationAnimationHost,
-} from "../../../core/presentation";
+} from "../../../../../core/presentation";
 import {
   createDynamicsTrajectory,
   type WebPulse,
   type WebScalarAnimation,
   type WebTrajectory,
-} from "./dynamics";
+} from "../dynamics";
 
 export type WebAnimationHostOptions = Readonly<{
   now(): number;

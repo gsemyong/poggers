@@ -4,7 +4,7 @@ import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 import process from "node:process";
 
-import { platformAdapters } from "./adapters/index";
+import { platformAdapters } from "./adapters/registry";
 import { selectPlatformAdapters, type DevelopmentSession } from "./contracts/platform";
 import { compileApplication, resolveApplication } from "./core/compiler/source";
 

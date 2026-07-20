@@ -1,8 +1,4 @@
-import type {
-  ConfiguredWebPresentation,
-  WebPresentation,
-  WebStyle,
-} from "@poggers/kit/web/presentation";
+import type { ConfiguredWebPresentation, WebPresentation, WebStyle } from "@poggers/kit/web";
 import type { App } from "src/app";
 
 const parameters = {

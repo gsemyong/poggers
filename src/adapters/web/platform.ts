@@ -1,5 +1,5 @@
 import type { UIDefinition, UIElement } from "../../core/ui";
-import type { Child, IntrinsicElements } from "./component/elements";
+import type { Child, IntrinsicElements } from "./ui/component/language";
 
 type WebPrimitiveName = Extract<keyof IntrinsicElements, string>;
 
@@ -38,3 +38,19 @@ export type BrowserServiceWorker = {
 type WebUISatisfiesContract = WebUI extends UIDefinition<WebUI> ? true : never;
 const webUISatisfiesContract: WebUISatisfiesContract = true;
 void webUISatisfiesContract;
+export { For, Show } from "./ui/component/runtime";
+export type { Child, VirtualForOptions } from "./ui/component/runtime";
+export {
+  createPress,
+  createShortcut,
+  mountDialog,
+  mountDrag,
+  type DialogMode,
+  type DragOptions,
+  type DragRelease,
+  type DragSample,
+  type PressBindings,
+  type Shortcut,
+  type ShortcutBinding,
+} from "./ui/component/interaction";
+export * from "./ui/presentation/language";

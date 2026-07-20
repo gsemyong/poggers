@@ -1,4 +1,7 @@
-import type { JSXElement } from "./types";
+declare const jsxElement: unique symbol;
+
+/** Opaque result of one platform-native JSX expression. It has no runtime form. */
+export type JSXElement = Readonly<{ [jsxElement]: true }>;
 
 export type JSXPlatformRegistration<IntrinsicElements extends object> = Readonly<{
   IntrinsicElements: IntrinsicElements;
@@ -77,5 +80,3 @@ export namespace JSX {
   export type IntrinsicAttributes = { key?: string | number };
   export type IntrinsicElements = JSXIntrinsicElements;
 }
-
-export type { JSXElement } from "./types";

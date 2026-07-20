@@ -95,6 +95,8 @@ export type {
 export { animate, createPresentationFrame, settled, velocity } from "./core/presentation";
 export { selectPlatformAdapters } from "./contracts/platform";
 export type {
+  ComponentAdapter,
+  ComponentAdapterSession,
   DevelopmentSession,
   PlatformAdapter,
   PlatformAdapterImplementation,

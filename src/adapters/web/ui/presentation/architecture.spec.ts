@@ -15,7 +15,7 @@ describe("web Presentation mutation ownership", () => {
         if (!ts.isCallExpression(node)) return;
         const name = calledName(node.expression);
         const allowedNativeAnimation =
-          file === "execution.ts" &&
+          file === "runtime/execution.ts" &&
           name === "animate" &&
           enclosingFunction(ancestors) === "createNativeAnimation";
         if ((name === "animate" && !allowedNativeAnimation) || name === "startViewTransition") {
@@ -44,7 +44,8 @@ describe("web Presentation mutation ownership", () => {
         const owner = enclosingFunction(ancestors);
         const allowed =
           (file === "adapter.ts" && owner === "applyVariables") ||
-          (file === "layout.ts" && (owner === "restoreProperty" || owner === "suspendTransforms"));
+          (file === "runtime/layout.ts" &&
+            (owner === "restoreProperty" || owner === "suspendTransforms"));
         if (!allowed) violations.push(location(file, source, node, `${owner}.${name}`));
       });
     }
@@ -52,8 +53,8 @@ describe("web Presentation mutation ownership", () => {
   });
 
   it("limits temporary measurement writes to synchronously restored transform properties", async () => {
-    const source = await parse("layout.ts");
-    const sourceText = await readFile(resolve(presentationDirectory, "layout.ts"), "utf8");
+    const source = await parse("runtime/layout.ts");
+    const sourceText = await readFile(resolve(presentationDirectory, "runtime/layout.ts"), "utf8");
     const written = new Set<string>();
     visit(source, (node, ancestors) => {
       if (!ts.isCallExpression(node) || calledName(node.expression) !== "setProperty") return;
@@ -76,7 +77,7 @@ describe("web Presentation mutation ownership", () => {
 
 async function implementationFiles(): Promise<string[]> {
   const result: string[] = [];
-  for await (const file of glob("*.ts", { cwd: presentationDirectory })) {
+  for await (const file of glob("**/*.ts", { cwd: presentationDirectory })) {
     if (!file.endsWith(".spec.ts")) result.push(file);
   }
   return result.sort();

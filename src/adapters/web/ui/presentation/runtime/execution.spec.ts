@@ -1,7 +1,7 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 
-import { createDynamicsTrajectory, sampleTrack } from "./dynamics";
+import { createDynamicsTrajectory, createSpringTrajectory, sampleTrack, spring } from "../dynamics";
 import {
   defaultWebExecutionTolerances,
   planAdaptiveWebExecution,
@@ -9,7 +9,6 @@ import {
   startWebNativeExecution,
   type WebNativeExecutionPlan,
 } from "./execution";
-import { createSpringTrajectory, spring } from "./spring";
 
 const target = {} as Element;
 const elements = { Panel: () => [target] };

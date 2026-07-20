@@ -1,35 +1,7 @@
 import type { PlatformAdapter } from "../../contracts/platform";
 import type { WebPlatform } from "./platform";
 import { buildApplication, runApplication } from "./toolchain";
-import { createWebUIAdapter, type WebUIAdapter } from "./ui-adapter";
-
-export * from "./public";
-export { createWebPresentationAdapter } from "./presentation/adapter";
-export type {
-  WebFeedbackHost,
-  WebImageHost,
-  WebPresentationAdapter,
-  WebPresentationAdapterInstance,
-  WebPresentationAdapterOptions,
-  WebPresentationAdapterSession,
-  WebPresentationFrameElement,
-  WebPresentationFrameInspection,
-  WebStyleHost,
-} from "./presentation/adapter";
-export {
-  compileWebDynamicStyle,
-  compileWebStyle,
-  planWebPresentationArtifacts,
-} from "./presentation/compiler";
-export type {
-  CompiledWebDynamicStyle,
-  CompiledWebStyle,
-  WebArtifactExecution,
-  WebElementArtifact,
-  WebPresentationArtifactPlan,
-} from "./presentation/compiler";
-export { createWebUIAdapter } from "./ui-adapter";
-export type { WebUIAdapter } from "./ui-adapter";
+import { createWebUIAdapter, type WebUIAdapter } from "./ui/adapter";
 
 export type WebPlatformAdapter = PlatformAdapter<WebPlatform, WebUIAdapter>;
 

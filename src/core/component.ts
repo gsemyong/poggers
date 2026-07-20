@@ -1,4 +1,4 @@
-import type { JSXElement } from "./jsx/types";
+import type { JSXElement } from "./jsx/runtime";
 import type { UIChild, UIContract, UIElementName, UIElementProps, UIElementTarget } from "./ui";
 
 type Empty = Record<never, never>;

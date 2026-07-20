@@ -1,12 +1,12 @@
-import type { UIAdapter } from "../../contracts/platform";
-import { activateJSXRenderer } from "../../core/jsx/runtime";
+import type { UIAdapter } from "../../../contracts/platform";
+import { activateJSXRenderer } from "../../../core/jsx/runtime";
+import type { WebUI } from "../platform";
 import { createApplicationUI, type WebComponentAdapter } from "./component/adapter";
 import { jsx as webJSX } from "./component/runtime";
-import type { WebUI } from "./platform";
-
-export { HotUpdateCoordinator } from "../../core/development";
-export { render } from "./component/runtime";
 import { createWebPresentationAdapter, type WebPresentationAdapter } from "./presentation/adapter";
+
+export { HotUpdateCoordinator } from "../../../core/development";
+export { render } from "./component/runtime";
 
 const renderWebIntrinsic = (type: string, props: Readonly<Record<string, unknown>>) =>
   webJSX(type, props as Parameters<typeof webJSX>[1]);

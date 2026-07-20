@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 
 import { POGGERS_IR_VERSION, type ProgramIR } from "../../core/compiler/ir";
-import { createWebPlatformAdapter } from "./index";
+import { createWebPlatformAdapter } from "./adapter";
 
 describe("web Platform Adapter", () => {
   test("pairs the web UI implementation with the web realization", () => {
