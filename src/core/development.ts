@@ -2,7 +2,9 @@ import {
   assertApplicationIRVersion,
   type ComponentIR,
   type ExpressionIR,
+  type FunctionIR,
   type ApplicationIR,
+  type ProgramContributionIR,
   type ProgramIR,
   type StatementIR,
   type TypeIR,
@@ -13,8 +15,26 @@ export type CapabilityImplementations = Readonly<
 >;
 
 export type ExecutionTrace = Readonly<{
-  calls: readonly string[];
+  calls: readonly CapabilityCallTrace[];
   result: unknown;
+}>;
+
+export type CapabilityCallTrace = Readonly<{
+  capability: string;
+  operation: string;
+  input: unknown;
+}>;
+
+export type ExecutionScenario = Readonly<{
+  responses: Readonly<
+    Record<
+      string,
+      readonly (
+        | Readonly<{ ok: unknown }>
+        | Readonly<{ error: Readonly<{ message: string; data?: unknown }> }>
+      )[]
+    >
+  >;
 }>;
 
 /** Executes the portable process body represented by the typed IR. */
@@ -24,27 +44,144 @@ export async function executeProgramIR(
   capabilities: CapabilityImplementations,
 ): Promise<ExecutionTrace> {
   assertApplicationIRVersion(ir);
-  const program = ir.programs.find(({ id }) => id === programId);
+  const program = ir.programs
+    .flatMap(({ contributions }) => contributions)
+    .find(({ id }) => id === programId);
   if (!program) throw new Error(`Unknown Program ${JSON.stringify(programId)}.`);
+  return executeProgramContributionIR(program, capabilities);
+}
+
+export async function executeProgramContributionIR(
+  program: ProgramContributionIR,
+  capabilities: CapabilityImplementations,
+): Promise<ExecutionTrace> {
   validateCapabilities(program, capabilities);
   if (program.implementation.kind !== "portable") {
     throw new Error(
-      `Program ${JSON.stringify(programId)} is ${program.implementation.kind}, not portable IR.`,
+      `Program ${JSON.stringify(program.id)} is ${program.implementation.kind}, not portable IR.`,
     );
   }
 
-  const calls: string[] = [];
+  const calls: CapabilityCallTrace[] = [];
   const locals = new Map<string, unknown>();
-  const completion = await executeStatements(
-    program.implementation.start.body,
-    locals,
-    capabilities,
-    calls,
+  const functions = new Map(
+    program.implementation.functions.map((function_) => [function_.id, function_]),
   );
-  return { calls, result: completion.value };
+  try {
+    const completion = await executeStatements(
+      program.implementation.start.body,
+      locals,
+      capabilities,
+      calls,
+      functions,
+    );
+    return { calls, result: completion.value };
+  } catch (error) {
+    if (error && typeof error === "object") {
+      Object.defineProperty(error, portableCalls, { value: [...calls] });
+    }
+    throw error;
+  }
 }
 
-function validateCapabilities(program: ProgramIR, capabilities: CapabilityImplementations): void {
+/** Runs one deterministic fixture through the reference backend using generated Capability doubles. */
+export async function executeProgramFixtureIR(
+  ir: ApplicationIR,
+  programId: string,
+  scenario: ExecutionScenario,
+): Promise<Readonly<{ calls: readonly CapabilityCallTrace[]; result: unknown }>> {
+  const program = ir.programs
+    .flatMap(({ contributions }) => contributions)
+    .find(({ id }) => id === programId);
+  if (!program) throw new Error(`Unknown Program ${JSON.stringify(programId)}.`);
+  const pending = new Map(
+    Object.entries(scenario.responses).map(([key, values]) => [key, [...values]]),
+  );
+  const capabilities: Record<
+    string,
+    Record<string, (...arguments_: readonly unknown[]) => unknown>
+  > = Object.create(null) as Record<
+    string,
+    Record<string, (...arguments_: readonly unknown[]) => unknown>
+  >;
+  for (const capability of program.requires) {
+    if (capability.type.kind !== "record") continue;
+    const implementation: Record<string, (...arguments_: readonly unknown[]) => unknown> =
+      Object.create(null) as Record<string, (...arguments_: readonly unknown[]) => unknown>;
+    for (const operation of capability.type.fields) {
+      if (operation.type.kind !== "function") continue;
+      const key = `${capability.name}.${operation.name}`;
+      const respond = () => {
+        const response = pending.get(key)?.shift();
+        if (!response) throw new Error(`missing fixture response for ${key}`);
+        if ("error" in response) {
+          throw new FixtureCapabilityError(response.error.message, response.error.data);
+        }
+        return response.ok;
+      };
+      implementation[operation.name] =
+        operation.type.result.kind === "promise" ? async () => respond() : () => respond();
+    }
+    capabilities[capability.name] = implementation;
+  }
+  try {
+    const trace = await executeProgramIR(ir, programId, capabilities);
+    return {
+      calls: canonicalPortableValue(trace.calls) as readonly CapabilityCallTrace[],
+      result: { ok: canonicalPortableValue(trace.result ?? null) },
+    };
+  } catch (error) {
+    return {
+      calls: canonicalPortableValue(
+        error && typeof error === "object" && portableCalls in error
+          ? ((error as { [portableCalls]: readonly CapabilityCallTrace[] })[portableCalls] ?? [])
+          : [],
+      ) as readonly CapabilityCallTrace[],
+      result: {
+        error: {
+          message: error instanceof Error ? error.message : String(error),
+          ...(error instanceof FixtureCapabilityError && error.data !== undefined
+            ? { data: canonicalPortableValue(error.data) }
+            : {}),
+        },
+      },
+    };
+  }
+}
+
+function canonicalPortableValue(value: unknown): unknown {
+  if (typeof value === "number") {
+    if (Number.isNaN(value)) return { $number: "nan" };
+    if (value === Infinity) return { $number: "positive-infinity" };
+    if (value === -Infinity) return { $number: "negative-infinity" };
+    if (Object.is(value, -0)) return { $number: "negative-zero" };
+    return value;
+  }
+  if (Array.isArray(value)) return value.map(canonicalPortableValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([name, item]) => [name, canonicalPortableValue(item)]),
+    );
+  }
+  return value;
+}
+
+const portableCalls = Symbol("poggers.portable.calls");
+
+class FixtureCapabilityError extends Error {
+  readonly data: unknown;
+
+  constructor(message: string, data: unknown) {
+    super(message);
+    this.name = "FixtureCapabilityError";
+    this.data = data;
+  }
+}
+
+function validateCapabilities(
+  program: ProgramContributionIR,
+  capabilities: CapabilityImplementations,
+): void {
   for (const contract of program.requires) {
     const implementation = capabilities[contract.name];
     if (!implementation) {
@@ -72,32 +209,38 @@ async function executeStatements(
   statements: readonly StatementIR[],
   locals: Map<string, unknown>,
   capabilities: CapabilityImplementations,
-  calls: string[],
+  calls: CapabilityCallTrace[],
+  functions: ReadonlyMap<string, FunctionIR>,
 ): Promise<Completion> {
   for (const statement of statements) {
     switch (statement.kind) {
       case "let":
-        locals.set(statement.name, await evaluate(statement.value, locals, capabilities, calls));
+        locals.set(
+          statement.name,
+          await evaluate(statement.value, locals, capabilities, calls, functions),
+        );
         break;
       case "assign": {
         const current = locals.get(statement.name);
-        const value = await evaluate(statement.value, locals, capabilities, calls);
+        const value = await evaluate(statement.value, locals, capabilities, calls, functions);
         locals.set(statement.name, assign(statement.operator, current, value));
         break;
       }
       case "expression":
-        await evaluate(statement.expression, locals, capabilities, calls);
+        await evaluate(statement.expression, locals, capabilities, calls, functions);
         break;
       case "if": {
-        const branch = truthy(await evaluate(statement.condition, locals, capabilities, calls))
+        const branch = boolean(
+          await evaluate(statement.condition, locals, capabilities, calls, functions),
+        )
           ? statement.consequent
           : statement.alternate;
-        const completion = await executeStatements(branch, locals, capabilities, calls);
+        const completion = await executeStatements(branch, locals, capabilities, calls, functions);
         if (completion.returned) return completion;
         break;
       }
       case "for-of": {
-        const values = await evaluate(statement.values, locals, capabilities, calls);
+        const values = await evaluate(statement.values, locals, capabilities, calls, functions);
         if (!values || typeof values !== "object" || !(Symbol.iterator in values)) {
           throw new Error(
             `${statement.span.file}:${statement.span.line}: for-of value is not iterable.`,
@@ -105,7 +248,13 @@ async function executeStatements(
         }
         for (const value of values as Iterable<unknown>) {
           locals.set(statement.item, value);
-          const completion = await executeStatements(statement.body, locals, capabilities, calls);
+          const completion = await executeStatements(
+            statement.body,
+            locals,
+            capabilities,
+            calls,
+            functions,
+          );
           if (completion.returned) return completion;
         }
         break;
@@ -114,7 +263,9 @@ async function executeStatements(
         return {
           returned: true,
           ...(statement.value
-            ? { value: await evaluate(statement.value, locals, capabilities, calls) }
+            ? {
+                value: await evaluate(statement.value, locals, capabilities, calls, functions),
+              }
             : {}),
         };
     }
@@ -126,7 +277,8 @@ async function evaluate(
   expression: ExpressionIR,
   locals: ReadonlyMap<string, unknown>,
   capabilities: CapabilityImplementations,
-  calls: string[],
+  calls: CapabilityCallTrace[],
+  functions: ReadonlyMap<string, FunctionIR>,
 ): Promise<unknown> {
   switch (expression.kind) {
     case "literal":
@@ -137,32 +289,53 @@ async function evaluate(
       return locals.get(expression.name);
     case "array":
       return Promise.all(
-        expression.values.map((value) => evaluate(value, locals, capabilities, calls)),
+        expression.values.map((value) => evaluate(value, locals, capabilities, calls, functions)),
       );
     case "record":
       return Object.fromEntries(
         await Promise.all(
           expression.fields.map(async ({ name, value }) => [
             name,
-            await evaluate(value, locals, capabilities, calls),
+            await evaluate(value, locals, capabilities, calls, functions),
           ]),
         ),
       );
     case "property": {
-      const value = await evaluate(expression.value, locals, capabilities, calls);
+      const value = await evaluate(expression.value, locals, capabilities, calls, functions);
       if (!value || typeof value !== "object") throw new Error(`Cannot read ${expression.name}.`);
       return (value as Readonly<Record<string, unknown>>)[expression.name];
     }
     case "unary": {
-      const value = await evaluate(expression.value, locals, capabilities, calls);
-      return expression.operator === "!" ? !truthy(value) : -number(value);
+      const value = await evaluate(expression.value, locals, capabilities, calls, functions);
+      return expression.operator === "!" ? !boolean(value) : -number(value);
     }
     case "binary":
       return binary(
         expression.operator,
-        await evaluate(expression.left, locals, capabilities, calls),
-        await evaluate(expression.right, locals, capabilities, calls),
+        await evaluate(expression.left, locals, capabilities, calls, functions),
+        await evaluate(expression.right, locals, capabilities, calls, functions),
       );
+    case "call": {
+      const function_ = functions.get(expression.function);
+      if (!function_) throw new Error(`Unknown portable function ${expression.function}.`);
+      const arguments_ = await Promise.all(
+        expression.arguments.map((argument) =>
+          evaluate(argument, locals, capabilities, calls, functions),
+        ),
+      );
+      const functionLocals = new Map<string, unknown>();
+      for (const [index, parameter] of function_.parameters.entries()) {
+        functionLocals.set(parameter.name, arguments_[index]);
+      }
+      const completion = await executeStatements(
+        function_.body,
+        functionLocals,
+        capabilities,
+        calls,
+        functions,
+      );
+      return completion.value;
+    }
     case "capability-call": {
       const capability = capabilities[expression.capability];
       const operation = capability?.[expression.operation];
@@ -172,11 +345,23 @@ async function evaluate(
         );
       }
       const arguments_ = await Promise.all(
-        expression.arguments.map((argument) => evaluate(argument, locals, capabilities, calls)),
+        expression.arguments.map((argument) =>
+          evaluate(argument, locals, capabilities, calls, functions),
+        ),
       );
-      calls.push(`${expression.capability}.${expression.operation}`);
+      calls.push({
+        capability: expression.capability,
+        operation: expression.operation,
+        input: arguments_[0] ?? null,
+      });
       const result = Reflect.apply(operation, capability, arguments_);
-      return expression.awaited ? await result : result;
+      if (expression.awaited) return await result;
+      if (isPromiseLike(result)) {
+        throw new Error(
+          `Synchronous Capability ${expression.capability}.${expression.operation} returned a Promise.`,
+        );
+      }
+      return result;
     }
   }
 }
@@ -203,9 +388,8 @@ function binary(
 ): unknown {
   switch (operator) {
     case "+":
-      return typeof left === "string" || typeof right === "string"
-        ? `${String(left)}${String(right)}`
-        : number(left) + number(right);
+      if (typeof left === "string" && typeof right === "string") return left + right;
+      return number(left) + number(right);
     case "-":
       return number(left) - number(right);
     case "*":
@@ -215,9 +399,9 @@ function binary(
     case "%":
       return number(left) % number(right);
     case "===":
-      return left === right;
+      return equal(left, right);
     case "!==":
-      return left !== right;
+      return !equal(left, right);
     case "<":
       return number(left) < number(right);
     case "<=":
@@ -227,9 +411,11 @@ function binary(
     case ">=":
       return number(left) >= number(right);
     case "&&":
-      return truthy(left) ? right : left;
+      return boolean(left) && boolean(right);
     case "||":
-      return truthy(left) ? left : right;
+      return boolean(left) || boolean(right);
+    case "??":
+      return left ?? right;
   }
 }
 
@@ -238,8 +424,41 @@ function number(value: unknown): number {
   return value;
 }
 
-function truthy(value: unknown): boolean {
-  return Boolean(value);
+function boolean(value: unknown): boolean {
+  if (typeof value !== "boolean") throw new Error(`Expected boolean, received ${typeof value}.`);
+  return value;
+}
+
+function equal(left: unknown, right: unknown): boolean {
+  if (
+    (typeof left === "number" && typeof right === "number") ||
+    (typeof left === "string" && typeof right === "string") ||
+    (typeof left === "boolean" && typeof right === "boolean") ||
+    left === null ||
+    right === null
+  ) {
+    return left === right;
+  }
+  if (Array.isArray(left) && Array.isArray(right)) {
+    return left.length === right.length && left.every((value, index) => equal(value, right[index]));
+  }
+  if (isRecord(left) && isRecord(right)) {
+    const leftKeys = Object.keys(left);
+    const rightKeys = Object.keys(right);
+    return (
+      leftKeys.length === rightKeys.length &&
+      leftKeys.every((key) => Object.hasOwn(right, key) && equal(left[key], right[key]))
+    );
+  }
+  return false;
+}
+
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
+  return isRecord(value) && typeof value.then === "function";
 }
 
 export type HotReplacementManifest = Readonly<{
@@ -273,12 +492,14 @@ export type HotUpdateResult<Value> =
   | Readonly<{ status: "rejected"; reason: string; cause?: unknown }>;
 
 export function createHotReplacementManifest(ir: ApplicationIR): HotReplacementManifest {
-  const programs = ir.programs.map((program) => ({
-    id: program.id,
-    environment: program.environment,
-    ...(program.ui ? { state: program.ui.state } : {}),
-    components: program.ui?.components ?? [],
-  }));
+  const programs = ir.programs.flatMap((program) =>
+    program.contributions.map((contribution) => ({
+      id: contribution.id,
+      environment: program.environment,
+      ...(contribution.ui ? { state: contribution.ui.state } : {}),
+      components: contribution.ui?.components ?? [],
+    })),
+  );
   return { revision: stableHash(JSON.stringify(programs)), programs };
 }
 

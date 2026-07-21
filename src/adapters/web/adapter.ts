@@ -4,15 +4,25 @@ import { createWebUIAdapter, type WebUIAdapter } from "@/adapters/web/ui/adapter
 import type { PlatformAdapter } from "@/contracts/platform";
 
 export type WebPlatformAdapter = PlatformAdapter<WebPlatform, WebUIAdapter>;
+export type WebPlatformAdapterOptions = Readonly<{
+  developmentPort?: number;
+  serverOrigin?: string;
+}>;
 
 /** Creates the complete development, production, Component, and Presentation web realization. */
-export function createWebPlatformAdapter(): WebPlatformAdapter {
+export function createWebPlatformAdapter(
+  options: WebPlatformAdapterOptions = {},
+): WebPlatformAdapter {
   return {
     name: "web",
     ui: createWebUIAdapter(),
     async develop(input) {
       assertWebInput(input.platform, input.programs);
-      const server = await runApplication({ directory: input.directory });
+      const server = await runApplication({
+        directory: input.directory,
+        port: options.developmentPort,
+        serverOrigin: options.serverOrigin,
+      });
       let disposed = false;
       return {
         locations: [`http://localhost:${server.port}`],
@@ -25,14 +35,11 @@ export function createWebPlatformAdapter(): WebPlatformAdapter {
     },
     async build(input) {
       assertWebInput(input.platform, input.programs);
-      const directory = await buildApplication({
+      const build = await buildApplication({
         directory: input.directory,
         outdir: input.output,
       });
-      return {
-        directory,
-        entries: [{ environment: "browser-main", path: `${directory}/app.js` }],
-      };
+      return build;
     },
   };
 }
@@ -47,8 +54,9 @@ function assertWebInput(
 ): void {
   if (platform !== "web") throw new Error(`The web adapter cannot realize Platform ${platform}.`);
   const unsupported = programs.filter(
-    ({ environment, ui }) =>
-      environment.platform !== "web" || environment.name !== "browser-main" || !ui,
+    ({ environment }) =>
+      environment.platform !== "web" ||
+      !["browser-main", "browser-worker", "browser-service-worker"].includes(environment.name),
   );
   if (unsupported.length) {
     throw new Error(

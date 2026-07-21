@@ -1,48 +1,34 @@
-import type { Feature, Program } from "@poggers/kit";
-import type { ServerProcess } from "@poggers/kit/server";
+import {
+  createIdentity,
+  placePrograms,
+  type AuthenticatedUser,
+  type IdentityClient as FeatureIdentityClient,
+  type IdentityFeature as FeatureIdentity,
+  type IdentityModel,
+  type PlacedFeature,
+  type IdentitySession,
+  type IdentityService,
+} from "@poggers/kit";
 
-import type { App } from "../app";
-
-export type CookieCredentials = Readonly<{ cookie?: string }>;
 export type User = Readonly<{ id: string; name: string; email: string }>;
-export type Session = Readonly<{ user: User }>;
 
-export type IdentityServer = Readonly<{
-  authenticate(input: { credentials: CookieCredentials }): Promise<User | undefined>;
+export type Identity = IdentityModel<{
+  Name: "identity";
+  Principal: User;
 }>;
 
-export type AuthenticationServer = IdentityServer &
-  Readonly<{ handle(input: { request: Request }): Promise<Response> }>;
+export type IdentityServer = IdentityService<Identity>;
+export type Session = IdentitySession<Identity>;
+export type IdentityClient = FeatureIdentityClient<Identity>;
+export type IdentityFeature = PlacedFeature<
+  FeatureIdentity<Identity>,
+  { server: "api"; browser: "browser" }
+>;
 
-export type IdentityClient = Readonly<{
-  session(): Promise<Session | undefined>;
-  signIn(input: { email: string; password: string }): Promise<Session>;
-  signUp(input: { name: string; email: string; password: string }): Promise<Session>;
-  signOut(): Promise<void>;
-}>;
-
-export type IdentityFeature = Readonly<{
-  Programs: {
-    server: Program<
-      ServerProcess,
-      {
-        Requires: { authentication: AuthenticationServer };
-        Provides: { identity: IdentityServer };
-      }
-    >;
-  };
-}>;
-
-export const identity = {
-  programs: {
-    server: {
-      start({ capabilities }) {
-        return {
-          identity: {
-            authenticate: (input) => capabilities.authentication.authenticate(input),
-          },
-        };
-      },
-    },
-  },
-} satisfies Feature<IdentityFeature, App>;
+export const identity = placePrograms(
+  createIdentity<Identity>({
+    name: "identity",
+    principal: (user: AuthenticatedUser): User => user,
+  }),
+  { server: "api", browser: "browser" },
+);

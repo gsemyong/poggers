@@ -1,5 +1,11 @@
 import type { BrowserMainThread, BrowserServiceWorker } from "@/adapters/web/platform";
-import type { Application, Feature, Program } from "@/core/application";
+import {
+  placePrograms,
+  type Application,
+  type Feature,
+  type PlacedFeature,
+  type Program,
+} from "@/core/application";
 
 type Message = Readonly<{ id: string; text: string }>;
 type ServerPlatform = { readonly Name: "server" };
@@ -308,3 +314,27 @@ const invalidCleanupCallback = {
 } satisfies Feature<OwnedStartResource>;
 
 void invalidCleanupCallback;
+
+type LogicalPlacement = {
+  Programs: {
+    server: Program<Server>;
+    browser: Program<BrowserMainThread>;
+  };
+  Features: {
+    child: { Programs: { server: Program<Server> } };
+  };
+};
+
+const logicalPlacement: Feature<LogicalPlacement> = {
+  programs: { server: {}, browser: {} },
+  features: { child: { programs: { server: {} } } },
+};
+const placedPrograms = placePrograms(logicalPlacement, { server: "api" });
+const placedProgramsProof: Feature<PlacedFeature<LogicalPlacement, { server: "api" }>> =
+  placedPrograms;
+void placedPrograms.programs.api;
+void placedPrograms.programs.browser;
+void placedPrograms.features.child.programs.api;
+// @ts-expect-error Placement removes the logical role from the realized Feature contract.
+void placedPrograms.programs.server;
+void placedProgramsProof;

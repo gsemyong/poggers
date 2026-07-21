@@ -4,86 +4,147 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-import type {
-  EventStore,
-  EntityEvent,
-  ProgramCapabilities,
-  ProgramExternalCapabilities,
-  StoredEvent,
-} from "@poggers/kit";
 import { betterAuth } from "better-auth";
 import { getMigrations } from "better-auth/db/migration";
 
-import type { App } from "../app";
-import type { HttpServer } from "../features/api";
-import type { AuthenticationServer, CookieCredentials, User } from "../features/identity";
-import type { Task } from "../features/tasks";
+import type { HttpServer } from "@/adapters/server/platform";
+import type { Clock, EventStore, Identifiers, StoredEvent } from "@/features/entity";
+import type { AuthenticationBackend } from "@/features/identity";
 
-export type ServerCapabilityOptions = Readonly<{
+export type NodeHostOptions = Readonly<{
+  directory?: string;
   database?: string;
   host?: string;
   port?: number;
   webOrigin?: string;
+  appName?: string;
+  secret?: string;
 }>;
 
-export async function createServerCapabilities(
-  input: ServerCapabilityOptions = {},
-): Promise<ProgramExternalCapabilities<App, "server">> {
+export type NodeHost<Event> = Readonly<{
+  authentication: AuthenticationBackend;
+  events: EventStore<Event> & Disposable;
+  identifiers: Identifiers;
+  clock: Clock;
+  http: HttpServer & AsyncDisposable & Readonly<{ locations: readonly string[] }>;
+}>;
+export type NodeHostCapability = keyof NodeHost<unknown>;
+
+/** Implements the reusable host boundary; Features own all domain routing and APIs. */
+export function createNodeHost<
+  Event = unknown,
+  const Capabilities extends readonly NodeHostCapability[] = readonly NodeHostCapability[],
+>(
+  input: NodeHostOptions & Readonly<{ capabilities: Capabilities }>,
+): Promise<Pick<NodeHost<Event>, Capabilities[number]>>;
+export function createNodeHost(
+  input: NodeHostOptions & Readonly<{ capabilities: readonly string[] }>,
+): Promise<Readonly<Record<string, unknown>>>;
+export function createNodeHost<Event = unknown>(input?: NodeHostOptions): Promise<NodeHost<Event>>;
+export async function createNodeHost<Event = unknown>(
+  input: NodeHostOptions & Readonly<{ capabilities?: readonly string[] }> = {},
+): Promise<NodeHost<Event> | Partial<NodeHost<Event>>> {
+  const available: readonly NodeHostCapability[] = [
+    "authentication",
+    "clock",
+    "events",
+    "http",
+    "identifiers",
+  ];
+  const requested = new Set(input.capabilities ?? available);
+  for (const capability of requested) {
+    if (!available.includes(capability as NodeHostCapability)) {
+      throw new Error(
+        `Server Platform does not implement host Capability ${JSON.stringify(capability)}.`,
+      );
+    }
+  }
   const host = input.host ?? "localhost";
-  const port = input.port ?? 3010;
+  const port = input.port ?? numberEnvironment("PORT") ?? 3010;
   const origin = `http://${host}:${port}`;
-  const path = input.database ?? resolve(import.meta.dirname, "../../.data/application.sqlite");
-  if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
-  const database = new DatabaseSync(path);
-  const events = createSqliteEventStore<EntityEvent<Task>>(database, () => database.close());
+  let database: DatabaseSync | undefined;
+  let databaseClosed = false;
+  const closeDatabase = () => {
+    if (!database || databaseClosed) return;
+    databaseClosed = true;
+    database.close();
+  };
+  if (requested.has("authentication") || requested.has("events")) {
+    const path =
+      input.database ??
+      process.env.POGGERS_DATABASE ??
+      resolve(input.directory ?? process.cwd(), ".data/application.sqlite");
+    if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
+    database = new DatabaseSync(path);
+  }
+  const result: {
+    authentication?: AuthenticationBackend;
+    events?: EventStore<Event> & Disposable;
+    identifiers?: Identifiers;
+    clock?: Clock;
+    http?: HttpServer & AsyncDisposable & Readonly<{ locations: readonly string[] }>;
+  } = {};
   try {
-    const auth = betterAuth({
-      appName: "Poggers Operations",
-      baseURL: origin,
-      database,
-      emailAndPassword: { enabled: true },
-      secret: "poggers-authenticated-crud-development-secret-32-characters",
-      trustedOrigins: [input.webOrigin ?? "http://localhost:3000"],
-    });
-    await (await getMigrations(auth.options)).runMigrations();
-    const authentication: AuthenticationServer = Object.freeze({
-      async authenticate({ credentials }: { credentials: CookieCredentials }) {
-        const headers = new Headers();
-        if (credentials.cookie) headers.set("cookie", credentials.cookie);
-        const session = await auth.api.getSession({ headers });
-        return session ? user(session.user) : undefined;
-      },
-      handle: ({ request }) => auth.handler(request),
-    });
-    const http = await createHttpCapability({
-      host,
-      port,
-      origin,
-      webOrigin: input.webOrigin ?? "http://localhost:3000",
-    });
-    return {
-      authentication,
-      events,
-      identifiers: { create: randomUUID },
-      clock: { now: Date.now },
-      http,
-    };
+    if (requested.has("authentication")) {
+      const auth = betterAuth({
+        appName: input.appName ?? "Poggers Application",
+        baseURL: origin,
+        database: database!,
+        emailAndPassword: { enabled: true },
+        secret:
+          input.secret ??
+          process.env.BETTER_AUTH_SECRET ??
+          "poggers-development-authentication-secret",
+        trustedOrigins: [input.webOrigin ?? "http://localhost:3000"],
+      });
+      await (await getMigrations(auth.options)).runMigrations();
+      result.authentication = Object.freeze({
+        async authenticate({ cookie }) {
+          const headers = new Headers();
+          if (cookie) headers.set("cookie", cookie);
+          const session = await auth.api.getSession({ headers });
+          return session
+            ? { id: session.user.id, name: session.user.name, email: session.user.email }
+            : undefined;
+        },
+        handle: ({ request, path: mountedPath }) => {
+          const url = new URL(request.url);
+          url.pathname = `/api/auth${url.pathname.slice(mountedPath.length)}`;
+          return auth.handler(new Request(url, request));
+        },
+        [Symbol.dispose]: closeDatabase,
+      });
+    }
+    if (requested.has("events")) {
+      result.events = createSqliteEventStore<Event>(database!, closeDatabase);
+    }
+    if (requested.has("identifiers")) result.identifiers = { create: randomUUID };
+    if (requested.has("clock")) result.clock = { now: Date.now };
+    if (requested.has("http")) {
+      result.http = await createNodeHttpServer({
+        host,
+        port,
+        origin,
+        webOrigin: input.webOrigin ?? "http://localhost:3000",
+      });
+    }
+    return Object.freeze(result);
   } catch (error) {
-    events[Symbol.dispose]();
+    await result.http?.[Symbol.asyncDispose]();
+    closeDatabase();
     throw error;
   }
 }
 
-export default {
-  development: () => createServerCapabilities(),
-  production: () =>
-    createServerCapabilities({
-      database: process.env.POGGERS_DATABASE,
-      host: process.env.HOST,
-      port: process.env.PORT ? Number(process.env.PORT) : undefined,
-      webOrigin: process.env.WEB_ORIGIN,
-    }),
-} satisfies ProgramCapabilities<App, "server">;
+function numberEnvironment(name: string): number | undefined {
+  const value = process.env[name];
+  if (value === undefined) return undefined;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0 || parsed > 65_535) {
+    throw new TypeError(`${name} must be an integer between 0 and 65535.`);
+  }
+  return parsed;
+}
 
 export function createSqliteEventStore<Event>(
   database: DatabaseSync,
@@ -147,7 +208,7 @@ export function createSqliteEventStore<Event>(
       }
     },
     subscribe({ stream, after = 0 }) {
-      return sqliteEventStream(readEvents(stream, after), subscribers, stream);
+      return eventStream(readEvents(stream, after), subscribers, stream);
     },
     [Symbol.dispose]() {
       if (disposed) return;
@@ -158,7 +219,7 @@ export function createSqliteEventStore<Event>(
   };
 }
 
-async function createHttpCapability(input: {
+async function createNodeHttpServer(input: {
   host: string;
   port: number;
   origin: string;
@@ -201,8 +262,9 @@ async function createHttpCapability(input: {
   return {
     locations: [input.origin],
     route({ path, handle }) {
-      if (routes.has(path))
+      if (routes.has(path)) {
         throw new Error(`HTTP route ${JSON.stringify(path)} is already mounted.`);
+      }
       routes.set(path, handle);
       return { [Symbol.dispose]: () => void routes.delete(path) };
     },
@@ -217,7 +279,7 @@ async function createHttpCapability(input: {
   };
 }
 
-function sqliteEventStream<Event>(
+function eventStream<Event>(
   initial: readonly StoredEvent<Event>[],
   subscribers: Map<string, Set<(event: StoredEvent<Event>) => void>>,
   stream: string,
@@ -259,8 +321,9 @@ function sqliteEventStream<Event>(
 
 async function webRequest(request: IncomingMessage, origin: string): Promise<Request> {
   const chunks: Uint8Array[] = [];
-  for await (const chunk of request)
+  for await (const chunk of request) {
     chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+  }
   const body = chunks.length ? Buffer.concat(chunks) : undefined;
   return new Request(new URL(request.url ?? "/", origin), {
     method: request.method,
@@ -289,8 +352,9 @@ async function writeResponse(
     while (!response.closed && !response.destroyed) {
       const next = await reader.read();
       if (next.done) break;
-      if (!response.write(next.value))
+      if (!response.write(next.value)) {
         await new Promise((resolve) => response.once("drain", resolve));
+      }
     }
     if (!response.closed && !response.destroyed) response.end();
   } finally {
@@ -305,10 +369,9 @@ function writeCors(request: IncomingMessage, response: ServerResponse, webOrigin
     response.setHeader("vary", "origin");
   }
   response.setHeader("access-control-allow-credentials", "true");
-  response.setHeader("access-control-allow-headers", "content-type");
+  response.setHeader(
+    "access-control-allow-headers",
+    "content-type, x-poggers-command, x-poggers-entity",
+  );
   response.setHeader("access-control-allow-methods", "DELETE, GET, OPTIONS, PATCH, POST");
-}
-
-function user(value: { id: string; name: string; email: string }): User {
-  return { id: value.id, name: value.name, email: value.email };
 }

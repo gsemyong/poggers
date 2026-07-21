@@ -241,6 +241,11 @@ export type ComponentViewContext<
 > = Readonly<{
   props: ComponentExternalProps<Owner, Name>;
   feature: ComponentFeatureAPI<Owner>;
+  features: {
+    readonly [Feature in keyof FeaturesOf<Owner>]: ComponentFeatureAPI<
+      Extract<FeaturesOf<Owner>[Feature], ComponentOwner>
+    >;
+  };
   state: ComponentState<Owner, Name>;
   actions: ComponentActionAPI<Owner, Name>;
   slots: ComponentSlots<Owner, Name>;
@@ -255,6 +260,11 @@ export type ComponentStateInput<
 > = Readonly<{
   props: ComponentExternalProps<Owner, Name>;
   feature: ComponentFeatureAPI<Owner>;
+  features: {
+    readonly [Feature in keyof FeaturesOf<Owner>]: ComponentFeatureAPI<
+      Extract<FeaturesOf<Owner>[Feature], ComponentOwner>
+    >;
+  };
 }>;
 
 export type ComponentActionContext<
@@ -264,6 +274,11 @@ export type ComponentActionContext<
 > = Readonly<{
   props: ComponentExternalProps<Owner, Name>;
   feature: ComponentFeatureAPI<Owner>;
+  features: {
+    readonly [Feature in keyof FeaturesOf<Owner>]: ComponentFeatureAPI<
+      Extract<FeaturesOf<Owner>[Feature], ComponentOwner>
+    >;
+  };
   capabilities: ComponentCapabilities<Owner>;
   state: Mutable<ComponentState<Owner, Name>>;
   elements: ComponentElementMap<Owner, Name>;
@@ -295,6 +310,11 @@ export type ComponentMountContext<
 > = Readonly<{
   props: ComponentExternalProps<Owner, Name>;
   feature: ComponentFeatureAPI<Owner>;
+  features: {
+    readonly [Feature in keyof FeaturesOf<Owner>]: ComponentFeatureAPI<
+      Extract<FeaturesOf<Owner>[Feature], ComponentOwner>
+    >;
+  };
   capabilities: ComponentCapabilities<Owner>;
   state: ComponentState<Owner, Name>;
   actions: ComponentActionAPI<Owner, Name>;

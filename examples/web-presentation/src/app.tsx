@@ -1,7 +1,7 @@
 import type { Application } from "@poggers/kit";
 
-import { dashboard, type DashboardFeature } from "./dashboard";
-import { editorial } from "./presentation";
+import { dashboard, type DashboardFeature } from "./features/dashboard";
+import { editorial } from "./presentations/editorial";
 
 export type App = {
   Features: { dashboard: DashboardFeature };

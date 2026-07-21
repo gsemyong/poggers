@@ -11,8 +11,8 @@ import {
   type WebStyle,
 } from "@poggers/kit/web";
 
-import type { App } from "./app";
-import type { SheetState } from "./dashboard";
+import type { App } from "../app";
+import type { SheetState } from "../features/dashboard";
 
 const parameters = {
   color: {
@@ -28,18 +28,18 @@ const parameters = {
   radius: { control: 6, surface: 8 },
   presence: { sheetExitThreshold: 0.005 },
   audio: {
-    bright: createAudioAsset(new URL("./control.wav", import.meta.url), {
+    bright: createAudioAsset(new URL("./assets/control.wav", import.meta.url), {
       gain: 0.16,
       playbackRate: 1.3,
     }),
-    deep: createAudioAsset(new URL("./control.wav", import.meta.url), {
+    deep: createAudioAsset(new URL("./assets/control.wav", import.meta.url), {
       gain: 0.2,
       playbackRate: 0.72,
     }),
   },
   image: {
-    warm: createImageAsset(new URL("./accent-warm.svg", import.meta.url)),
-    cool: createImageAsset(new URL("./accent-cool.svg", import.meta.url)),
+    warm: createImageAsset(new URL("./assets/accent-warm.svg", import.meta.url)),
+    cool: createImageAsset(new URL("./assets/accent-cool.svg", import.meta.url)),
   },
   spring: {
     control: spring({ duration: 320, bounce: 0.16 }),

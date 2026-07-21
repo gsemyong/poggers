@@ -1,65 +1,122 @@
+import type { ProgramHostFactory } from "@/contracts/platform";
 import type { Application, ApplicationContract } from "@/core/application";
-import {
-  collectProgramManifest,
-  type CapabilityProfile,
-  type ProgramCapabilityModule,
-} from "@/core/capability";
+import { collectProgramManifest } from "@/core/capability";
 import type { ProgramIR } from "@/core/compiler/ir";
-import { startProcess, type Process } from "@/core/process";
+import { executeProgramContributionIR, type CapabilityImplementations } from "@/core/development";
+import { startProcess } from "@/core/process";
 
-export type ServerCapabilityModules = Readonly<Record<string, ProgramCapabilityModule>>;
+export type RunningServerProgram = AsyncDisposable &
+  Readonly<{
+    name: string;
+    locations: readonly string[];
+  }>;
 
-/** Starts each server Program with its one application-owned Capability implementation. */
+/** Starts one independently deployable server Program as one Process instance. */
+export async function startServerProgram<Contract extends ApplicationContract>(
+  application: Application<Contract>,
+  program: ProgramIR,
+  createHost: ProgramHostFactory,
+  profile: "development" | "production",
+): Promise<RunningServerProgram> {
+  const manifest = collectProgramManifest(program);
+  const capabilities = await createHost({ program: program.name, profile, manifest });
+  if (!isRecord(capabilities)) {
+    throw new TypeError(`Program "${program.name}" ${profile} Capabilities must be an object.`);
+  }
+  if (isPortableProgram(program)) {
+    try {
+      for (const contribution of program.contributions) {
+        if (contribution.implementation.kind !== "portable") continue;
+        await executeProgramContributionIR(contribution, capabilities as CapabilityImplementations);
+      }
+    } catch (error) {
+      await disposeCapabilities(capabilities);
+      throw error;
+    }
+    let disposed = false;
+    return {
+      name: program.name,
+      locations: Object.values(capabilities).flatMap(capabilityLocations),
+      async [Symbol.asyncDispose]() {
+        if (disposed) return;
+        disposed = true;
+        await disposeCapabilities(capabilities);
+      },
+    };
+  }
+  const process = await startProcess(application, program.name, capabilities, manifest);
+  let disposed = false;
+  return {
+    name: program.name,
+    locations: Object.values(process.capabilities).flatMap(capabilityLocations),
+    async [Symbol.asyncDispose]() {
+      if (disposed) return;
+      disposed = true;
+      await process.dispose();
+    },
+  };
+}
+
+function isPortableProgram(program: ProgramIR): boolean {
+  return program.contributions.every(
+    (contribution) =>
+      !contribution.ui &&
+      contribution.provides.length === 0 &&
+      (contribution.implementation.kind === "none" ||
+        contribution.implementation.kind === "portable"),
+  );
+}
+
+async function disposeCapabilities(capabilities: Readonly<Record<string, unknown>>): Promise<void> {
+  const values = [...new Set(Object.values(capabilities))].reverse();
+  const errors: unknown[] = [];
+  for (const value of values) {
+    if (!value || (typeof value !== "object" && typeof value !== "function")) continue;
+    const disposable = value as Partial<Disposable & AsyncDisposable>;
+    try {
+      const disposeAsync = disposable[Symbol.asyncDispose];
+      const dispose = disposable[Symbol.dispose];
+      if (typeof disposeAsync === "function") {
+        await disposeAsync.call(disposable);
+      } else if (typeof dispose === "function") {
+        dispose.call(disposable);
+      }
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  if (errors.length === 1) throw errors[0];
+  if (errors.length > 1) throw new AggregateError(errors, "Portable Capability disposal failed.");
+}
+
+/** Starts each server Program with one adapter-owned host scope per Process instance. */
 export async function startServerPrograms<Contract extends ApplicationContract>(
   application: Application<Contract>,
   programs: readonly ProgramIR[],
-  modules: ServerCapabilityModules,
-  profile: CapabilityProfile,
+  createHost: ProgramHostFactory,
+  profile: "development" | "production",
 ): Promise<AsyncDisposable & Readonly<{ locations: readonly string[] }>> {
-  const processes: Record<string, Process> = Object.create(null);
+  const running: RunningServerProgram[] = [];
   try {
-    for (const name of unique(programs.map((program) => program.name))) {
-      const module = modules[name] ?? emptyCapabilities;
-      const capabilities = await module[profile]();
-      if (!isRecord(capabilities)) {
-        throw new TypeError(`Program "${name}" ${profile} Capabilities must be an object.`);
-      }
-      processes[name] = await startProcess(
-        application,
-        name,
-        capabilities,
-        collectProgramManifest(name, programs),
-      );
+    for (const program of programs) {
+      running.push(await startServerProgram(application, program, createHost, profile));
     }
   } catch (error) {
-    await disposeProcesses(processes);
+    await disposeServerPrograms(running);
     throw error;
   }
 
-  const locations = [
-    ...new Set(
-      Object.values(processes).flatMap((process) =>
-        Object.values(process.capabilities).flatMap((capability) =>
-          capabilityLocations(capability),
-        ),
-      ),
-    ),
-  ].sort();
+  const locations = [...new Set(running.flatMap((program) => program.locations))].sort();
   let disposed = false;
   return {
     locations,
     async [Symbol.asyncDispose]() {
       if (disposed) return;
       disposed = true;
-      await disposeProcesses(processes);
+      await disposeServerPrograms(running);
     },
   };
 }
-
-const emptyCapabilities: ProgramCapabilityModule = Object.freeze({
-  development: () => ({}),
-  production: () => ({}),
-});
 
 function capabilityLocations(value: unknown): readonly string[] {
   if (!value || typeof value !== "object" || !("locations" in value)) return [];
@@ -69,19 +126,16 @@ function capabilityLocations(value: unknown): readonly string[] {
     : [];
 }
 
-function unique(values: readonly string[]): readonly string[] {
-  return [...new Set(values)].sort();
-}
-
 function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
-async function disposeProcesses(processes: Readonly<Record<string, Process>>): Promise<void> {
+async function disposeServerPrograms(programs: readonly RunningServerProgram[]): Promise<void> {
   const results = await Promise.allSettled(
-    Object.values(processes)
+    programs
+      .slice()
       .reverse()
-      .map((process) => process.dispose()),
+      .map((program) => program[Symbol.asyncDispose]()),
   );
   const errors = results.flatMap((result) => (result.status === "rejected" ? [result.reason] : []));
   if (errors.length === 1) throw errors[0];

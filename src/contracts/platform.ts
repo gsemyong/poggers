@@ -1,4 +1,5 @@
 import type { PlatformContract } from "@/core/application";
+import type { ProgramManifest } from "@/core/capability";
 import type { ApplicationIR, ProgramIR } from "@/core/compiler/ir";
 import type { PresentationAdapter, PresentationLanguage } from "@/core/presentation";
 import type { UIChild, UIContract, UIDefinition, UITarget } from "@/core/ui";
@@ -24,6 +25,7 @@ export type DevelopmentSession = AsyncDisposable &
   }>;
 
 export type ProductionArtifact = Readonly<{
+  program: string;
   environment: string;
   path: string;
 }>;
@@ -33,6 +35,17 @@ export type ProductionArtifacts = Readonly<{
   directory: string;
   entries: readonly ProductionArtifact[];
 }>;
+
+export type ProgramHostInput = Readonly<{
+  program: string;
+  profile: "development" | "production";
+  manifest: ProgramManifest;
+}>;
+
+/** Creates the external Capability scope owned by one running Program instance. */
+export type ProgramHostFactory = (
+  input: ProgramHostInput,
+) => Readonly<Record<string, unknown>> | PromiseLike<Readonly<Record<string, unknown>>>;
 
 /** The common mounted result required from every UI Component implementation. */
 export type ComponentAdapterSession<UI extends UIContract> = Readonly<{
@@ -46,7 +59,7 @@ export type ComponentAdapter<
   Input = unknown,
   Session extends ComponentAdapterSession<UI> = ComponentAdapterSession<UI>,
 > = Readonly<{
-  createApplicationUI(input: Input): Session;
+  createApplicationUI(input: Input): Session | PromiseLike<Session>;
 }>;
 
 type ComponentBinding<UI extends UIContract, Implementation> = unknown extends Implementation

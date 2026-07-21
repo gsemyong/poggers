@@ -27,8 +27,8 @@ src/
 
 `app.tsx` is only the composition root. A Feature owns product structure and
 behavior. A Presentation owns adapter-defined user-facing decisions, including
-visuals, assets, and motion on the web. Small projects may add more files to
-those two folders without changing the architecture.
+visuals, assets, and motion on the web. Every project retains this organization
+as it grows; Feature and Presentation paths do not change with project size.
 
 ## Develop The Kit
 
@@ -60,5 +60,11 @@ reorder and layout continuity, repeated action feedback, shared environment
 observations, reduced motion, frame inspection, and deterministic realization
 of each frame.
 
-See [the architecture document](docs/architecture.md) for the product model,
-adapter boundaries, repository organization, and testing convention.
+See [the architecture document](docs/architecture.md) for the product model and
+adapter boundaries, and [the project organization](docs/project-organization.md)
+for the application and reusable Feature conventions. Headless code intended
+for both JavaScript development and native production follows the deliberately
+small [Portable TypeScript profile](docs/portable-typescript.md); unsupported
+host code is identified in IR and can never become a silent native source
+fallback. The [native production plan](docs/native-production-plan.md) records
+the whole-Program realization gates and measured cache behavior.

@@ -1,7 +1,6 @@
 import type { BrowserMainThread } from "@/adapters/web/platform";
 import type { Program } from "@/core/application";
 import type {
-  ProgramCapabilities,
   ProgramExternalCapabilities,
   ProgramProvidedCapabilities,
   ProgramRequiredCapabilities,
@@ -36,26 +35,13 @@ void required;
 void provided;
 void external;
 
-const complete = {
-  development: () => ({ clock: { now: () => 0 } }),
-  production: () => ({ clock: { now: () => Date.now() } }),
-} satisfies ProgramCapabilities<App, "browser">;
-void complete;
+const unexpectedExternal: ProgramExternalCapabilities<App, "browser"> = {
+  clock: { now: () => 0 },
+  // @ts-expect-error externally supplied Capabilities exclude Feature-provided reader.
+  reader: { read: () => "value" },
+};
+void unexpectedExternal;
 
-const missing = {
-  // @ts-expect-error clock is required by the complete Application contract.
-  development: () => ({}),
-  production: () => ({ clock: { now: () => 0 } }),
-} satisfies ProgramCapabilities<App, "browser">;
-void missing;
-
-const incompatible = {
-  // @ts-expect-error a Capability implementation must preserve the semantic contract.
-  development: () => ({ clock: { now: () => "later" } }),
-  production: () => ({ clock: { now: () => 0 } }),
-} satisfies ProgramCapabilities<App, "browser">;
-void incompatible;
-
-// @ts-expect-error unknown Programs cannot receive a Capability module.
-const unknown: ProgramCapabilities<App, "worker"> = {};
-void unknown;
+// @ts-expect-error clock is required by the complete Application contract.
+const missingExternal: ProgramExternalCapabilities<App, "browser"> = {};
+void missingExternal;

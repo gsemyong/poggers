@@ -10,10 +10,12 @@ export type {
   FeatureDefinitions,
   FeatureUIAPIs,
   PlatformContract,
+  PlacedFeature,
   PresentationName,
   Program,
   ProgramContract,
   ProgramOwner,
+  ProgramNamesIn,
   ProgramProvides,
   ProgramRequires,
   ProgramStartContext,
@@ -22,6 +24,7 @@ export type {
   UIContributionAPI,
   UIState,
 } from "@/core/application";
+export { placePrograms } from "@/core/application";
 export {
   bindCapabilitiesToScope,
   createProgramContributionInstance,
@@ -30,11 +33,8 @@ export {
   startProcess,
 } from "@/core/process";
 export type { Process, ProgramContributionInstance, UIContributionInstance } from "@/core/process";
-export { collectProgramManifest } from "@/core/capability";
+export { collectExternalCapabilityNames, collectProgramManifest } from "@/core/capability";
 export type {
-  CapabilityProfile,
-  ProgramCapabilities,
-  ProgramCapabilityModule,
   ProgramContributionAddress,
   ProgramContributionManifest,
   ProgramExternalCapabilities,
@@ -116,37 +116,46 @@ export type {
   PlatformDevelopmentInput,
   PlatformInput,
   PlatformProductionInput,
+  ProgramHostFactory,
+  ProgramHostInput,
   ProductionArtifact,
   ProductionArtifacts,
   UIAdapter,
 } from "@/contracts/platform";
-export {
-  bindEntityCredentials,
-  defineEntityFeature,
-  EntityFailure,
-} from "@/features/entity/feature";
+export { bindEntityPrincipal, createEntity, EntityFailure } from "@/features/entity";
 export type {
   Clock,
-  Entity,
+  DefinedEntityFeature,
+  EntityApi,
+  EntityActions,
   EntityAuthorization,
-  EntityClient,
-  EntityContract,
   EntityEvent,
   EntityFailureCode,
   EntityFeature,
-  EntityFeatureDefinition,
-  EntityFeatureFactory,
-  EntityRequest,
+  EntityImplementation,
+  EntityModel,
+  EntityModelDefinition,
+  EntityPrincipal,
   EntityService,
   EntitySnapshot,
+  EntityState,
+  EntityMutation,
+  EntitySynchronization,
+  EntityValue,
   EventStore,
   Identifiers,
-  Identity,
-  Principal,
   StoredEvent,
-} from "@/features/entity/feature";
-export {
-  createEntityFixture,
-  createIdentity,
-  createMemoryEventStore,
-} from "@/features/entity/testing";
+} from "@/features/entity";
+export { createIdentity } from "@/features/identity";
+export type {
+  AuthenticatedUser,
+  AuthenticationBackend,
+  IdentityClient,
+  IdentityFeature,
+  IdentityImplementation,
+  IdentityModel,
+  IdentityModelDefinition,
+  IdentitySession,
+  IdentityService,
+} from "@/features/identity";
+export { createEntityFixture, createMemoryEventStore } from "@/features/entity.testing";

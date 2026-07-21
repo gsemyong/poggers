@@ -12,7 +12,7 @@ import {
   planProgram,
   ResourceScope,
   startProcess,
-  validateProgramCapabilities,
+  validateCapabilityBindings,
 } from "@/core/process";
 
 type ServerPlatform = { readonly Name: "server" };
@@ -142,6 +142,7 @@ describe("Program runtime", () => {
       },
       {
         address: { program: "cloud", feature: "orders" },
+        provides: ["api"],
         capabilities: {
           name: "store",
           first: {
@@ -162,8 +163,10 @@ describe("Program runtime", () => {
       },
     );
 
-    expect((instance.start().api as { read(): number }).read()).toBe(42);
-    expect(instance.start()).toBe(instance.provided);
+    const started = instance.start();
+    expect(instance.start()).toBe(started);
+    expect(((await started).api as { read(): number }).read()).toBe(42);
+    expect(await instance.start()).toBe(instance.provided);
     await instance.dispose();
     await instance.dispose();
     expect(events).toEqual(["start:store", "dispose:api", "dispose:second", "dispose:first"]);
@@ -199,6 +202,7 @@ describe("Program runtime", () => {
       },
       {
         address: { program: "cloud", feature: "work" },
+        provides: [],
         capabilities: {
           first: {
             open: () => ({
@@ -220,7 +224,7 @@ describe("Program runtime", () => {
       },
     );
 
-    instance.start();
+    await instance.start();
     const disposal = instance.dispose();
     await expect(disposal).rejects.toBeInstanceOf(AggregateError);
     expect(events).toEqual(["second", "first"]);
@@ -238,11 +242,12 @@ describe("Program runtime", () => {
       },
       {
         address: { program: "cloud", feature: "late-resource" },
+        provides: [],
         capabilities: { resources: { open: () => resource } },
       },
     );
 
-    instance.start();
+    await instance.start();
     const disposal = instance.dispose();
     resolveResource({
       async [Symbol.asyncDispose]() {
@@ -287,6 +292,7 @@ describe("Program runtime", () => {
       },
       {
         address: { program: "browser", feature: "counter" },
+        provides: [],
         capabilities: {
           values: {
             subscribe(next: (value: number) => void): Disposable {
@@ -298,7 +304,7 @@ describe("Program runtime", () => {
       },
     );
 
-    instance.start();
+    await instance.start();
     receive?.(1);
     expect(values).toEqual([1]);
     await instance.dispose();
@@ -350,10 +356,10 @@ describe("Program runtime", () => {
     };
     const instance = createProgramContributionInstance(
       { start: () => source },
-      { address: { program: "worker", feature: "stream" } },
+      { address: { program: "worker", feature: "stream" }, provides: [] },
     );
 
-    instance.start();
+    await instance.start();
     await reading;
     await instance.dispose();
 
@@ -375,6 +381,7 @@ describe("Program runtime", () => {
       },
       {
         address: { program: "cloud", feature: "operation" },
+        provides: [],
         capabilities: {
           operations: {
             open: () => ({
@@ -386,7 +393,7 @@ describe("Program runtime", () => {
       },
     );
 
-    instance.start();
+    await instance.start();
     await instance.dispose();
     expect(events).toEqual(["cancel", "dispose"]);
   });
@@ -603,11 +610,12 @@ describe("Program runtime", () => {
       },
       {
         address: { program: "worker", feature: "search" },
+        provides: [],
         capabilities: { changes },
       },
     );
 
-    instance.start();
+    await instance.start();
     await started;
     await instance.dispose();
     expect(returned).toBe(true);
@@ -767,10 +775,10 @@ describe("Program runtime", () => {
       manifest("server", { feature: "consumer", requires: ["clock", "events"] }),
     );
 
-    expect(() => validateProgramCapabilities(plan, { clock: {}, extra: {} })).toThrow(
+    expect(() => validateCapabilityBindings(plan, { clock: {}, extra: {} })).toThrow(
       "missing: events; unexpected: extra",
     );
-    expect(() => validateProgramCapabilities(plan, { clock: {}, events: {} })).not.toThrow();
+    expect(() => validateCapabilityBindings(plan, { clock: {}, events: {} })).not.toThrow();
   });
 
   test("owns external and Feature-provided Capability resources exactly once", async () => {
@@ -821,6 +829,110 @@ describe("Program runtime", () => {
     await process.dispose();
     await process.dispose();
     expect(disposals).toEqual({ external: 1, provided: 1 });
+  });
+
+  test("awaits asynchronous providers before starting their consumers", async () => {
+    const events: string[] = [];
+    const application = {
+      features: {
+        consumer: {
+          programs: {
+            api: {
+              start({ capabilities }: { capabilities: { reader: { read(): string } } }) {
+                events.push(`consumer:${capabilities.reader.read()}`);
+              },
+            },
+          },
+        },
+        provider: {
+          programs: {
+            api: {
+              async start() {
+                events.push("provider:start");
+                await Promise.resolve();
+                events.push("provider:ready");
+                return {
+                  reader: {
+                    read: () => "ready",
+                    [Symbol.dispose]: () => events.push("provider:dispose"),
+                  },
+                };
+              },
+            },
+          },
+        },
+      },
+    };
+
+    const process = await startProcess(
+      application,
+      "api",
+      {},
+      manifest(
+        "api",
+        { feature: "consumer", requires: ["reader"] },
+        { feature: "provider", provides: ["reader"] },
+      ),
+    );
+
+    expect(events).toEqual(["provider:start", "provider:ready", "consumer:ready"]);
+    await process.dispose();
+    expect(events).toEqual([
+      "provider:start",
+      "provider:ready",
+      "consumer:ready",
+      "provider:dispose",
+    ]);
+  });
+
+  test("shares one Feature binding locally and recreates it for another Process", async () => {
+    let created = 0;
+    const observed: number[] = [];
+    const application = {
+      features: {
+        provider: {
+          programs: {
+            server: {
+              start() {
+                const id = ++created;
+                return { reader: { read: () => id } };
+              },
+            },
+          },
+        },
+        first: {
+          programs: {
+            server: {
+              start({ capabilities }: { capabilities: { reader: { read(): number } } }) {
+                observed.push(capabilities.reader.read());
+              },
+            },
+          },
+        },
+        second: {
+          programs: {
+            server: {
+              start({ capabilities }: { capabilities: { reader: { read(): number } } }) {
+                observed.push(capabilities.reader.read());
+              },
+            },
+          },
+        },
+      },
+    };
+    const graph = manifest(
+      "server",
+      { feature: "provider", provides: ["reader"] },
+      { feature: "first", requires: ["reader"] },
+      { feature: "second", requires: ["reader"] },
+    );
+
+    const first = await startProcess(application, "server", {}, graph);
+    const second = await startProcess(application, "server", {}, graph);
+
+    expect(observed).toEqual([1, 1, 2, 2]);
+    await first.dispose();
+    await second.dispose();
   });
 });
 

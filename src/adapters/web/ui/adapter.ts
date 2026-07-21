@@ -20,11 +20,11 @@ export type WebUIAdapter = UIAdapter<WebUI, WebComponentAdapter, WebPresentation
 export function createWebUIAdapter(): WebUIAdapter {
   const presentation = createWebPresentationAdapter();
   const component: WebComponentAdapter = {
-    createApplicationUI(options) {
+    async createApplicationUI(options) {
       const activation = activateJSXRenderer(renderWebIntrinsic);
       let ui;
       try {
-        ui = createApplicationUI({ ...options, presentationAdapter: presentation });
+        ui = await createApplicationUI({ ...options, presentationAdapter: presentation });
       } catch (error) {
         activation[Symbol.dispose]();
         throw error;

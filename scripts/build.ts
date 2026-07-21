@@ -77,6 +77,7 @@ await build({
     emptyOutDir: false,
     minify: false,
     outDir: distDir,
+    ssr: true,
     rollupOptions: {
       external: (id) =>
         !id.startsWith(".") &&
@@ -98,6 +99,7 @@ await build({
   },
 });
 await assertNoPrivateAliases();
+await assertServerEnvironment();
 
 async function rewriteDeclarationAliases(): Promise<void> {
   for await (const file of glob("src/**/*.d.ts", { cwd: distDir })) {
@@ -124,6 +126,13 @@ async function assertNoPrivateAliases(): Promise<void> {
     if (/(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+|\bdeclare\s+module\s*)["']@\//.test(contents)) {
       throw new Error(`Private source alias leaked into ${file}.`);
     }
+  }
+}
+
+async function assertServerEnvironment(): Promise<void> {
+  const native = await readFile(resolve(distDir, "src/adapters/server/native.js"), "utf8");
+  if (!native.includes("process.env.POGGERS_NATIVE_CACHE")) {
+    throw new Error("The package build replaced the server environment with a client constant.");
   }
 }
 

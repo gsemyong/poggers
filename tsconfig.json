@@ -1,6 +1,6 @@
 {
   "compilerOptions": {
-    "lib": ["ES2024", "ESNext.Disposable", "DOM"],
+    "lib": ["ES2024", "ESNext.Disposable", "DOM", "DOM.Iterable"],
     "target": "ESNext",
     "module": "Preserve",
     "moduleDetection": "force",
@@ -26,8 +26,6 @@
     "${configDir}/src/**/*.ts",
     "${configDir}/src/**/*.tsx",
     "${configDir}/src/**/*.d.ts",
-    "${configDir}/scripts/**/*.ts",
-    "${configDir}/examples/**/*.ts",
-    "${configDir}/examples/**/*.tsx"
+    "${configDir}/scripts/**/*.ts"
   ]
 }

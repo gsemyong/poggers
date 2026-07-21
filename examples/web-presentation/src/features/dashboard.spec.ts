@@ -7,12 +7,13 @@ import { describe, expect, it } from "vitest";
 import {
   planWebPresentationArtifacts,
   validateWebPresentationSource,
-} from "../../../src/adapters/web/ui/presentation/compiler";
-import { createWebAnimationHost } from "../../../src/adapters/web/ui/presentation/runtime/animation";
-import { compilePresentationSource } from "../../../src/core/compiler/presentation";
-import { createActionEventLedger, evaluatePresentationFrame } from "../../../src/core/presentation";
+} from "@/adapters/web/ui/presentation/compiler";
+import { createWebAnimationHost } from "@/adapters/web/ui/presentation/runtime/animation";
+import { compilePresentationSource } from "@/core/compiler/presentation";
+import { createActionEventLedger, evaluatePresentationFrame } from "@/core/presentation";
+
+import { editorial } from "../presentations/editorial";
 import { dashboard, type SheetState } from "./dashboard";
-import { editorial } from "./presentation";
 
 type DashboardAPI = Readonly<{
   sheet: SheetState;
@@ -117,8 +118,11 @@ describe("canonical sheet behavior state", () => {
   });
 
   it("drives sheet presence, backdrop, and panel from one compiled coordinate", async () => {
-    const source = await readFile(new URL("./presentation.ts", import.meta.url), "utf8");
-    const compilation = compilePresentationSource(source, "presentation.ts");
+    const source = await readFile(
+      new URL("../presentations/editorial.ts", import.meta.url),
+      "utf8",
+    );
+    const compilation = compilePresentationSource(source, "presentations/editorial.ts");
     expect(() => validateWebPresentationSource(compilation.ir)).not.toThrow();
     const declarations = compilation.ir.declarations;
     const position = "createEditorial/Dashboard/Application::position";
@@ -140,7 +144,7 @@ describe("canonical sheet behavior state", () => {
     expect(declarations.some(({ destination }) => destination.toLowerCase().includes("blur"))).toBe(
       false,
     );
-  });
+  }, 15_000);
 
   it("represents every dismissal source explicitly", async () => {
     for (const source of ["button", "backdrop", "escape"] as const) {

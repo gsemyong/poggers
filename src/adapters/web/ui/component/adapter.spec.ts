@@ -1,4 +1,4 @@
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 
 import type { BrowserMainThread } from "@/adapters/web/platform";
 import { createWebUIAdapter } from "@/adapters/web/ui/adapter";
@@ -9,6 +9,8 @@ import type { PresentationAdapterInstance } from "@/core/presentation";
 
 const createApplicationUI = createWebUIAdapter().component.createApplicationUI;
 const boundary = {} as Element;
+
+afterEach(() => vi.unstubAllGlobals());
 
 type Counter = {
   Programs: {
@@ -56,6 +58,8 @@ const counter = (count: number): Feature<Counter> => ({
 
 describe("Program UI composition", () => {
   test("composes isolated child APIs into a parent UI contribution", async () => {
+    vi.stubGlobal("Element", class {});
+    let renderedChildren: readonly number[] = [];
     const shell: Feature<Shell> = {
       features: { first: counter(1), second: counter(10) },
       programs: {
@@ -68,13 +72,20 @@ describe("Program UI composition", () => {
               return count;
             },
           },
-          components: { Root: { view: () => null } },
+          components: {
+            Root: {
+              view({ features }) {
+                renderedChildren = [features.first.count, features.second.count];
+                return null;
+              },
+            },
+          },
           root: "Root",
         },
       },
     };
     const application: Application<Contract> = { features: { shell } };
-    const ui = createApplicationUI({
+    const ui = await createApplicationUI({
       application,
       program: "browser",
       presentations: { presentations: {} },
@@ -88,12 +99,15 @@ describe("Program UI composition", () => {
     expect(ui.api.total).toBe(0);
     expect(increment({ feature: "first", by: 2 })).toBe(3);
     expect(ui.api.total).toBe(13);
+    ui.renderRoot();
+    await Promise.resolve();
+    expect(renderedChildren).toEqual([3, 10]);
 
     await ui.dispose();
     expect(() => increment({ feature: "first", by: 1 })).toThrow("disposed");
   });
 
-  test("requires exactly one root for a UI Program", () => {
+  test("requires exactly one root for a UI Program", async () => {
     const application = {
       features: {
         empty: {
@@ -102,14 +116,14 @@ describe("Program UI composition", () => {
       },
     } as unknown as Application<Contract>;
 
-    expect(() =>
+    await expect(
       createApplicationUI({
         application,
         program: "browser",
         presentations: { presentations: {} },
         boundary,
       }),
-    ).toThrow("exactly one root");
+    ).rejects.toThrow("exactly one root");
   });
 
   test("updates authored Presentations in place when their public names are stable", async () => {
@@ -135,7 +149,7 @@ describe("Program UI composition", () => {
       features: { shell },
       presentations: { family },
     } satisfies Application<AppearanceContract>;
-    const ui = createApplicationUI<AppearanceContract>({
+    const ui = await createApplicationUI<AppearanceContract>({
       application,
       program: "browser",
       presentations: { presentations: { family } },
@@ -183,7 +197,7 @@ describe("Program UI composition", () => {
       features: { shell },
       presentations: { family },
     } satisfies Application<AppearanceContract>;
-    const ui = createApplicationUI<AppearanceContract>({
+    const ui = await createApplicationUI<AppearanceContract>({
       application,
       program: "browser",
       presentations: { presentations: { family } },
@@ -196,7 +210,7 @@ describe("Program UI composition", () => {
     await ui.dispose();
   });
 
-  test("rejects multiple roots for a composed UI Program", () => {
+  test("rejects multiple roots for a composed UI Program", async () => {
     const application = {
       features: {
         first: {
@@ -218,14 +232,14 @@ describe("Program UI composition", () => {
       },
     } as unknown as Application<Contract>;
 
-    expect(() =>
+    await expect(
       createApplicationUI({
         application,
         program: "browser",
         presentations: { presentations: {} },
         boundary,
       }),
-    ).toThrow("found 2");
+    ).rejects.toThrow("found 2");
   });
 
   test("binds child-provided Capabilities into its parent contribution", async () => {
@@ -275,7 +289,7 @@ describe("Program UI composition", () => {
       },
     };
     const application: Application<App> = { features: { consumer } };
-    const ui = createApplicationUI({
+    const ui = await createApplicationUI({
       application,
       program: "browser",
       programManifest: {
@@ -313,7 +327,7 @@ describe("Program UI composition", () => {
     };
     const application: Application<Contract> = { features: { shell } };
     const hotState = {};
-    const first = createApplicationUI({
+    const first = await createApplicationUI({
       application,
       program: "browser",
       presentations: { presentations: {} },
@@ -327,7 +341,7 @@ describe("Program UI composition", () => {
     first.captureHotState();
     await first.dispose();
 
-    const second = createApplicationUI({
+    const second = await createApplicationUI({
       application,
       program: "browser",
       presentations: { presentations: {} },

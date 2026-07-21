@@ -1,4 +1,5 @@
-import type { ApplicationContract, FeatureContract, ProgramContract } from "@/core/application";
+import type { FeatureContract, ProgramContract } from "@/core/application";
+import { linkProgram, type ProgramIR } from "@/core/compiler/ir";
 
 type Empty = Record<never, never>;
 type Simplify<Value> = { readonly [Key in keyof Value]: Value[Key] };
@@ -84,25 +85,6 @@ export type ProgramExternalCapabilities<
   Name extends PropertyKey,
 > = Simplify<Omit<RequiredIn<Owner, Name>, keyof ProvidedIn<Owner, Name>>>;
 
-type CapabilityResult<Value> = Value | PromiseLike<Value>;
-
-/** Build-profile implementations for the external contract inferred from an Application. */
-export type ProgramCapabilities<Owner extends ApplicationContract, Name extends PropertyKey> =
-  Name extends ProgramName<Owner>
-    ? Readonly<{
-        development(): CapabilityResult<ProgramExternalCapabilities<Owner, Name>>;
-        production(): CapabilityResult<ProgramExternalCapabilities<Owner, Name>>;
-      }>
-    : never;
-
-export type CapabilityProfile = "development" | "production";
-
-/** Runtime shape of a type-checked Program capability module. */
-export type ProgramCapabilityModule = Readonly<{
-  development(): CapabilityResult<Readonly<Record<string, unknown>>>;
-  production(): CapabilityResult<Readonly<Record<string, unknown>>>;
-}>;
-
 /** Compiler-derived dependency meaning for one Feature contribution. */
 export type ProgramContributionManifest = Readonly<{
   feature: string;
@@ -117,26 +99,28 @@ export type ProgramManifest = Readonly<{
 }>;
 
 /** Projects compiler IR into the dependency manifest consumed by every Process runtime. */
-export function collectProgramManifest(
-  name: string,
-  programs: readonly Readonly<{
-    feature: string;
-    name: string;
-    requires: readonly Readonly<{ name: string }>[];
-    provides: readonly Readonly<{ name: string }>[];
-  }>[],
-): ProgramManifest {
+export function collectProgramManifest(program: ProgramIR): ProgramManifest {
+  const linked = linkProgram(program);
   return {
-    name,
-    contributions: programs
-      .filter((program) => program.name === name)
-      .map((program) => ({
-        feature: program.feature,
-        requires: program.requires.map((capability) => capability.name).sort(),
-        provides: program.provides.map((capability) => capability.name).sort(),
-      }))
-      .sort((left, right) => left.feature.localeCompare(right.feature)),
+    name: program.name,
+    contributions: linked.contributions.map(({ contribution }) => ({
+      feature: contribution.feature,
+      requires: contribution.requires.map((capability) => capability.name).sort(),
+      provides: contribution.provides.map((capability) => capability.name).sort(),
+    })),
   };
+}
+
+/** Derives the exact Capability names a Platform Adapter must supply for one Program. */
+export function collectExternalCapabilityNames(manifest: ProgramManifest): readonly string[] {
+  const provided = new Set(manifest.contributions.flatMap(({ provides }) => provides));
+  return [
+    ...new Set(
+      manifest.contributions
+        .flatMap(({ requires }) => requires)
+        .filter((name) => !provided.has(name)),
+    ),
+  ].sort();
 }
 
 /** The stable identity of one Feature contribution to a named Program. */

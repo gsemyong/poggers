@@ -28,14 +28,7 @@ import {
   type PresentationAdapter,
   type PresentationAdapterInstance,
 } from "@/core/presentation";
-import {
-  bindCapabilitiesToScope,
-  createProgramContributionInstance,
-  planProgram,
-  ResourceScope,
-  type ProgramContributionInstance,
-  validateProgramCapabilities,
-} from "@/core/process";
+import { assembleProgram, bindCapabilitiesToScope, ResourceScope } from "@/core/process";
 import { createReactiveState } from "@/core/state";
 
 export type ComponentRuntimeElements<Contract extends ApplicationContract> = {
@@ -92,7 +85,7 @@ export type CreateApplicationUIOptions<Contract extends ApplicationContract> = R
 export type WebComponentAdapter = Readonly<{
   createApplicationUI<Contract extends ApplicationContract>(
     options: Omit<CreateApplicationUIOptions<Contract>, "presentationAdapter">,
-  ): ApplicationUI;
+  ): Promise<ApplicationUI>;
 }>;
 
 type RuntimeComponentConfig = {
@@ -145,6 +138,7 @@ type RuntimeComponentDefinition = {
 type RuntimeComponentStateInput = {
   readonly props: Record<string, unknown>;
   readonly feature: Readonly<Record<string, unknown>>;
+  readonly features: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
 };
 
 type RuntimeComponentComposition = {
@@ -164,6 +158,7 @@ type RuntimeComponentComposition = {
 type RuntimeComponentViewContext = {
   readonly props: Readonly<Record<string, unknown>>;
   readonly feature: Readonly<Record<string, unknown>>;
+  readonly features: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
   readonly state: Readonly<Record<string, unknown>>;
   readonly actions: Record<string, (...args: unknown[]) => void>;
   readonly slots: Record<string, unknown>;
@@ -171,7 +166,7 @@ type RuntimeComponentViewContext = {
   readonly components: Record<string, unknown>;
 };
 
-export function createApplicationUI<Contract extends ApplicationContract>({
+export async function createApplicationUI<Contract extends ApplicationContract>({
   application,
   program,
   presentations,
@@ -182,7 +177,7 @@ export function createApplicationUI<Contract extends ApplicationContract>({
   programManifest,
   boundary,
   presentationAdapter,
-}: CreateApplicationUIOptions<Contract>): ApplicationUI {
+}: CreateApplicationUIOptions<Contract>): Promise<ApplicationUI> {
   const runtimeApplication = application as RuntimeApplication;
   const configuredPresentations = {
     ...presentations.presentations,
@@ -205,7 +200,7 @@ export function createApplicationUI<Contract extends ApplicationContract>({
   const componentNamespaces: RuntimeComponentComposition["componentNamespaces"] = {
     "": Object.create(null),
   };
-  const programUI = createProgramUI(
+  const programUI = await createProgramUI(
     runtimeApplication,
     program,
     capabilities,
@@ -268,6 +263,12 @@ export function createApplicationUI<Contract extends ApplicationContract>({
   );
   updateRootPresentation(defaultPresentation);
 
+  const captureHotState = (): HotRenderState => {
+    const state = programUI.captureHotState();
+    state.presentation = presentationInstance.snapshot();
+    return state;
+  };
+
   return {
     api: programUI.api,
     features: programUI.features,
@@ -278,11 +279,7 @@ export function createApplicationUI<Contract extends ApplicationContract>({
       if (!root) throw new Error(`Unknown root Component "${rootName}".`);
       return root();
     },
-    captureHotState() {
-      const state = programUI.captureHotState();
-      state.presentation = presentationInstance.snapshot();
-      return state;
-    },
+    captureHotState,
     updatePresentations(next) {
       if (
         Object.keys(configuredPresentations).sort().join("\n") !==
@@ -297,6 +294,7 @@ export function createApplicationUI<Contract extends ApplicationContract>({
       return true;
     },
     async dispose() {
+      captureHotState();
       const componentResults = await Promise.allSettled(
         [...composition.lifecycles].map((lifecycle) => lifecycle.dispose()),
       );
@@ -422,7 +420,7 @@ function createComponentInstance(
     options.composition.actionEventRevision,
   );
   const services = componentServices({ ...options, componentName });
-  const stateInput = Object.assign(pickServices(services, ["feature"]), {
+  const stateInput = Object.assign(pickServices(services, ["feature", "features"]), {
     props,
   }) as RuntimeComponentStateInput;
   const stateSource =
@@ -440,7 +438,7 @@ function createComponentInstance(
   const state = stateRuntime.read;
   const elements = Object.create(null) as Record<string, Component<Props>>;
 
-  const actionContext = Object.assign(pickServices(services, ["feature"]), {
+  const actionContext = Object.assign(pickServices(services, ["feature", "features"]), {
     props,
     capabilities,
     state: stateRuntime.mutable,
@@ -512,7 +510,7 @@ function createComponentInstance(
       onMount(() => {
         lifecycle.adopt(
           definition.mount?.(
-            Object.assign(pickServices(services, ["feature"]), {
+            Object.assign(pickServices(services, ["feature", "features"]), {
               props,
               capabilities,
               state,
@@ -534,6 +532,7 @@ function createComponentInstance(
     const viewContext: RuntimeComponentViewContext = {
       props,
       feature: services.feature as Readonly<Record<string, unknown>>,
+      features: services.features as Readonly<Record<string, Readonly<Record<string, unknown>>>>,
       state,
       actions,
       slots,
@@ -552,7 +551,25 @@ function componentServices(options: {
 }): Readonly<Record<string, unknown>> {
   return {
     feature: options.composition.apis[componentOwner(options.componentName) ?? ""] ?? {},
+    features: childFeatureAPIs(
+      componentOwner(options.componentName) ?? "",
+      options.composition.apis,
+    ),
   };
+}
+
+function childFeatureAPIs(
+  owner: string,
+  apis: Readonly<Record<string, Readonly<Record<string, unknown>>>>,
+): Readonly<Record<string, Readonly<Record<string, unknown>>>> {
+  const prefix = owner ? `${owner}.` : "";
+  return Object.fromEntries(
+    Object.entries(apis).flatMap(([path, api]) => {
+      if (!path.startsWith(prefix)) return [];
+      const name = path.slice(prefix.length);
+      return name && !name.includes(".") ? [[name, api] as const] : [];
+    }),
+  );
 }
 
 function componentOwner(component: string): string | undefined {
@@ -1112,14 +1129,14 @@ function normalizeRuntimeComponents<Contract extends ApplicationContract>(
   return result;
 }
 
-function createProgramUI(
+async function createProgramUI(
   application: RuntimeApplication,
   program: string,
   externalCapabilities: Readonly<Record<string, unknown>>,
   manifest: ProgramManifest,
   hotState?: HotRenderState,
   onActionEvent: () => void = () => undefined,
-): {
+): Promise<{
   api: Readonly<Record<string, unknown>>;
   features: Record<string, Readonly<Record<string, unknown>>>;
   apis: Record<string, Readonly<Record<string, unknown>>>;
@@ -1127,79 +1144,21 @@ function createProgramUI(
   events: Record<string, Readonly<Record<string, unknown>>>;
   captureHotState(): HotRenderState;
   dispose(): Promise<void>;
-} {
-  const apis: Record<string, Readonly<Record<string, unknown>>> = Object.create(null);
-  const instances: ProgramContributionInstance[] = [];
-  const externalScope = new ResourceScope();
-  const providedCapabilities: Record<string, unknown> = Object.create(null);
-  const uiInstances = new Map<string, ProgramContributionInstance["ui"]>();
+}> {
+  const assembly = await assembleProgram({
+    application,
+    name: program,
+    capabilities: externalCapabilities,
+    manifest,
+    initialState: hotState?.programs,
+    onActionEvent,
+  });
+  const apis = { ...assembly.ui };
   const capabilities: Record<string, Readonly<Record<string, unknown>>> = Object.create(null);
   const events: Record<string, Readonly<Record<string, unknown>>> = Object.create(null);
-
-  const plan = planProgram(application, program, manifest);
-  validateProgramCapabilities(plan, externalCapabilities);
-  for (const capability of Object.values(externalCapabilities)) externalScope.adopt(capability);
-  const planned = new Map(
-    plan.contributions.map((contribution) => [contribution.feature, contribution]),
-  );
-  const instanceByPath = new Map<string, ProgramContributionInstance>();
-  const registries = new Map<string, Record<string, unknown>>();
-  const instantiate = (path: string): Readonly<Record<string, unknown>> => {
-    const existing = instanceByPath.get(path);
-    if (existing) return existing.ui?.api ?? Object.freeze({});
-    const contribution = planned.get(path);
-    if (!contribution) return Object.freeze({});
-    const children: Record<string, Readonly<Record<string, unknown>>> = Object.create(null);
-    for (const child of contribution.children) {
-      children[child.slice(path.length + 1)] = instantiate(child);
-    }
-    const registry: Record<string, unknown> = Object.create(null);
-    for (const name of contribution.manifest.requires) {
-      if (Object.hasOwn(externalCapabilities, name)) registry[name] = externalCapabilities[name];
-    }
-    const instance = createProgramContributionInstance(contribution.definition as never, {
-      address: { program, feature: path },
-      capabilities: registry,
-      features: children,
-      initialState: hotState?.programs?.[path],
-      onActionEvent,
-    });
-    instanceByPath.set(path, instance);
-    registries.set(path, registry);
-    uiInstances.set(path, instance.ui);
-    capabilities[path] = instance.capabilities;
-    events[path] = instance.ui?.events ?? Object.freeze({});
-    const api = instance.ui?.api ?? Object.freeze({});
-    apis[path] = api;
-    return api;
-  };
-
-  try {
-    for (const contribution of plan.contributions) instantiate(contribution.feature);
-    for (const contribution of plan.contributions) {
-      const instance = instanceByPath.get(contribution.feature)!;
-      const registry = registries.get(contribution.feature)!;
-      for (const name of contribution.manifest.requires) {
-        if (Object.hasOwn(providedCapabilities, name)) registry[name] = providedCapabilities[name];
-      }
-      const provided = instance.start();
-      const actual = Object.keys(provided).sort();
-      const declared = [...contribution.manifest.provides].sort();
-      if (actual.join("\n") !== declared.join("\n")) {
-        throw new Error(
-          `Program "${program}" Feature "${contribution.feature}" provided ` +
-            `[${actual.join(", ")}] but declares [${declared.join(", ")}].`,
-        );
-      }
-      Object.assign(providedCapabilities, provided);
-      instances.push(instance);
-    }
-  } catch (error) {
-    void Promise.allSettled([
-      ...[...instanceByPath.values()].reverse().map((instance) => instance.dispose()),
-      externalScope.dispose(),
-    ]);
-    throw error;
+  for (const instance of assembly.contributions) {
+    capabilities[instance.address.feature] = instance.capabilities;
+    events[instance.address.feature] = instance.ui?.events ?? Object.freeze({});
   }
 
   const root = collectProgramRoots(application, program);
@@ -1207,6 +1166,15 @@ function createProgramUI(
   const api = owner ? (apis[owner] ?? Object.freeze({})) : Object.freeze({});
 
   let disposed = false;
+  const captureHotState = (): HotRenderState => {
+    const state = hotState ?? {};
+    state.programs = Object.fromEntries(
+      assembly.contributions.flatMap((instance) =>
+        instance.ui ? [[instance.address.feature, instance.ui.snapshot()]] : [],
+      ),
+    );
+    return state;
+  };
   return {
     api,
     features: Object.fromEntries(
@@ -1215,32 +1183,12 @@ function createProgramUI(
     apis,
     capabilities,
     events,
-    captureHotState() {
-      const state = hotState ?? {};
-      state.programs = Object.fromEntries(
-        [...uiInstances].flatMap(([path, ui]) => (ui ? [[path, ui.snapshot()]] : [])),
-      );
-      return state;
-    },
+    captureHotState,
     async dispose() {
       if (disposed) return;
       disposed = true;
-      this.captureHotState();
-      const errors: unknown[] = [];
-      for (const instance of [...instances].reverse()) {
-        try {
-          await instance.dispose();
-        } catch (error) {
-          errors.push(error);
-        }
-      }
-      try {
-        await externalScope.dispose();
-      } catch (error) {
-        errors.push(error);
-      }
-      if (errors.length === 1) throw errors[0];
-      if (errors.length > 1) throw new AggregateError(errors, "UI Process disposal failed.");
+      captureHotState();
+      await assembly.dispose();
     },
   };
 }

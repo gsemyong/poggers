@@ -11,7 +11,8 @@ export default defineConfig({
       enforce: "pre",
       transform(source, id) {
         const file = id.split("?", 1)[0]!;
-        if (!file.includes("/examples/") || !file.endsWith("/presentation.ts")) return;
+        if (!file.includes("/examples/") || !file.includes("/presentations/")) return;
+        if (!file.endsWith(".ts") || file.endsWith(".spec.ts")) return;
         return { code: transformPresentationSource(source, file), map: null };
       },
     },

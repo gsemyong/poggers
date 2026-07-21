@@ -12,14 +12,17 @@ import {
 } from "@/contracts/platform";
 import { compileApplication, resolveApplication } from "@/core/compiler/source";
 
-export async function runCli(arguments_ = process.argv.slice(2)): Promise<void> {
+export async function runCli(
+  arguments_ = process.argv.slice(2),
+  adapters: Readonly<Record<string, PlatformAdapterImplementation>> = platformAdapters,
+): Promise<void> {
   const [command = "dev", ...commandArguments] = arguments_;
   const directory = readFlag(commandArguments, "dir") ?? process.cwd();
 
   if (command === "create") {
     await createProject(commandArguments);
   } else if (command === "dev") {
-    const realization = resolveRealization(directory);
+    const realization = resolveRealization(directory, adapters);
     const sessions: DevelopmentSession[] = [];
     try {
       for (const adapter of realization.adapters) {
@@ -47,7 +50,7 @@ export async function runCli(arguments_ = process.argv.slice(2)): Promise<void> 
     process.on("SIGINT", () => void stop());
     process.on("SIGTERM", () => void stop());
   } else if (command === "build") {
-    const realization = resolveRealization(directory);
+    const realization = resolveRealization(directory, adapters);
     const root = resolve(
       directory,
       readFlag(commandArguments, "outdir") ?? readFlag(commandArguments, "outfile") ?? "dist",
@@ -180,15 +183,15 @@ function readFlag(arguments_: readonly string[], name: string): string | undefin
   return index < 0 ? undefined : arguments_[index + 1];
 }
 
-function resolveRealization(directory: string) {
+function resolveRealization(
+  directory: string,
+  adapters: Readonly<Record<string, PlatformAdapterImplementation>>,
+) {
   const paths = resolveApplication(directory);
   const ir = compileApplication(paths.application);
   return {
     ir,
-    adapters: selectPlatformAdapters(
-      ir,
-      platformAdapters as unknown as Readonly<Record<string, PlatformAdapterImplementation>>,
-    ),
+    adapters: selectPlatformAdapters(ir, adapters),
     input: {
       directory: paths.directory,
       application: paths.application,

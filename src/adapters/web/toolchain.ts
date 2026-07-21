@@ -16,8 +16,13 @@ import {
 
 import { transformComponentSource } from "@/adapters/web/ui/component/compiler";
 import { validateWebPresentationSource } from "@/adapters/web/ui/presentation/compiler";
-import { collectProgramManifest } from "@/core/capability";
-import { serializeApplicationIR, type ApplicationIR, type ComponentIR } from "@/core/compiler/ir";
+import { collectExternalCapabilityNames, collectProgramManifest } from "@/core/capability";
+import {
+  serializeApplicationIR,
+  type ApplicationIR,
+  type ComponentIR,
+  type ProgramIR,
+} from "@/core/compiler/ir";
 import { compilePresentationSource } from "@/core/compiler/presentation";
 import {
   createApplicationCompiler,
@@ -39,6 +44,19 @@ type PreparedApplication = Readonly<{
   presentationSources: ReadonlySet<string>;
   revision: number;
   updateKind: "full" | "presentation";
+  workers: readonly WebWorkerEntry[];
+}>;
+
+type WebWorkerEntry = Readonly<{
+  program: string;
+  environment: "browser-worker" | "browser-service-worker";
+  source: string;
+  output: string;
+}>;
+
+export type WebBuild = Readonly<{
+  directory: string;
+  entries: readonly Readonly<{ program: string; environment: string; path: string }>[];
 }>;
 
 type WebComponentEnvironmentContract = Readonly<{
@@ -50,6 +68,8 @@ type WebComponentEnvironmentContract = Readonly<{
 function webApplicationContract(ir: ApplicationIR): Readonly<{
   uiProgram: string;
   components: Readonly<Record<string, WebComponentEnvironmentContract>>;
+  headless: readonly ProgramIR[];
+  workers: readonly ProgramIR[];
 }> {
   const names = new Set(
     ir.programs
@@ -66,13 +86,23 @@ function webApplicationContract(ir: ApplicationIR): Readonly<{
   for (const program of ir.programs) {
     if (program.name !== uiProgram || program.environment.name !== "browser-main" || !program.ui)
       continue;
-    for (const component of program.ui.components) {
-      const name = runtimeComponentName(program.feature, component.name);
-      if (components[name]) throw new Error(`Duplicate runtime Component ${JSON.stringify(name)}.`);
-      components[name] = componentEnvironmentContract(component);
+    for (const contribution of program.contributions) {
+      for (const component of contribution.ui?.components ?? []) {
+        const name = runtimeComponentName(contribution.feature, component.name);
+        if (components[name]) {
+          throw new Error(`Duplicate runtime Component ${JSON.stringify(name)}.`);
+        }
+        components[name] = componentEnvironmentContract(component);
+      }
     }
   }
-  return { uiProgram, components };
+  const headless = ir.programs.filter(
+    ({ name, environment }) => environment.name === "browser-main" && name !== uiProgram,
+  );
+  const workers = ir.programs.filter(({ environment }) =>
+    ["browser-worker", "browser-service-worker"].includes(environment.name),
+  );
+  return { uiProgram, components, headless, workers };
 }
 
 function runtimeComponentName(feature: string, component: string): string {
@@ -92,7 +122,7 @@ export async function buildApplication(options: {
   directory: string;
   outdir: string;
   development?: boolean;
-}): Promise<string> {
+}): Promise<WebBuild> {
   const paths = resolveApplication(options.directory);
   const outdir = resolve(paths.directory, options.outdir);
   const work = await realpath(
@@ -106,6 +136,9 @@ export async function buildApplication(options: {
     const prepared = await prepareApplication(paths, work, options.development ?? false);
 
     await writeFile(resolve(outdir, "application.ir.json"), serializeApplicationIR(prepared.ir));
+    const workerInputs = Object.fromEntries(
+      prepared.workers.map(({ output, source }) => [output, source]),
+    );
     await build({
       ...viteConfiguration(paths, options.development),
       build: {
@@ -113,13 +146,13 @@ export async function buildApplication(options: {
         minify: options.development ? false : "oxc",
         outDir: outdir,
         rollupOptions: {
-          input: prepared.entry,
+          input: { app: prepared.entry, ...workerInputs },
           output: {
             assetFileNames: (asset) =>
               asset.names.some((name) => name.endsWith(".css"))
                 ? "styles.css"
                 : "assets/[name]-[hash][extname]",
-            entryFileNames: "app.js",
+            entryFileNames: ({ name }) => (name === "app" ? "app.js" : "workers/[name].js"),
           },
         },
         sourcemap: options.development ? "inline" : false,
@@ -127,7 +160,23 @@ export async function buildApplication(options: {
       },
     });
     await writeFile(resolve(outdir, "index.html"), htmlSource("/app.js"));
-    return outdir;
+    return {
+      directory: outdir,
+      entries: [
+        ...prepared.ir.programs
+          .filter(({ environment }) => environment.name === "browser-main")
+          .map((program) => ({
+            program: program.name,
+            environment: program.environment.name,
+            path: resolve(outdir, "app.js"),
+          })),
+        ...prepared.workers.map(({ program, environment, output }) => ({
+          program,
+          environment,
+          path: resolve(outdir, "workers", `${output}.js`),
+        })),
+      ],
+    };
   } finally {
     await removeWorkDirectory(work);
   }
@@ -136,17 +185,30 @@ export async function buildApplication(options: {
 export async function runApplication(options: {
   directory: string;
   port?: number;
+  serverOrigin?: string;
 }): Promise<DevelopmentServer> {
   const paths = resolveApplication(options.directory);
   const work = await realpath(await mkdtemp(resolve(tmpdir(), "poggers-web-dev-")));
   const compiler = createApplicationCompiler(paths.application);
-  const prepared = await prepareApplication(paths, work, true, "full", compiler);
+  const prepared = await prepareApplication(
+    paths,
+    work,
+    true,
+    "full",
+    compiler,
+    undefined,
+    undefined,
+    options.serverOrigin,
+  );
   await writeFile(resolve(work, "index.html"), htmlSource("/browser.generated.ts"));
 
   const server = await createServer({
     ...viteConfiguration(paths, true),
     appType: "spa",
-    plugins: [presentationContractPlugin(paths, work, compiler, prepared), ...vitePlugins(paths)],
+    plugins: [
+      presentationContractPlugin(paths, work, compiler, prepared, options.serverOrigin),
+      ...vitePlugins(paths),
+    ],
     root: work,
     server: {
       fs: { allow: [work, paths.directory, resolve(import.meta.dirname, "../../..")] },
@@ -184,6 +246,7 @@ async function prepareApplication(
   compiler: ApplicationCompiler = createApplicationCompiler(paths.application),
   previous?: PreparedApplication,
   changedFile?: string,
+  serverOrigin?: string,
 ): Promise<PreparedApplication> {
   await mkdir(work, { recursive: true });
   const compilation =
@@ -205,19 +268,63 @@ async function prepareApplication(
   }
 
   const candidate = resolve(work, "application.generated.ts");
+  const ui = ir.programs.find(({ name }) => name === contract.uiProgram)!;
+  const programManifest = collectProgramManifest(ui);
+  const workers = await Promise.all(
+    contract.workers.map(async (program, index): Promise<WebWorkerEntry> => {
+      const output = workerName(program.name, index);
+      const source = resolve(work, `${output}.generated.ts`);
+      const manifest = collectProgramManifest(program);
+      await writeIfChanged(
+        source,
+        workerSource({
+          application: paths.application,
+          development,
+          serverOrigin,
+          host: resolve(import.meta.dirname, `platform${moduleExtension()}`),
+          processRuntime: resolve(import.meta.dirname, `../../core/process${moduleExtension()}`),
+          revision,
+          program,
+          manifest,
+          hostCapabilities: collectExternalCapabilityNames(manifest),
+        }),
+      );
+      return {
+        program: program.name,
+        environment: program.environment.name as WebWorkerEntry["environment"],
+        source,
+        output,
+      };
+    }),
+  );
   await writeIfChanged(
     candidate,
     candidateSource({
       application: paths.application,
-      capabilityModule: resolveProgramCapabilities(paths, contract.uiProgram),
       development,
+      serverOrigin,
+      host: resolve(import.meta.dirname, `platform${moduleExtension()}`),
       revision,
       runtime: resolve(import.meta.dirname, `./ui/adapter${moduleExtension()}`),
+      processRuntime: resolve(import.meta.dirname, `../../core/process${moduleExtension()}`),
       program: contract.uiProgram,
-      programManifest: collectProgramManifest(contract.uiProgram, ir.programs),
+      programManifest,
+      hostCapabilities: collectExternalCapabilityNames(programManifest),
       components: contract.components,
       presentationDependencies: collectPresentationDependencies(ir, contract.uiProgram),
       hotManifest: createHotReplacementManifest(ir),
+      headless: contract.headless.map((program) => {
+        const manifest = collectProgramManifest(program);
+        return {
+          program: program.name,
+          manifest,
+          hostCapabilities: collectExternalCapabilityNames(manifest),
+        };
+      }),
+      workers: workers.map(({ environment, output, source }) => ({
+        environment,
+        source: development ? `./${basename(source)}` : `/workers/${output}.js`,
+      })),
     }),
   );
   const entry = resolve(work, "browser.generated.ts");
@@ -236,20 +343,8 @@ async function prepareApplication(
     presentationSources: compilation.presentationSources,
     revision,
     updateKind,
+    workers,
   };
-}
-
-function resolveProgramCapabilities(paths: ApplicationPaths, program: string): string | undefined {
-  for (const extension of [".ts", ".tsx"]) {
-    const candidate = resolve(paths.source, "capabilities", `${program}${extension}`);
-    try {
-      accessSync(candidate);
-      return candidate;
-    } catch {
-      continue;
-    }
-  }
-  return undefined;
 }
 
 async function writeIfChanged(path: string, contents: string): Promise<boolean> {
@@ -362,6 +457,7 @@ function presentationContractPlugin(
   work: string,
   compiler: ApplicationCompiler,
   initial: PreparedApplication,
+  serverOrigin?: string,
 ): Plugin {
   const generated = [
     resolve(work, "application.generated.ts"),
@@ -387,6 +483,7 @@ function presentationContractPlugin(
           compiler,
           prepared,
           context.file,
+          serverOrigin,
         );
         context.server.config.logger.info(
           `[poggers] ${updateKind} semantic update ${Math.round((performance.now() - started) * 10) / 10}ms`,
@@ -478,10 +575,66 @@ async function loadApplication(
   return record(loaded.default ?? loaded);
 }
 
+function workerSource(input: {
+  application: string;
+  development: boolean;
+  serverOrigin?: string;
+  host: string;
+  processRuntime: string;
+  revision: number;
+  program: ProgramIR;
+  manifest: unknown;
+  hostCapabilities: readonly string[];
+}): string {
+  const application = input.development
+    ? `${input.application}?poggers-revision=${input.revision}`
+    : input.application;
+  const lifecycle =
+    input.program.environment.name === "browser-service-worker"
+      ? `addEventListener("install", (event) => event.waitUntil(skipWaiting()));
+addEventListener("activate", (event) => event.waitUntil(clients.claim()));`
+      : `let disposed = false;
+addEventListener("message", (event) => {
+  if (event.data !== "poggers:dispose" || disposed) return;
+  disposed = true;
+  void process.dispose().finally(() => {
+    event.ports[0]?.postMessage("poggers:disposed");
+    close();
+  });
+});`;
+  return `import application from ${JSON.stringify(application)};
+import { createWebHost } from ${JSON.stringify(input.host)};
+import { startProcess } from ${JSON.stringify(input.processRuntime)};
+
+const capabilities = createWebHost({
+  capabilities: ${JSON.stringify(input.hostCapabilities)},
+  context: "worker",
+  ${input.development ? `serverOrigin: ${JSON.stringify(input.serverOrigin ?? "http://localhost:3010")},` : ""}
+});
+const process = await startProcess(
+  application,
+  ${JSON.stringify(input.program.name)},
+  capabilities,
+  ${JSON.stringify(input.manifest)},
+);
+${lifecycle}
+`;
+}
+
+function workerName(program: string, index: number): string {
+  const readable = program
+    .toLowerCase()
+    .replaceAll(/[^a-z0-9]+/g, "-")
+    .replaceAll(/^-|-$/g, "");
+  return `${String(index + 1).padStart(2, "0")}-${readable || "worker"}`;
+}
+
 function candidateSource(input: {
   application: string;
-  capabilityModule?: string;
   development: boolean;
+  serverOrigin?: string;
+  host: string;
+  processRuntime: string;
   revision: number;
   runtime: string;
   program: string;
@@ -489,19 +642,59 @@ function candidateSource(input: {
   components: unknown;
   presentationDependencies: unknown;
   hotManifest: unknown;
+  hostCapabilities: readonly string[];
+  headless: readonly Readonly<{
+    program: string;
+    manifest: unknown;
+    hostCapabilities: readonly string[];
+  }>[];
+  workers: readonly Readonly<{
+    environment: WebWorkerEntry["environment"];
+    source: string;
+  }>[];
 }): string {
   const application = input.development
     ? `${input.application}?poggers-revision=${input.revision}`
     : input.application;
-  const capabilityModule = input.capabilityModule
-    ? `import capabilityModule from ${JSON.stringify(input.capabilityModule)};`
-    : `const capabilityModule = { development: () => ({}), production: () => ({}) };`;
   return `import application from ${JSON.stringify(application)};
+import { createWebHost } from ${JSON.stringify(input.host)};
 import { createWebUIAdapter, render } from ${JSON.stringify(input.runtime)};
-${capabilityModule}
+import { startProcess } from ${JSON.stringify(input.processRuntime)};
 
 export const manifest = ${JSON.stringify(input.hotManifest)};
 export const presentations = application.presentations ?? {};
+const headlessPrograms = ${JSON.stringify(input.headless)};
+const workerPrograms = ${JSON.stringify(input.workers)};
+
+const hostOptions = (capabilities) => ({
+  capabilities,
+  ${input.development ? `serverOrigin: ${JSON.stringify(input.serverOrigin ?? "http://localhost:3010")},` : ""}
+});
+
+const disposeAll = async (values) => {
+  const results = await Promise.allSettled(values.slice().reverse().map((value) => value()));
+  const errors = results.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
+  if (errors.length === 1) throw errors[0];
+  if (errors.length > 1) throw new AggregateError(errors, "Browser Program disposal failed.");
+};
+
+const disposeWorker = (worker) => new Promise((resolve) => {
+  const channel = new MessageChannel();
+  let complete = false;
+  const finish = () => {
+    if (complete) return;
+    complete = true;
+    clearTimeout(timeout);
+    channel.port1.close();
+    worker.terminate();
+    resolve();
+  };
+  const timeout = setTimeout(finish, 1000);
+  channel.port1.onmessage = (event) => {
+    if (event.data === "poggers:disposed") finish();
+  };
+  worker.postMessage("poggers:dispose", [channel.port2]);
+});
 
 export async function activate(root, previous = {}) {
   const hotState = {
@@ -514,24 +707,58 @@ export async function activate(root, previous = {}) {
     scroll: { ...previous.scroll },
     values: previous.values?.slice(),
   };
+  const cleanups = [];
+  try {
+    for (const definition of headlessPrograms) {
+      const process = await startProcess(
+        application,
+        definition.program,
+        createWebHost(hostOptions(definition.hostCapabilities)),
+        definition.manifest,
+      );
+      cleanups.push(() => process.dispose());
+    }
+    for (const definition of workerPrograms) {
+      const url = new URL(definition.source, import.meta.url);
+      if (definition.environment === "browser-worker") {
+        const worker = new Worker(url, { type: "module", name: "poggers" });
+        cleanups.push(() => disposeWorker(worker));
+      } else {
+        await navigator.serviceWorker.register(url, { type: "module" });
+      }
+    }
+  } catch (error) {
+    await disposeAll(cleanups);
+    throw error;
+  }
   const platform = createWebUIAdapter();
-  const capabilities = await capabilityModule.${input.development ? "development" : "production"}();
-  const ui = platform.component.createApplicationUI({
-    application,
-    program: ${JSON.stringify(input.program)},
-    programManifest: ${JSON.stringify(input.programManifest)},
-    capabilities,
-    presentations: { presentations },
-    components: ${JSON.stringify(input.components)},
-    presentationDependencies: ${JSON.stringify(input.presentationDependencies)},
-    hotState,
-    boundary: root,
-  });
+  const capabilities = createWebHost(${JSON.stringify({
+    capabilities: input.hostCapabilities,
+    ...(input.development ? { serverOrigin: input.serverOrigin ?? "http://localhost:3010" } : {}),
+  })});
+  let ui;
+  try {
+    ui = await platform.component.createApplicationUI({
+      application,
+      program: ${JSON.stringify(input.program)},
+      programManifest: ${JSON.stringify(input.programManifest)},
+      capabilities,
+      presentations: { presentations },
+      components: ${JSON.stringify(input.components)},
+      presentationDependencies: ${JSON.stringify(input.presentationDependencies)},
+      hotState,
+      boundary: root,
+    });
+  } catch (error) {
+    await disposeAll(cleanups);
+    throw error;
+  }
   let disposeRender;
   try {
     disposeRender = render(() => ui.renderRoot(), root, hotState);
   } catch (error) {
     await ui.dispose();
+    await disposeAll(cleanups);
     throw error;
   }
   let disposed = false;
@@ -546,7 +773,7 @@ export async function activate(root, previous = {}) {
       if (disposed) return;
       disposed = true;
       disposeRender();
-      await ui.dispose();
+      await disposeAll([() => ui.dispose(), ...cleanups]);
     },
   };
 }
@@ -572,16 +799,18 @@ export function collectPresentationDependencies(
         name === programName && environment.name === "browser-main" && Boolean(ui),
     )
     .flatMap((program) =>
-      (program.ui?.components ?? []).map((component) => {
-        const semantic = [
-          ...program.feature.split(".").filter(Boolean).map(capitalize),
-          component.name,
-        ].join("/");
-        return {
-          semantic,
-          runtime: runtimeComponentName(program.feature, component.name),
-        };
-      }),
+      program.contributions.flatMap((contribution) =>
+        (contribution.ui?.components ?? []).map((component) => {
+          const semantic = [
+            ...contribution.feature.split(".").filter(Boolean).map(capitalize),
+            component.name,
+          ].join("/");
+          return {
+            semantic,
+            runtime: runtimeComponentName(contribution.feature, component.name),
+          };
+        }),
+      ),
     )
     .sort((left, right) => right.semantic.length - left.semantic.length);
   const animationScopes = new Map(

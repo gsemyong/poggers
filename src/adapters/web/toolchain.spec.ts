@@ -56,37 +56,43 @@ function applicationIR(): ApplicationIR {
     features: [],
     programs: [
       {
-        id: "feature/dashboard/program/browser",
-        feature: "dashboard",
+        id: "program/browser",
         name: "browser",
         environment: { name: "browser-main", platform: "web", ui: "web" },
-        requires: [],
-        provides: [],
-        ui: {
-          state: { kind: "record", fields: [] },
-          actions: [],
-          components: [
-            {
-              name: "Animated",
-              propCallbacks: [],
+        ui: { root: { feature: "dashboard", component: "Animated" } },
+        contributions: [
+          {
+            id: "feature/dashboard/program/browser",
+            feature: "dashboard",
+            requires: [],
+            provides: [],
+            ui: {
               state: { kind: "record", fields: [] },
               actions: [],
-              elements: [{ name: "Root", element: "div" }],
-              implementation: { state: false, actions: false, mount: false, view: true },
+              components: [
+                {
+                  name: "Animated",
+                  propCallbacks: [],
+                  state: { kind: "record", fields: [] },
+                  actions: [],
+                  elements: [{ name: "Root", element: "div" }],
+                  implementation: { state: false, actions: false, mount: false, view: true },
+                },
+                {
+                  name: "Static",
+                  propCallbacks: [],
+                  state: { kind: "record", fields: [] },
+                  actions: [],
+                  elements: [{ name: "Root", element: "div" }],
+                  implementation: { state: false, actions: false, mount: false, view: true },
+                },
+              ],
+              root: "Animated",
             },
-            {
-              name: "Static",
-              propCallbacks: [],
-              state: { kind: "record", fields: [] },
-              actions: [],
-              elements: [{ name: "Root", element: "div" }],
-              implementation: { state: false, actions: false, mount: false, view: true },
-            },
-          ],
-          root: "Animated",
-        },
-        implementation: { kind: "source", span },
-        span,
+            implementation: { kind: "source", reason: "platform-ui", span },
+            span,
+          },
+        ],
       },
     ],
     presentations: [

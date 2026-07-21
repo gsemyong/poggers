@@ -196,15 +196,24 @@ function application(file: string): ApplicationIR {
     features: [{ id: "feature/app", path: "app", children: [], programs: [] }],
     programs: [
       {
-        id: "feature/app/program/browser",
-        feature: "app",
+        id: "program/browser",
         name: "browser",
         environment: { name: "browser-main", platform: "web", ui: "web" },
-        requires: [],
-        provides: [],
-        ui: { state: record({ count: numberType() }), actions: [], components: [] },
-        implementation: { kind: "source", span: { file, line: 1, column: 1 } },
-        span: { file, line: 1, column: 1 },
+        contributions: [
+          {
+            id: "feature/app/program/browser",
+            feature: "app",
+            requires: [],
+            provides: [],
+            ui: { state: record({ count: numberType() }), actions: [], components: [] },
+            implementation: {
+              kind: "source",
+              reason: "platform-ui",
+              span: { file, line: 1, column: 1 },
+            },
+            span: { file, line: 1, column: 1 },
+          },
+        ],
       },
     ],
     presentations: [],

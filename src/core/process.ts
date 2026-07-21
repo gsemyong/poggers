@@ -61,7 +61,7 @@ export type ProgramContributionInstance = Readonly<{
   ui?: UIContributionInstance;
   capabilities: Readonly<Record<string, unknown>>;
   provided: Readonly<Record<string, unknown>>;
-  start(): Readonly<Record<string, unknown>>;
+  start(): Promise<Readonly<Record<string, unknown>>>;
   dispose(): Promise<void>;
 }>;
 
@@ -149,6 +149,7 @@ export function createUIContributionInstance(
 
 type ProgramContributionOptions = Readonly<{
   address: ProgramContributionAddress;
+  provides: readonly string[];
   capabilities?: Record<string, unknown>;
   features?: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
   initialState?: Readonly<Record<string, unknown>>;
@@ -308,7 +309,7 @@ export function createProgramContributionInstance(
   options: ProgramContributionOptions,
 ): ProgramContributionInstance {
   const scope = new ResourceScope();
-  let started = false;
+  let starting: Promise<Readonly<Record<string, unknown>>> | undefined;
   let disposed = false;
   let provided: Readonly<Record<string, unknown>> = Object.freeze({});
   const availableCapabilities = options.capabilities ?? Object.create(null);
@@ -332,42 +333,37 @@ export function createProgramContributionInstance(
       return provided;
     },
     start() {
-      if (started) return provided;
-      if (disposed) throw new Error(`${formatAddress(options.address)} is disposed.`);
-      started = true;
-      if (!definition.start) return provided;
+      if (starting) return starting;
+      if (disposed) {
+        return Promise.reject(new Error(`${formatAddress(options.address)} is disposed.`));
+      }
+      starting = (async () => {
+        const result = definition.start?.({
+          capabilities,
+          ...(ui
+            ? {
+                actions: ui.actions,
+                features: options.features ?? {},
+              }
+            : {}),
+        });
 
-      const result = definition.start({
-        capabilities,
-        ...(ui
-          ? {
-              actions: ui.actions,
-              features: options.features ?? {},
-            }
-          : {}),
-      });
-
-      if (isPromiseLike(result)) {
-        scope.adopt(result);
-      } else if (result !== undefined) {
-        if (
-          result !== null &&
-          typeof result === "object" &&
-          (isDisposable(result) || isAsyncIterable(result))
-        ) {
-          scope.adopt(result);
-        } else {
-          if (!isRecord(result)) {
+        if (options.provides.length) {
+          const capabilities = await result;
+          if (!isRecord(capabilities)) {
             throw new Error(
-              `${formatAddress(options.address)} start must return a resource or Capability object.`,
+              `${formatAddress(options.address)} must return its declared Capability object.`,
             );
           }
-          provided = Object.freeze({ ...result });
+          provided = Object.freeze({ ...capabilities });
           Object.assign(availableCapabilities, provided);
           for (const capability of Object.values(provided)) scope.adopt(capability);
+        } else if (result !== undefined) {
+          scope.adopt(result);
         }
-      }
-      return provided;
+        return provided;
+      })();
+      return starting;
     },
     async dispose() {
       if (disposed) return;
@@ -404,8 +400,26 @@ export type ProgramPlan = Readonly<{
   external: readonly string[];
 }>;
 
+export type ProgramAssemblyOptions = Readonly<{
+  application: RuntimeApplication;
+  name: string;
+  capabilities: Readonly<Record<string, unknown>>;
+  manifest: ProgramManifest;
+  initialState?: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
+  onActionEvent?: () => void;
+}>;
+
+/** One fully started Program and every Feature contribution assembled into it. */
+export type ProgramAssembly = Readonly<{
+  name: string;
+  contributions: readonly ProgramContributionInstance[];
+  capabilities: Readonly<Record<string, unknown>>;
+  ui: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
+  dispose(): Promise<void>;
+}>;
+
 /** Validates that a Program received exactly the compiler-inferred external contract. */
-export function validateProgramCapabilities(
+export function validateCapabilityBindings(
   plan: ProgramPlan,
   capabilities: Readonly<Record<string, unknown>>,
 ): void {
@@ -544,22 +558,15 @@ export function planProgram(
   };
 }
 
-/** Starts every Feature contribution to one named Program. */
-export async function startProcess<Contract extends ApplicationContract>(
-  application: Application<Contract>,
-  name: string,
-  capabilities: Readonly<Record<string, unknown>>,
-  manifest: ProgramManifest,
-): Promise<Process> {
-  const runtime = application as RuntimeApplication;
-  const plan = planProgram(runtime, name, manifest);
-  const contributions: ProgramContributionInstance[] = [];
+/** Assembles and starts every Feature contribution to one named Program. */
+export async function assembleProgram(options: ProgramAssemblyOptions): Promise<ProgramAssembly> {
+  const plan = planProgram(options.application, options.name, options.manifest);
   const ui: Record<string, Readonly<Record<string, unknown>>> = Object.create(null);
   const externalScope = new ResourceScope();
   const providedCapabilities: Record<string, unknown> = Object.create(null);
 
-  validateProgramCapabilities(plan, capabilities);
-  for (const capability of Object.values(capabilities)) externalScope.adopt(capability);
+  validateCapabilityBindings(plan, options.capabilities);
+  for (const capability of Object.values(options.capabilities)) externalScope.adopt(capability);
 
   const instances = new Map<string, ProgramContributionInstance>();
   const registries = new Map<string, Record<string, unknown>>();
@@ -575,12 +582,17 @@ export async function startProcess<Contract extends ApplicationContract>(
     }
     const registry: Record<string, unknown> = Object.create(null);
     for (const capability of planned.manifest.requires) {
-      if (Object.hasOwn(capabilities, capability)) registry[capability] = capabilities[capability];
+      if (Object.hasOwn(options.capabilities, capability)) {
+        registry[capability] = options.capabilities[capability];
+      }
     }
     const instance = createProgramContributionInstance(planned.definition, {
-      address: { program: name, feature: path },
+      address: { program: options.name, feature: path },
+      provides: planned.manifest.provides,
       capabilities: registry,
       features: children,
+      initialState: options.initialState?.[path],
+      onActionEvent: options.onActionEvent,
     });
     instances.set(path, instance);
     registries.set(path, registry);
@@ -598,7 +610,7 @@ export async function startProcess<Contract extends ApplicationContract>(
           registry[capability] = providedCapabilities[capability];
         }
       }
-      const provided = instance.start();
+      const provided = await instance.start();
       const actual = Object.keys(provided).sort();
       const declared = [...planned.manifest.provides].sort();
       if (actual.join("\n") !== declared.join("\n")) {
@@ -608,19 +620,18 @@ export async function startProcess<Contract extends ApplicationContract>(
         );
       }
       Object.assign(providedCapabilities, provided);
-      contributions.push(instance);
     }
   } catch (error) {
-    const created = [...instances.values()];
-    await disposeProgram(created, externalScope).catch(() => undefined);
+    await disposeProgram([...instances.values()], externalScope).catch(() => undefined);
     throw error;
   }
 
+  const contributions = plan.contributions.map(({ feature }) => instances.get(feature)!);
   let disposed = false;
   return {
-    name,
+    name: options.name,
     contributions,
-    capabilities: Object.freeze({ ...capabilities, ...providedCapabilities }),
+    capabilities: Object.freeze({ ...options.capabilities, ...providedCapabilities }),
     ui,
     async dispose() {
       if (disposed) return;
@@ -628,6 +639,21 @@ export async function startProcess<Contract extends ApplicationContract>(
       await disposeProgram(contributions, externalScope);
     },
   };
+}
+
+/** Starts one live Process instance of a named Program. */
+export async function startProcess<Contract extends ApplicationContract>(
+  application: Application<Contract>,
+  name: string,
+  capabilities: Readonly<Record<string, unknown>>,
+  manifest: ProgramManifest,
+): Promise<Process> {
+  return assembleProgram({
+    application: application as RuntimeApplication,
+    name,
+    capabilities,
+    manifest,
+  });
 }
 
 function insertSorted(values: string[], value: string): void {

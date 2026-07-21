@@ -1,13 +1,14 @@
 import { createProgramContributionInstance } from "@/core/process";
 import {
-  type EntityContract,
+  bindEntityPrincipal,
+  type DefinedEntityFeature,
+  type EntityApi,
   type EntityEvent,
-  type EntityFeatureFactory,
+  type EntityModelDefinition,
   type EntityService,
   type EventStore,
-  type Identity,
   type StoredEvent,
-} from "@/features/entity/feature";
+} from "@/features/entity";
 
 export function createMemoryEventStore<Event>(): EventStore<Event> {
   const streams = new Map<string, StoredEvent<Event>[]>();
@@ -40,37 +41,41 @@ export function createMemoryEventStore<Event>(): EventStore<Event> {
   };
 }
 
-export function createIdentity<Credentials, Value extends Readonly<{ id: string }>>(
-  identify: (credentials: Credentials) => Value | undefined,
-): Identity<Credentials, Value> {
-  return { authenticate: async ({ credentials }) => identify(credentials) };
-}
-
-export function createEntityFixture<Contract extends EntityContract>(
-  factory: EntityFeatureFactory<Contract>,
-  input: Readonly<{
-    identity: Identity<Contract["Credentials"], Contract["Principal"]>;
-  }>,
-): AsyncDisposable &
-  Readonly<{
-    service: EntityService<Contract>;
-    events: EventStore<EntityEvent<Contract["Entity"]>>;
-  }> {
-  const feature = factory();
-  const events = createMemoryEventStore<EntityEvent<Contract["Entity"]>>();
+/** Creates the specialized semantic fixture shipped with the entity factory. */
+export async function createEntityFixture<Model extends EntityModelDefinition>(
+  feature: DefinedEntityFeature<Model>,
+  input: Readonly<{ principal: Model["Principal"] }>,
+): Promise<
+  AsyncDisposable &
+    Readonly<{
+      api: EntityApi<Model>;
+      service: EntityService<Model>;
+      events: EventStore<EntityEvent<Model["Value"]>>;
+      as(principal: Model["Principal"]): EntityApi<Model>;
+    }>
+> {
+  const events = createMemoryEventStore<EntityEvent<Model["Value"]>>();
   let identifier = 0;
   let time = 0;
   const instance = createProgramContributionInstance(feature.programs.server as never, {
-    address: { program: "server", feature: factory.capability },
+    address: { program: "server", feature: feature.capability },
+    provides: [feature.capability],
     capabilities: {
-      identity: input.identity,
+      identity: { authenticate: async () => input.principal },
       events,
       identifiers: { create: () => `entity-${++identifier}` },
       clock: { now: () => ++time },
+      http: { route: () => ({ [Symbol.dispose]: () => undefined }) },
     },
   });
-  const service = instance.start()[factory.capability] as EntityService<Contract>;
-  return { service, events, [Symbol.asyncDispose]: () => instance.dispose() };
+  const service = (await instance.start())[feature.capability] as EntityService<Model>;
+  return {
+    api: bindEntityPrincipal(service, input.principal),
+    service,
+    events,
+    as: (principal) => bindEntityPrincipal(service, principal),
+    [Symbol.asyncDispose]: () => instance.dispose(),
+  };
 }
 
 function eventStream<Event>(

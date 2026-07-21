@@ -71,7 +71,7 @@ const orders = {
           state.status = "ready";
         },
         open({ capabilities }, input) {
-          capabilities.navigation.open(input);
+          capabilities.navigation.navigate({ path: `/orders/${input.id}` });
         },
       },
       start({ actions, capabilities }) {
@@ -106,6 +106,23 @@ export default {
 } satisfies Application<App>;
 ```
 
+Reusable Feature factories name logical Program roles such as `server` and
+`browser`. The consuming application assigns those roles to its concrete
+Program names once, at composition:
+
+```ts
+const tasks = placePrograms(createEntity<Tasks>(definition), {
+  server: "api",
+  browser: "browser",
+});
+```
+
+Placement applies recursively through the Feature tree and preserves the
+factory's semantic API. Two logical roles cannot be mapped to the same name in
+one Feature. After placement, ordinary same-named Program assembly is the only
+composition rule; factories do not gain a second runtime or communication
+mechanism.
+
 `start` establishes long-lived Program relationships. Actions handle finite
 input. Returned disposables, async disposables, async iterables, and promises
 resolving to owned resources are disposed once in reverse acquisition order.
@@ -113,12 +130,11 @@ Features coordinate through Capabilities; direct APIs exposed to Components
 are assembled only from contributions to the same Program.
 
 For each named Program, all Feature requirements and providers form one capability graph. The
-Application supplies only requirements that no Feature provides, through
-`src/capabilities/<program>.ts`. Its `development()` or `production()` function is called once per
-Process. The runtime validates the exact external set, orders providers before dependants, and owns
-external and Feature-provided resources exactly once. Cross-Program communication is therefore an
-ordinary semantic Capability implementation, such as a local object or an HTTP client; it is not a
-second framework mechanism.
+selected Platform Adapter creates the external host scope once per Process instance; applications
+do not wire host dependencies. The runtime validates that scope against compiler-derived meaning,
+orders Feature providers before dependants, and owns external and Feature-provided resources
+exactly once. Cross-Program communication is an ordinary semantic Capability implementation, such
+as a local object or an HTTP client; it is not a second framework mechanism.
 
 ## UI boundary
 
@@ -187,6 +203,48 @@ Adapter selection uses Platform identities extracted into IR. Environment
 names never select implementations. A missing or mismatched adapter fails
 before native work starts. Product source can mention semantic Platform and UI
 types but cannot access adapter implementations.
+
+The compiler emits exactly one descriptor for each named Program, assembled
+from every same-named Feature contribution. In development, an adapter starts
+one owned Process for each descriptor. A compatible source update replaces only
+the affected Processes transactionally; a browser-only edit therefore cannot
+restart an unrelated server Process. In production, each descriptor becomes an
+independently deployable `ProductionArtifact` identified by its Program and
+Environment.
+
+Portable headless logic follows a stricter realization path. The TypeScript compiler API resolves
+the authored types, symbols, generic specializations, factory object construction, and executable
+syntax without running source. The frontend lowers that meaning statement by statement into typed
+IR with source spans and a reachable pure-function graph. JavaScript development and native Rust
+generation consume the same IR; neither backend interprets TypeScript independently.
+
+Capabilities are the only effect boundary. Pure helpers and local data compile directly, while a
+known native Capability implementation can use static dispatch. Platform UI remains intentionally
+platform source. Host logic outside the current portable profile is recorded as `host-source` with
+its diagnostic so JavaScript development remains available, but native generation fails explicitly
+instead of embedding or invoking JavaScript. The normative subset and cross-backend semantics live
+in [portable-typescript.md](./portable-typescript.md).
+
+The server production adapter links every contribution to a named Program before generation. It
+resolves Feature-provided Capabilities, validates the remaining host contract, and emits one stable
+Rust workspace per Program topology. Adapter runtime support, identity behavior, each entity
+Feature, and the thin executable are separate crates. Generated-source fingerprints preserve
+`rustfmt` output, so changing one Feature rebuilds that crate and the executable without touching
+unrelated Features or adapter runtime code. Complete semantic output is content-addressed; an exact
+repeat copies the executable without invoking Cargo. Strict Clippy validation is an explicit test
+gate rather than production build work.
+
+The native server can expose only API routes or, when `POGGERS_WEB_ROOT` is set, serve a built web
+artifact with SPA fallback. The browser continues to use same-origin `/api`; deployment may provide
+that topology directly, through the native process, or through a CDN or reverse proxy.
+
+Running one artifact once creates one Process. Running the same artifact more
+than once creates independent replicas with fresh host-capability scopes.
+Replica count, placement, supervision, load balancing, and horizontal scaling
+belong to deployment and the selected Capability implementations. Product code
+does not acquire topology syntax. Contributions inside one Program communicate
+through its assembled local capability graph; Programs communicate only through
+ordinary external Capabilities such as HTTP, queues, or shared storage.
 
 The shipped web adapter owns browser Environments, DOM JSX, direct fine-grained
 updates, Vite development and production, and the web Presentation language.
@@ -353,6 +411,11 @@ src/
     registry.ts
     server/
       adapter.ts
+      host.ts
+      native.ts       # whole-Program generation, caching, and build
+      native/
+        domain.ts     # portable Feature callbacks to Rust
+        runtime.ts    # stable native server runtime source
       platform.ts
       runtime.ts
     web/
@@ -379,9 +442,9 @@ src/
             layout.ts       # layout continuity
             observations.ts # browser observations
   features/
-    entity/
-      feature.ts       # reusable event-sourced entity Feature factory
-      testing.ts       # factory-owned deterministic test harness
+    entity.ts          # reusable event-sourced entity Feature factory
+    entity.testing.ts  # factory-owned deterministic test harness
+    identity.ts        # reusable authenticated identity Feature factory
   cli.ts
   index.ts
 ```
@@ -400,6 +463,10 @@ Package exports point directly at real modules; there are no forwarding
 entrypoint files. `template/` is the canonical generated application.
 `examples/` contains focused executable pressure cases and does not replace
 the template.
+
+Generated applications and executable examples follow the single convention in
+[Project organization](project-organization.md). That convention is independent
+of application size and is verified by the CLI test suite.
 
 ## Verification
 
