@@ -1,46 +1,29 @@
-/** Stable Rust support owned by the server production adapter. */
-export const SERVER_RUNTIME_MANIFEST = `[package]
-name = "poggers_server_runtime"
-version = "0.0.0"
-edition = "2024"
-
-[dependencies]
-argon2 = "0.5.3"
-async-stream = "0.3.6"
-axum = "0.8.9"
-bytes = "1.10.1"
-rusqlite = { version = "0.40.1", features = ["bundled"] }
-serde_json = "1.0.145"
-tokio = { version = "1.48.0", features = ["net", "signal", "sync"] }
-tower-http = { version = "0.6.6", features = ["cors", "fs"] }
-uuid = { version = "1.18.1", features = ["v4"] }
-`;
-
-export const SERVER_RUNTIME_SOURCE = `use std::{
-    collections::HashMap,
+use std::{
+    collections::{HashMap, HashSet},
     convert::Infallible,
     env,
-    path::PathBuf,
+    fmt::Write,
+    path::{Path as FilePath, PathBuf},
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use argon2::{
-    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
+    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
 };
 use async_stream::stream;
 use axum::{
+    Json, Router,
     body::Body,
     extract::{Path, Query, State},
-    http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode},
+    http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri, header},
     response::{IntoResponse, Response},
     routing::{get, post},
-    Json, Router,
 };
 use bytes::Bytes;
-use rusqlite::{params, Connection, OptionalExtension};
-use serde_json::{json, Value};
+use rusqlite::{Connection, OptionalExtension, params};
+use serde_json::{Value, json};
 use tokio::sync::broadcast;
 use tower_http::{
     cors::{AllowOrigin, CorsLayer},
@@ -70,6 +53,7 @@ struct AppState {
     database: Arc<Mutex<Connection>>,
     channels: Arc<Mutex<HashMap<String, broadcast::Sender<Value>>>>,
     identity: IdentitySpec,
+    document: Option<Arc<Value>>,
 }
 
 #[derive(Debug)]
@@ -91,7 +75,11 @@ impl ApiError {
     }
 
     fn internal(error: impl std::fmt::Display) -> Self {
-        Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", error.to_string())
+        Self::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            error.to_string(),
+        )
     }
 }
 
@@ -198,7 +186,9 @@ fn authenticated_user(state: &AppState, headers: &HeaderMap) -> Result<Value, Ap
 }
 
 fn principal(state: &AppState, headers: &HeaderMap) -> Result<Value, ApiError> {
-    Ok((state.identity.project)(authenticated_user(state, headers)?))
+    Ok((state.identity.project)(authenticated_user(
+        state, headers,
+    )?))
 }
 
 fn session_response(user: Value, token: &str) -> Response {
@@ -693,17 +683,20 @@ async fn changes(
         filter.as_ref(),
     );
     let output = stream! {
-        yield Ok::<Bytes, Infallible>(Bytes::from(format!("{}\n", initial)));
+        yield Ok::<Bytes, Infallible>(Bytes::from(format!("{}
+    ", initial)));
         loop {
             match receiver.recv().await {
                 Ok(snapshot) => {
                     let snapshot = visible(spec, &principal, snapshot, filter.as_ref());
-                    yield Ok(Bytes::from(format!("{}\n", snapshot)));
+                    yield Ok(Bytes::from(format!("{}
+    ", snapshot)));
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => {
                     if let Ok(snapshot) = current_snapshot(&state, &stream_name) {
                         let snapshot = visible(spec, &principal, snapshot, filter.as_ref());
-                        yield Ok(Bytes::from(format!("{}\n", snapshot)));
+                        yield Ok(Bytes::from(format!("{}
+    ", snapshot)));
                     }
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
@@ -741,21 +734,24 @@ fn entity_routes(mut router: Router<AppState>, spec: EntitySpec) -> Router<AppSt
     let get_spec = spec;
     let update_spec = spec;
     let remove_spec = spec;
-    router = router.route(
-        &collection,
-        get(
-            move |State(state): State<AppState>,
-                  headers: HeaderMap,
-                  Query(query): Query<HashMap<String, String>>| async move {
-                json_response(list_entities(list_spec, state, headers, query).await)
-            },
-        )
-        .post(
-            move |State(state): State<AppState>, headers: HeaderMap, Json(input): Json<Value>| async move {
-                created_response(create_entity(create_spec, state, headers, input).await)
-            },
-        ),
-    );
+    router =
+        router.route(
+            &collection,
+            get(
+                move |State(state): State<AppState>,
+                      headers: HeaderMap,
+                      Query(query): Query<HashMap<String, String>>| async move {
+                    json_response(list_entities(list_spec, state, headers, query).await)
+                },
+            )
+            .post(
+                move |State(state): State<AppState>,
+                      headers: HeaderMap,
+                      Json(input): Json<Value>| async move {
+                    created_response(create_entity(create_spec, state, headers, input).await)
+                },
+            ),
+        );
     router = router.route(
         &changes_path,
         get(
@@ -791,6 +787,295 @@ fn entity_routes(mut router: Router<AppState>, spec: EntitySpec) -> Router<AppSt
     )
 }
 
+fn load_web_document(root: &FilePath) -> Result<Value, String> {
+    let source = std::fs::read_to_string(root.join("document.ir.json"))
+        .map_err(|error| format!("read web document: {error}"))?;
+    let document: Value =
+        serde_json::from_str(&source).map_err(|error| format!("decode web document: {error}"))?;
+    render_web_document(&document)?;
+    Ok(document)
+}
+
+fn document_string<'a>(document: &'a Value, name: &str) -> Result<&'a str, String> {
+    document
+        .get(name)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("web document {name} must be a string"))
+}
+
+fn render_web_document(document: &Value) -> Result<String, String> {
+    validate_object_keys(
+        document,
+        &[
+            "entry",
+            "language",
+            "rendering",
+            "root",
+            "styles",
+            "title",
+            "version",
+        ],
+        "web document",
+    )?;
+    if document.get("version").and_then(Value::as_u64) != Some(1) {
+        return Err("unsupported web document version".to_owned());
+    }
+    if document_string(document, "rendering")? != "initial-state-ssr" {
+        return Err("unsupported web document rendering mode".to_owned());
+    }
+    let language = document_string(document, "language")?;
+    if language.is_empty()
+        || language
+            .chars()
+            .any(|character| character.is_whitespace() || "\"'<>".contains(character))
+    {
+        return Err("invalid web document language".to_owned());
+    }
+    let title = document_string(document, "title")?;
+    let entry = document_string(document, "entry")?;
+    if !entry.starts_with('/') {
+        return Err("web document entry must be absolute".to_owned());
+    }
+    let styles = document
+        .get("styles")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "web document styles must be an array".to_owned())?;
+    let root = document
+        .get("root")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "web document root must be an array".to_owned())?;
+    let mut output = String::from("<!doctype html><html lang=\"");
+    escape_html_attribute(&mut output, language);
+    output.push_str("\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1,viewport-fit=cover\">");
+    if !styles.is_empty() {
+        output.push_str("<style data-poggers-ssr>");
+        for style in styles {
+            let style = style
+                .as_str()
+                .ok_or_else(|| "web document style must be a string".to_owned())?;
+            if style.to_ascii_lowercase().contains("</style") {
+                return Err("web document style cannot close the style element".to_owned());
+            }
+            output.push_str(style);
+        }
+        output.push_str("</style>");
+    }
+    output.push_str("<title>");
+    escape_html_text(&mut output, title);
+    output.push_str(
+        "</title></head><body><div id=\"app\" data-poggers-rendering=\"initial-state-ssr\">",
+    );
+    let mut identities = HashSet::new();
+    for node in root {
+        render_web_node(&mut output, node, &mut identities)?;
+    }
+    output.push_str("</div><script type=\"module\" src=\"");
+    escape_html_attribute(&mut output, entry);
+    output.push_str("\"></script></body></html>");
+    Ok(output)
+}
+
+fn render_web_node(
+    output: &mut String,
+    node: &Value,
+    identities: &mut HashSet<String>,
+) -> Result<(), String> {
+    let kind = document_string(node, "kind")?;
+    let hydration = document_string(node, "hydration")?;
+    if !valid_hydration_identity(hydration) || !identities.insert(hydration.to_owned()) {
+        return Err("invalid web hydration identity".to_owned());
+    }
+    if kind == "text" {
+        validate_object_keys(node, &["hydration", "kind", "value"], "web text node")?;
+        if !hydration.starts_with('t') {
+            return Err("web text hydration identity must start with t".to_owned());
+        }
+        output.push_str("<!--poggers:");
+        output.push_str(hydration);
+        output.push_str("-->");
+        escape_html_text(output, document_string(node, "value")?);
+        return Ok(());
+    }
+    if kind != "element" {
+        return Err(format!("unsupported web document node {kind}"));
+    }
+    validate_object_keys(
+        node,
+        &["attributes", "children", "hydration", "kind", "tag"],
+        "web element node",
+    )?;
+    if !hydration.starts_with('e') {
+        return Err("web element hydration identity must start with e".to_owned());
+    }
+    let tag = document_string(node, "tag")?;
+    if !valid_html_name(tag) {
+        return Err(format!("invalid web element {tag}"));
+    }
+    write!(output, "<{tag}").expect("write to String");
+    let attributes = node
+        .get("attributes")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "web element attributes must be an array".to_owned())?;
+    let mut attribute_names = HashSet::new();
+    let mut hydration_attribute = None;
+    for attribute in attributes {
+        validate_object_keys(attribute, &["name", "value"], "web element attribute")?;
+        let name = document_string(attribute, "name")?;
+        if !valid_html_attribute(name) {
+            return Err(format!("invalid web attribute {name}"));
+        }
+        let value = document_string(attribute, "value")?;
+        if !attribute_names.insert(name) {
+            return Err(format!("duplicate web attribute {name}"));
+        }
+        if name == "data-poggers-h" {
+            hydration_attribute = Some(value);
+        }
+        output.push(' ');
+        output.push_str(name);
+        if !value.is_empty() {
+            output.push_str("=\"");
+            escape_html_attribute(output, value);
+            output.push('"');
+        }
+    }
+    if hydration_attribute != Some(hydration) {
+        return Err(format!(
+            "web element {hydration} has a mismatched hydration attribute"
+        ));
+    }
+    output.push('>');
+    let children = node
+        .get("children")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "web element children must be an array".to_owned())?;
+    if is_void_element(tag) {
+        return if children.is_empty() {
+            Ok(())
+        } else {
+            Err(format!("void web element {tag} cannot have children"))
+        };
+    }
+    for child in children {
+        render_web_node(output, child, identities)?;
+    }
+    write!(output, "</{tag}>").expect("write to String");
+    Ok(())
+}
+
+fn validate_object_keys(value: &Value, expected: &[&str], subject: &str) -> Result<(), String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| format!("{subject} must be an object"))?;
+    if object.len() != expected.len() || expected.iter().any(|name| !object.contains_key(*name)) {
+        return Err(format!("{subject} has unsupported fields"));
+    }
+    Ok(())
+}
+
+fn valid_hydration_identity(value: &str) -> bool {
+    let mut characters = value.chars();
+    matches!(characters.next(), Some('e' | 't'))
+        && characters.clone().next().is_some()
+        && characters.all(|character| character.is_ascii_digit())
+}
+
+fn valid_html_name(value: &str) -> bool {
+    let mut characters = value.chars();
+    characters
+        .next()
+        .is_some_and(|character| character.is_ascii_lowercase())
+        && characters.all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+        })
+}
+
+fn valid_html_attribute(value: &str) -> bool {
+    let mut characters = value.chars();
+    characters
+        .next()
+        .is_some_and(|character| character.is_ascii_lowercase())
+        && characters.all(|character| {
+            character.is_ascii_lowercase()
+                || character.is_ascii_digit()
+                || matches!(character, '-' | '_' | '.' | ':')
+        })
+}
+
+fn is_void_element(value: &str) -> bool {
+    matches!(
+        value,
+        "area"
+            | "base"
+            | "br"
+            | "col"
+            | "embed"
+            | "hr"
+            | "img"
+            | "input"
+            | "link"
+            | "meta"
+            | "source"
+            | "track"
+            | "wbr"
+    )
+}
+
+fn escape_html_text(output: &mut String, value: &str) {
+    for character in value.chars() {
+        match character {
+            '&' => output.push_str("&amp;"),
+            '<' => output.push_str("&lt;"),
+            '>' => output.push_str("&gt;"),
+            _ => output.push(character),
+        }
+    }
+}
+
+fn escape_html_attribute(output: &mut String, value: &str) {
+    for character in value.chars() {
+        match character {
+            '&' => output.push_str("&amp;"),
+            '<' => output.push_str("&lt;"),
+            '>' => output.push_str("&gt;"),
+            '"' => output.push_str("&quot;"),
+            '\'' => output.push_str("&#39;"),
+            _ => output.push(character),
+        }
+    }
+}
+
+async fn web_document(State(state): State<AppState>, method: Method, uri: Uri) -> Response {
+    if method != Method::GET && method != Method::HEAD {
+        return StatusCode::METHOD_NOT_ALLOWED.into_response();
+    }
+    if uri
+        .path()
+        .rsplit('/')
+        .next()
+        .is_some_and(|segment| segment.contains('.'))
+    {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let Some(document) = state.document.as_deref() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    match render_web_document(document) {
+        Ok(html) => {
+            let body = if method == Method::HEAD {
+                String::new()
+            } else {
+                html
+            };
+            ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], body).into_response()
+        }
+        Err(error) => {
+            eprintln!("render web document: {error}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
 pub async fn serve(
     application: &'static str,
     program: &'static str,
@@ -804,10 +1089,18 @@ pub async fn serve(
         eprintln!("{}", error.message);
         std::process::exit(1);
     });
+    let web_root = env::var("POGGERS_WEB_ROOT").ok().map(PathBuf::from);
+    let document = web_root.as_ref().map(|root| {
+        Arc::new(load_web_document(root).unwrap_or_else(|error| {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }))
+    });
     let state = AppState {
         database: Arc::new(Mutex::new(database)),
         channels: Arc::new(Mutex::new(HashMap::new())),
         identity,
+        document,
     };
     let web_origin =
         env::var("POGGERS_WEB_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".to_owned());
@@ -841,16 +1134,16 @@ pub async fn serve(
             &format!("/api/{}/get-session", identity.name),
             get(get_session),
         )
-        .route(
-            &format!("/api/{}/sign-out", identity.name),
-            post(sign_out),
-        );
+        .route(&format!("/api/{}/sign-out", identity.name), post(sign_out));
     for spec in entities {
         router = entity_routes(router, *spec);
     }
-    let router = if let Ok(root) = env::var("POGGERS_WEB_ROOT") {
-        let root = PathBuf::from(root);
-        router.fallback_service(ServeDir::new(&root).fallback(ServeFile::new(root.join("index.html"))))
+    let router = if let Some(root) = web_root {
+        router
+            .route_service("/app.js", ServeFile::new(root.join("app.js")))
+            .nest_service("/assets", ServeDir::new(root.join("assets")))
+            .nest_service("/workers", ServeDir::new(root.join("workers")))
+            .fallback(web_document)
     } else {
         router
     };
@@ -868,4 +1161,80 @@ pub async fn serve(
         .await
         .expect("serve native application");
 }
-`;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn document() -> Value {
+        json!({
+            "version": 1,
+            "rendering": "initial-state-ssr",
+            "language": "en",
+            "title": "A < B & C",
+            "entry": "/app.js",
+            "styles": [".root{color:red}"],
+            "root": [{
+                "kind": "element",
+                "hydration": "e0",
+                "tag": "main",
+                "attributes": [
+                    { "name": "class", "value": "root" },
+                    { "name": "data-poggers-h", "value": "e0" }
+                ],
+                "children": [{
+                    "kind": "text",
+                    "hydration": "t0",
+                    "value": "<script>&\"'"
+                }]
+            }]
+        })
+    }
+
+    #[test]
+    fn renders_the_versioned_document_and_escapes_content() {
+        let rendered = render_web_document(&document()).expect("render document");
+        assert!(rendered.starts_with("<!doctype html><html lang=\"en\">"));
+        assert!(rendered.contains("<style data-poggers-ssr>.root{color:red}</style>"));
+        assert!(rendered.contains("<title>A &lt; B &amp; C</title>"));
+        assert!(rendered.contains("<!--poggers:t0-->&lt;script&gt;&amp;\"'"));
+        assert!(
+            rendered.ends_with("<script type=\"module\" src=\"/app.js\"></script></body></html>")
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_versions_and_unsafe_names() {
+        let mut version = document();
+        version["version"] = json!(2);
+        assert_eq!(
+            render_web_document(&version).expect_err("reject version"),
+            "unsupported web document version"
+        );
+
+        let mut tag = document();
+        tag["root"][0]["tag"] = json!("script><script");
+        assert_eq!(
+            render_web_document(&tag).expect_err("reject tag"),
+            "invalid web element script><script"
+        );
+
+        let mut style = document();
+        style["styles"] = json!(["</style><script>alert(1)</script>"]);
+        assert_eq!(
+            render_web_document(&style).expect_err("reject style terminator"),
+            "web document style cannot close the style element"
+        );
+
+        let mut duplicate = document();
+        duplicate["root"][0]["children"] = json!([{
+            "kind": "text",
+            "hydration": "e0",
+            "value": "duplicate"
+        }]);
+        assert_eq!(
+            render_web_document(&duplicate).expect_err("reject duplicate identity"),
+            "invalid web hydration identity"
+        );
+    }
+}

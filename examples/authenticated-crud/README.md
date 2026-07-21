@@ -26,9 +26,10 @@ POGGERS_WEB_ROOT="$PWD/dist/web" \
 ```
 
 Open `http://localhost:3000`. `dist/server/api` is a standalone native executable; it serves the
-built browser artifact when `POGGERS_WEB_ROOT` is set and otherwise exposes only the API. A CDN or
-reverse proxy may serve `dist/web` instead, provided same-origin `/api` requests reach the native
-Program.
+built browser assets and renders its deterministic initial-state document in Rust when
+`POGGERS_WEB_ROOT` is set; otherwise it exposes only the API. The browser reactivates the server
+nodes in place. Authenticated request-data SSR is intentionally not claimed yet. A CDN or reverse
+proxy may serve `dist/web` instead, provided same-origin `/api` requests reach the native Program.
 
 ## Semantic model
 

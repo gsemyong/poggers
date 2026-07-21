@@ -139,11 +139,11 @@ describe("project template", () => {
       ui: { root: { feature: "shell", component: "Application" } },
     });
     const html = await readFile(resolve(target, "dist/index.html"), "utf8");
-    expect(html).toContain("@layer reset{");
-    expect(html).toContain("dialog::backdrop{background:transparent}");
+    expect(html).toContain("@layer poggers.reset{");
+    expect(html).toContain(":where(dialog)::backdrop{background:transparent}");
     expect(html).not.toContain("stylex");
     expect(html).not.toContain('href="/styles.css"');
-    expect(html.indexOf("@layer reset{")).toBeLessThan(html.indexOf('src="/app.js"'));
+    expect(html.indexOf("@layer poggers.reset{")).toBeLessThan(html.indexOf('src="/app.js"'));
 
     expect(() =>
       validateUIProgramRoot({ features: { shell: { programs: { browser: {} } } } }, "browser"),

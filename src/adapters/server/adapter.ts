@@ -15,8 +15,14 @@ import type { ProgramIR } from "@/core/compiler/ir";
 import { createApplicationCompiler } from "@/core/compiler/source";
 
 export { startServerPrograms } from "@/adapters/server/runtime";
-export { createNodeHost } from "@/adapters/server/host";
-export type { NodeHost, NodeHostCapability, NodeHostOptions } from "@/adapters/server/host";
+export { createJetStreamEventStore, createNodeHost } from "@/adapters/server/host";
+export type {
+  NodeEventStoreOptions,
+  NodeHost,
+  NodeHostCapability,
+  NodeHostOptions,
+} from "@/adapters/server/host";
+export { placeShard } from "@/adapters/server/placement";
 export type ServerHostFactory = ProgramHostFactory;
 
 export type ServerPlatformAdapter = PlatformAdapter<ServerPlatform>;

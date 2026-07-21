@@ -218,12 +218,14 @@ This plan is complete only when all of the following are true:
   Program crates in about 25 seconds. Editing the task callback rebuilt only tasks and the Program
   in 874 ms. Repeating the exact build copied the content-addressed artifact in 5 ms without Cargo.
 - A normal production build emitted `web/` and a native `server/api` executable. The executable
-  served the browser artifact with SPA fallback; sign-up, deep-link navigation, CRUD, realtime
-  state, and reload persistence were exercised in a browser without console errors.
+  rendered the versioned initial-state web document in Rust, served assets separately, and adopted
+  the same DOM during browser activation. Sign-up, deep-link navigation, CRUD, cross-browser
+  realtime state, and reload persistence were exercised without console errors.
 - A packed `@poggers/kit` tarball installed into a clean temporary application built both artifacts,
   proving that published code does not depend on workspace aliases or root-only dependencies.
-- The final repository gate passed TypeScript checks for the package and both examples, Oxlint,
-  Oxfmt, 310 tests across 39 files, and the SSR publishing build.
+- The latest repository gate passed TypeScript checks for the package and both examples, Oxlint,
+  Oxfmt, 318 tests across 42 files, and the production package build. The checked-in native crate
+  separately passed rustfmt, strict Clippy, unit tests, and doc tests.
 
 Runtime validation of arbitrary hostile JSON from TypeScript-only entity contracts is not silently
 claimed by this milestone. Credentials have explicit runtime validation, while generic entity

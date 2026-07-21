@@ -22,6 +22,21 @@ import type {
 import type { PresentationSourceIR } from "@/core/compiler/presentation";
 
 type CSSDeclarations = Record<string, string>;
+
+export const webResetCss =
+  ":where(*,::before,::after){box-sizing:border-box}" +
+  ":where(html,body,#app){margin:0;min-block-size:100%}" +
+  ":where(body){min-block-size:100dvb;text-rendering:optimizeLegibility;-webkit-font-smoothing:antialiased}" +
+  ":where(h1,h2,h3,h4,p,figure,blockquote,dl,dd){margin:0}" +
+  ":where(button,input,textarea,select){color:inherit;font:inherit;margin:0}" +
+  ":where(button){appearance:none;border:0;padding:0;background:none}" +
+  ":where(dialog){max-inline-size:none;max-block-size:none;margin:0;border:0;padding:0;color:inherit;background:transparent}" +
+  ":where(dialog)::backdrop{background:transparent}" +
+  ":where(img,picture,video,canvas,svg){display:block;max-inline-size:100%}" +
+  ":where(textarea:not([rows])){min-block-size:10em}" +
+  ":where(:target){scroll-margin-block:5ex}" +
+  "[hidden]{display:none!important}";
+
 const webStyleRoots = new Set([
   "layout",
   "paint",

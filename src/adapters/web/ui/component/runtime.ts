@@ -104,9 +104,17 @@ type LifecycleScope = {
   mounted: boolean;
 };
 
+type HydrationContext = {
+  readonly elements: ReadonlyMap<string, HTMLElement>;
+  readonly textMarkers: ReadonlyMap<string, Comment>;
+  elementCursor: number;
+  textCursor: number;
+};
+
 let currentOwner: Owner | null = null;
 let currentLifecycleScope: LifecycleScope | null = null;
 let currentChildHost: HTMLElement | null = null;
+let currentHydration: HydrationContext | null = null;
 
 export function currentPresenceGraph(): PresenceGraph<Element> | undefined {
   return currentOwner?.scene;
@@ -225,10 +233,18 @@ export function onCleanup(fn: () => void): void {
 }
 
 export function render(child: Child, root: Element, hotState?: HotRenderState): RenderDisposer {
+  return renderAttempt(child, root, hotState, true);
+}
+
+function renderAttempt(
+  child: Child,
+  root: Element,
+  hotState: HotRenderState | undefined,
+  allowHydration: boolean,
+): RenderDisposer {
   const hotRefresh = Boolean(hotState?.mounted);
   const hotScroll = hotState?.scroll;
   const hotFocus = hotState?.focus;
-  if (hotState) hotState.mounted = true;
   const scene = new PresenceGraph<Element>();
   const owner: Owner = {
     cleanups: [],
@@ -244,12 +260,18 @@ export function render(child: Child, root: Element, hotState?: HotRenderState): 
     sceneSequence: 0,
   };
   const previousOwner = currentOwner;
+  const previousHydration = currentHydration;
   const previousNodes = [...root.childNodes];
   let mountedNodes: Node[] = [];
+  let hydrationFailure: unknown;
   currentOwner = owner;
+  const hydration = allowHydration && !hotRefresh ? createHydrationContext(root) : null;
+  currentHydration = hydration;
   try {
     mountedNodes = toNodes(resolveChild(child));
     root.replaceChildren(...mountedNodes);
+    if (hydration) finishHydration(root, hydration);
+    currentHydration = null;
     while (owner.mounts.length) {
       for (const mount of owner.mounts.splice(0)) {
         const cleanup = mount();
@@ -263,11 +285,25 @@ export function render(child: Child, root: Element, hotState?: HotRenderState): 
     for (const cleanup of owner.cleanups.splice(0).reverse()) cleanup();
     owner.scene.dispose();
     owner.mounts.length = 0;
-    root.replaceChildren(...previousNodes);
-    throw error;
+    if (hydration) hydrationFailure = error;
+    else {
+      root.replaceChildren(...previousNodes);
+      throw error;
+    }
   } finally {
     currentOwner = previousOwner;
+    currentHydration = previousHydration;
   }
+
+  if (hydrationFailure !== undefined) {
+    const message =
+      hydrationFailure instanceof Error ? hydrationFailure.message : String(hydrationFailure);
+    console.error(`[poggers] ${message} Recovering with a client render.`);
+    root.replaceChildren();
+    root.setAttribute("data-poggers-rendering", "client-recovered");
+    return renderAttempt(child, root, hotState, false);
+  }
+  if (hotState) hotState.mounted = true;
 
   const capture = () => {
     const state = owner.hotState ?? {};
@@ -471,6 +507,14 @@ export function For<
   Items extends readonly unknown[],
   Key extends VirtualPropertyKey<Items> = VirtualPropertyKey<Items>,
 >(props: ForProps<Items> | VirtualForProps<Items, Key>): JSXElement {
+  if (typeof document === "undefined") {
+    const items = readSource(props.each);
+    return (
+      items.length === 0 && props.fallback !== undefined
+        ? props.fallback
+        : items.map((item, index) => props.children(item, index))
+    ) as JSXElement;
+  }
   if (props.virtual) return virtualFor(props as VirtualForProps<Items>) as JSXElement;
   const start = document.createComment("for");
   const end = document.createComment("/for");
@@ -1114,6 +1158,9 @@ export function virtualItemPosition(
 }
 
 export function Show(props: { when: unknown; children: Child; fallback?: Child }): JSXElement {
+  if (typeof document === "undefined") {
+    return (readCondition(props.when) ? props.children : props.fallback) as JSXElement;
+  }
   const start = document.createComment("show");
   const end = document.createComment("/show");
   const parent = document.createDocumentFragment();
@@ -1309,7 +1356,8 @@ function requestPresenceFrame(fn: () => void) {
 function createNode(type: string | ErasedComponent, props: Props): Child {
   if (typeof type === "function") return untrack(() => type(props as never));
 
-  const element = document.createElement(type);
+  const hydration = currentHydration;
+  const element = hydration ? claimHydrationElement(hydration, type) : document.createElement(type);
   const { children, __poggersStructuralChildren, __poggersScene, ...attributes } = props;
 
   if (__poggersScene) {
@@ -1329,7 +1377,9 @@ function createNode(type: string | ErasedComponent, props: Props): Child {
       __poggersStructuralChildren === true && typeof children === "function"
         ? untrack(() => resolveChild(children))
         : children;
-    element.append(...toNodes(resolvedChildren));
+    const nodes = toNodes(resolvedChildren);
+    if (hydration) element.replaceChildren(...nodes);
+    else element.append(...nodes);
     adoptSceneChildren(element);
   } finally {
     currentChildHost = previousHost;
@@ -1848,7 +1898,12 @@ function toNodes(child: Child): Node[] {
     return Array.from(resolved.childNodes);
   }
   if (resolved instanceof Node) return [resolved];
-  return [document.createTextNode(String(resolved))];
+  const hydration = currentHydration;
+  return [
+    hydration
+      ? claimHydrationText(hydration, String(resolved))
+      : document.createTextNode(String(resolved)),
+  ];
 }
 
 function dynamicNodes(readChild: () => Child): Node[] {
@@ -1956,6 +2011,10 @@ function registerCleanup(cleanup: () => void) {
 }
 
 function blockEffect(fn: () => void | (() => void)) {
+  if (currentHydration) {
+    registerCleanup(alienEffect(fn));
+    return;
+  }
   if (currentLifecycleScope) {
     currentLifecycleScope.cleanups.push(alienEffect(fn));
     return;
@@ -1968,6 +2027,75 @@ function blockEffect(fn: () => void | (() => void)) {
   queueMicrotask(() => {
     alienEffect(fn);
   });
+}
+
+function createHydrationContext(root: Element): HydrationContext | null {
+  if (root.getAttribute("data-poggers-rendering") !== "initial-state-ssr") return null;
+  const elements = new Map<string, HTMLElement>();
+  for (const element of root.querySelectorAll<HTMLElement>("[data-poggers-h]")) {
+    const identity = element.getAttribute("data-poggers-h");
+    if (!identity || elements.has(identity)) {
+      throw new Error(`Invalid SSR element hydration identity ${JSON.stringify(identity)}.`);
+    }
+    elements.set(identity, element);
+  }
+  const textMarkers = new Map<string, Comment>();
+  const visit = (node: Node) => {
+    if (node.nodeType === Node.COMMENT_NODE) {
+      const marker = (node as Comment).data;
+      if (marker.startsWith("poggers:")) {
+        const identity = marker.slice("poggers:".length);
+        if (
+          !identity ||
+          textMarkers.has(identity) ||
+          node.nextSibling?.nodeType !== Node.TEXT_NODE
+        ) {
+          throw new Error(`Invalid SSR text hydration identity ${JSON.stringify(identity)}.`);
+        }
+        textMarkers.set(identity, node as Comment);
+      }
+    }
+    for (const childNode of node.childNodes) visit(childNode);
+  };
+  visit(root);
+  return { elements, textMarkers, elementCursor: 0, textCursor: 0 };
+}
+
+function claimHydrationElement(hydration: HydrationContext, tag: string): HTMLElement {
+  const identity = `e${hydration.elementCursor++}`;
+  const element = hydration.elements.get(identity);
+  if (!element || element.localName !== tag) {
+    throw new Error(
+      `SSR hydration mismatch at ${identity}: expected <${tag}>, found ${element ? `<${element.localName}>` : "nothing"}.`,
+    );
+  }
+  return element;
+}
+
+function claimHydrationText(hydration: HydrationContext, value: string): Text {
+  const identity = `t${hydration.textCursor++}`;
+  const marker = hydration.textMarkers.get(identity);
+  const text = marker?.nextSibling;
+  if (!marker || !(text instanceof Text) || text.data !== value) {
+    throw new Error(
+      `SSR hydration mismatch at ${identity}: expected ${JSON.stringify(value)}, found ${JSON.stringify(text?.textContent)}.`,
+    );
+  }
+  marker.remove();
+  return text;
+}
+
+function finishHydration(root: Element, hydration: HydrationContext): void {
+  if (
+    hydration.elementCursor !== hydration.elements.size ||
+    hydration.textCursor !== hydration.textMarkers.size
+  ) {
+    throw new Error(
+      `SSR hydration left unclaimed nodes: ${hydration.elements.size - hydration.elementCursor} elements and ${hydration.textMarkers.size - hydration.textCursor} text nodes.`,
+    );
+  }
+  for (const element of hydration.elements.values()) element.removeAttribute("data-poggers-h");
+  root.setAttribute("data-poggers-rendering", "hydrated");
 }
 
 function createScopedNodes(readNodes: () => Child): ScopedNodes {

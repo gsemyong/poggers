@@ -234,9 +234,20 @@ unrelated Features or adapter runtime code. Complete semantic output is content-
 repeat copies the executable without invoking Cargo. Strict Clippy validation is an explicit test
 gate rather than production build work.
 
-The native server can expose only API routes or, when `POGGERS_WEB_ROOT` is set, serve a built web
-artifact with SPA fallback. The browser continues to use same-origin `/api`; deployment may provide
-that topology directly, through the native process, or through a CDN or reverse proxy.
+The web production adapter emits browser assets plus a versioned `WebDocumentIR`. It evaluates only
+the deterministic initial Component state: Program starts, Component mounts, Capabilities, native
+listeners, refs, observations, and feedback remain inert. The server production adapter embeds a
+checked-in Rust renderer and, when `POGGERS_WEB_ROOT` is set, renders that document for every
+document request while serving immutable assets separately. The browser adopts the exact server
+nodes and attaches reactivity and listeners; a shape mismatch is diagnosed once and recovers with
+one clean client render. This is deliberately **initial-state SSR**. Request-derived authenticated
+SSR requires a future typed render-input Capability and is not implied by this mode.
+
+Stable native host code is ordinary Rust in `src/adapters/server/native`, checked by rustfmt,
+Clippy, and Rust tests. TypeScript assembles the generated workspace and semantic Feature crates;
+it does not store Rust in source strings or call JavaScript from the production executable.
+Development and native implementations are compared at observable boundaries, including the same
+black-box authentication, authorization, event persistence, restart, and CRUD scenarios.
 
 Running one artifact once creates one Process. Running the same artifact more
 than once creates independent replicas with fresh host-capability scopes.
@@ -245,6 +256,16 @@ belong to deployment and the selected Capability implementations. Product code
 does not acquire topology syntax. Contributions inside one Program communicate
 through its assembled local capability graph; Programs communicate only through
 ordinary external Capabilities such as HTTP, queues, or shared storage.
+
+The Node host can select SQLite for a single process or JetStream for a network-authoritative
+`EventStore`. JetStream stores one atomic append batch per encoded logical-stream subject and uses
+expected last-subject sequence as compare-and-append. Ordered consumers provide complete reads and
+continuations; they are not shared work queues. The replica suite starts two separately assembled
+Programs on different ports and with independent capability scopes, then proves cross-replica
+reads, principal isolation, compare-and-append contention, live continuation, and restart catch-up.
+Rendezvous placement is a deployment helper with property-tested stability and bounded remapping;
+it does not add topology syntax to Features. A real multi-node JetStream failure-domain test and a
+native Rust JetStream host remain deployment-adapter work, not claims of this single-machine suite.
 
 The shipped web adapter owns browser Environments, DOM JSX, direct fine-grained
 updates, Vite development and production, and the web Presentation language.
@@ -413,13 +434,17 @@ src/
       adapter.ts
       host.ts
       native.ts       # whole-Program generation, caching, and build
+      placement.ts    # deployment-only deterministic shard placement
       native/
+        Cargo.toml
         domain.ts     # portable Feature callbacks to Rust
-        runtime.ts    # stable native server runtime source
+        src/
+          lib.rs      # stable native host and document runtime
       platform.ts
       runtime.ts
     web/
       adapter.ts        # concrete Platform adapter
+      document.ts       # canonical initial-state SSR artifact
       platform.ts       # web UI language and public API
       toolchain.ts      # development and production realization
       ui/

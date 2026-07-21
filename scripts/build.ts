@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { access, glob, readFile, rm, writeFile } from "node:fs/promises";
+import { access, copyFile, glob, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, relative, resolve } from "node:path";
 import process from "node:process";
 
@@ -98,6 +98,11 @@ await build({
     target: "node26",
   },
 });
+const nativeSource = resolve(sourceDir, "adapters/server/native");
+const nativeOutput = resolve(distDir, "src/adapters/server/native");
+await mkdir(resolve(nativeOutput, "src"), { recursive: true });
+await copyFile(resolve(nativeSource, "Cargo.toml"), resolve(nativeOutput, "Cargo.toml"));
+await copyFile(resolve(nativeSource, "src/lib.rs"), resolve(nativeOutput, "src/lib.rs"));
 await assertNoPrivateAliases();
 await assertServerEnvironment();
 

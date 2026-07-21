@@ -1,6 +1,7 @@
 import { readPresentationPresence, setPresentationPresence } from "@/adapters/web/ui/presence";
 import {
   planWebPresentationArtifacts,
+  webResetCss,
   type CompiledWebStyle,
   type WebPresentationArtifactPlan,
 } from "@/adapters/web/ui/presentation/compiler";
@@ -174,15 +175,6 @@ type RenderedPresentation<ElementName extends string> = Readonly<{
   declarations: Readonly<Partial<Record<ElementName, Readonly<WebElementPresentation>>>>;
   artifacts: WebPresentationArtifactPlan<ElementName>;
 }>;
-
-const webReset =
-  ":where(*,::before,::after){box-sizing:border-box}" +
-  ":where(html,body){margin:0;min-block-size:100%}" +
-  ":where(body){text-rendering:optimizeLegibility;-webkit-font-smoothing:antialiased}" +
-  ":where(h1,h2,h3,h4,p,figure,blockquote,dl,dd){margin:0}" +
-  ":where(button,input,textarea,select){color:inherit;font:inherit}" +
-  ":where(button){appearance:none}" +
-  ":where(img,picture,video,canvas,svg){display:block;max-inline-size:100%}";
 
 /** Realizes web Presentation declarations through document-scoped native hosts. */
 export function createWebPresentationAdapter(
@@ -1288,7 +1280,7 @@ class WebStyleRegistry {
       .map(([, entry]) => entry.css)
       .join("");
     const emitted =
-      `@layer poggers.reset,poggers.presentation;@layer poggers.reset{${webReset}}` +
+      `@layer poggers.reset,poggers.presentation;@layer poggers.reset{${webResetCss}}` +
       `@layer poggers.presentation{${css}}`;
     if (emitted === this.#emitted) return;
     this.#emitted = emitted;

@@ -1,11 +1,11 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { access, chmod, copyFile, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 
 import { generateEntityDomain, generateIdentityDomain } from "@/adapters/server/native/domain";
-import { SERVER_RUNTIME_MANIFEST, SERVER_RUNTIME_SOURCE } from "@/adapters/server/native/runtime";
 import {
   linkProgram,
   type CapabilityIR,
@@ -17,6 +17,9 @@ import {
 import { generateRustProductionProgram } from "@/core/compiler/rust";
 
 const NATIVE_ADAPTER_VERSION = 2;
+const nativeRuntime = resolve(import.meta.dirname, "native");
+const SERVER_RUNTIME_MANIFEST = readFileSync(resolve(nativeRuntime, "Cargo.toml"), "utf8");
+const SERVER_RUNTIME_SOURCE = readFileSync(resolve(nativeRuntime, "src/lib.rs"), "utf8");
 
 export type NativeServerBuild = Readonly<{
   executable: string;

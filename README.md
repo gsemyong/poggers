@@ -67,4 +67,7 @@ for both JavaScript development and native production follows the deliberately
 small [Portable TypeScript profile](docs/portable-typescript.md); unsupported
 host code is identified in IR and can never become a silent native source
 fallback. The [native production plan](docs/native-production-plan.md) records
-the whole-Program realization gates and measured cache behavior.
+the whole-Program realization gates and measured cache behavior. The
+[production runtime plan](docs/production-runtime-plan.md) records the Rust
+initial-state SSR, native host-source, clean-package, and network-replica
+acceptance gates and their explicit limits.

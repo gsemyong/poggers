@@ -14,8 +14,12 @@ import {
   type Plugin,
 } from "vite";
 
+import { renderWebDocument, type WebDocumentIR } from "@/adapters/web/document";
 import { transformComponentSource } from "@/adapters/web/ui/component/compiler";
-import { validateWebPresentationSource } from "@/adapters/web/ui/presentation/compiler";
+import {
+  validateWebPresentationSource,
+  webResetCss,
+} from "@/adapters/web/ui/presentation/compiler";
 import { collectExternalCapabilityNames, collectProgramManifest } from "@/core/capability";
 import {
   serializeApplicationIR,
@@ -134,8 +138,10 @@ export async function buildApplication(options: {
   await mkdir(outdir, { recursive: true });
   try {
     const prepared = await prepareApplication(paths, work, options.development ?? false);
+    const document = await prepareProductionDocument(paths, work, prepared.ir);
 
     await writeFile(resolve(outdir, "application.ir.json"), serializeApplicationIR(prepared.ir));
+    await writeFile(resolve(outdir, "document.ir.json"), `${JSON.stringify(document)}\n`);
     const workerInputs = Object.fromEntries(
       prepared.workers.map(({ output, source }) => [output, source]),
     );
@@ -159,7 +165,7 @@ export async function buildApplication(options: {
         target: "es2022",
       },
     });
-    await writeFile(resolve(outdir, "index.html"), htmlSource("/app.js"));
+    await writeFile(resolve(outdir, "index.html"), renderWebDocument(document));
     return {
       directory: outdir,
       entries: [
@@ -575,6 +581,64 @@ async function loadApplication(
   return record(loaded.default ?? loaded);
 }
 
+async function prepareProductionDocument(
+  paths: ApplicationPaths,
+  work: string,
+  ir: ApplicationIR,
+): Promise<WebDocumentIR> {
+  const contract = webApplicationContract(ir);
+  const program = ir.programs.find(({ name }) => name === contract.uiProgram);
+  if (!program) throw new Error(`Missing UI Program ${JSON.stringify(contract.uiProgram)}.`);
+  const source = resolve(work, "document.generated.ts");
+  await writeIfChanged(
+    source,
+    `import application from ${JSON.stringify(paths.application)};
+import { prepareWebDocument } from ${JSON.stringify(resolve(import.meta.dirname, `document${moduleExtension()}`))};
+
+export default await prepareWebDocument({
+  application,
+  program: ${JSON.stringify(contract.uiProgram)},
+  manifest: ${JSON.stringify(collectProgramManifest(program))},
+  components: ${JSON.stringify(contract.components)},
+  presentationDependencies: ${JSON.stringify(collectPresentationDependencies(ir, contract.uiProgram))},
+  entry: "/app.js",
+});
+`,
+  );
+  const output = resolve(work, "document-evaluate");
+  await rm(output, { recursive: true, force: true });
+  await build({
+    configFile: false,
+    root: paths.directory,
+    resolve: {
+      alias: kitAliases(),
+      conditions: ["poggers-source", ...defaultServerConditions],
+    },
+    plugins: vitePlugins(paths),
+    build: {
+      emptyOutDir: true,
+      minify: false,
+      outDir: output,
+      rollupOptions: {
+        input: source,
+        output: { entryFileNames: "document.js", format: "es" },
+      },
+      ssr: true,
+      target: "node26",
+    },
+    ssr: { noExternal: true },
+  });
+  const loaded = (await import(
+    `${pathToFileURL(resolve(output, "document.js")).href}?v=${Date.now()}`
+  )) as { default?: WebDocumentIR };
+  const document = loaded.default;
+  if (!document) throw new Error("Web document preparation returned no artifact.");
+  const stylesheet =
+    `@layer poggers.reset,poggers.presentation;@layer poggers.reset{${webResetCss}}` +
+    `@layer poggers.presentation{${document.styles.join("")}}`;
+  return Object.freeze({ ...document, styles: Object.freeze([stylesheet]) });
+}
+
 function workerSource(input: {
   application: string;
   development: boolean;
@@ -969,11 +1033,7 @@ if (import.meta.hot) {
 
 function htmlSource(entry: string): string {
   return `<!doctype html>
-<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><style>@layer reset{${resetCss()}}</style><title>Poggers</title></head><body><div id="app"></div><script type="module" src="${entry}"></script></body></html>`;
-}
-
-function resetCss(): string {
-  return `*,*::before,*::after{box-sizing:border-box}html{color-scheme:light dark;-webkit-text-size-adjust:100%;text-size-adjust:100%;tab-size:4}html,body,#app{min-block-size:100%;margin:0}body{min-block-size:100dvb}body,h1,h2,h3,h4,p,figure,blockquote,dl,dd{margin:0}button,input,textarea,select{font:inherit;color:inherit}button{border:0;padding:0;background:none}dialog{max-inline-size:none;max-block-size:none;margin:0;border:0;padding:0;color:inherit;background:transparent}dialog::backdrop{background:transparent}img,picture,svg,canvas{display:block;max-inline-size:100%}input,button,textarea,select{margin:0}textarea:not([rows]){min-block-size:10em}:target{scroll-margin-block:5ex}[hidden]{display:none!important}`;
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><style>@layer poggers.reset,poggers.presentation;@layer poggers.reset{${webResetCss}}</style><title>Poggers</title></head><body><div id="app"></div><script type="module" src="${entry}"></script></body></html>`;
 }
 
 function cleanId(id: string): string {

@@ -4,6 +4,20 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
+import {
+  DeliverPolicy,
+  DiscardPolicy,
+  JetStreamApiCodes,
+  JetStreamApiError,
+  RetentionPolicy,
+  StorageType,
+  jetstream,
+  jetstreamManager,
+  type JetStreamClient,
+  type JetStreamManager,
+  type StoredMsg,
+} from "@nats-io/jetstream";
+import { connect } from "@nats-io/transport-node";
 import { betterAuth } from "better-auth";
 import { getMigrations } from "better-auth/db/migration";
 
@@ -19,11 +33,18 @@ export type NodeHostOptions = Readonly<{
   webOrigin?: string;
   appName?: string;
   secret?: string;
+  eventStore?: NodeEventStoreOptions;
 }>;
+
+export type NodeEventStoreOptions =
+  | Readonly<{ kind: "sqlite" }>
+  | Readonly<{ kind: "jetstream"; servers: string | readonly string[]; stream?: string }>;
+
+type HostedEventStore<Event> = EventStore<Event> & (Disposable | AsyncDisposable);
 
 export type NodeHost<Event> = Readonly<{
   authentication: AuthenticationBackend;
-  events: EventStore<Event> & Disposable;
+  events: HostedEventStore<Event>;
   identifiers: Identifiers;
   clock: Clock;
   http: HttpServer & AsyncDisposable & Readonly<{ locations: readonly string[] }>;
@@ -69,7 +90,11 @@ export async function createNodeHost<Event = unknown>(
     databaseClosed = true;
     database.close();
   };
-  if (requested.has("authentication") || requested.has("events")) {
+  const eventStore = resolveEventStore(input);
+  if (
+    requested.has("authentication") ||
+    (requested.has("events") && eventStore.kind === "sqlite")
+  ) {
     const path =
       input.database ??
       process.env.POGGERS_DATABASE ??
@@ -79,7 +104,7 @@ export async function createNodeHost<Event = unknown>(
   }
   const result: {
     authentication?: AuthenticationBackend;
-    events?: EventStore<Event> & Disposable;
+    events?: HostedEventStore<Event>;
     identifiers?: Identifiers;
     clock?: Clock;
     http?: HttpServer & AsyncDisposable & Readonly<{ locations: readonly string[] }>;
@@ -116,7 +141,10 @@ export async function createNodeHost<Event = unknown>(
       });
     }
     if (requested.has("events")) {
-      result.events = createSqliteEventStore<Event>(database!, closeDatabase);
+      result.events =
+        eventStore.kind === "jetstream"
+          ? await createJetStreamEventStore<Event>(eventStore)
+          : createSqliteEventStore<Event>(database!, closeDatabase);
     }
     if (requested.has("identifiers")) result.identifiers = { create: randomUUID };
     if (requested.has("clock")) result.clock = { now: Date.now };
@@ -131,6 +159,7 @@ export async function createNodeHost<Event = unknown>(
     return Object.freeze(result);
   } catch (error) {
     await result.http?.[Symbol.asyncDispose]();
+    await disposeHostedEventStore(result.events);
     closeDatabase();
     throw error;
   }
@@ -144,6 +173,22 @@ function numberEnvironment(name: string): number | undefined {
     throw new TypeError(`${name} must be an integer between 0 and 65535.`);
   }
   return parsed;
+}
+
+function resolveEventStore(input: NodeHostOptions): NodeEventStoreOptions {
+  if (input.eventStore) return input.eventStore;
+  const servers = process.env.NATS_URL;
+  return process.env.POGGERS_EVENT_STORE === "jetstream" && servers
+    ? { kind: "jetstream", servers, stream: process.env.POGGERS_EVENT_STREAM }
+    : { kind: "sqlite" };
+}
+
+async function disposeHostedEventStore(
+  store: HostedEventStore<unknown> | undefined,
+): Promise<void> {
+  if (!store) return;
+  if (Symbol.asyncDispose in store) await store[Symbol.asyncDispose]();
+  else store[Symbol.dispose]();
 }
 
 export function createSqliteEventStore<Event>(
@@ -217,6 +262,271 @@ export function createSqliteEventStore<Event>(
       close();
     },
   };
+}
+
+type JetStreamBatch<Event> = Readonly<{
+  stream: string;
+  expectedRevision: number;
+  events: readonly Event[];
+}>;
+
+/** Network authority for the semantic EventStore contract; Features remain transport-agnostic. */
+export async function createJetStreamEventStore<Event>(
+  options: Extract<NodeEventStoreOptions, { kind: "jetstream" }>,
+): Promise<EventStore<Event> & AsyncDisposable> {
+  const connection = await connect({
+    servers: typeof options.servers === "string" ? options.servers : [...options.servers],
+  });
+  const streamName = options.stream ?? "POGGERS_EVENTS";
+  const prefix = "poggers.events";
+  let manager: JetStreamManager;
+  try {
+    manager = await jetstreamManager(connection);
+    await ensureEventStream(manager, streamName, prefix);
+  } catch (error) {
+    await connection.close();
+    throw error;
+  }
+  const client = jetstream(connection);
+  let disposed = false;
+  const assertLive = () => {
+    if (disposed) throw new Error("The event store is disposed.");
+  };
+
+  return {
+    async read({ stream, after = 0 }) {
+      assertLive();
+      return readJetStreamEvents<Event>(
+        client,
+        streamName,
+        eventSubject(prefix, stream),
+        stream,
+        after,
+      );
+    },
+    async append({ stream, expectedRevision, events }) {
+      assertLive();
+      const subject = eventSubject(prefix, stream);
+      const current = await lastJetStreamBatch<Event>(manager, streamName, subject);
+      if (batchRevision(current?.batch) !== expectedRevision) return undefined;
+      if (events.length === 0) return [];
+      try {
+        await client.publish(
+          subject,
+          new TextEncoder().encode(JSON.stringify({ stream, expectedRevision, events })),
+          { expect: { lastSubjectSequence: current?.sequence ?? 0 } },
+        );
+      } catch (error) {
+        if (
+          error instanceof JetStreamApiError &&
+          (error.code === JetStreamApiCodes.StreamWrongLastSequence ||
+            error.code === JetStreamApiCodes.StreamWrongLastSequenceUnknown)
+        ) {
+          return undefined;
+        }
+        throw error;
+      }
+      return storedBatch(stream, expectedRevision, events);
+    },
+    subscribe({ stream, after = 0 }) {
+      assertLive();
+      return subscribeJetStreamEvents<Event>(
+        client,
+        streamName,
+        eventSubject(prefix, stream),
+        stream,
+        after,
+      );
+    },
+    async [Symbol.asyncDispose]() {
+      if (disposed) return;
+      disposed = true;
+      await connection.drain();
+    },
+  };
+}
+
+async function ensureEventStream(
+  manager: JetStreamManager,
+  stream: string,
+  prefix: string,
+): Promise<void> {
+  const subject = `${prefix}.>`;
+  try {
+    const current = await manager.streams.info(stream);
+    validateEventStream(current.config, stream, subject);
+    return;
+  } catch (error) {
+    if (!(error instanceof JetStreamApiError) || error.code !== JetStreamApiCodes.StreamNotFound) {
+      throw error;
+    }
+  }
+  try {
+    await manager.streams.add({
+      name: stream,
+      subjects: [subject],
+      retention: RetentionPolicy.Limits,
+      discard: DiscardPolicy.Old,
+      storage: StorageType.File,
+      allow_direct: true,
+    });
+  } catch (error) {
+    const current = await manager.streams.info(stream).catch(() => undefined);
+    if (!current) throw error;
+    validateEventStream(current.config, stream, subject);
+  }
+}
+
+function validateEventStream(
+  config: Readonly<{
+    subjects: readonly string[];
+    retention: RetentionPolicy;
+    discard: DiscardPolicy;
+    storage: StorageType;
+  }>,
+  stream: string,
+  subject: string,
+): void {
+  if (
+    !config.subjects.includes(subject) ||
+    config.retention !== RetentionPolicy.Limits ||
+    config.discard !== DiscardPolicy.Old ||
+    config.storage !== StorageType.File
+  ) {
+    throw new TypeError(
+      `JetStream ${JSON.stringify(stream)} is incompatible with the EventStore contract.`,
+    );
+  }
+}
+
+async function lastJetStreamBatch<Event>(
+  manager: JetStreamManager,
+  stream: string,
+  subject: string,
+): Promise<Readonly<{ sequence: number; batch: JetStreamBatch<Event> }> | undefined> {
+  let message: StoredMsg | null;
+  try {
+    message = await manager.streams.getMessage(stream, { last_by_subj: subject });
+  } catch (error) {
+    if (error instanceof JetStreamApiError && error.code === JetStreamApiCodes.NoMessageFound) {
+      return;
+    }
+    throw error;
+  }
+  return message ? { sequence: message.seq, batch: decodeBatch<Event>(message.data) } : undefined;
+}
+
+async function readJetStreamEvents<Event>(
+  client: JetStreamClient,
+  streamName: string,
+  subject: string,
+  stream: string,
+  after: number,
+): Promise<readonly StoredEvent<Event>[]> {
+  const consumer = await client.consumers.get(streamName, {
+    filter_subjects: subject,
+    deliver_policy: DeliverPolicy.All,
+  });
+  const result: StoredEvent<Event>[] = [];
+  try {
+    let pending = (await consumer.info()).num_pending;
+    while (pending > 0) {
+      const messages = await consumer.fetch({
+        max_messages: Math.min(pending, 1_000),
+        expires: 1_000,
+      });
+      let received = 0;
+      for await (const message of messages) {
+        received += 1;
+        appendBatch(result, decodeBatch<Event>(message.data), stream, after);
+      }
+      if (!received) throw new Error(`JetStream EventStore timed out while reading ${stream}.`);
+      pending -= received;
+    }
+    return result;
+  } finally {
+    await consumer.delete();
+  }
+}
+
+function subscribeJetStreamEvents<Event>(
+  client: JetStreamClient,
+  streamName: string,
+  subject: string,
+  stream: string,
+  after: number,
+): AsyncIterable<StoredEvent<Event>> {
+  return {
+    async *[Symbol.asyncIterator]() {
+      const consumer = await client.consumers.get(streamName, {
+        filter_subjects: subject,
+        deliver_policy: DeliverPolicy.All,
+      });
+      const messages = await consumer.consume();
+      let revision = after;
+      try {
+        for await (const message of messages) {
+          const stored: StoredEvent<Event>[] = [];
+          appendBatch(stored, decodeBatch<Event>(message.data), stream, revision);
+          for (const event of stored) {
+            if (event.revision !== revision + 1) {
+              throw new Error(`JetStream EventStore observed a gap at ${stream}:${revision + 1}.`);
+            }
+            revision = event.revision;
+            yield event;
+          }
+        }
+      } finally {
+        await messages.close();
+        await consumer.delete();
+      }
+    },
+  };
+}
+
+function decodeBatch<Event>(data: Uint8Array): JetStreamBatch<Event> {
+  const value = JSON.parse(new TextDecoder().decode(data)) as Partial<JetStreamBatch<Event>>;
+  if (
+    typeof value.stream !== "string" ||
+    !Number.isSafeInteger(value.expectedRevision) ||
+    !Array.isArray(value.events)
+  ) {
+    throw new TypeError("JetStream EventStore received an invalid append batch.");
+  }
+  return value as JetStreamBatch<Event>;
+}
+
+function appendBatch<Event>(
+  target: StoredEvent<Event>[],
+  batch: JetStreamBatch<Event>,
+  stream: string,
+  after: number,
+): void {
+  if (batch.stream !== stream)
+    throw new TypeError("JetStream EventStore stream identity mismatch.");
+  for (const event of storedBatch(stream, batch.expectedRevision, batch.events)) {
+    if (event.revision > after) target.push(event);
+  }
+}
+
+function storedBatch<Event>(
+  stream: string,
+  expectedRevision: number,
+  events: readonly Event[],
+): readonly StoredEvent<Event>[] {
+  return events.map((event, index) => ({
+    stream,
+    revision: expectedRevision + index + 1,
+    event,
+  }));
+}
+
+function batchRevision(batch: JetStreamBatch<unknown> | undefined): number {
+  return batch ? batch.expectedRevision + batch.events.length : 0;
+}
+
+function eventSubject(prefix: string, stream: string): string {
+  return `${prefix}.${Buffer.from(stream).toString("base64url")}`;
 }
 
 async function createNodeHttpServer(input: {
