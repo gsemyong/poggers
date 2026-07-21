@@ -1,18 +1,14 @@
 import fc from "fast-check";
 import { describe, expect, it, vi } from "vitest";
 
-import {
-  createActionEventLedger,
-  type Animation,
-  type Event,
-} from "../../../../../core/presentation";
-import { decay, follow, pulse, spring, track } from "../dynamics";
+import { decay, follow, pulse, spring, track } from "@/adapters/web/ui/presentation/dynamics";
 import {
   createNativeWebFrameHost,
   createWebAnimationHost,
   createWebFrameHost,
   type WebFrameTask,
-} from "./animation";
+} from "@/adapters/web/ui/presentation/runtime/animation";
+import { createActionEventLedger, type Animation, type Event } from "@/core/presentation";
 
 const sheetSpring = spring({ initial: 0, stiffness: 520, damping: 42 });
 

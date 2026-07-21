@@ -14,21 +14,18 @@ import {
   type Plugin,
 } from "vite";
 
-import {
-  serializeApplicationIR,
-  type ApplicationIR,
-  type ComponentIR,
-} from "../../core/compiler/ir";
-import { compilePresentationSource } from "../../core/compiler/presentation";
+import { transformComponentSource } from "@/adapters/web/ui/component/compiler";
+import { validateWebPresentationSource } from "@/adapters/web/ui/presentation/compiler";
+import { collectProgramManifest } from "@/core/capability";
+import { serializeApplicationIR, type ApplicationIR, type ComponentIR } from "@/core/compiler/ir";
+import { compilePresentationSource } from "@/core/compiler/presentation";
 import {
   createApplicationCompiler,
   resolveApplication,
   type ApplicationCompiler,
   type ApplicationPaths,
-} from "../../core/compiler/source";
-import { createHotReplacementManifest } from "../../core/development";
-import { transformComponentSource } from "./ui/component/compiler";
-import { validateWebPresentationSource } from "./ui/presentation/compiler";
+} from "@/core/compiler/source";
+import { createHotReplacementManifest } from "@/core/development";
 
 export type DevelopmentServer = Readonly<{
   port: number;
@@ -212,10 +209,12 @@ async function prepareApplication(
     candidate,
     candidateSource({
       application: paths.application,
+      capabilityModule: resolveProgramCapabilities(paths, contract.uiProgram),
       development,
       revision,
       runtime: resolve(import.meta.dirname, `./ui/adapter${moduleExtension()}`),
       program: contract.uiProgram,
+      programManifest: collectProgramManifest(contract.uiProgram, ir.programs),
       components: contract.components,
       presentationDependencies: collectPresentationDependencies(ir, contract.uiProgram),
       hotManifest: createHotReplacementManifest(ir),
@@ -238,6 +237,19 @@ async function prepareApplication(
     revision,
     updateKind,
   };
+}
+
+function resolveProgramCapabilities(paths: ApplicationPaths, program: string): string | undefined {
+  for (const extension of [".ts", ".tsx"]) {
+    const candidate = resolve(paths.source, "capabilities", `${program}${extension}`);
+    try {
+      accessSync(candidate);
+      return candidate;
+    } catch {
+      continue;
+    }
+  }
+  return undefined;
 }
 
 async function writeIfChanged(path: string, contents: string): Promise<boolean> {
@@ -267,6 +279,7 @@ function kitAliases() {
   const web = resolve(kit, "adapters/web");
   const extension = moduleExtension();
   return [
+    { find: /^@\/(.*)$/, replacement: `${kit}/$1` },
     {
       find: /^@poggers\/kit\/jsx-dev-runtime$/,
       replacement: resolve(core, `jsx/development${extension}`),
@@ -467,10 +480,12 @@ async function loadApplication(
 
 function candidateSource(input: {
   application: string;
+  capabilityModule?: string;
   development: boolean;
   revision: number;
   runtime: string;
   program: string;
+  programManifest: unknown;
   components: unknown;
   presentationDependencies: unknown;
   hotManifest: unknown;
@@ -478,8 +493,12 @@ function candidateSource(input: {
   const application = input.development
     ? `${input.application}?poggers-revision=${input.revision}`
     : input.application;
+  const capabilityModule = input.capabilityModule
+    ? `import capabilityModule from ${JSON.stringify(input.capabilityModule)};`
+    : `const capabilityModule = { development: () => ({}), production: () => ({}) };`;
   return `import application from ${JSON.stringify(application)};
 import { createWebUIAdapter, render } from ${JSON.stringify(input.runtime)};
+${capabilityModule}
 
 export const manifest = ${JSON.stringify(input.hotManifest)};
 export const presentations = application.presentations ?? {};
@@ -496,9 +515,12 @@ export async function activate(root, previous = {}) {
     values: previous.values?.slice(),
   };
   const platform = createWebUIAdapter();
+  const capabilities = await capabilityModule.${input.development ? "development" : "production"}();
   const ui = platform.component.createApplicationUI({
     application,
     program: ${JSON.stringify(input.program)},
+    programManifest: ${JSON.stringify(input.programManifest)},
+    capabilities,
     presentations: { presentations },
     components: ${JSON.stringify(input.components)},
     presentationDependencies: ${JSON.stringify(input.presentationDependencies)},

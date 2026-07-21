@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { needsNativePropertyWrite } from "./runtime";
+import { needsNativePropertyWrite } from "@/adapters/web/ui/component/runtime";
 
 describe("web Structure native property writes", () => {
   it("materializes an authored empty reflected attribute exactly once", () => {

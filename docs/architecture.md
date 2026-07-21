@@ -112,6 +112,14 @@ resolving to owned resources are disposed once in reverse acquisition order.
 Features coordinate through Capabilities; direct APIs exposed to Components
 are assembled only from contributions to the same Program.
 
+For each named Program, all Feature requirements and providers form one capability graph. The
+Application supplies only requirements that no Feature provides, through
+`src/capabilities/<program>.ts`. Its `development()` or `production()` function is called once per
+Process. The runtime validates the exact external set, orders providers before dependants, and owns
+external and Feature-provided resources exactly once. Cross-Program communication is therefore an
+ordinary semantic Capability implementation, such as a local object or an HTTP client; it is not a
+second framework mechanism.
+
 ## UI boundary
 
 Each UI-capable Platform defines its own JSX Elements, native properties,
@@ -331,6 +339,7 @@ concepts have independent lifecycle and invariants.
 src/
   core/
     application.ts
+    capability.ts
     process.ts
     component.ts
     ui.ts
@@ -339,10 +348,13 @@ src/
     compiler/
     jsx/
   contracts/
-    capability.ts
     platform.ts
   adapters/
     registry.ts
+    server/
+      adapter.ts
+      platform.ts
+      runtime.ts
     web/
       adapter.ts        # concrete Platform adapter
       platform.ts       # web UI language and public API
@@ -366,6 +378,10 @@ src/
             execution.ts    # canonical-to-WAAPI planning
             layout.ts       # layout continuity
             observations.ts # browser observations
+  features/
+    entity/
+      feature.ts       # reusable event-sourced entity Feature factory
+      testing.ts       # factory-owned deterministic test harness
   cli.ts
   index.ts
 ```

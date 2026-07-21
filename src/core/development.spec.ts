@@ -5,14 +5,14 @@ import {
   type ComponentIR,
   type ApplicationIR,
   type TypeIR,
-} from "./compiler/ir";
+} from "@/core/compiler/ir";
 import {
   createHotReplacementManifest,
   HotUpdateCoordinator,
   isHotReplacementCompatible,
   type HotCandidate,
   type HotReplacementManifest,
-} from "./development";
+} from "@/core/development";
 
 describe("semantic hot updates", () => {
   test("accepts additive and removed state fields but rejects changed fields", () => {
@@ -203,6 +203,7 @@ function application(file: string): ApplicationIR {
         requires: [],
         provides: [],
         ui: { state: record({ count: numberType() }), actions: [], components: [] },
+        implementation: { kind: "source", span: { file, line: 1, column: 1 } },
         span: { file, line: 1, column: 1 },
       },
     ],

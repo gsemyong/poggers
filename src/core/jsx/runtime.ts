@@ -1,7 +1,7 @@
-declare const jsxElement: unique symbol;
-
 /** Opaque result of one platform-native JSX expression. It has no runtime form. */
-export type JSXElement = Readonly<{ [jsxElement]: true }>;
+export interface JSXElement {
+  readonly __poggersJSXElement: true;
+}
 
 export type JSXPlatformRegistration<IntrinsicElements extends object> = Readonly<{
   IntrinsicElements: IntrinsicElements;

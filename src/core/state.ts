@@ -37,7 +37,7 @@ export function createReactiveState(
       const cell = cells[name];
       if (!cell) throw new Error(`Unknown UI state "${name}".`);
       if (active()) {
-        cell(value && typeof value === "object" ? graph.wrap(value, name) : value);
+        cell(graph.assign(value, name));
       }
       return true;
     },
@@ -85,6 +85,16 @@ class ReactiveObjectGraph {
     return node.proxy;
   }
 
+  assign(value: unknown, path: string): unknown {
+    return this.wrap(this.#own(value), path);
+  }
+
+  #own(value: unknown): unknown {
+    if (!isTrackable(value)) return value;
+    const raw = rawValues.get(value) ?? value;
+    return this.#nodes.has(raw) ? raw : cloneSnapshot(raw);
+  }
+
   #createNode(target: object, path: string): ReactiveObjectNode {
     const cells = new Map<PropertyKey, ReactiveCell<unknown>>();
     const shape = this.#createCell(0, `${path}.*`);
@@ -113,7 +123,7 @@ class ReactiveObjectGraph {
         const existed = Object.hasOwn(target, property);
         const previousLength = Array.isArray(target) ? target.length : undefined;
         const previous = Reflect.get(target, property);
-        const raw = rawValues.get(value as object) ?? value;
+        const raw = this.#own(value);
         if (Object.is(previous, raw)) return true;
 
         const removed =

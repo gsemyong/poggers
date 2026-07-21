@@ -21,16 +21,28 @@ export type {
   UIActionContext,
   UIContributionAPI,
   UIState,
-} from "./core/application";
+} from "@/core/application";
 export {
   bindCapabilitiesToScope,
   createProgramContributionInstance,
   createUIContributionInstance,
   ResourceScope,
   startProcess,
-} from "./core/process";
-export type { Process, ProgramContributionInstance, UIContributionInstance } from "./core/process";
-export type { CapabilityResolver, ProgramContributionAddress } from "./contracts/capability";
+} from "@/core/process";
+export type { Process, ProgramContributionInstance, UIContributionInstance } from "@/core/process";
+export { collectProgramManifest } from "@/core/capability";
+export type {
+  CapabilityProfile,
+  ProgramCapabilities,
+  ProgramCapabilityModule,
+  ProgramContributionAddress,
+  ProgramContributionManifest,
+  ProgramExternalCapabilities,
+  ProgramManifest,
+  ProgramName,
+  ProgramProvidedCapabilities,
+  ProgramRequiredCapabilities,
+} from "@/core/capability";
 export type {
   ComponentActionArgs,
   ComponentActionContext,
@@ -56,7 +68,7 @@ export type {
   ComponentUI,
   ComponentViewContext,
   RootComponentName,
-} from "./core/component";
+} from "@/core/component";
 export type {
   UIChild,
   UIContract,
@@ -66,7 +78,7 @@ export type {
   UIElementProps,
   UIElementTarget,
   UITarget,
-} from "./core/ui";
+} from "@/core/ui";
 export type {
   ActionCompleted,
   ActionEvent,
@@ -91,9 +103,9 @@ export type {
   PresentationElementResolver,
   PresentationFrame,
   PresentationLanguage,
-} from "./core/presentation";
-export { animate, createPresentationFrame, settled, velocity } from "./core/presentation";
-export { selectPlatformAdapters } from "./contracts/platform";
+} from "@/core/presentation";
+export { animate, createPresentationFrame, settled, velocity } from "@/core/presentation";
+export { selectPlatformAdapters } from "@/contracts/platform";
 export type {
   ComponentAdapter,
   ComponentAdapterSession,
@@ -107,4 +119,34 @@ export type {
   ProductionArtifact,
   ProductionArtifacts,
   UIAdapter,
-} from "./contracts/platform";
+} from "@/contracts/platform";
+export {
+  bindEntityCredentials,
+  defineEntityFeature,
+  EntityFailure,
+} from "@/features/entity/feature";
+export type {
+  Clock,
+  Entity,
+  EntityAuthorization,
+  EntityClient,
+  EntityContract,
+  EntityEvent,
+  EntityFailureCode,
+  EntityFeature,
+  EntityFeatureDefinition,
+  EntityFeatureFactory,
+  EntityRequest,
+  EntityService,
+  EntitySnapshot,
+  EventStore,
+  Identifiers,
+  Identity,
+  Principal,
+  StoredEvent,
+} from "@/features/entity/feature";
+export {
+  createEntityFixture,
+  createIdentity,
+  createMemoryEventStore,
+} from "@/features/entity/testing";

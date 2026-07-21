@@ -1,10 +1,10 @@
-import type { ComponentOwner } from "../../../../core/component";
+import type { IntrinsicElements } from "@/adapters/web/ui/component/language";
+import type { WebSpring, WebTrack, WebTween } from "@/adapters/web/ui/presentation/dynamics";
+import type { ComponentOwner } from "@/core/component";
 import type {
   ConfiguredPresentation as CoreConfiguredPresentation,
   Presentation as CorePresentation,
-} from "../../../../core/presentation";
-import type { IntrinsicElements } from "../component/language";
-import type { WebSpring, WebTrack, WebTween } from "./dynamics";
+} from "@/core/presentation";
 
 type Empty = Record<never, never>;
 
@@ -464,7 +464,15 @@ export type ConfiguredWebPresentation<
   Parameters extends object = Empty,
 > = CoreConfiguredPresentation<Root, WebPresentationLanguage, Parameters>;
 
-export { decay, follow, pulse, sampleTrack, spring, track, tween } from "./dynamics";
+export {
+  decay,
+  follow,
+  pulse,
+  sampleTrack,
+  spring,
+  track,
+  tween,
+} from "@/adapters/web/ui/presentation/dynamics";
 export type {
   WebDecay,
   WebDecayOptions,
@@ -483,4 +491,4 @@ export type {
   WebTrajectory,
   WebTween,
   WebTweenOptions,
-} from "./dynamics";
+} from "@/adapters/web/ui/presentation/dynamics";

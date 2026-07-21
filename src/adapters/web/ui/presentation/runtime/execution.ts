@@ -1,5 +1,5 @@
-import { compileWebStyleDeclarations } from "../compiler";
-import type { WebElementPresentation } from "../language";
+import { compileWebStyleDeclarations } from "@/adapters/web/ui/presentation/compiler";
+import type { WebElementPresentation } from "@/adapters/web/ui/presentation/language";
 
 const nativeProperties = new Set(["opacity", "rotate", "scale", "translate"]);
 const adaptiveSafetyMargin = 0.5;

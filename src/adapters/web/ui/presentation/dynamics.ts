@@ -1,4 +1,4 @@
-import type { Animation, Event } from "../../../../core/presentation";
+import type { Animation, Event } from "@/core/presentation";
 
 const millisecondsPerSecond = 1_000;
 const maximumSpringDuration = 60;

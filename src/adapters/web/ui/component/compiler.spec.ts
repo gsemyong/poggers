@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 
-import { transformComponentSource } from "./compiler";
+import { transformComponentSource } from "@/adapters/web/ui/component/compiler";
 
 describe("component compiler", () => {
   test("lowers reactive component reads and strips presentation factories from the browser app", () => {

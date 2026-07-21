@@ -1,13 +1,13 @@
-import type { Program } from "../core/application";
-import type { PresentationAdapter } from "../core/presentation";
-import type { UIElement } from "../core/ui";
 import type {
   DevelopmentSession,
   PlatformAdapter,
   PlatformAdapters,
   ProductionArtifacts,
   UIAdapter,
-} from "./platform";
+} from "@/contracts/platform";
+import type { Program } from "@/core/application";
+import type { PresentationAdapter } from "@/core/presentation";
+import type { UIElement } from "@/core/ui";
 
 type NativeTarget = { readonly kind: "native" };
 type OtherTarget = { readonly kind: "other" };

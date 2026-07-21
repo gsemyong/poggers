@@ -1,6 +1,6 @@
 import { describe, expect, test, vi } from "vitest";
 
-import { activateJSXRenderer, jsx } from "./runtime";
+import { activateJSXRenderer, jsx } from "@/core/jsx/runtime";
 
 describe("shared JSX protocol", () => {
   test("calls Components and native renderers directly without retaining a tree", () => {

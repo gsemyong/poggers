@@ -1,7 +1,10 @@
 import { effect } from "alien-signals";
 import { describe, expect, it } from "vitest";
 
-import { createWebElementObservationHost, createWebEnvironmentHost } from "./observations";
+import {
+  createWebElementObservationHost,
+  createWebEnvironmentHost,
+} from "@/adapters/web/ui/presentation/runtime/observations";
 
 describe("web Presentation Environment", () => {
   it("updates through one scheduled read and releases its native listeners", () => {

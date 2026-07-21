@@ -1,5 +1,5 @@
-import type { ComponentContract, ComponentDefinitions, RootComponentName } from "./component";
-import type { UIContract, UIDefinition, UIElementName } from "./ui";
+import type { ComponentContract, ComponentDefinitions, RootComponentName } from "@/core/component";
+import type { UIContract, UIDefinition, UIElementName } from "@/core/ui";
 
 type Empty = Record<never, never>;
 type ActionRecord = Record<string, (...args: never[]) => unknown>;
@@ -229,15 +229,17 @@ type UIActionDefinitions<
 type UIComponentDefinitions<
   Owner extends FeatureContract,
   ProgramName extends keyof ProgramsOf<Owner>,
-> = ComponentDefinitions<ProgramOwner<Owner, ProgramName>, ProgramOwner<Owner, ProgramName>>;
+  Root extends FeatureContract,
+> = ComponentDefinitions<ProgramOwner<Root, ProgramName>, ProgramOwner<Owner, ProgramName>>;
 
 type ProgramUIFields<
   Owner extends FeatureContract,
   ProgramName extends keyof ProgramsOf<Owner>,
   Contract extends ProgramContract,
+  Root extends FeatureContract,
 > = DefinitionField<"state", Mutable<StateOf<Contract>>> &
   DefinitionField<"actions", UIActionDefinitions<Owner, ProgramName, Contract>> &
-  DefinitionField<"components", UIComponentDefinitions<Owner, ProgramName>> & {
+  DefinitionField<"components", UIComponentDefinitions<Owner, ProgramName, Root>> & {
     root?: RootComponentName<ProgramOwner<Owner, ProgramName>>;
   };
 
@@ -263,10 +265,11 @@ type ProgramStartResult<Contract extends ProgramContract> = keyof ProvidesOf<Con
 type ProgramDefinition<
   Owner extends FeatureContract,
   ProgramName extends keyof ProgramsOf<Owner>,
+  Root extends FeatureContract,
   Contract extends ProgramContract = Extract<ProgramsOf<Owner>[ProgramName], ProgramContract>,
 > = Readonly<
   (HasUI<Contract> extends true
-    ? ProgramUIFields<Owner, ProgramName, Contract>
+    ? ProgramUIFields<Owner, ProgramName, Contract, Root>
     : {
         state?: never;
         actions?: never;
@@ -286,18 +289,26 @@ type ProgramDefinition<
         })
 >;
 
-type ProgramDefinitions<Owner extends FeatureContract> = {
-  readonly [Name in keyof ProgramsOf<Owner>]: ProgramDefinition<Owner, Name>;
+type ProgramDefinitions<Owner extends FeatureContract, Root extends FeatureContract> = {
+  readonly [Name in keyof ProgramsOf<Owner>]: ProgramDefinition<Owner, Name, Root>;
 };
 
-export type FeatureDefinitions<Features extends Record<string, FeatureContract>> = {
-  readonly [Name in keyof Features]: Feature<Extract<Features[Name], FeatureContract>>;
+export type FeatureDefinitions<
+  Features extends Record<string, FeatureContract>,
+  Root extends FeatureContract = { Features: Features },
+> = {
+  readonly [Name in keyof Features]:
+    | Feature<Extract<Features[Name], FeatureContract>, Root>
+    | Feature<Extract<Features[Name], FeatureContract>>;
 };
 
 /** A reusable vertical slice that contributes to Programs and composes children. */
-export type Feature<Contract extends FeatureContract> = Readonly<
-  DefinitionField<"programs", ProgramDefinitions<Contract>> &
-    DefinitionField<"features", FeatureDefinitions<FeaturesOf<Contract>>>
+export type Feature<
+  Contract extends FeatureContract,
+  Root extends FeatureContract = Contract,
+> = Readonly<
+  DefinitionField<"programs", ProgramDefinitions<Contract, Root>> &
+    DefinitionField<"features", FeatureDefinitions<FeaturesOf<Contract>, Root>>
 >;
 
 export type PresentationName<Contract extends ApplicationContract> = Contract extends {
@@ -382,7 +393,7 @@ type EnvironmentConflictIn<Owner extends FeatureContract> = string extends keyof
 type ApplicationDefinition<Contract extends ApplicationContract> = Readonly<
   {
     metadata?: ApplicationMetadata;
-    features: FeatureDefinitions<FeaturesOf<Contract>>;
+    features: FeatureDefinitions<FeaturesOf<Contract>, Contract>;
   } & ApplicationPresentations<Contract>
 >;
 

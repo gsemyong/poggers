@@ -11,7 +11,7 @@ import {
   readEventOccurrences,
   type Animation,
   type PresentationAnimationHost,
-} from "./presentation";
+} from "@/core/presentation";
 
 describe("Presentation kernel", () => {
   it("normalizes one logical frame into deterministic immutable data", () => {

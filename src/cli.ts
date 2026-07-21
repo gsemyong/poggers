@@ -4,9 +4,13 @@ import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 import process from "node:process";
 
-import { platformAdapters } from "./adapters/registry";
-import { selectPlatformAdapters, type DevelopmentSession } from "./contracts/platform";
-import { compileApplication, resolveApplication } from "./core/compiler/source";
+import { platformAdapters } from "@/adapters/registry";
+import {
+  selectPlatformAdapters,
+  type DevelopmentSession,
+  type PlatformAdapterImplementation,
+} from "@/contracts/platform";
+import { compileApplication, resolveApplication } from "@/core/compiler/source";
 
 export async function runCli(arguments_ = process.argv.slice(2)): Promise<void> {
   const [command = "dev", ...commandArguments] = arguments_;
@@ -181,7 +185,10 @@ function resolveRealization(directory: string) {
   const ir = compileApplication(paths.application);
   return {
     ir,
-    adapters: selectPlatformAdapters(ir, platformAdapters),
+    adapters: selectPlatformAdapters(
+      ir,
+      platformAdapters as unknown as Readonly<Record<string, PlatformAdapterImplementation>>,
+    ),
     input: {
       directory: paths.directory,
       application: paths.application,

@@ -1,6 +1,6 @@
 import * as ts from "@typescript/typescript6";
 
-import type { SourceSpan } from "./ir";
+import type { SourceSpan } from "@/core/compiler/ir";
 
 export type PresentationAnimationIR = Readonly<{
   id: string;

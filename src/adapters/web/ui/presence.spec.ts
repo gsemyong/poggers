@@ -7,7 +7,7 @@ import {
   PresenceGraph,
   readPresentationPresence,
   setPresentationPresence,
-} from "./presence";
+} from "@/adapters/web/ui/presence";
 
 describe("web Component presence identity", () => {
   it("reclaims a keyed outgoing node without duplicating structural ownership", () => {

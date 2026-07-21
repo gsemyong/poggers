@@ -14,8 +14,9 @@ import { resolve } from "node:path";
 
 import { afterEach, describe, expect, test } from "vitest";
 
-import { validateUIProgramRoot } from "./adapters/web/toolchain";
-import { createProject, runCli } from "./cli";
+import { validateUIProgramRoot } from "@/adapters/web/toolchain";
+import { createProject, runCli } from "@/cli";
+import { POGGERS_IR_VERSION } from "@/core/compiler/ir";
 
 const directories: string[] = [];
 afterEach(async () => {
@@ -118,7 +119,7 @@ describe("project template", () => {
         ui?: unknown;
       }[];
     };
-    expect(manifest.version).toBe(5);
+    expect(manifest.version).toBe(POGGERS_IR_VERSION);
     expect(manifest.platforms).toEqual(["web"]);
     expect(manifest.features.map(({ id }) => id)).toEqual(["feature/shell"]);
     expect(manifest.programs).toHaveLength(1);

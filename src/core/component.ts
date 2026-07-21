@@ -1,5 +1,11 @@
-import type { JSXElement } from "./jsx/runtime";
-import type { UIChild, UIContract, UIElementName, UIElementProps, UIElementTarget } from "./ui";
+import type { JSXElement } from "@/core/jsx/runtime";
+import type {
+  UIChild,
+  UIContract,
+  UIElementName,
+  UIElementProps,
+  UIElementTarget,
+} from "@/core/ui";
 
 type Empty = Record<never, never>;
 type ActionRecord = Record<string, (...args: never[]) => unknown>;
@@ -229,7 +235,7 @@ type ComponentActionAPI<Owner extends ComponentOwner, Name extends ComponentName
 };
 
 export type ComponentViewContext<
-  _Root extends ComponentOwner,
+  Root extends ComponentOwner,
   Owner extends ComponentOwner,
   Name extends ComponentName<Owner>,
 > = Readonly<{
@@ -238,7 +244,7 @@ export type ComponentViewContext<
   state: ComponentState<Owner, Name>;
   actions: ComponentActionAPI<Owner, Name>;
   slots: ComponentSlots<Owner, Name>;
-  components: ComponentComposition<Owner>;
+  components: ComponentComposition<Root>;
   elements: ComponentElementMap<Owner, Name>;
 }>;
 

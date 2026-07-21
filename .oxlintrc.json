@@ -13,6 +13,12 @@
   },
   "overrides": [
     {
+      "files": ["src/**/*.ts", "src/**/*.tsx"],
+      "rules": {
+        "no-restricted-imports": ["error", { "patterns": ["./**", "../**"] }]
+      }
+    },
+    {
       "files": [
         "src/core/application.ts",
         "src/core/component.ts",
@@ -24,11 +30,11 @@
         "src/core/compiler/source.ts",
         "src/core/jsx/development.ts",
         "src/core/jsx/runtime.ts",
-        "src/contracts/capability.ts",
+        "src/core/capability.ts",
         "src/contracts/platform.ts"
       ],
       "rules": {
-        "no-restricted-imports": ["error", { "patterns": ["**/adapters/**"] }]
+        "no-restricted-imports": ["error", { "patterns": ["./**", "../**", "**/adapters/**"] }]
       }
     }
   ],

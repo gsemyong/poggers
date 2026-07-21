@@ -1,11 +1,11 @@
 import { describe, expect, test } from "vitest";
 
-import type { Application, Feature, Program } from "../../../../core/application";
-import type { PresentationAdapterInstance } from "../../../../core/presentation";
-import type { BrowserMainThread } from "../../platform";
-import { createWebUIAdapter } from "../adapter";
-import type { WebPresentationLanguage } from "../presentation/language";
-import { createPresentationGraph } from "./adapter";
+import type { BrowserMainThread } from "@/adapters/web/platform";
+import { createWebUIAdapter } from "@/adapters/web/ui/adapter";
+import { createPresentationGraph } from "@/adapters/web/ui/component/adapter";
+import type { WebPresentationLanguage } from "@/adapters/web/ui/presentation/language";
+import type { Application, Feature, Program } from "@/core/application";
+import type { PresentationAdapterInstance } from "@/core/presentation";
 
 const createApplicationUI = createWebUIAdapter().component.createApplicationUI;
 const boundary = {} as Element;
@@ -278,6 +278,13 @@ describe("Program UI composition", () => {
     const ui = createApplicationUI({
       application,
       program: "browser",
+      programManifest: {
+        name: "browser",
+        contributions: [
+          { feature: "consumer", requires: ["reader"], provides: [] },
+          { feature: "consumer.provider", requires: [], provides: ["reader"] },
+        ],
+      },
       presentations: { presentations: {} },
       boundary,
     });

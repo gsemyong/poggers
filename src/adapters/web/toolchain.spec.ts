@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { POGGERS_IR_VERSION, type ApplicationIR } from "../../core/compiler/ir";
-import { collectPresentationDependencies } from "./toolchain";
+import { collectPresentationDependencies } from "@/adapters/web/toolchain";
+import { POGGERS_IR_VERSION, type ApplicationIR } from "@/core/compiler/ir";
 
 describe("web Presentation dependency manifest", () => {
   it("preserves exact destinations and classifies independent Components", () => {
@@ -85,6 +85,7 @@ function applicationIR(): ApplicationIR {
           ],
           root: "Animated",
         },
+        implementation: { kind: "source", span },
         span,
       },
     ],

@@ -2,7 +2,7 @@ import { effect, endBatch, signal, startBatch } from "alien-signals";
 import fc from "fast-check";
 import { describe, expect, test } from "vitest";
 
-import { createReactiveState } from "./state";
+import { createReactiveState } from "@/core/state";
 
 const createState = (initial: Readonly<Record<string, unknown>>) =>
   createReactiveState(initial, (value) => signal(value));
@@ -54,6 +54,19 @@ describe("reactive state", () => {
 
     expect(first).toEqual(["a", "A"]);
     expect(lengths).toEqual([2, 3]);
+  });
+
+  test("adopts immutable external snapshots into mutable reactive state", () => {
+    const state = createState({ items: [] as ReadonlyArray<{ value: number }> });
+    const snapshot = Object.freeze([Object.freeze({ value: 1 })]);
+
+    state.mutable.items = snapshot;
+    const items = state.mutable.items as Array<{ value: number }>;
+    expect(items[0]?.value).toBe(1);
+    items[0]!.value = 2;
+
+    expect(state.snapshot()).toEqual({ items: [{ value: 2 }] });
+    expect(snapshot[0]?.value).toBe(1);
   });
 
   test("batches nested writes and snapshots plain data", () => {

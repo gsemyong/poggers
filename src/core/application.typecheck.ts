@@ -1,5 +1,5 @@
-import type { BrowserMainThread, BrowserServiceWorker } from "../adapters/web/platform";
-import type { Application, Feature, Program } from "./application";
+import type { BrowserMainThread, BrowserServiceWorker } from "@/adapters/web/platform";
+import type { Application, Feature, Program } from "@/core/application";
 
 type Message = Readonly<{ id: string; text: string }>;
 type ServerPlatform = { readonly Name: "server" };

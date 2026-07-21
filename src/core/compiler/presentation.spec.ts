@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { compilePresentationSource, PresentationSourceDiagnostic } from "./presentation";
+import {
+  compilePresentationSource,
+  PresentationSourceDiagnostic,
+} from "@/core/compiler/presentation";
 
 describe("Presentation source compiler", () => {
   it("extracts and lowers named Animation bindings and temporal queries", () => {

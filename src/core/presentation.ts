@@ -9,7 +9,7 @@ import type {
   ComponentOwner,
   ComponentProps,
   ComponentState,
-} from "./component";
+} from "@/core/component";
 
 type Empty = Record<never, never>;
 type AnyFunction = (...arguments_: never[]) => unknown;
@@ -495,10 +495,28 @@ type PresentationFeatureDefinitions<
   Owner extends ComponentOwner,
   Language extends PresentationLanguage,
 > = Readonly<{
-  [Name in keyof ComponentFeatures<Owner> as Capitalize<Extract<Name, string>>]: (
+  [Name in keyof ComponentFeatures<Owner> as [
+    ComponentNamesIn<Extract<ComponentFeatures<Owner>[Name], ComponentOwner>>,
+  ] extends [never]
+    ? never
+    : Capitalize<Extract<Name, string>>]: (
     input: PresentationScopeInput<Extract<ComponentFeatures<Owner>[Name], ComponentOwner>>,
   ) => PresentationComponentTree<Extract<ComponentFeatures<Owner>[Name], ComponentOwner>, Language>;
 }>;
+
+type ComponentNamesIn<
+  Owner extends ComponentOwner,
+  Depth extends readonly unknown[] = [],
+> = Depth["length"] extends 8
+  ? never
+  :
+      | ComponentName<Owner>
+      | {
+          [Name in keyof ComponentFeatures<Owner>]: ComponentNamesIn<
+            Extract<ComponentFeatures<Owner>[Name], ComponentOwner>,
+            readonly [...Depth, unknown]
+          >;
+        }[keyof ComponentFeatures<Owner>];
 
 /** Reactive product facts shared by every Component in one Feature scope. */
 export type PresentationScopeInput<Owner extends ComponentOwner> = Readonly<{

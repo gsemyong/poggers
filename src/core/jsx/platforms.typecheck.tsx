@@ -1,8 +1,8 @@
 import type { JSXElement, JSXPlatformRegistration } from "@poggers/kit/jsx-runtime";
 
-import type { BrowserMainThread } from "../../adapters/web/platform";
-import type { Feature, Program } from "../application";
-import type { UIElement } from "../ui";
+import type { BrowserMainThread } from "@/adapters/web/platform";
+import type { Feature, Program } from "@/core/application";
+import type { UIElement } from "@/core/ui";
 
 type NativeNode = Readonly<{ id: number }>;
 type NativeStackProps = Readonly<{

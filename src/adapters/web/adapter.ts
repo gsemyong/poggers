@@ -1,7 +1,7 @@
-import type { PlatformAdapter } from "../../contracts/platform";
-import type { WebPlatform } from "./platform";
-import { buildApplication, runApplication } from "./toolchain";
-import { createWebUIAdapter, type WebUIAdapter } from "./ui/adapter";
+import type { WebPlatform } from "@/adapters/web/platform";
+import { buildApplication, runApplication } from "@/adapters/web/toolchain";
+import { createWebUIAdapter, type WebUIAdapter } from "@/adapters/web/ui/adapter";
+import type { PlatformAdapter } from "@/contracts/platform";
 
 export type WebPlatformAdapter = PlatformAdapter<WebPlatform, WebUIAdapter>;
 

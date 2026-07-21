@@ -2,6 +2,7 @@ node_modules
 dist
 coverage
 .poggers
+.data
 .DS_Store
 .env
 mise.local.toml

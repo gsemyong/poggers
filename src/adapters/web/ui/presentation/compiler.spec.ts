@@ -1,15 +1,15 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 
-import { compilePresentationSource } from "../../../../core/compiler/presentation";
 import {
   compileWebDynamicStyle,
   compileWebStyle,
   planWebPresentationArtifacts,
   validateWebPresentationSource,
-} from "./compiler";
-import { spring } from "./dynamics";
-import type { WebStyle } from "./language";
+} from "@/adapters/web/ui/presentation/compiler";
+import { spring } from "@/adapters/web/ui/presentation/dynamics";
+import type { WebStyle } from "@/adapters/web/ui/presentation/language";
+import { compilePresentationSource } from "@/core/compiler/presentation";
 
 describe("web Presentation compiler", () => {
   it("accepts only compositor-safe temporal destinations", () => {

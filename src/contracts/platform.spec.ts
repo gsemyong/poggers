@@ -1,12 +1,12 @@
 import { describe, expect, test } from "vitest";
 
-import { POGGERS_IR_VERSION, type ApplicationIR } from "../core/compiler/ir";
 import {
   selectPlatformAdapters,
   type DevelopmentSession,
   type PlatformAdapterImplementation,
   type ProductionArtifacts,
-} from "./platform";
+} from "@/contracts/platform";
+import { POGGERS_IR_VERSION, type ApplicationIR } from "@/core/compiler/ir";
 
 describe("Platform Adapter selection", () => {
   test("selects required adapters in deterministic Platform order", () => {

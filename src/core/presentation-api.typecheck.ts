@@ -6,7 +6,7 @@ import {
   type Animation,
   type Event,
   type Presentation,
-} from "./presentation";
+} from "@/core/presentation";
 
 type Child = {
   State: { visible: boolean };

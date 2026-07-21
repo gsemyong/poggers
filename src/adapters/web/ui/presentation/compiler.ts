@@ -1,4 +1,3 @@
-import type { PresentationSourceIR } from "../../../../core/compiler/presentation";
 import type {
   WebElementPresentation,
   WebFeedback,
@@ -19,7 +18,8 @@ import type {
   WebStyle,
   WebStyleFragment,
   WebText,
-} from "./language";
+} from "@/adapters/web/ui/presentation/language";
+import type { PresentationSourceIR } from "@/core/compiler/presentation";
 
 type CSSDeclarations = Record<string, string>;
 const webStyleRoots = new Set([

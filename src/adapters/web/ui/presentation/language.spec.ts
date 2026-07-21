@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import type { Animation } from "../../../../core/presentation";
-import { decay, follow, spring, track, tween } from "./dynamics";
-import { createAudioAsset, createImageAsset } from "./language";
+import { decay, follow, spring, track, tween } from "@/adapters/web/ui/presentation/dynamics";
+import { createAudioAsset, createImageAsset } from "@/adapters/web/ui/presentation/language";
+import type { Animation } from "@/core/presentation";
 
 describe("web Presentation language", () => {
   it("constructs immutable typed Animation descriptions without resources", () => {

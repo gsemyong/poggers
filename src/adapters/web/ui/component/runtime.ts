@@ -16,7 +16,7 @@ import {
   setActiveSub as alienSetActiveSub,
 } from "alien-signals";
 
-import type { JSXElement } from "../../../../core/jsx/runtime";
+import type { Child } from "@/adapters/web/ui/component/language";
 import {
   adoptSceneChildren,
   hasPresentationPresence,
@@ -27,8 +27,8 @@ import {
   setSceneElementVisible,
   unmountPresenceElement,
   type SceneElementRegistration,
-} from "../presence";
-import type { Child } from "./language";
+} from "@/adapters/web/ui/presence";
+import type { JSXElement } from "@/core/jsx/runtime";
 
 export type VirtualCollectionGeometry = {
   readonly axis: "block" | "inline";
@@ -2026,4 +2026,4 @@ export type {
   HTMLAttributes,
   IntrinsicElements,
   SVGAttributes,
-} from "./language";
+} from "@/adapters/web/ui/component/language";

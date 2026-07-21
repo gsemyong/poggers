@@ -4,9 +4,13 @@ import { resolve } from "node:path";
 
 import { afterEach, describe, expect, test } from "vitest";
 
-import { executeProgramIR } from "../development";
-import { serializeApplicationIR, type TypeIR } from "./ir";
-import { compileApplication, createApplicationCompiler, ApplicationDiagnostic } from "./source";
+import { serializeApplicationIR, type TypeIR } from "@/core/compiler/ir";
+import {
+  compileApplication,
+  createApplicationCompiler,
+  ApplicationDiagnostic,
+} from "@/core/compiler/source";
+import { executeProgramIR } from "@/core/development";
 
 const temporaryDirectories: string[] = [];
 
@@ -44,9 +48,13 @@ describe("Poggers Application compiler", () => {
     expect(program).toMatchObject({
       environment: { name: "server", platform: "server" },
       requires: [{ name: "numbers" }, { name: "output" }],
-      start: { asynchronous: true },
+      implementation: { kind: "portable", start: { asynchronous: true } },
     });
-    expect(program?.start?.body.map(({ kind }) => kind)).toEqual(["let", "let", "for-of", "if"]);
+    expect(
+      program?.implementation.kind === "portable"
+        ? program.implementation.start.body.map(({ kind }) => kind)
+        : [],
+    ).toEqual(["let", "let", "for-of", "if"]);
   });
 
   test("semantic IDs do not depend on declaration order", async () => {
@@ -60,6 +68,19 @@ describe("Poggers Application compiler", () => {
 
     expect(reordered.features.map(({ id }) => id)).toEqual(original.features.map(({ id }) => id));
     expect(reordered.programs.map(({ id }) => id)).toEqual(original.programs.map(({ id }) => id));
+  });
+
+  test("rejects one Program name assigned to incompatible execution contexts", async () => {
+    const entry = await fixture(
+      applicationSource().replace(
+        'type Child = { Programs: { cloud: Program<{ Name: "server"; Platform: { Name: "server" } }> } };',
+        'type Child = { Programs: { cloud: Program<{ Name: "device"; Platform: { Name: "device" } }> } };',
+      ),
+    );
+
+    expect(() => compileApplication(entry)).toThrow(
+      'Program "cloud" has incompatible execution contexts "device" and "server"',
+    );
   });
 
   test("extracts deterministic Component state, actions, Elements, and lifecycle", async () => {
@@ -126,12 +147,124 @@ describe("Poggers Application compiler", () => {
     expect(() => compileApplication(entry)).toThrow(/may call only declared Capabilities/);
   });
 
+  test("marks callback-based implementation as source instead of dropping it", async () => {
+    const entry = await fixture(
+      applicationSource()
+        .replace(
+          "read(input: { count: number }): Promise<readonly number[]>;",
+          "read(input: { count: number }): Promise<readonly number[]>;\n  subscribe(input: { receive(value: number): void }): Disposable;",
+        )
+        .replace(
+          "const values = await capabilities.numbers.read({ count: 4 });",
+          "capabilities.numbers.subscribe({ receive: () => undefined });\n        const values = await capabilities.numbers.read({ count: 4 });",
+        ),
+    );
+    const program = compileApplication(entry).programs.find(
+      ({ id }) => id === "feature/worker/program/cloud",
+    );
+
+    expect(program?.implementation).toMatchObject({ kind: "source" });
+    await expect(
+      executeProgramIR(compileApplication(entry), "feature/worker/program/cloud", {
+        numbers: { read: async () => [], subscribe: () => ({}) },
+        output: { write: async () => undefined },
+      }),
+    ).rejects.toThrow("is source, not portable IR");
+  });
+
   test("rejects any in portable Capability contracts", async () => {
     const entry = await fixture(
       applicationSource().replace("read(input: { count: number })", "read(input: any)"),
     );
 
     expect(() => compileApplication(entry)).toThrow(/cannot contain any/);
+  });
+
+  test("lowers real-time Capability streams without exposing iterator machinery", async () => {
+    const entry = await fixture(
+      applicationSource().replace(
+        "read(input: { count: number }): Promise<readonly number[]>;",
+        "read(input: { count: number }): Promise<readonly number[]>;\n  changes(): AsyncIterable<{ revision: number }>;",
+      ),
+    );
+    const program = compileApplication(entry).programs.find(
+      ({ id }) => id === "feature/worker/program/cloud",
+    );
+    const numbers = program?.requires.find(({ name }) => name === "numbers");
+
+    expect(numbers?.type).toMatchObject({
+      kind: "record",
+      fields: expect.arrayContaining([
+        {
+          name: "changes",
+          optional: false,
+          type: {
+            kind: "function",
+            parameters: [],
+            result: {
+              kind: "stream",
+              element: {
+                kind: "record",
+                fields: [{ name: "revision", optional: false, type: numberType() }],
+              },
+            },
+          },
+        },
+      ]),
+    });
+  });
+
+  test("preserves host-native Capability values as explicit opaque boundaries", async () => {
+    const entry = await fixture(
+      applicationSource().replace(
+        "read(input: { count: number }): Promise<readonly number[]>;",
+        "read(input: { count: number }): Promise<readonly number[]>;\n  exchange(request: Request): Promise<Response>;",
+      ),
+    );
+    const numbers = compileApplication(entry)
+      .programs.find(({ id }) => id === "feature/worker/program/cloud")
+      ?.requires.find(({ name }) => name === "numbers");
+
+    expect(numbers?.type.kind).toBe("record");
+    if (numbers?.type.kind !== "record") return;
+    expect(numbers.type.fields.find(({ name }) => name === "exchange")).toEqual({
+      name: "exchange",
+      optional: false,
+      type: {
+        kind: "function",
+        parameters: [
+          {
+            name: "request",
+            optional: false,
+            type: { kind: "opaque", name: "Request" },
+          },
+        ],
+        result: {
+          kind: "promise",
+          value: { kind: "opaque", name: "Response" },
+        },
+      },
+    });
+  });
+
+  test("extracts an opaque headless Feature factory from its generic contract", async () => {
+    const ir = compileApplication(await fixture(headlessFactoryApplicationSource()));
+
+    expect(ir.features).toEqual([
+      {
+        id: "feature/tasks",
+        path: "tasks",
+        children: [],
+        programs: ["feature/tasks/program/server"],
+      },
+    ]);
+    expect(ir.programs[0]).toMatchObject({
+      id: "feature/tasks/program/server",
+      environment: { name: "server", platform: "server" },
+      requires: [{ name: "repository" }],
+      provides: [{ name: "tasks" }],
+    });
+    expect(ir.programs[0]?.implementation).toMatchObject({ kind: "source" });
   });
 
   test("executes the extracted process through injected Capabilities", async () => {
@@ -294,6 +427,36 @@ export default {
   metadata: { name: "Component fixture" },
   features: { shell },
   presentations: { clean: {} },
+} satisfies Application<App>;
+`;
+}
+
+function headlessFactoryApplicationSource(): string {
+  return `
+type Platform = { readonly Name: string };
+type Environment = { readonly Name: string; readonly Platform: Platform };
+type Program<E extends Environment, C extends object = {}> = Readonly<C & { Environment: E }>;
+type Feature<C> = unknown;
+type Application<C> = unknown;
+
+type Tasks = {
+  Programs: {
+    server: Program<
+      { Name: "server"; Platform: { Name: "server" } },
+      {
+        Requires: { repository: { read(): Promise<readonly string[]> } };
+        Provides: { tasks: { list(): Promise<readonly string[]> } };
+      }
+    >;
+  };
+};
+type App = { Features: { tasks: Tasks } };
+
+declare function createTasksFeature(): Feature<Tasks>;
+
+export default {
+  metadata: { name: "Factory fixture" },
+  features: { tasks: createTasksFeature() },
 } satisfies Application<App>;
 `;
 }

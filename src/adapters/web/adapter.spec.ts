@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 
-import { POGGERS_IR_VERSION, type ProgramIR } from "../../core/compiler/ir";
-import { createWebPlatformAdapter } from "./adapter";
+import { createWebPlatformAdapter } from "@/adapters/web/adapter";
+import { POGGERS_IR_VERSION, type ProgramIR } from "@/core/compiler/ir";
 
 describe("web Platform Adapter", () => {
   test("pairs the web UI implementation with the web realization", () => {
@@ -45,7 +45,10 @@ function programIR(environment: string): ProgramIR {
     environment: { name: environment, platform: "web" },
     requires: [],
     provides: [],
-    start: { asynchronous: false, body: [], span: { file: "app.ts", line: 1, column: 1 } },
+    implementation: {
+      kind: "portable",
+      start: { asynchronous: false, body: [], span: { file: "app.ts", line: 1, column: 1 } },
+    },
     span: { file: "app.ts", line: 1, column: 1 },
   };
 }

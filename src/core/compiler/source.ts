@@ -16,8 +16,8 @@ import {
   type SourceSpan,
   type StatementIR,
   type TypeIR,
-} from "./ir";
-import { compilePresentationSource } from "./presentation";
+} from "@/core/compiler/ir";
+import { compilePresentationSource } from "@/core/compiler/presentation";
 
 export class ApplicationDiagnostic extends Error {
   readonly span: SourceSpan;
@@ -145,6 +145,7 @@ function compileApplicationProgram(
     features,
     programs,
   );
+  validateProgramEnvironments(programs);
 
   const platforms = [...new Set(programs.map(({ environment }) => environment.platform))].sort();
 
@@ -185,6 +186,23 @@ function compileApplicationProgram(
     },
     program,
   };
+}
+
+function validateProgramEnvironments(programs: readonly ProgramIR[]): void {
+  const environments = new Map<string, ProgramIR["environment"]>();
+  for (const program of programs) {
+    const previous = environments.get(program.name);
+    if (!previous) {
+      environments.set(program.name, program.environment);
+      continue;
+    }
+    if (JSON.stringify(previous) === JSON.stringify(program.environment)) continue;
+    throw new ApplicationDiagnostic(
+      `Program ${JSON.stringify(program.name)} has incompatible execution contexts ` +
+        `${JSON.stringify(previous.name)} and ${JSON.stringify(program.environment.name)}.`,
+      program.span,
+    );
+  }
 }
 
 function presentationImplementationSources(
@@ -270,67 +288,58 @@ function inside(root: string, file: string): boolean {
 function extractFeatures(
   checker: ts.TypeChecker,
   contracts: ts.Type,
-  values: ts.ObjectLiteralExpression,
+  values: ts.ObjectLiteralExpression | undefined,
   parent: string,
   features: FeatureIR[],
   programs: ProgramIR[],
+  at: ts.Node = values!,
 ): void {
   for (const symbol of sortedSymbols(contracts.getProperties())) {
     const name = symbol.getName();
     const path = parent ? `${parent}.${name}` : name;
-    const contract = checker.getTypeOfSymbolAtLocation(symbol, symbol.valueDeclaration ?? values);
-    const value = resolveObjectMember(checker, values, name);
-    if (!value) throw diagnostic(values, `Feature ${JSON.stringify(path)} has no implementation.`);
-    const featureValue = requireObject(
-      checker,
-      value,
-      `Feature ${JSON.stringify(path)} must be an object.`,
-    );
-    const programContracts = propertyType(
-      checker,
-      contract,
-      "Programs",
-      symbol.valueDeclaration ?? values,
-    );
+    const location = symbol.valueDeclaration ?? at;
+    const contract = checker.getTypeOfSymbolAtLocation(symbol, location);
+    const value = values ? resolveObjectMember(checker, values, name) : undefined;
+    if (values && !value)
+      throw diagnostic(values, `Feature ${JSON.stringify(path)} has no implementation.`);
+    const featureValue = value ? objectExpression(checker, value) : undefined;
+    const featureLocation = value ?? location;
+    const programContracts = propertyType(checker, contract, "Programs", location);
     const programValues = objectExpression(
       checker,
       objectMember(checker, featureValue, "programs"),
     );
-    const childContracts = propertyType(
-      checker,
-      contract,
-      "Features",
-      symbol.valueDeclaration ?? values,
-    );
+    const childContracts = propertyType(checker, contract, "Features", location);
     const childValues = objectExpression(checker, objectMember(checker, featureValue, "features"));
     const programIds: string[] = [];
     const childIds: string[] = [];
 
     if (programContracts) {
-      if (!programValues)
+      if (featureValue && !programValues)
         throw diagnostic(featureValue, `Feature ${JSON.stringify(path)} needs programs.`);
       for (const programSymbol of sortedSymbols(programContracts.getProperties())) {
         const programName = programSymbol.getName();
         const id = `feature/${path}/program/${programName}`;
         const programContract = checker.getTypeOfSymbolAtLocation(
           programSymbol,
-          programSymbol.valueDeclaration ?? programValues,
+          programSymbol.valueDeclaration ?? featureLocation,
         );
-        const implementation = resolveObjectMember(checker, programValues, programName);
-        if (!implementation) {
+        const implementation = programValues
+          ? resolveObjectMember(checker, programValues, programName)
+          : undefined;
+        if (programValues && !implementation) {
           throw diagnostic(programValues, `Program ${JSON.stringify(id)} has no implementation.`);
         }
+        const programValue = implementation ? objectExpression(checker, implementation) : undefined;
         programs.push(
           extractProgram(
             checker,
             programContract,
-            requireObject(
-              checker,
-              implementation,
-              `Program ${JSON.stringify(id)} must be an object.`,
-            ),
+            programValue,
             path,
             programName,
+            featureLocation,
+            Boolean((value && !featureValue) || (implementation && !programValue)),
           ),
         );
         programIds.push(id);
@@ -338,12 +347,20 @@ function extractFeatures(
     }
 
     if (childContracts) {
-      if (!childValues)
+      if (featureValue && !childValues)
         throw diagnostic(featureValue, `Feature ${JSON.stringify(path)} needs features.`);
       for (const child of sortedSymbols(childContracts.getProperties())) {
         childIds.push(`feature/${path}.${child.getName()}`);
       }
-      extractFeatures(checker, childContracts, childValues, path, features, programs);
+      extractFeatures(
+        checker,
+        childContracts,
+        childValues,
+        path,
+        features,
+        programs,
+        featureLocation,
+      );
     }
 
     features.push({
@@ -358,47 +375,92 @@ function extractFeatures(
 function extractProgram(
   checker: ts.TypeChecker,
   contract: ts.Type,
-  value: ts.ObjectLiteralExpression,
+  value: ts.ObjectLiteralExpression | undefined,
   feature: string,
   name: string,
+  at: ts.Node = value!,
+  factory = false,
 ): ProgramIR {
-  const environment = propertyType(checker, contract, "Environment", value);
-  if (!environment) throw diagnostic(value, `Program ${JSON.stringify(name)} has no Environment.`);
-  const environmentName = literalProperty(checker, environment, "Name", value);
-  const platformContract = propertyType(checker, environment, "Platform", value);
+  const location = value ?? at;
+  const environment = propertyType(checker, contract, "Environment", location);
+  if (!environment)
+    throw diagnostic(location, `Program ${JSON.stringify(name)} has no Environment.`);
+  const environmentName = literalProperty(checker, environment, "Name", location);
+  const platformContract = propertyType(checker, environment, "Platform", location);
   if (!platformContract) {
-    throw diagnostic(value, `Environment ${JSON.stringify(environmentName)} has no Platform.`);
+    throw diagnostic(location, `Environment ${JSON.stringify(environmentName)} has no Platform.`);
   }
-  const platform = literalProperty(checker, platformContract, "Name", value);
-  const uiContract = propertyType(checker, environment, "UI", value);
-  const ui = uiContract ? literalProperty(checker, uiContract, "Name", value) : undefined;
-  const state = propertyType(checker, contract, "State", value);
-  const actions = propertyType(checker, contract, "Actions", value);
-  const components = propertyType(checker, contract, "Components", value);
+  const platform = literalProperty(checker, platformContract, "Name", location);
+  const uiContract = propertyType(checker, environment, "UI", location);
+  const ui = uiContract ? literalProperty(checker, uiContract, "Name", location) : undefined;
+  const state = propertyType(checker, contract, "State", location);
+  const actions = propertyType(checker, contract, "Actions", location);
+  const components = propertyType(checker, contract, "Components", location);
+  if (!value && (state || actions || components)) {
+    throw diagnostic(
+      location,
+      `UI Program ${JSON.stringify(name)} must expose compiler-readable Feature metadata.`,
+    );
+  }
   const componentValues = objectExpression(checker, objectMember(checker, value, "components"));
-  const start = objectMemberDeclaration(value, "start");
+  const start = value ? objectMemberDeclaration(value, "start") : undefined;
   const root = stringMember(checker, value, "root");
+  const implementation = programImplementation(
+    start,
+    Boolean(state || actions || components),
+    factory,
+    location,
+  );
 
   return {
     id: `feature/${feature}/program/${name}`,
     feature,
     name,
     environment: { name: environmentName, platform, ...(ui ? { ui } : {}) },
-    requires: capabilityList(checker, propertyType(checker, contract, "Requires", value), value),
-    provides: capabilityList(checker, propertyType(checker, contract, "Provides", value), value),
+    requires: capabilityList(
+      checker,
+      propertyType(checker, contract, "Requires", location),
+      location,
+    ),
+    provides: capabilityList(
+      checker,
+      propertyType(checker, contract, "Provides", location),
+      location,
+    ),
     ...(state || actions || components
       ? {
           ui: {
-            state: state ? lowerType(checker, state, value) : emptyRecord(),
+            state: state ? lowerType(checker, state, location) : emptyRecord(),
             actions: sortedSymbols(actions?.getProperties() ?? []).map((item) => item.getName()),
-            components: componentList(checker, components, componentValues, value),
+            components: componentList(checker, components, componentValues, location),
             ...(root ? { root } : {}),
           },
         }
       : {}),
-    ...(start && !state && !actions && !components ? { start: lowerFunction(start) } : {}),
-    span: spanOf(value),
+    implementation,
+    span: spanOf(location),
   };
+}
+
+function programImplementation(
+  start: ts.ObjectLiteralElementLike | undefined,
+  ui: boolean,
+  factory: boolean,
+  at: ts.Node,
+): ProgramIR["implementation"] {
+  if (ui || factory) return { kind: "source", span: spanOf(at) };
+  if (!start) return { kind: "none" };
+  try {
+    return { kind: "portable", start: lowerFunction(start) };
+  } catch (error) {
+    if (
+      error instanceof ApplicationDiagnostic &&
+      /Unsupported portable (expression|statement)/.test(error.message)
+    ) {
+      return { kind: "source", span: spanOf(start) };
+    }
+    throw error;
+  }
 }
 
 function capabilityList(
@@ -494,6 +556,8 @@ function lowerType(
   if (type.flags & (ts.TypeFlags.Void | ts.TypeFlags.Undefined | ts.TypeFlags.Never)) {
     return primitive("void");
   }
+  const native = nativeTypeName(type);
+  if (native) return { kind: "opaque", name: native };
   if (type.isUnion()) {
     const defined = type.types.filter((item) => !(item.flags & ts.TypeFlags.Undefined));
     if (defined.length === 1 && defined.length !== type.types.length) {
@@ -531,6 +595,10 @@ function lowerType(
       const argument = checker.getTypeArguments(type as ts.TypeReference)[0];
       if (argument) return { kind: "promise", value: lowerType(checker, argument, at, active) };
     }
+    if (type.symbol?.getName() === "AsyncIterable") {
+      const argument = checker.getTypeArguments(type as ts.TypeReference)[0];
+      if (argument) return { kind: "stream", element: lowerType(checker, argument, at, active) };
+    }
     const signatures = checker.getSignaturesOfType(type, ts.SignatureKind.Call);
     if (signatures.length === 1 && type.getProperties().length === 0) {
       const signature = signatures[0]!;
@@ -563,6 +631,22 @@ function lowerType(
   } finally {
     active.delete(type);
   }
+}
+
+function nativeTypeName(type: ts.Type): string | undefined {
+  const symbol = type.aliasSymbol ?? type.symbol;
+  if (!symbol?.declarations?.length) return undefined;
+  const name = symbol.getName();
+  if (["Array", "ReadonlyArray", "Promise", "AsyncIterable"].includes(name)) return undefined;
+  if (
+    !symbol.declarations.every((declaration) => {
+      const source = declaration.getSourceFile();
+      return source.hasNoDefaultLib || /(^|[/\\])lib\.[^/\\]+\.d\.ts$/.test(source.fileName);
+    })
+  ) {
+    return undefined;
+  }
+  return name.startsWith("__") ? undefined : name;
 }
 
 function lowerFunction(node: ts.ObjectLiteralElementLike): FunctionIR {
@@ -1068,15 +1152,19 @@ function normalizeSourceFiles(ir: ApplicationIR, root: string): ApplicationIR {
     programs: ir.programs.map((program) => ({
       ...program,
       span: normalizeSpan(program.span),
-      ...(program.start
-        ? {
-            start: {
-              ...program.start,
-              span: normalizeSpan(program.start.span),
-              body: normalizeStatements(program.start.body),
-            },
-          }
-        : {}),
+      implementation:
+        program.implementation.kind === "portable"
+          ? {
+              kind: "portable",
+              start: {
+                ...program.implementation.start,
+                span: normalizeSpan(program.implementation.start.span),
+                body: normalizeStatements(program.implementation.start.body),
+              },
+            }
+          : program.implementation.kind === "source"
+            ? { kind: "source", span: normalizeSpan(program.implementation.span) }
+            : program.implementation,
     })),
   };
 }

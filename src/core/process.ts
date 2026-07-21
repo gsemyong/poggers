@@ -1,9 +1,13 @@
 import { endBatch, signal as createSignal, startBatch } from "alien-signals";
 
-import type { CapabilityResolver, ProgramContributionAddress } from "../contracts/capability";
-import type { Application, ApplicationContract } from "./application";
-import { createActionEventLedger, type ActionEvent } from "./presentation";
-import { createReactiveState } from "./state";
+import type { Application, ApplicationContract } from "@/core/application";
+import type {
+  ProgramContributionAddress,
+  ProgramContributionManifest,
+  ProgramManifest,
+} from "@/core/capability";
+import { createActionEventLedger, type ActionEvent } from "@/core/presentation";
+import { createReactiveState } from "@/core/state";
 
 type ResourceCleanup = () => void | Promise<void>;
 type ResourceIterator = AsyncIterator<unknown>;
@@ -64,6 +68,7 @@ export type ProgramContributionInstance = Readonly<{
 export type Process = Readonly<{
   name: string;
   contributions: readonly ProgramContributionInstance[];
+  capabilities: Readonly<Record<string, unknown>>;
   ui: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
   dispose(): Promise<void>;
 }>;
@@ -144,7 +149,7 @@ export function createUIContributionInstance(
 
 type ProgramContributionOptions = Readonly<{
   address: ProgramContributionAddress;
-  capabilities?: Readonly<Record<string, unknown>>;
+  capabilities?: Record<string, unknown>;
   features?: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
   initialState?: Readonly<Record<string, unknown>>;
   onActionEvent?: () => void;
@@ -221,12 +226,25 @@ export class ResourceScope {
     }
   }
 
+  adoptResult(value: unknown): void {
+    if (!isPromiseLike(value)) {
+      this.adopt(value);
+      return;
+    }
+    this.track(
+      Promise.resolve(value).then(
+        (resolved) => this.adopt(resolved),
+        () => undefined,
+      ),
+    );
+  }
+
   action<Value>(run: () => Value): Value {
     if (!this.#active) throw new Error("Resource scope is disposed.");
     startBatch();
     try {
       const value = run();
-      this.adopt(value);
+      this.adoptResult(value);
       return value;
     } finally {
       endBatch();
@@ -293,9 +311,7 @@ export function createProgramContributionInstance(
   let started = false;
   let disposed = false;
   let provided: Readonly<Record<string, unknown>> = Object.freeze({});
-  const availableCapabilities: Record<string, unknown> = {
-    ...options.capabilities,
-  };
+  const availableCapabilities = options.capabilities ?? Object.create(null);
   const capabilities = bindCapabilitiesToScope(availableCapabilities, scope);
   const ui = hasRuntimeUI(definition)
     ? createUIContributionInstance(definition, {
@@ -374,88 +390,229 @@ export function createProgramContributionInstance(
   return instance;
 }
 
+type PlannedContribution = Readonly<{
+  feature: string;
+  definition: RuntimeProgramDefinition;
+  manifest: ProgramContributionManifest;
+  children: readonly string[];
+  dependencies: readonly string[];
+}>;
+
+export type ProgramPlan = Readonly<{
+  name: string;
+  contributions: readonly PlannedContribution[];
+  external: readonly string[];
+}>;
+
+/** Validates that a Program received exactly the compiler-inferred external contract. */
+export function validateProgramCapabilities(
+  plan: ProgramPlan,
+  capabilities: Readonly<Record<string, unknown>>,
+): void {
+  const supplied = Object.keys(capabilities).sort();
+  const missing = plan.external.filter((capability) => !Object.hasOwn(capabilities, capability));
+  const excess = supplied.filter((capability) => !plan.external.includes(capability));
+  if (!missing.length && !excess.length) return;
+  throw new Error(
+    `Program "${plan.name}" external Capabilities are invalid` +
+      `${missing.length ? `; missing: ${missing.join(", ")}` : ""}` +
+      `${excess.length ? `; unexpected: ${excess.join(", ")}` : ""}.`,
+  );
+}
+
+/** Validates and orders the compiler-derived dependency graph for one Program. */
+export function planProgram(
+  application: RuntimeApplication,
+  name: string,
+  manifest: ProgramManifest,
+): ProgramPlan {
+  if (manifest.name !== name) {
+    throw new Error(
+      `Program manifest ${JSON.stringify(manifest.name)} cannot start Program ${JSON.stringify(name)}.`,
+    );
+  }
+
+  const runtime = new Map<
+    string,
+    Readonly<{ definition: RuntimeProgramDefinition; children: readonly string[] }>
+  >();
+  const visit = (feature: RuntimeFeature, path: string): void => {
+    const children: string[] = [];
+    for (const [childName, child] of sortedEntries(feature.features)) {
+      const childPath = qualify(path, childName);
+      children.push(childPath);
+      visit(child, childPath);
+    }
+    const definition = feature.programs?.[name];
+    if (definition) runtime.set(path, { definition, children });
+  };
+  for (const [featureName, feature] of sortedEntries(application.features)) {
+    visit(feature, featureName);
+  }
+  if (!runtime.size) throw new Error(`Application does not define Program "${name}".`);
+
+  const declarations = new Map<string, ProgramContributionManifest>();
+  const providers = new Map<string, string>();
+  for (const contribution of manifest.contributions) {
+    if (declarations.has(contribution.feature)) {
+      throw new Error(
+        `Program "${name}" declares Feature "${contribution.feature}" more than once.`,
+      );
+    }
+    declarations.set(contribution.feature, contribution);
+    for (const capability of contribution.provides) {
+      const previous = providers.get(capability);
+      if (previous) {
+        throw new Error(
+          `Program "${name}" has multiple providers for Capability "${capability}": ` +
+            `Features "${previous}" and "${contribution.feature}".`,
+        );
+      }
+      providers.set(capability, contribution.feature);
+    }
+  }
+
+  for (const path of runtime.keys()) {
+    if (!declarations.has(path)) {
+      throw new Error(`Program "${name}" manifest is missing Feature "${path}".`);
+    }
+  }
+  for (const path of declarations.keys()) {
+    if (!runtime.has(path)) {
+      throw new Error(`Program "${name}" manifest contains unknown Feature "${path}".`);
+    }
+  }
+
+  const external = new Set<string>();
+  const pending = new Map<string, Set<string>>();
+  const dependencyGraph = new Map<string, readonly string[]>();
+  const dependants = new Map<string, Set<string>>();
+  for (const declaration of declarations.values()) {
+    const dependencies = new Set<string>();
+    for (const capability of declaration.requires) {
+      const provider = providers.get(capability);
+      if (!provider) external.add(capability);
+      else if (provider !== declaration.feature) dependencies.add(provider);
+    }
+    pending.set(declaration.feature, dependencies);
+    dependencyGraph.set(declaration.feature, [...dependencies].sort());
+    for (const dependency of dependencies) {
+      const values = dependants.get(dependency) ?? new Set<string>();
+      values.add(declaration.feature);
+      dependants.set(dependency, values);
+    }
+  }
+
+  const ready = [...pending]
+    .filter(([, dependencies]) => !dependencies.size)
+    .map(([feature]) => feature)
+    .sort();
+  const ordered: string[] = [];
+  while (ready.length) {
+    const feature = ready.shift()!;
+    ordered.push(feature);
+    for (const dependant of [...(dependants.get(feature) ?? [])].sort()) {
+      const dependencies = pending.get(dependant)!;
+      dependencies.delete(feature);
+      if (!dependencies.size) insertSorted(ready, dependant);
+    }
+  }
+  if (ordered.length !== pending.size) {
+    const cycle = [...pending]
+      .filter(([feature]) => !ordered.includes(feature))
+      .map(([feature]) => feature)
+      .sort();
+    throw new Error(
+      `Program "${name}" has a Capability provider cycle between Features: ${cycle.join(", ")}.`,
+    );
+  }
+
+  return {
+    name,
+    external: [...external].sort(),
+    contributions: ordered.map((feature) => {
+      const declaration = declarations.get(feature)!;
+      const value = runtime.get(feature)!;
+      return {
+        feature,
+        definition: value.definition,
+        manifest: declaration,
+        children: value.children,
+        dependencies: dependencyGraph.get(feature) ?? [],
+      };
+    }),
+  };
+}
+
 /** Starts every Feature contribution to one named Program. */
 export async function startProcess<Contract extends ApplicationContract>(
   application: Application<Contract>,
   name: string,
-  resolver: CapabilityResolver,
+  capabilities: Readonly<Record<string, unknown>>,
+  manifest: ProgramManifest,
 ): Promise<Process> {
   const runtime = application as RuntimeApplication;
+  const plan = planProgram(runtime, name, manifest);
   const contributions: ProgramContributionInstance[] = [];
   const ui: Record<string, Readonly<Record<string, unknown>>> = Object.create(null);
+  const externalScope = new ResourceScope();
   const providedCapabilities: Record<string, unknown> = Object.create(null);
-  let found = false;
 
-  type ResolvedFeature = Readonly<{
-    feature: RuntimeFeature;
-    path: string;
-    children: readonly ResolvedFeature[];
-    capabilities?: Readonly<Record<string, unknown>>;
-  }>;
+  validateProgramCapabilities(plan, capabilities);
+  for (const capability of Object.values(capabilities)) externalScope.adopt(capability);
 
-  const resolveFeature = async (
-    feature: RuntimeFeature,
-    path: string,
-  ): Promise<ResolvedFeature> => {
-    const children: ResolvedFeature[] = [];
-    for (const [childName, child] of sortedEntries(feature.features)) {
-      children.push(await resolveFeature(child, qualify(path, childName)));
-    }
-    const definition = feature.programs?.[name];
-    if (!definition) return { feature, path, children };
-
-    found = true;
-    const address = { program: name, feature: path };
-    const capabilities = await resolver.resolve(address);
-    if (!isRecord(capabilities)) {
-      throw new Error(`${formatAddress(address)} adapter returned invalid Capabilities.`);
-    }
-    return { feature, path, children, capabilities };
-  };
-
-  const instantiate = async (node: ResolvedFeature): Promise<Readonly<Record<string, unknown>>> => {
+  const instances = new Map<string, ProgramContributionInstance>();
+  const registries = new Map<string, Record<string, unknown>>();
+  const definitions = new Map(plan.contributions.map((value) => [value.feature, value]));
+  const instantiate = (path: string): Readonly<Record<string, unknown>> => {
+    const existing = instances.get(path);
+    if (existing) return existing.ui?.api ?? Object.freeze({});
+    const planned = definitions.get(path);
+    if (!planned) return Object.freeze({});
     const children: Record<string, Readonly<Record<string, unknown>>> = Object.create(null);
-    for (const child of node.children) {
-      children[child.path.slice(node.path.length + 1)] = await instantiate(child);
+    for (const child of planned.children) {
+      children[child.slice(path.length + 1)] = instantiate(child);
     }
-
-    const definition = node.feature.programs?.[name];
-    if (!definition) {
-      const empty = Object.freeze(Object.create(null) as Record<string, unknown>);
-      ui[node.path] = empty;
-      return empty;
+    const registry: Record<string, unknown> = Object.create(null);
+    for (const capability of planned.manifest.requires) {
+      if (Object.hasOwn(capabilities, capability)) registry[capability] = capabilities[capability];
     }
-
-    const address = { program: name, feature: node.path };
-    const instance = createProgramContributionInstance(definition, {
-      address,
-      capabilities: { ...node.capabilities, ...providedCapabilities },
+    const instance = createProgramContributionInstance(planned.definition, {
+      address: { program: name, feature: path },
+      capabilities: registry,
       features: children,
     });
-    contributions.push(instance);
-    const provided = instance.start();
-    for (const [capabilityName, capability] of Object.entries(provided)) {
-      if (Object.hasOwn(providedCapabilities, capabilityName)) {
-        throw new Error(
-          `Program "${name}" has multiple providers for Capability "${capabilityName}".`,
-        );
-      }
-      providedCapabilities[capabilityName] = capability;
-    }
-    const api = instance.ui?.api ?? Object.freeze({});
-    ui[node.path] = api;
-    return api;
+    instances.set(path, instance);
+    registries.set(path, registry);
+    ui[path] = instance.ui?.api ?? Object.freeze({});
+    return ui[path]!;
   };
 
   try {
-    const roots: ResolvedFeature[] = [];
-    for (const [featureName, feature] of sortedEntries(runtime.features)) {
-      roots.push(await resolveFeature(feature, featureName));
+    for (const contribution of plan.contributions) instantiate(contribution.feature);
+    for (const planned of plan.contributions) {
+      const instance = instances.get(planned.feature)!;
+      const registry = registries.get(planned.feature)!;
+      for (const capability of planned.manifest.requires) {
+        if (Object.hasOwn(providedCapabilities, capability)) {
+          registry[capability] = providedCapabilities[capability];
+        }
+      }
+      const provided = instance.start();
+      const actual = Object.keys(provided).sort();
+      const declared = [...planned.manifest.provides].sort();
+      if (actual.join("\n") !== declared.join("\n")) {
+        throw new Error(
+          `${formatAddress(instance.address)} provided [${actual.join(", ")}] but its contract declares ` +
+            `[${declared.join(", ")}].`,
+        );
+      }
+      Object.assign(providedCapabilities, provided);
+      contributions.push(instance);
     }
-    if (!found) throw new Error(`Application does not define Program "${name}".`);
-    for (const root of roots) await instantiate(root);
   } catch (error) {
-    await disposeContributions(contributions);
+    const created = [...instances.values()];
+    await disposeProgram(created, externalScope).catch(() => undefined);
     throw error;
   }
 
@@ -463,13 +620,39 @@ export async function startProcess<Contract extends ApplicationContract>(
   return {
     name,
     contributions,
+    capabilities: Object.freeze({ ...capabilities, ...providedCapabilities }),
     ui,
     async dispose() {
       if (disposed) return;
       disposed = true;
-      await disposeContributions(contributions);
+      await disposeProgram(contributions, externalScope);
     },
   };
+}
+
+function insertSorted(values: string[], value: string): void {
+  const index = values.findIndex((candidate) => candidate.localeCompare(value) > 0);
+  if (index === -1) values.push(value);
+  else values.splice(index, 0, value);
+}
+
+async function disposeProgram(
+  contributions: readonly ProgramContributionInstance[],
+  external: ResourceScope,
+): Promise<void> {
+  const errors: unknown[] = [];
+  try {
+    await disposeContributions(contributions);
+  } catch (error) {
+    errors.push(error);
+  }
+  try {
+    await external.dispose();
+  } catch (error) {
+    errors.push(error);
+  }
+  if (errors.length === 1) throw errors[0];
+  if (errors.length > 1) throw new AggregateError(errors, "Process disposal failed.");
 }
 
 function hasRuntimeUI(definition: RuntimeProgramDefinition): boolean {
@@ -518,18 +701,40 @@ export function bindCapabilitiesToScope(
       return iterable;
     }
 
-    const proxy = new Proxy(value, {
-      get(target, property, receiver) {
-        const next = Reflect.get(target, property, receiver);
+    const shell =
+      typeof value === "function"
+        ? (...args: readonly unknown[]) => {
+            if (!scope.active) throw new Error("Program contribution is disposed.");
+            const result = Reflect.apply(value, undefined, args);
+            scope.adoptResult(result);
+            return wrap(result);
+          }
+        : (Object.create(null) as object);
+    const proxy = new Proxy(shell, {
+      get(_target, property) {
+        const next = Reflect.get(value, property, value);
         if (typeof next === "function") {
           return (...args: readonly unknown[]) => {
             if (!scope.active) throw new Error("Program contribution is disposed.");
-            const result = Reflect.apply(next, target, args);
-            scope.adopt(result);
+            const result = Reflect.apply(next, value, args);
+            if (!isAsyncIterableValue(result)) scope.adoptResult(result);
             return wrap(result);
           };
         }
         return wrap(next);
+      },
+      getOwnPropertyDescriptor(_target, property) {
+        const descriptor = Reflect.getOwnPropertyDescriptor(value, property);
+        return descriptor ? { ...descriptor, configurable: true } : undefined;
+      },
+      getPrototypeOf() {
+        return Reflect.getPrototypeOf(value);
+      },
+      has(_target, property) {
+        return Reflect.has(value, property);
+      },
+      ownKeys() {
+        return Reflect.ownKeys(value);
       },
     });
     proxies.set(value, proxy);
@@ -572,6 +777,12 @@ function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
 
 function isAsyncIterable(value: object): value is AsyncIterable<unknown> {
   return Symbol.asyncIterator in value;
+}
+
+function isAsyncIterableValue(value: unknown): value is AsyncIterable<unknown> {
+  return Boolean(
+    value && (typeof value === "object" || typeof value === "function") && isAsyncIterable(value),
+  );
 }
 
 function isDisposable(value: object): value is Disposable | AsyncDisposable {

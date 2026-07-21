@@ -1,6 +1,6 @@
-import type { PresentationSourceIR } from "./presentation";
+import type { PresentationSourceIR } from "@/core/compiler/presentation";
 
-export const POGGERS_IR_VERSION = 5 as const;
+export const POGGERS_IR_VERSION = 7 as const;
 
 export type SourceSpan = Readonly<{
   file: string;
@@ -10,6 +10,7 @@ export type SourceSpan = Readonly<{
 
 export type TypeIR =
   | Readonly<{ kind: "primitive"; name: "boolean" | "number" | "string" | "void" }>
+  | Readonly<{ kind: "opaque"; name: string }>
   | Readonly<{ kind: "literal"; value: boolean | number | string }>
   | Readonly<{ kind: "array"; element: TypeIR }>
   | Readonly<{ kind: "tuple"; elements: readonly TypeIR[] }>
@@ -17,6 +18,7 @@ export type TypeIR =
   | Readonly<{ kind: "union"; variants: readonly TypeIR[] }>
   | Readonly<{ kind: "record"; fields: readonly FieldIR[] }>
   | Readonly<{ kind: "promise"; value: TypeIR }>
+  | Readonly<{ kind: "stream"; element: TypeIR }>
   | Readonly<{ kind: "function"; parameters: readonly FieldIR[]; result: TypeIR }>;
 
 export type FieldIR = Readonly<{
@@ -86,6 +88,11 @@ export type FunctionIR = Readonly<{
   span: SourceSpan;
 }>;
 
+export type ProgramImplementationIR =
+  | Readonly<{ kind: "none" }>
+  | Readonly<{ kind: "portable"; start: FunctionIR }>
+  | Readonly<{ kind: "source"; span: SourceSpan }>;
+
 export type CapabilityIR = Readonly<{
   name: string;
   type: TypeIR;
@@ -118,7 +125,7 @@ export type ProgramIR = Readonly<{
     components: readonly ComponentIR[];
     root?: string;
   }>;
-  start?: FunctionIR;
+  implementation: ProgramImplementationIR;
   span: SourceSpan;
 }>;
 

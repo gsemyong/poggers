@@ -10,7 +10,10 @@
     "types": [],
     "moduleResolution": "bundler",
     "customConditions": ["poggers-source"],
-    "paths": { "src/*": ["${configDir}/src/*"] },
+    "paths": {
+      "@/*": ["./src/*"],
+      "src/*": ["${configDir}/src/*"]
+    },
     "verbatimModuleSyntax": true,
     "noEmit": true,
     "strict": true,

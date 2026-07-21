@@ -19,6 +19,18 @@ export default defineConfig({
   resolve: {
     alias: [
       {
+        find: /^@\/(.*)$/,
+        replacement: `${resolve(import.meta.dirname, "src")}/$1`,
+      },
+      {
+        find: /^@poggers\/kit\/adapters\/server$/,
+        replacement: resolve(import.meta.dirname, "src/adapters/server/adapter.ts"),
+      },
+      {
+        find: /^@poggers\/kit\/server$/,
+        replacement: resolve(import.meta.dirname, "src/adapters/server/platform.ts"),
+      },
+      {
         find: /^@poggers\/kit\/web$/,
         replacement: resolve(import.meta.dirname, "src/adapters/web/platform.ts"),
       },

@@ -10,7 +10,7 @@ import {
   spring,
   track,
   tween,
-} from "./dynamics";
+} from "@/adapters/web/ui/presentation/dynamics";
 
 describe("web Presentation dynamics", () => {
   it("samples bounded inertial decay deterministically", () => {

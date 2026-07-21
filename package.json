@@ -43,6 +43,16 @@
       "types": "./dist/src/adapters/web/adapter.d.ts",
       "default": "./dist/src/adapters/web/adapter.js"
     },
+    "./server": {
+      "poggers-source": "./src/adapters/server/platform.ts",
+      "types": "./dist/src/adapters/server/platform.d.ts",
+      "default": "./dist/src/adapters/server/platform.js"
+    },
+    "./adapters/server": {
+      "poggers-source": "./src/adapters/server/adapter.ts",
+      "types": "./dist/src/adapters/server/adapter.d.ts",
+      "default": "./dist/src/adapters/server/adapter.js"
+    },
     "./tsconfig": "./tsconfig.json"
   },
   "publishConfig": {
@@ -51,6 +61,7 @@
   "scripts": {
     "build": "nub scripts/build.ts",
     "benchmark": "nub scripts/benchmark.ts",
+    "dev:crud": "nub src/cli.ts dev --dir examples/authenticated-crud",
     "dev:example": "nub src/cli.ts dev --dir examples/web-presentation",
     "typecheck": "tsc --noEmit",
     "fmt": "oxfmt",
@@ -68,6 +79,7 @@
   },
   "devDependencies": {
     "@types/node": "^26.1.1",
+    "better-auth": "^1.6.23",
     "fast-check": "^4.9.0",
     "oxfmt": "^0.59.0",
     "oxlint": "^1.74.0",

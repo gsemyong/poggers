@@ -1,7 +1,7 @@
-import type { PlatformContract } from "../core/application";
-import type { ApplicationIR, ProgramIR } from "../core/compiler/ir";
-import type { PresentationAdapter, PresentationLanguage } from "../core/presentation";
-import type { UIChild, UIContract, UIDefinition, UITarget } from "../core/ui";
+import type { PlatformContract } from "@/core/application";
+import type { ApplicationIR, ProgramIR } from "@/core/compiler/ir";
+import type { PresentationAdapter, PresentationLanguage } from "@/core/presentation";
+import type { UIChild, UIContract, UIDefinition, UITarget } from "@/core/ui";
 
 export type PlatformInput<Platform extends PlatformContract = PlatformContract> = Readonly<{
   directory: string;

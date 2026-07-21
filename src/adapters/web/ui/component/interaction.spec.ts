@@ -9,7 +9,7 @@ import {
   type DragDriver,
   type DragOptions,
   type DragSample,
-} from "./interaction";
+} from "@/adapters/web/ui/component/interaction";
 
 function createDragTrigger() {
   let appended: HTMLElement | undefined;

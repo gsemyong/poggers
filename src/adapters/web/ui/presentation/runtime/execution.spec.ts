@@ -1,14 +1,19 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 
-import { createDynamicsTrajectory, createSpringTrajectory, sampleTrack, spring } from "../dynamics";
+import {
+  createDynamicsTrajectory,
+  createSpringTrajectory,
+  sampleTrack,
+  spring,
+} from "@/adapters/web/ui/presentation/dynamics";
 import {
   defaultWebExecutionTolerances,
   planAdaptiveWebExecution,
   planWebExecution,
   startWebNativeExecution,
   type WebNativeExecutionPlan,
-} from "./execution";
+} from "@/adapters/web/ui/presentation/runtime/execution";
 
 const target = {} as Element;
 const elements = { Panel: () => [target] };

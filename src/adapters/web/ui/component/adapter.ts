@@ -1,24 +1,3 @@
-import type { ProgramContributionAddress } from "../../../../contracts/capability";
-import type {
-  Application,
-  ApplicationContract,
-  PresentationName,
-} from "../../../../core/application";
-import type { ComponentProps, ComponentName, ComponentState } from "../../../../core/component";
-import {
-  createActionEventLedger,
-  type PresentationAdapter,
-  type PresentationAdapterInstance,
-} from "../../../../core/presentation";
-import {
-  bindCapabilitiesToScope,
-  createProgramContributionInstance,
-  ResourceScope,
-  type ProgramContributionInstance,
-} from "../../../../core/process";
-import { createReactiveState } from "../../../../core/state";
-import { PresenceGraph } from "../presence";
-import type { WebElementPresentation, WebPresentationLanguage } from "../presentation/language";
 import {
   allocatePresenceOwner,
   captureSignalOnHotRefresh,
@@ -28,13 +7,36 @@ import {
   jsx,
   onCleanup,
   onMount,
+  runtimeSignal,
   signal,
   type Child,
   type Component,
   type Props,
   type HotRenderState,
   type Signal,
-} from "./runtime";
+} from "@/adapters/web/ui/component/runtime";
+import { PresenceGraph } from "@/adapters/web/ui/presence";
+import type {
+  WebElementPresentation,
+  WebPresentationLanguage,
+} from "@/adapters/web/ui/presentation/language";
+import type { Application, ApplicationContract, PresentationName } from "@/core/application";
+import type { ProgramManifest } from "@/core/capability";
+import type { ComponentProps, ComponentName, ComponentState } from "@/core/component";
+import {
+  createActionEventLedger,
+  type PresentationAdapter,
+  type PresentationAdapterInstance,
+} from "@/core/presentation";
+import {
+  bindCapabilitiesToScope,
+  createProgramContributionInstance,
+  planProgram,
+  ResourceScope,
+  type ProgramContributionInstance,
+  validateProgramCapabilities,
+} from "@/core/process";
+import { createReactiveState } from "@/core/state";
 
 export type ComponentRuntimeElements<Contract extends ApplicationContract> = {
   [Name in ComponentName<Contract>]?: {
@@ -81,7 +83,8 @@ export type CreateApplicationUIOptions<Contract extends ApplicationContract> = R
   presentationDependencies?: PresentationDependencyManifest;
   components?: ComponentRuntimeElements<Contract>;
   hotState?: HotRenderState;
-  resolveCapabilities?(address: ProgramContributionAddress): Readonly<Record<string, unknown>>;
+  capabilities?: Readonly<Record<string, unknown>>;
+  programManifest?: ProgramManifest;
   boundary: Element;
   presentationAdapter: PresentationAdapter<WebPresentationLanguage, Element>;
 }>;
@@ -175,7 +178,8 @@ export function createApplicationUI<Contract extends ApplicationContract>({
   presentationDependencies,
   components,
   hotState,
-  resolveCapabilities,
+  capabilities = {},
+  programManifest,
   boundary,
   presentationAdapter,
 }: CreateApplicationUIOptions<Contract>): ApplicationUI {
@@ -204,7 +208,8 @@ export function createApplicationUI<Contract extends ApplicationContract>({
   const programUI = createProgramUI(
     runtimeApplication,
     program,
-    (address) => ({ ...resolveCapabilities?.(address) }),
+    capabilities,
+    programManifest ?? inferEmptyProgramManifest(runtimeApplication, program),
     hotState,
     notifyActionEvent,
   );
@@ -319,6 +324,27 @@ export function createApplicationUI<Contract extends ApplicationContract>({
   };
 }
 
+function inferEmptyProgramManifest(
+  application: RuntimeApplication,
+  program: string,
+): ProgramManifest {
+  const contributions: Array<ProgramManifest["contributions"][number]> = [];
+  const visit = (
+    features: Readonly<Record<string, RuntimeFeature>> | undefined,
+    parent: string,
+  ): void => {
+    for (const [name, feature] of Object.entries(features ?? {})) {
+      const path = parent ? `${parent}.${name}` : name;
+      if (feature.programs?.[program]) {
+        contributions.push({ feature: path, requires: [], provides: [] });
+      }
+      visit(feature.features, path);
+    }
+  };
+  visit(application.features, "");
+  return { name: program, contributions };
+}
+
 function createComponentInstance(
   componentName: string,
   options: {
@@ -359,6 +385,17 @@ function createComponentInstance(
       : undefined;
   const refs = Object.create(null) as Record<string, Element | null>;
   const mountedTargets = Object.create(null) as Record<string, Set<Element>>;
+  const targetRevision = runtimeSignal(0);
+  let targetRevisionValue = 0;
+  let targetRevisionQueued = false;
+  const invalidateTargets = () => {
+    if (targetRevisionQueued) return;
+    targetRevisionQueued = true;
+    queueMicrotask(() => {
+      targetRevisionQueued = false;
+      targetRevision(++targetRevisionValue);
+    });
+  };
   const sharedScene = currentPresenceGraph();
   const scene = sharedScene ?? new PresenceGraph<Element>();
   const structuralKey = currentStructuralKey();
@@ -426,6 +463,7 @@ function createComponentInstance(
     elements[elementName] = createComponentElementComponent(componentName, elementName, tagName, {
       refs,
       mountedTargets,
+      invalidateTargets,
       scene,
       sceneOwner,
     });
@@ -458,6 +496,7 @@ function createComponentInstance(
       state: createPresentationState(services.feature as Readonly<Record<string, unknown>>, state),
       refs,
       mountedTargets,
+      targetRevision,
       elements: Object.fromEntries(
         Object.keys(options.config.elements).map((name) => [name, { name }]),
       ),
@@ -592,6 +631,7 @@ function componentsForComponent(
   const owner = componentOwner(component) ?? "";
   return Object.assign(
     Object.create(null),
+    composition.componentNamespaces[""] ?? {},
     composition.componentGroups[owner] ?? {},
     composition.componentNamespaces[owner] ?? {},
   );
@@ -622,6 +662,7 @@ function mountAuthoredPresentationComponent(options: {
   state: Readonly<Record<string, unknown>>;
   refs: Readonly<Record<string, Element | null>>;
   mountedTargets: Readonly<Record<string, ReadonlySet<Element>>>;
+  targetRevision: Signal<number>;
   elements: Readonly<Record<string, Readonly<{ name: string }>>>;
   events: Readonly<Record<string, unknown>>;
   adapter: PresentationAdapterInstance<WebPresentationLanguage, Element>;
@@ -650,18 +691,22 @@ function mountAuthoredPresentationComponent(options: {
     });
     let currentPresentationRevision: number | undefined;
     let currentGraphDynamic: boolean | undefined;
+    let currentTargetRevision: number | undefined;
     const disposeEffect = effect(() => {
+      const targetRevision = options.targetRevision();
       const revision = options.presentationRevision();
       void options.graph.revision(options.componentName);
       const graphDynamic = options.graph.dynamic(options.componentName);
       if (
         (currentPresentationRevision !== undefined && revision !== currentPresentationRevision) ||
-        (currentGraphDynamic !== undefined && graphDynamic !== currentGraphDynamic)
+        (currentGraphDynamic !== undefined && graphDynamic !== currentGraphDynamic) ||
+        (currentTargetRevision !== undefined && targetRevision !== currentTargetRevision)
       ) {
         session.reconfigure();
       }
       currentPresentationRevision = revision;
       currentGraphDynamic = graphDynamic;
+      currentTargetRevision = targetRevision;
       session.render(
         ({ elements }) => {
           const component = options.graph.component(options.componentName);
@@ -974,6 +1019,7 @@ function createComponentElementComponent(
   options: {
     refs: Record<string, Element | null>;
     mountedTargets: Record<string, Set<Element>>;
+    invalidateTargets: () => void;
     scene: PresenceGraph<Element>;
     sceneOwner: string;
   },
@@ -990,9 +1036,12 @@ function createComponentElementComponent(
       ref(target: Element) {
         options.refs[name] = target;
         const targets = (options.mountedTargets[name] ??= new Set());
-        targets.add(target);
+        if (!targets.has(target)) {
+          targets.add(target);
+          options.invalidateTargets();
+        }
         onCleanup(() => {
-          targets.delete(target);
+          if (targets.delete(target)) options.invalidateTargets();
           if (options.refs[name] === target) options.refs[name] = null;
         });
         return typeof authorRef === "function" ? authorRef(target) : undefined;
@@ -1066,7 +1115,8 @@ function normalizeRuntimeComponents<Contract extends ApplicationContract>(
 function createProgramUI(
   application: RuntimeApplication,
   program: string,
-  resolveCapabilities: (address: ProgramContributionAddress) => Readonly<Record<string, unknown>>,
+  externalCapabilities: Readonly<Record<string, unknown>>,
+  manifest: ProgramManifest,
   hotState?: HotRenderState,
   onActionEvent: () => void = () => undefined,
 ): {
@@ -1080,63 +1130,75 @@ function createProgramUI(
 } {
   const apis: Record<string, Readonly<Record<string, unknown>>> = Object.create(null);
   const instances: ProgramContributionInstance[] = [];
+  const externalScope = new ResourceScope();
   const providedCapabilities: Record<string, unknown> = Object.create(null);
   const uiInstances = new Map<string, ProgramContributionInstance["ui"]>();
   const capabilities: Record<string, Readonly<Record<string, unknown>>> = Object.create(null);
   const events: Record<string, Readonly<Record<string, unknown>>> = Object.create(null);
 
-  const instantiate = (
-    feature: RuntimeFeature,
-    path: string,
-  ): Readonly<Record<string, unknown>> => {
+  const plan = planProgram(application, program, manifest);
+  validateProgramCapabilities(plan, externalCapabilities);
+  for (const capability of Object.values(externalCapabilities)) externalScope.adopt(capability);
+  const planned = new Map(
+    plan.contributions.map((contribution) => [contribution.feature, contribution]),
+  );
+  const instanceByPath = new Map<string, ProgramContributionInstance>();
+  const registries = new Map<string, Record<string, unknown>>();
+  const instantiate = (path: string): Readonly<Record<string, unknown>> => {
+    const existing = instanceByPath.get(path);
+    if (existing) return existing.ui?.api ?? Object.freeze({});
+    const contribution = planned.get(path);
+    if (!contribution) return Object.freeze({});
     const children: Record<string, Readonly<Record<string, unknown>>> = Object.create(null);
-    for (const [name, child] of Object.entries(feature.features ?? {}).sort(([left], [right]) =>
-      left.localeCompare(right),
-    )) {
-      children[name] = instantiate(child, path ? `${path}.${name}` : name);
+    for (const child of contribution.children) {
+      children[child.slice(path.length + 1)] = instantiate(child);
     }
-
-    const definition = feature.programs?.[program];
-    if (!definition) {
-      const empty = Object.freeze(Object.create(null) as Record<string, unknown>);
-      apis[path] = empty;
-      events[path] = empty;
-      return empty;
+    const registry: Record<string, unknown> = Object.create(null);
+    for (const name of contribution.manifest.requires) {
+      if (Object.hasOwn(externalCapabilities, name)) registry[name] = externalCapabilities[name];
     }
-
-    const address = { program, feature: path };
-    const externalCapabilities = resolveCapabilities(address);
-    const instance = createProgramContributionInstance(definition as never, {
-      address,
-      capabilities: { ...externalCapabilities, ...providedCapabilities },
+    const instance = createProgramContributionInstance(contribution.definition as never, {
+      address: { program, feature: path },
+      capabilities: registry,
       features: children,
       initialState: hotState?.programs?.[path],
       onActionEvent,
     });
-    instances.push(instance);
+    instanceByPath.set(path, instance);
+    registries.set(path, registry);
     uiInstances.set(path, instance.ui);
     capabilities[path] = instance.capabilities;
     events[path] = instance.ui?.events ?? Object.freeze({});
-    const provided = instance.start();
-    for (const [name, capability] of Object.entries(provided)) {
-      if (Object.hasOwn(providedCapabilities, name)) {
-        throw new Error(`UI Program "${program}" has multiple providers for Capability "${name}".`);
-      }
-      providedCapabilities[name] = capability;
-    }
     const api = instance.ui?.api ?? Object.freeze({});
     apis[path] = api;
     return api;
   };
 
   try {
-    for (const [name, feature] of Object.entries(application.features ?? {}).sort(
-      ([left], [right]) => left.localeCompare(right),
-    )) {
-      instantiate(feature, name);
+    for (const contribution of plan.contributions) instantiate(contribution.feature);
+    for (const contribution of plan.contributions) {
+      const instance = instanceByPath.get(contribution.feature)!;
+      const registry = registries.get(contribution.feature)!;
+      for (const name of contribution.manifest.requires) {
+        if (Object.hasOwn(providedCapabilities, name)) registry[name] = providedCapabilities[name];
+      }
+      const provided = instance.start();
+      const actual = Object.keys(provided).sort();
+      const declared = [...contribution.manifest.provides].sort();
+      if (actual.join("\n") !== declared.join("\n")) {
+        throw new Error(
+          `Program "${program}" Feature "${contribution.feature}" provided ` +
+            `[${actual.join(", ")}] but declares [${declared.join(", ")}].`,
+        );
+      }
+      Object.assign(providedCapabilities, provided);
+      instances.push(instance);
     }
   } catch (error) {
-    void Promise.allSettled([...instances].reverse().map((instance) => instance.dispose()));
+    void Promise.allSettled([
+      ...[...instanceByPath.values()].reverse().map((instance) => instance.dispose()),
+      externalScope.dispose(),
+    ]);
     throw error;
   }
 
@@ -1171,6 +1233,11 @@ function createProgramUI(
         } catch (error) {
           errors.push(error);
         }
+      }
+      try {
+        await externalScope.dispose();
+      } catch (error) {
+        errors.push(error);
       }
       if (errors.length === 1) throw errors[0];
       if (errors.length > 1) throw new AggregateError(errors, "UI Process disposal failed.");

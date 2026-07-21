@@ -6,7 +6,7 @@ import {
   type ProgramIR,
   type StatementIR,
   type TypeIR,
-} from "./compiler/ir";
+} from "@/core/compiler/ir";
 
 export type CapabilityImplementations = Readonly<
   Record<string, Readonly<Record<string, (...arguments_: readonly unknown[]) => unknown>>>
@@ -27,11 +27,20 @@ export async function executeProgramIR(
   const program = ir.programs.find(({ id }) => id === programId);
   if (!program) throw new Error(`Unknown Program ${JSON.stringify(programId)}.`);
   validateCapabilities(program, capabilities);
-  if (!program.start) return { calls: [], result: undefined };
+  if (program.implementation.kind !== "portable") {
+    throw new Error(
+      `Program ${JSON.stringify(programId)} is ${program.implementation.kind}, not portable IR.`,
+    );
+  }
 
   const calls: string[] = [];
   const locals = new Map<string, unknown>();
-  const completion = await executeStatements(program.start.body, locals, capabilities, calls);
+  const completion = await executeStatements(
+    program.implementation.start.body,
+    locals,
+    capabilities,
+    calls,
+  );
   return { calls, result: completion.value };
 }
 
@@ -376,6 +385,9 @@ function compatibleType(previous: TypeIR, next: TypeIR): boolean {
   }
   if (previous.kind === "promise" && next.kind === "promise") {
     return compatibleType(previous.value, next.value);
+  }
+  if (previous.kind === "stream" && next.kind === "stream") {
+    return compatibleType(previous.element, next.element);
   }
   return JSON.stringify(previous) === JSON.stringify(next);
 }

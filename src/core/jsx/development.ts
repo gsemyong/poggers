@@ -1,4 +1,4 @@
-import { Fragment, jsx, type JSXElement, type JSXIntrinsicElements } from "./runtime";
+import { Fragment, jsx, type JSXElement, type JSXIntrinsicElements } from "@/core/jsx/runtime";
 
 export { Fragment };
 
@@ -17,4 +17,4 @@ export namespace JSX {
   export type IntrinsicElements = JSXIntrinsicElements;
 }
 
-export type { JSXElement } from "./runtime";
+export type { JSXElement } from "@/core/jsx/runtime";

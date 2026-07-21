@@ -2,15 +2,18 @@ import { effect } from "alien-signals";
 import fc from "fast-check";
 import { describe, expect, test } from "vitest";
 
-import type { BrowserMainThread } from "../adapters/web/platform";
-import type { CapabilityResolver } from "../contracts/capability";
-import type { Application, Feature, Program } from "./application";
+import type { BrowserMainThread } from "@/adapters/web/platform";
+import type { Application, Feature, Program } from "@/core/application";
+import type { ProgramManifest } from "@/core/capability";
 import {
+  bindCapabilitiesToScope,
   createProgramContributionInstance,
   createUIContributionInstance,
+  planProgram,
   ResourceScope,
   startProcess,
-} from "./process";
+  validateProgramCapabilities,
+} from "@/core/process";
 
 type ServerPlatform = { readonly Name: "server" };
 type Server = { readonly Name: "server"; readonly Platform: ServerPlatform };
@@ -166,6 +169,25 @@ describe("Program runtime", () => {
     expect(events).toEqual(["start:store", "dispose:api", "dispose:second", "dispose:first"]);
   });
 
+  test("binds immutable Capability objects without violating Proxy invariants", async () => {
+    const capability = Object.freeze({
+      value: 42,
+      read() {
+        return this.value;
+      },
+    });
+    const scope = new ResourceScope();
+    const bound = bindCapabilitiesToScope({ capability }, scope) as {
+      capability: typeof capability;
+    };
+
+    expect(bound.capability.read()).toBe(42);
+    expect(Object.keys(bound.capability)).toEqual(["value", "read"]);
+
+    await scope.dispose();
+    expect(() => bound.capability.read()).toThrow("disposed");
+  });
+
   test("aggregates cleanup failures after running every cleanup", async () => {
     const events: string[] = [];
     const instance = createProgramContributionInstance(
@@ -230,6 +252,17 @@ describe("Program runtime", () => {
     });
     await disposal;
     expect(events).toEqual(["disposed"]);
+  });
+
+  test("does not turn a handled Capability rejection into a disposal failure", async () => {
+    const scope = new ResourceScope();
+    const capabilities = bindCapabilitiesToScope(
+      { operation: { run: () => Promise.reject(new Error("expected")) } },
+      scope,
+    ) as { operation: { run(): Promise<void> } };
+
+    await expect(capabilities.operation.run()).rejects.toThrow("expected");
+    await expect(scope.dispose()).resolves.toBeUndefined();
   });
 
   test("routes long-lived external updates through actions while the contribution is live", async () => {
@@ -360,15 +393,13 @@ describe("Program runtime", () => {
 
   test("does not duplicate subscriptions across repeated activation", async () => {
     const listeners = new Set<() => void>();
-    const adapter: CapabilityResolver = {
-      resolve: () => ({
-        changes: {
-          subscribe(receive: () => void): Disposable {
-            listeners.add(receive);
-            return { [Symbol.dispose]: () => listeners.delete(receive) };
-          },
+    const capabilities = {
+      changes: {
+        subscribe(receive: () => void): Disposable {
+          listeners.add(receive);
+          return { [Symbol.dispose]: () => listeners.delete(receive) };
         },
-      }),
+      },
     };
     type Watcher = {
       Programs: {
@@ -393,7 +424,12 @@ describe("Program runtime", () => {
     };
 
     for (let revision = 0; revision < 100; revision++) {
-      const process = await startProcess(application, "browser", adapter);
+      const process = await startProcess(
+        application,
+        "browser",
+        capabilities,
+        manifest("browser", { feature: "watcher", requires: ["changes"] }),
+      );
       expect(listeners.size).toBe(1);
       await process.dispose();
       expect(listeners.size).toBe(0);
@@ -434,7 +470,16 @@ describe("Program runtime", () => {
       },
     };
     const application: Application<App> = { features: { parent } };
-    const process = await startProcess(application, "cloud", { resolve: () => ({}) });
+    const process = await startProcess(
+      application,
+      "cloud",
+      {},
+      manifest(
+        "cloud",
+        { feature: "parent", requires: ["child"] },
+        { feature: "parent.child", provides: ["child"] },
+      ),
+    );
 
     expect(starts).toEqual(["parent.child", "parent:child"]);
     expect(process.contributions.map(({ address }) => address.feature)).toEqual([
@@ -444,8 +489,8 @@ describe("Program runtime", () => {
     await process.dispose();
   });
 
-  test("resolves every binding before user work starts", async () => {
-    type Leaf = { Programs: { cloud: Program<Server> } };
+  test("validates every external Capability before user work starts", async () => {
+    type Leaf = { Programs: { cloud: Program<Server, { Requires: { value: string } }> } };
     type App = { Features: { first: Leaf; second: Leaf } };
     const events: string[] = [];
     const feature = (name: string): Feature<Leaf> => ({
@@ -462,13 +507,17 @@ describe("Program runtime", () => {
     };
 
     await expect(
-      startProcess(application, "cloud", {
-        resolve({ feature: path }) {
-          if (path === "second") throw new Error("binding failed");
-          return {};
-        },
-      }),
-    ).rejects.toThrow("binding failed");
+      startProcess(
+        application,
+        "cloud",
+        {},
+        manifest(
+          "cloud",
+          { feature: "first", requires: ["value"] },
+          { feature: "second", requires: ["value"] },
+        ),
+      ),
+    ).rejects.toThrow("missing: value");
     expect(events).toEqual([]);
   });
 
@@ -506,8 +555,10 @@ describe("Program runtime", () => {
     };
 
     await expect(
-      startProcess(application, "cloud", {
-        resolve: () => ({
+      startProcess(
+        application,
+        "cloud",
+        {
           resource: {
             open: () => ({
               [Symbol.dispose]() {
@@ -515,8 +566,9 @@ describe("Program runtime", () => {
               },
             }),
           },
-        }),
-      }),
+        },
+        manifest("cloud", { feature: "first", requires: ["resource"] }, { feature: "second" }),
+      ),
     ).rejects.toThrow("startup failed");
     expect(events).toEqual(["start:first", "start:second", "dispose:first"]);
   });
@@ -561,6 +613,31 @@ describe("Program runtime", () => {
     expect(returned).toBe(true);
   });
 
+  test("does not consume an AsyncIterable before the Capability caller", async () => {
+    let returned = false;
+    const source = {
+      changes(): AsyncIterable<number> {
+        return {
+          async *[Symbol.asyncIterator]() {
+            try {
+              yield 42;
+              await new Promise(() => undefined);
+            } finally {
+              returned = true;
+            }
+          },
+        };
+      },
+    };
+    const scope = new ResourceScope();
+    const bound = bindCapabilitiesToScope(source, scope) as typeof source;
+    const iterator = bound.changes()[Symbol.asyncIterator]();
+
+    expect(await iterator.next()).toEqual({ done: false, value: 42 });
+    await scope.dispose();
+    expect(returned).toBe(true);
+  });
+
   test("can bind local, proxy, and fake implementations through one adapter", async () => {
     type Reader = { read(): string };
     type Consumer = {
@@ -595,16 +672,172 @@ describe("Program runtime", () => {
       },
     };
     const application: Application<App> = { features: { consumer } };
-    const adapters: CapabilityResolver[] = [
-      { resolve: () => ({ reader: { read: () => "local" } }) },
-      { resolve: () => ({ reader: { read: () => "proxy" } }) },
-      { resolve: () => ({ reader: { read: () => "fake" } }) },
+    const implementations = [
+      { reader: { read: () => "local" } },
+      { reader: { read: () => "proxy" } },
+      { reader: { read: () => "fake" } },
     ];
 
-    for (const [index, adapter] of adapters.entries()) {
-      const process = await startProcess(application, "browser", adapter);
+    for (const [index, capabilities] of implementations.entries()) {
+      const process = await startProcess(
+        application,
+        "browser",
+        capabilities,
+        manifest("browser", { feature: "consumer", requires: ["reader"] }),
+      );
       expect(process.ui.consumer?.value).toBe(["local", "proxy", "fake"][index]);
       await process.dispose();
     }
   });
+
+  test("orders a provider graph independently of manifest and object insertion order", async () => {
+    const contributions = [
+      { feature: "worker", requires: ["cache", "clock"] },
+      { feature: "cache", requires: ["store"], provides: ["cache"] },
+      { feature: "store", provides: ["store"] },
+      { feature: "audit", requires: ["clock"] },
+    ] as const;
+
+    await fc.assert(
+      fc.asyncProperty(
+        fc.shuffledSubarray([...contributions], {
+          minLength: contributions.length,
+          maxLength: contributions.length,
+        }),
+        async (permutation) => {
+          const application = {
+            features: Object.fromEntries(
+              [...permutation]
+                .reverse()
+                .map(({ feature }) => [feature, { programs: { server: {} } }]),
+            ),
+          };
+          const plan = planProgram(application, "server", manifest("server", ...permutation));
+
+          expect(plan.external).toEqual(["clock"]);
+          expect(plan.contributions.map(({ feature }) => feature)).toEqual([
+            "audit",
+            "store",
+            "cache",
+            "worker",
+          ]);
+        },
+      ),
+      { numRuns: 100 },
+    );
+  });
+
+  test("rejects invalid Capability graphs before starting user code", () => {
+    const application = {
+      features: {
+        first: { programs: { server: {} } },
+        second: { programs: { server: {} } },
+      },
+    };
+
+    expect(() =>
+      planProgram(
+        application,
+        "server",
+        manifest(
+          "server",
+          { feature: "first", provides: ["shared"] },
+          { feature: "second", provides: ["shared"] },
+        ),
+      ),
+    ).toThrow('multiple providers for Capability "shared"');
+
+    expect(() =>
+      planProgram(
+        application,
+        "server",
+        manifest(
+          "server",
+          { feature: "first", requires: ["second"], provides: ["first"] },
+          { feature: "second", requires: ["first"], provides: ["second"] },
+        ),
+      ),
+    ).toThrow("provider cycle between Features: first, second");
+  });
+
+  test("validates an exact external Capability set", () => {
+    const plan = planProgram(
+      { features: { consumer: { programs: { server: {} } } } },
+      "server",
+      manifest("server", { feature: "consumer", requires: ["clock", "events"] }),
+    );
+
+    expect(() => validateProgramCapabilities(plan, { clock: {}, extra: {} })).toThrow(
+      "missing: events; unexpected: extra",
+    );
+    expect(() => validateProgramCapabilities(plan, { clock: {}, events: {} })).not.toThrow();
+  });
+
+  test("owns external and Feature-provided Capability resources exactly once", async () => {
+    const disposals = { external: 0, provided: 0 };
+    const application = {
+      features: {
+        provider: {
+          programs: {
+            server: {
+              start() {
+                return {
+                  reader: {
+                    read: () => "value",
+                    [Symbol.dispose]: () => disposals.provided++,
+                  },
+                };
+              },
+            },
+          },
+        },
+        consumer: {
+          programs: {
+            server: {
+              start({ capabilities }: { capabilities: { reader: { read(): string } } }) {
+                expect(capabilities.reader.read()).toBe("value");
+              },
+            },
+          },
+        },
+      },
+    };
+    const process = await startProcess(
+      application,
+      "server",
+      {
+        clock: {
+          now: () => 0,
+          [Symbol.dispose]: () => disposals.external++,
+        },
+      },
+      manifest(
+        "server",
+        { feature: "provider", provides: ["reader"] },
+        { feature: "consumer", requires: ["clock", "reader"] },
+      ),
+    );
+
+    await process.dispose();
+    await process.dispose();
+    expect(disposals).toEqual({ external: 1, provided: 1 });
+  });
 });
+
+function manifest(
+  name: string,
+  ...contributions: readonly Readonly<{
+    feature: string;
+    requires?: readonly string[];
+    provides?: readonly string[];
+  }>[]
+): ProgramManifest {
+  return {
+    name,
+    contributions: contributions.map((contribution) => ({
+      feature: contribution.feature,
+      requires: contribution.requires ?? [],
+      provides: contribution.provides ?? [],
+    })),
+  };
+}

@@ -1,7 +1,6 @@
 import fc from "fast-check";
 import { describe, expect, it, vi } from "vitest";
 
-import { animate, samplePresentationAnimation } from "../../../../core/presentation";
 import {
   createNativeFeedbackHost,
   createNativeAudioOutput,
@@ -10,9 +9,14 @@ import {
   type WebPresentationAdapterOptions,
   type WebPresentationFrameInspection,
   type WebStyleHost,
-} from "./adapter";
-import { follow, spring } from "./dynamics";
-import { createAudioAsset, createImageAsset, type WebElementPresentation } from "./language";
+} from "@/adapters/web/ui/presentation/adapter";
+import { follow, spring } from "@/adapters/web/ui/presentation/dynamics";
+import {
+  createAudioAsset,
+  createImageAsset,
+  type WebElementPresentation,
+} from "@/adapters/web/ui/presentation/language";
+import { animate, samplePresentationAnimation } from "@/core/presentation";
 
 type FakeElement = Element & {
   readonly classes: Set<string>;

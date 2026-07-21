@@ -1,7 +1,7 @@
 import fc from "fast-check";
 import { expect, test } from "vitest";
 
-import { POGGERS_IR_VERSION, serializeApplicationIR, type ApplicationIR } from "./ir";
+import { POGGERS_IR_VERSION, serializeApplicationIR, type ApplicationIR } from "@/core/compiler/ir";
 
 test("serializes arbitrary valid Application IR deterministically", () => {
   fc.assert(
