@@ -1,10 +1,9 @@
 import {
   createEntity,
-  type EntityFeature,
   type EntityModel,
   type Feature,
+  type FeatureContractOf,
   placePrograms,
-  type PlacedFeature,
   type Program,
 } from "@poggers/kit";
 import { For, type BrowserMainThread, type Navigation } from "@poggers/kit/web";
@@ -89,14 +88,12 @@ type TasksBrowser = Program<
   }
 >;
 
-type LogicalTasksFeature = Readonly<{
+export type TasksFeature = Readonly<{
   Features: {
-    tasks: PlacedFeature<EntityFeature<Tasks>, { server: "api"; browser: "browser" }>;
+    tasks: FeatureContractOf<typeof placedTaskEntity>;
   };
   Programs: { browser: TasksBrowser };
 }>;
-
-export type TasksFeature = LogicalTasksFeature;
 
 export const taskEntity = createEntity<Tasks>({
   name: "tasks",
@@ -117,7 +114,7 @@ export const taskEntity = createEntity<Tasks>({
 
 const placedTaskEntity = placePrograms(taskEntity, { server: "api", browser: "browser" });
 
-const logicalTasks: Feature<LogicalTasksFeature, App> = {
+export const tasks = {
   features: { tasks: placedTaskEntity },
   programs: {
     browser: {
@@ -331,9 +328,7 @@ const logicalTasks: Feature<LogicalTasksFeature, App> = {
       },
     },
   },
-};
-
-export const tasks = logicalTasks;
+} satisfies Feature<TasksFeature, App>;
 
 const taskPath = "/tasks";
 

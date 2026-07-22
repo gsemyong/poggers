@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import {
   access,
+  glob,
   mkdir,
   mkdtemp,
   readFile,
@@ -43,6 +44,7 @@ describe("project template", () => {
       "vitest.config.ts",
     ]);
     expect((await readdir(resolve(target, "src"))).sort()).toEqual([
+      "app.spec.ts",
       "app.tsx",
       "features",
       "presentations",
@@ -51,6 +53,9 @@ describe("project template", () => {
     expect(await readdir(resolve(target, "src/presentations"))).toEqual(["clean.ts"]);
     expect(await readFile(resolve(target, "src/app.tsx"), "utf8")).toContain(
       "satisfies Application<App>",
+    );
+    expect(await readFile(resolve(target, "src/app.spec.ts"), "utf8")).toContain(
+      "testApplication({",
     );
     expect(await readFile(resolve(target, "src/features/shell.tsx"), "utf8")).toContain(
       "satisfies Feature<ShellFeature>",
@@ -100,6 +105,11 @@ describe("project template", () => {
     await symlink(
       resolve(import.meta.dirname, "../node_modules/@types/node"),
       resolve(modules, "@types/node"),
+      "dir",
+    );
+    await symlink(
+      resolve(import.meta.dirname, "../node_modules/vitest"),
+      resolve(modules, "vitest"),
       "dir",
     );
 
@@ -244,6 +254,17 @@ async function expectCanonicalSourceRoot(source: string): Promise<void> {
     ),
   ).toBe(true);
   expect(presentations.some(({ name }) => name === "presentation.ts")).toBe(false);
+
+  for await (const file of glob("**/*.{ts,tsx}", { cwd: source })) {
+    if (file.endsWith(".spec.ts") && file !== "app.spec.ts") continue;
+    const contents = await readFile(resolve(source, file), "utf8");
+    expect(contents, `${file} imports private framework realization code`).not.toMatch(
+      /from\s+["'](?:@\/(?:adapters|contracts|core)\/|@poggers\/kit\/adapters\/)/,
+    );
+    expect(contents, `${file} names a backend implementation detail`).not.toMatch(
+      /\b(?:buildNativeServerProgram|compileApplication|createNodeHost|startServerProgram)\b/,
+    );
+  }
 }
 
 function run(command: string, arguments_: readonly string[], cwd: string): Promise<number> {

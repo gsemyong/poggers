@@ -1,8 +1,15 @@
 import { endBatch, startBatch } from "alien-signals";
 
-import type { HttpServer, ServerProcess } from "@/adapters/server/platform";
+import {
+  getHttpValue,
+  type HttpRequest,
+  type HttpResponse,
+  type HttpServer,
+  type ServerProcess,
+} from "@/adapters/server/platform";
 import type { BrowserMainThread, HttpClient, LocalStore, Scheduler } from "@/adapters/web/platform";
 import type { Feature, Program } from "@/core/application";
+import { mapStream } from "@/core/portable";
 import type {
   IdentityClient,
   IdentityModel,
@@ -71,8 +78,8 @@ export type EventStore<Event> = Readonly<{
   subscribe(input: { stream: string; after?: number }): AsyncIterable<StoredEvent<Event>>;
 }>;
 
-export type Identifiers = Readonly<{ create(): string }>;
-export type Clock = Readonly<{ now(): number }>;
+export type Identifiers = Readonly<{ create(input: {}): string }>;
+export type Clock = Readonly<{ now(input: {}): number }>;
 
 export type EntityFailureCode = "unauthenticated" | "forbidden" | "not-found" | "conflict";
 
@@ -246,74 +253,73 @@ export function createEntity<Model extends EntityModelDefinition>(
 ): DefinedEntityFeature<Model> {
   const path = `/api/${implementation.name}`;
   const replicas = new WeakMap<object, EntityReplica<Model>>();
-  return Object.assign(
-    {
-      programs: {
-        server: {
-          start({ capabilities }: { capabilities: Requirements<Model> }) {
-            const service = createEntityService(implementation, capabilities);
-            const route = capabilities.http.route({
-              path,
-              handle: createEntityHandler(service, capabilities.identity, path),
-            });
-            return {
-              [implementation.name]: Object.freeze({
-                ...service,
-                [Symbol.dispose]: () => route[Symbol.dispose](),
-              }),
-            } as unknown as ServerProvision<Model>;
-          },
-        },
-        browser: {
-          state: {
-            revision: 0,
-            entities: [],
-            mutations: [],
-            synchronization: "signed-out",
-          },
-          actions: {
-            synchronize({ capabilities, state }) {
-              let replica = replicas.get(capabilities);
-              if (!replica) {
-                replica = new EntityReplica(implementation, path, capabilities, state);
-                replicas.set(capabilities, replica);
-              }
-              replica.synchronize();
-            },
-            create({ capabilities }, input) {
-              return requireReplica(replicas, capabilities).create(input);
-            },
-            update({ capabilities }, input) {
-              return requireReplica(replicas, capabilities).update(input);
-            },
-            remove({ capabilities }, input) {
-              return requireReplica(replicas, capabilities).remove(input);
-            },
-            retry({ capabilities }, { mutation }) {
-              requireReplica(replicas, capabilities).retry(mutation);
-            },
-            dismiss({ capabilities }, { mutation }) {
-              requireReplica(replicas, capabilities).dismiss(mutation);
-            },
-          },
-          start({
-            capabilities,
-            actions,
-          }: {
-            capabilities: BrowserRequirements<Model>;
-            actions: EntityActions<Model>;
-          }) {
-            actions.synchronize();
-            const replica = requireReplica(replicas, capabilities);
-            return {
-              [implementation.name]: replica.api,
-            } as unknown as BrowserProvision<Model>;
-          },
+  return {
+    programs: {
+      server: {
+        start({ capabilities }: { capabilities: Requirements<Model> }) {
+          const serverPath = `/api/${implementation.name}`;
+          const service = createEntityService(implementation, capabilities);
+          const route = capabilities.http.route({
+            path: serverPath,
+            handle: createEntityHandler(service, capabilities.identity, serverPath),
+          });
+          return {
+            [implementation.name]: Object.freeze({
+              ...service,
+              [Symbol.dispose]: () => route[Symbol.dispose](),
+            }),
+          } as unknown as ServerProvision<Model>;
         },
       },
-    } as Feature<EntityFeature<Model>>,
-    { capability: implementation.name },
-  );
+      browser: {
+        state: {
+          revision: 0,
+          entities: [],
+          mutations: [],
+          synchronization: "signed-out",
+        },
+        actions: {
+          synchronize({ capabilities, state }) {
+            let replica = replicas.get(capabilities);
+            if (!replica) {
+              replica = new EntityReplica(implementation, path, capabilities, state);
+              replicas.set(capabilities, replica);
+            }
+            replica.synchronize();
+          },
+          create({ capabilities }, input) {
+            return requireReplica(replicas, capabilities).create(input);
+          },
+          update({ capabilities }, input) {
+            return requireReplica(replicas, capabilities).update(input);
+          },
+          remove({ capabilities }, input) {
+            return requireReplica(replicas, capabilities).remove(input);
+          },
+          retry({ capabilities }, { mutation }) {
+            requireReplica(replicas, capabilities).retry(mutation);
+          },
+          dismiss({ capabilities }, { mutation }) {
+            requireReplica(replicas, capabilities).dismiss(mutation);
+          },
+        },
+        start({
+          capabilities,
+          actions,
+        }: {
+          capabilities: BrowserRequirements<Model>;
+          actions: EntityActions<Model>;
+        }) {
+          actions.synchronize();
+          const replica = requireReplica(replicas, capabilities);
+          return {
+            [implementation.name]: replica.api,
+          } as unknown as BrowserProvision<Model>;
+        },
+      },
+    },
+    capability: implementation.name,
+  } as DefinedEntityFeature<Model>;
 }
 
 /** Binds one established principal to the server authority's semantic API. */
@@ -335,57 +341,62 @@ function createEntityHandler<Model extends EntityModelDefinition>(
   service: EntityService<Model>,
   identity: IdentityService<IdentityOf<Model>>,
   path: string,
-): (request: Request) => Promise<Response> {
+): (request: HttpRequest) => Promise<HttpResponse> {
   return async (request) => {
     try {
-      const principal = await identity.authenticate({ request });
+      const principal = await identity.authenticate({
+        cookie: getHttpValue(request.headers, { name: "cookie" }),
+      });
       if (!principal) throw new EntityFailure("unauthenticated", "Authentication is required.");
-      const url = new URL(request.url);
-      const filter = parseFilter<FilterOf<Model>>(url.searchParams.get("filter"));
-      if (url.pathname === `${path}/changes` && request.method === "GET") {
+      const filter = parseFilter<FilterOf<Model>>(
+        getHttpValue(request.query, { name: "filter" }) ?? null,
+      );
+      if (request.path === `${path}/changes` && request.method === "GET") {
         return entityStream(service.changes({ principal, filter }));
       }
-      if (url.pathname === path && request.method === "GET") {
-        return Response.json(await service.list({ principal, filter }));
+      if (request.path === path && request.method === "GET") {
+        return jsonResponse(await service.list({ principal, filter }));
       }
-      if (url.pathname === path && request.method === "POST") {
-        const commandId = request.headers.get("x-poggers-command");
-        const entityId = request.headers.get("x-poggers-entity");
-        return Response.json(
+      if (request.path === path && request.method === "POST") {
+        const commandId = getHttpValue(request.headers, { name: "x-poggers-command" });
+        const entityId = getHttpValue(request.headers, { name: "x-poggers-entity" });
+        return jsonResponse(
           await service.create({
             principal,
-            value: (await request.json()) as CreateOf<Model>,
-            ...(commandId && entityId ? { command: { id: commandId, entityId } } : {}),
+            value: JSON.parse(request.body) as CreateOf<Model>,
+            ...(commandId !== undefined && entityId !== undefined
+              ? { command: { id: commandId, entityId } }
+              : {}),
           }),
-          { status: 201 },
+          201,
         );
       }
       const prefix = `${path}/`;
-      if (!url.pathname.startsWith(prefix)) return notFoundResponse();
-      const id = decodeURIComponent(url.pathname.slice(prefix.length));
-      if (request.method === "GET") return Response.json(await service.get({ principal, id }));
+      if (!request.path.startsWith(prefix)) return notFoundResponse();
+      const id = request.path.slice(prefix.length);
+      if (request.method === "GET") return jsonResponse(await service.get({ principal, id }));
       if (request.method === "PATCH") {
-        const commandId = request.headers.get("x-poggers-command");
-        return Response.json(
+        const updateCommandId = getHttpValue(request.headers, { name: "x-poggers-command" });
+        return jsonResponse(
           await service.update({
             principal,
             id,
-            changes: (await request.json()) as UpdateOf<Model>,
-            ...(commandId ? { command: { id: commandId } } : {}),
+            changes: JSON.parse(request.body) as UpdateOf<Model>,
+            ...(updateCommandId !== undefined ? { command: { id: updateCommandId } } : {}),
           }),
         );
       }
       if (request.method === "DELETE") {
-        const commandId = request.headers.get("x-poggers-command");
-        return Response.json(
+        const removeCommandId = getHttpValue(request.headers, { name: "x-poggers-command" });
+        return jsonResponse(
           await service.remove({
             principal,
             id,
-            ...(commandId ? { command: { id: commandId } } : {}),
+            ...(removeCommandId !== undefined ? { command: { id: removeCommandId } } : {}),
           }),
         );
       }
-      return Response.json({ message: "Method not allowed." }, { status: 405 });
+      return jsonResponse({ message: "Method not allowed." }, 405);
     } catch (error) {
       return entityFailureResponse(error);
     }
@@ -494,8 +505,8 @@ class EntityReplica<Model extends EntityModelDefinition> implements AsyncDisposa
   create(input: CreateOf<Model>): ValueOf<Model> {
     const principal = this.#requirePrincipal();
     const command: EntityCommand<Model> = {
-      id: this.#capabilities.identifiers.create(),
-      entityId: this.#capabilities.identifiers.create(),
+      id: this.#capabilities.identifiers.create({}),
+      entityId: this.#capabilities.identifiers.create({}),
       operation: "create",
       input,
     };
@@ -522,7 +533,7 @@ class EntityReplica<Model extends EntityModelDefinition> implements AsyncDisposa
     });
     if (entity.id !== previous.id) throw new TypeError("An update cannot change an entity id.");
     this.#pending.push({
-      id: this.#capabilities.identifiers.create(),
+      id: this.#capabilities.identifiers.create({}),
       entityId: input.id,
       operation: "update",
       input: input.changes,
@@ -538,7 +549,7 @@ class EntityReplica<Model extends EntityModelDefinition> implements AsyncDisposa
     const entity = find(this.#snapshot(), id);
     if (!entity) throw notFound(id);
     this.#pending.push({
-      id: this.#capabilities.identifiers.create(),
+      id: this.#capabilities.identifiers.create({}),
       entityId: id,
       operation: "remove",
     });
@@ -927,6 +938,7 @@ function createEntityService<Model extends EntityModelDefinition>(
     reduceEvents<ValueOf<Model>>(
       stream(principal),
       await capabilities.events.read({ stream: stream(principal) }),
+      { revision: 0, entities: [] },
     );
   const authorize = async (input: EntityAuthorization<Model>) => {
     if (await implementation.authorize(input)) return;
@@ -942,11 +954,15 @@ function createEntityService<Model extends EntityModelDefinition>(
   ) => {
     const entities: ValueOf<Model>[] = [];
     for (const entity of snapshot.entities) {
-      if (!(await implementation.authorize({ operation: "read", principal, entity }))) continue;
-      if (filter !== undefined && implementation.matches) {
-        if (!(await implementation.matches({ principal, entity, filter }))) continue;
+      if (await implementation.authorize({ operation: "read", principal, entity })) {
+        if (
+          filter === undefined ||
+          !implementation.matches ||
+          (await implementation.matches({ principal, entity, filter }))
+        ) {
+          entities.push(entity);
+        }
       }
-      entities.push(entity);
     }
     return Object.freeze({ revision: snapshot.revision, entities: Object.freeze(entities) });
   };
@@ -967,7 +983,10 @@ function createEntityService<Model extends EntityModelDefinition>(
           if (entity !== undefined) return entity;
         }
       }
-      const snapshot = reduceEvents<ValueOf<Model>>(name, history);
+      const snapshot = reduceEvents<ValueOf<Model>>(name, history, {
+        revision: 0,
+        entities: [],
+      });
       const decision = await decide(snapshot);
       const appended = await capabilities.events.append({
         stream: name,
@@ -992,7 +1011,7 @@ function createEntityService<Model extends EntityModelDefinition>(
     create({ principal, value, command }) {
       return commit(principal, command?.id, async () => {
         const entity = implementation.create({
-          id: command?.entityId ?? capabilities.identifiers.create(),
+          id: command?.entityId ?? capabilities.identifiers.create({}),
           principal,
           input: value,
         });
@@ -1001,8 +1020,8 @@ function createEntityService<Model extends EntityModelDefinition>(
           event: {
             type: "entity.created",
             entity,
-            at: capabilities.clock.now(),
-            ...(command ? { commandId: command.id } : {}),
+            at: capabilities.clock.now({}),
+            commandId: command?.id,
           },
           result: entity,
         };
@@ -1019,8 +1038,8 @@ function createEntityService<Model extends EntityModelDefinition>(
           event: {
             type: "entity.replaced",
             entity,
-            at: capabilities.clock.now(),
-            ...(command ? { commandId: command.id } : {}),
+            at: capabilities.clock.now({}),
+            commandId: command?.id,
           },
           result: entity,
         };
@@ -1036,8 +1055,8 @@ function createEntityService<Model extends EntityModelDefinition>(
             type: "entity.removed",
             id,
             entity,
-            at: capabilities.clock.now(),
-            ...(command ? { commandId: command.id } : {}),
+            at: capabilities.clock.now({}),
+            commandId: command?.id,
           },
           result: entity,
         };
@@ -1053,31 +1072,16 @@ function createEntityService<Model extends EntityModelDefinition>(
   });
 }
 
-function entityStream<Value>(source: AsyncIterable<Value>): Response {
-  const iterator = source[Symbol.asyncIterator]();
-  const encoder = new TextEncoder();
-  return new Response(
-    new ReadableStream({
-      async pull(controller) {
-        try {
-          const next = await iterator.next();
-          if (next.done) controller.close();
-          else controller.enqueue(encoder.encode(`${JSON.stringify(next.value)}\n`));
-        } catch (error) {
-          controller.error(error);
-        }
-      },
-      async cancel() {
-        await iterator.return?.();
-      },
-    }),
-    {
-      headers: {
-        "cache-control": "no-cache, no-transform",
-        "content-type": "application/x-ndjson",
-      },
-    },
-  );
+function entityStream<Value>(source: AsyncIterable<Value>): HttpResponse {
+  return {
+    status: 200,
+    headers: [
+      { name: "cache-control", value: "no-cache, no-transform" },
+      { name: "content-type", value: "application/x-ndjson" },
+    ],
+    body: undefined,
+    stream: mapStream(source, (value) => `${JSON.stringify(value)}\n`),
+  };
 }
 
 function entityChanges<Model extends EntityModelDefinition>(
@@ -1161,7 +1165,7 @@ async function assertEntityResponse(response: Response): Promise<void> {
   throw new Error(body.message ?? `Request failed with status ${response.status}.`);
 }
 
-function entityFailureResponse(error: unknown): Response {
+function entityFailureResponse(error: unknown): HttpResponse {
   if (error instanceof EntityFailure) {
     const status =
       error.code === "unauthenticated"
@@ -1171,14 +1175,14 @@ function entityFailureResponse(error: unknown): Response {
           : error.code === "not-found"
             ? 404
             : 409;
-    return Response.json(
+    return jsonResponse(
       { code: error.code, message: error.message, details: error.details },
-      { status },
+      status,
     );
   }
-  return Response.json(
-    { message: error instanceof Error ? error.message : String(error) },
-    { status: 500 },
+  return jsonResponse(
+    { message: error instanceof Error ? error.message : "Internal server error." },
+    500,
   );
 }
 
@@ -1190,27 +1194,53 @@ function parseFilter<Value>(value: string | null): Value | undefined {
   return value === null ? undefined : (JSON.parse(value) as Value);
 }
 
-function notFoundResponse(): Response {
-  return Response.json({ message: "Not found." }, { status: 404 });
+function notFoundResponse(): HttpResponse {
+  return jsonResponse({ message: "Not found." }, 404);
+}
+
+function jsonResponse(value: object, status = 200): HttpResponse {
+  return {
+    status,
+    headers: [{ name: "content-type", value: "application/json" }],
+    body: JSON.stringify(value),
+    stream: undefined,
+  };
 }
 
 function reduceEvents<Value extends EntityValue>(
   stream: string,
   events: readonly StoredEvent<EntityEvent<Value>>[],
-  initial: EntitySnapshot<Value> = { revision: 0, entities: [] },
+  initial: EntitySnapshot<Value>,
 ): EntitySnapshot<Value> {
-  const entities = new Map(initial.entities.map((entity) => [entity.id, entity]));
+  let entities: Value[] = [];
+  for (const initialEntity of initial.entities) entities.push(initialEntity);
   let revision = initial.revision;
   for (const stored of events) {
     if (stored.stream !== stream || stored.revision !== revision + 1) {
-      throw new Error(`Entity stream ${JSON.stringify(stream)} is not contiguous.`);
+      throw new Error("Entity stream is not contiguous: " + stream);
     }
     revision = stored.revision;
     const event = stored.event;
-    if (event.type === "entity.removed") entities.delete(event.id);
-    else entities.set(event.entity.id, event.entity);
+    const next: Value[] = [];
+    if (event.type === "entity.removed") {
+      for (const current of entities) {
+        if (current.id !== event.id) next.push(current);
+      }
+    } else {
+      let replaced = false;
+      for (const existing of entities) {
+        if (existing.id === event.entity.id) {
+          next.push(event.entity);
+          replaced = true;
+        } else {
+          next.push(existing);
+        }
+      }
+      if (!replaced) next.push(event.entity);
+    }
+    entities = next;
   }
-  return Object.freeze({ revision, entities: Object.freeze([...entities.values()]) });
+  return { revision, entities };
 }
 
 function snapshots<Model extends EntityModelDefinition>(

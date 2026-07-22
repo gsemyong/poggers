@@ -13,13 +13,7 @@ import {
   type StatementIR,
   type TypeIR,
 } from "@/core/compiler/ir";
-import {
-  buildRustProgram,
-  createRustProgramSession,
-  generateRustProgram,
-  generateRustProductionProgram,
-  runRustProgram,
-} from "@/core/compiler/rust";
+import { buildRustProgram, createRustProgramSession, runRustProgram } from "@/core/compiler/rust";
 import {
   compileApplication,
   createApplicationCompiler,
@@ -220,7 +214,7 @@ describe("Poggers Application compiler", () => {
     expect(() => compileApplication(unawaited)).toThrow(/must be awaited/);
   });
 
-  test("rejects unsupported portable callbacks instead of silently falling back to source", async () => {
+  test("lowers authored capability callbacks as portable closures", async () => {
     const entry = await fixture(
       applicationSource()
         .replace(
@@ -236,18 +230,11 @@ describe("Poggers Application compiler", () => {
       compileApplication(entry),
       "feature/worker/program/cloud",
     )?.implementation;
-    expect(implementation).toMatchObject({
-      kind: "source",
-      reason: "host-source",
-      diagnostic: {
-        message: expect.stringMatching(/Unsupported portable expression ArrowFunction/),
-      },
-    });
-    expect(() =>
-      generateRustProgram(
-        programContribution(compileApplication(entry), "feature/worker/program/cloud")!,
-      ),
-    ).toThrow(/has no portable implementation/);
+    expect(implementation?.kind).toBe("portable");
+    if (implementation?.kind !== "portable") throw new Error("Expected portable IR.");
+    expect(
+      collectExpressions(implementation.start.body).some(({ kind }) => kind === "closure"),
+    ).toBe(true);
   });
 
   test("rejects any in portable Capability contracts", async () => {
@@ -289,6 +276,47 @@ describe("Poggers Application compiler", () => {
         },
       ]),
     });
+  });
+
+  test("lowers and executes for-await-of over Capability streams", async () => {
+    const entry = await fixture(streamApplicationSource());
+    const ir = compileApplication(entry);
+    const contribution = programContribution(ir, "feature/worker/program/cloud");
+    if (contribution?.implementation.kind !== "portable") {
+      throw new Error("Expected portable IR.");
+    }
+    expect(contribution.implementation.start.body).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "for-of", asynchronous: true, item: "change" }),
+      ]),
+    );
+
+    const writes: unknown[] = [];
+    await executeProgramIR(ir, "feature/worker/program/cloud", {
+      changes: {
+        async *subscribe() {
+          yield { revision: 2 };
+          yield { revision: 3 };
+        },
+      },
+      output: { write: async (input) => writes.push(input) },
+    });
+    expect(writes).toEqual([{ revision: 2 }]);
+  });
+
+  test("rejects for-await-of over a non-stream value", async () => {
+    const entry = await fixture(
+      streamApplicationSource()
+        .replace(
+          "for await (const change of capabilities.changes.subscribe({}))",
+          "for await (const change of [1, 2, 3])",
+        )
+        .replace("revision: change.revision", "revision: change"),
+    );
+
+    expect(() => compileApplication(entry)).toThrow(
+      "Portable for-await-of requires an asynchronous stream.",
+    );
   });
 
   test("preserves host-native Capability values as explicit opaque boundaries", async () => {
@@ -636,9 +664,6 @@ describe("Poggers Application compiler", () => {
     await expect(runRustProgram(factoryExecutable, factoryScenario)).resolves.toEqual(
       await executeProgramFixtureIR(factoryIR, "feature/tasks/program/server", factoryScenario),
     );
-    expect(() => generateRustProductionProgram(factoryProgram)).toThrow(
-      "requires a native Capability adapter for repository",
-    );
   }, 120_000);
 });
 
@@ -710,6 +735,42 @@ throw new Error("The compiler must never execute application source.");
 export default {
   metadata: { name: "Portable fixture" },
   features: { child, worker },
+} satisfies Application<App>;
+`;
+}
+
+function streamApplicationSource(): string {
+  return `
+type Platform = { readonly Name: "server" };
+type Environment = { readonly Name: "server"; readonly Platform: Platform };
+type Program<E extends Environment, C extends object = {}> = Readonly<C & { Environment: E }>;
+type Feature<C> = unknown;
+type Application<C> = unknown;
+type Changes = { subscribe(input: {}): AsyncIterable<{ revision: number }> };
+type Output = { write(input: { revision: number }): Promise<void> };
+type Worker = {
+  Programs: {
+    cloud: Program<Environment, { Requires: { changes: Changes; output: Output } }>;
+  };
+};
+type App = { Features: { worker: Worker } };
+
+const worker = {
+  programs: {
+    cloud: {
+      async start({ capabilities }: { capabilities: { changes: Changes; output: Output } }) {
+        for await (const change of capabilities.changes.subscribe({})) {
+          await capabilities.output.write({ revision: change.revision });
+          return;
+        }
+      },
+    },
+  },
+} satisfies Feature<Worker>;
+
+export default {
+  metadata: { name: "Stream fixture" },
+  features: { worker },
 } satisfies Application<App>;
 `;
 }
@@ -957,12 +1018,34 @@ function collectExpressions(statements: readonly StatementIR[]): ExpressionIR[] 
     else if (expression.kind === "binary") {
       visit(expression.left);
       visit(expression.right);
+    } else if (expression.kind === "conditional") {
+      visit(expression.condition);
+      visit(expression.consequent);
+      visit(expression.alternate);
     } else if (expression.kind === "call" || expression.kind === "capability-call") {
       expression.arguments.forEach(visit);
+    } else if (expression.kind === "invoke") {
+      visit(expression.callee);
+      expression.arguments.forEach(visit);
+    } else if (expression.kind === "method-call") {
+      visit(expression.receiver);
+      expression.arguments.forEach(visit);
+    } else if (expression.kind === "error") {
+      expression.arguments.forEach(visit);
+    } else if (expression.kind === "error-match") {
+      visit(expression.value);
+    } else if (expression.kind === "closure") {
+      expression.captures.forEach(visit);
     }
   };
   for (const statement of statements) {
-    if (statement.kind === "let" || statement.kind === "assign") visit(statement.value);
+    if (
+      statement.kind === "let" ||
+      statement.kind === "assign" ||
+      statement.kind === "array-push"
+    ) {
+      visit(statement.value);
+    } else if (statement.kind === "throw") visit(statement.value);
     else if (statement.kind === "expression") visit(statement.expression);
     else if (statement.kind === "if") {
       visit(statement.condition);
@@ -971,6 +1054,14 @@ function collectExpressions(statements: readonly StatementIR[]): ExpressionIR[] 
     } else if (statement.kind === "for-of") {
       visit(statement.values);
       expressions.push(...collectExpressions(statement.body));
+    } else if (statement.kind === "for-range") {
+      visit(statement.from);
+      visit(statement.to);
+      expressions.push(...collectExpressions(statement.body));
+    } else if (statement.kind === "try") {
+      expressions.push(...collectExpressions(statement.body));
+      expressions.push(...collectExpressions(statement.catch));
+      expressions.push(...collectExpressions(statement.finally));
     } else if (statement.value) visit(statement.value);
   }
   return expressions;

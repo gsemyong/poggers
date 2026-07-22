@@ -65,7 +65,7 @@ export type LocalStore = Readonly<{
 }>;
 
 /** Browser-owned identifier generation. */
-export type Identifiers = Readonly<{ create(): string }>;
+export type Identifiers = Readonly<{ create(input: {}): string }>;
 
 /** Cancellable deferred work supplied by the browser host. */
 export type Scheduler = Readonly<{

@@ -1,6 +1,7 @@
 import fc from "fast-check";
 import { describe, expect, test, vi } from "vitest";
 
+import type { HttpRequest, HttpResponse } from "@/adapters/server/platform";
 import { createProgramContributionInstance } from "@/core/process";
 import {
   createEntity,
@@ -135,22 +136,19 @@ describe("semantic entity Feature", () => {
 
   test("derives authenticated server and browser APIs from the same model", async () => {
     const events = createMemoryEventStore<EntityEvent<Note>>();
-    let handler: ((request: Request) => Promise<Response>) | undefined;
+    let handler: ((request: HttpRequest) => Promise<HttpResponse>) | undefined;
     const server = createProgramContributionInstance(notes.programs.server as never, {
       address: { program: "server", feature: "notes" },
       provides: ["notes"],
       capabilities: {
         identity: {
-          authenticate: async ({ request }: { request: Request }) => {
-            const id = request.headers.get("x-user");
-            return id ? { id } : undefined;
-          },
+          authenticate: async () => ({ id: "alice" }),
         },
         events,
         identifiers: { create: () => "note-1" },
         clock: { now: () => 1 },
         http: {
-          route(input: { handle(request: Request): Promise<Response> }) {
+          route(input: { handle(request: HttpRequest): Promise<HttpResponse> }) {
             handler = input.handle;
             return { [Symbol.dispose]: () => undefined };
           },
@@ -178,14 +176,7 @@ describe("semantic entity Feature", () => {
             signal?: AbortSignal;
           }) {
             if (!handler) throw new Error("Entity route was not mounted.");
-            return handler(
-              new Request(new URL(input.path, "http://test.local"), {
-                method: input.method,
-                headers: { "x-user": "alice", ...input.headers },
-                signal: input.signal,
-                ...(input.body === undefined ? {} : { body: input.body }),
-              }),
-            );
+            return responseFromHttp(handler(requestFromWeb(input)));
           },
         },
         storage: createMemoryStore(),
@@ -212,7 +203,7 @@ describe("semantic entity Feature", () => {
   test("restores pending local intent and commits it exactly once after reconnecting", async () => {
     const events = createMemoryEventStore<EntityEvent<Note>>();
     const storage = createMemoryStore();
-    let handler: ((request: Request) => Promise<Response>) | undefined;
+    let handler: ((request: HttpRequest) => Promise<HttpResponse>) | undefined;
     let online = true;
     let loseNextResponse = false;
     const server = createProgramContributionInstance(notes.programs.server as never, {
@@ -224,7 +215,7 @@ describe("semantic entity Feature", () => {
         identifiers: sequenceIdentifiers("server"),
         clock: { now: () => 1 },
         http: {
-          route(input: { handle(request: Request): Promise<Response> }) {
+          route(input: { handle(request: HttpRequest): Promise<HttpResponse> }) {
             handler = input.handle;
             return { [Symbol.dispose]: () => undefined };
           },
@@ -254,14 +245,7 @@ describe("semantic entity Feature", () => {
               signal?: AbortSignal;
             }) {
               if (!online || !handler) throw new TypeError("offline");
-              const response = await handler(
-                new Request(new URL(input.path, "http://test.local"), {
-                  method: input.method,
-                  headers: input.headers,
-                  signal: input.signal,
-                  ...(input.body === undefined ? {} : { body: input.body }),
-                }),
-              );
+              const response = await responseFromHttp(handler(requestFromWeb(input)));
               if (loseNextResponse && input.method === "POST") {
                 loseNextResponse = false;
                 throw new TypeError("response lost");
@@ -324,4 +308,43 @@ function createMemoryStore() {
 function sequenceIdentifiers(prefix = "entity") {
   let next = 0;
   return { create: () => `${prefix}-${++next}` };
+}
+
+function requestFromWeb(input: {
+  path: string;
+  method?: string;
+  headers?: Readonly<Record<string, string>>;
+  body?: string;
+}): HttpRequest {
+  const url = new URL(input.path, "http://test.local");
+  return {
+    method: input.method ?? "GET",
+    path: url.pathname,
+    query: [...url.searchParams].map(([name, value]) => ({ name, value })),
+    headers: Object.entries(input.headers ?? {}).map(([name, value]) => ({ name, value })),
+    body: input.body ?? "",
+  };
+}
+
+async function responseFromHttp(value: Promise<HttpResponse>): Promise<Response> {
+  const response = await value;
+  const headers = new Headers();
+  for (const { name, value } of response.headers) headers.append(name, value);
+  if (response.body !== undefined) {
+    return new Response(response.body, { status: response.status, headers });
+  }
+  const iterator = response.stream?.[Symbol.asyncIterator]();
+  const body = iterator
+    ? new ReadableStream<Uint8Array>({
+        async pull(controller) {
+          const next = await iterator.next();
+          if (next.done) controller.close();
+          else controller.enqueue(new TextEncoder().encode(next.value));
+        },
+        async cancel() {
+          await iterator.return?.();
+        },
+      })
+    : null;
+  return new Response(body, { status: response.status, headers });
 }

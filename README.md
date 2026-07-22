@@ -18,6 +18,7 @@ The generated project is the canonical application convention:
 
 ```text
 src/
+  app.spec.ts
   app.tsx
   features/
     shell.tsx
@@ -29,6 +30,9 @@ src/
 behavior. A Presentation owns adapter-defined user-facing decisions, including
 visuals, assets, and motion on the web. Every project retains this organization
 as it grows; Feature and Presentation paths do not change with project size.
+`app.spec.ts` states observable product behavior once; the framework runs it
+through both the hot-reloadable development realization and the optimized
+production realization.
 
 ## Develop The Kit
 
@@ -63,11 +67,9 @@ of each frame.
 See [the architecture document](docs/architecture.md) for the product model and
 adapter boundaries, and [the project organization](docs/project-organization.md)
 for the application and reusable Feature conventions. Headless code intended
-for both JavaScript development and native production follows the deliberately
+for both JavaScript development and optimized production follows the deliberately
 small [Portable TypeScript profile](docs/portable-typescript.md); unsupported
-host code is identified in IR and can never become a silent native source
-fallback. The [native production plan](docs/native-production-plan.md) records
-the whole-Program realization gates and measured cache behavior. The
-[production runtime plan](docs/production-runtime-plan.md) records the Rust
-initial-state SSR, native host-source, clean-package, and network-replica
-acceptance gates and their explicit limits.
+host code is identified in IR and can never become a silent production source
+fallback. The generic native path, its adapter contract, verified scope, and
+remaining optimization boundary are recorded in the
+[native runtime verification](docs/native-runtime-correction.md).

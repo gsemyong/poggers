@@ -3,6 +3,7 @@ import {
   placePrograms,
   type Application,
   type Feature,
+  type FeatureContractOf,
   type PlacedFeature,
   type Program,
 } from "@/core/application";
@@ -332,9 +333,12 @@ const logicalPlacement: Feature<LogicalPlacement> = {
 const placedPrograms = placePrograms(logicalPlacement, { server: "api" });
 const placedProgramsProof: Feature<PlacedFeature<LogicalPlacement, { server: "api" }>> =
   placedPrograms;
+const inferredPlacedProgramsProof: Feature<FeatureContractOf<typeof placedPrograms>> =
+  placedPrograms;
 void placedPrograms.programs.api;
 void placedPrograms.programs.browser;
 void placedPrograms.features.child.programs.api;
 // @ts-expect-error Placement removes the logical role from the realized Feature contract.
 void placedPrograms.programs.server;
 void placedProgramsProof;
+void inferredPlacedProgramsProof;

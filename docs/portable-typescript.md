@@ -14,21 +14,22 @@ Portable code may contain:
 - local `const` and `let` bindings;
 - record and array construction, property reads, arithmetic, comparisons, boolean operators, and
   string concatenation;
-- `if`, bounded `for...of`, and `return`;
-- statically resolved calls to authored pure portable functions, including specialized generic
-  helpers;
-- declared Capability calls, synchronously or with `await`.
+- `if`, numeric `for`, array `for...of`, stream `for await...of`, `return`, `throw`, and
+  `try`/`catch`/`finally`;
+- local assignment and array `push`;
+- statically resolved calls and closures over authored portable functions, including specialized
+  generic helpers;
+- structured errors and declared Capability calls, synchronously, with `await`, or as streams.
 
 Static imports are allowed when every reachable value is portable. Types erased by TypeScript do
 not become runtime dependencies.
 
-Tagged unions, recursive values, streams, cancellation, concurrent tasks, persistent Program
-state, and resource-valued Capability operations are not in profile v0. Their contracts may be
-extracted as application meaning, but a native backend must reject executable code that depends on
-semantics not yet represented by IR.
+Recursive values, cancellation, concurrent tasks, persistent Program-local state, generators, and
+general resource-valued operations are not in profile v0. Disposable values used by shipped
+Feature factories have explicit lifecycle meaning; unsupported resource shapes are rejected.
 
 The profile excludes ambient globals, dynamic imports and property access, classes, prototypes,
-reflection, exceptions, `eval`, generators, shared mutable module state, and unbounded JavaScript
+reflection, `eval`, generators, shared mutable module state, and unbounded JavaScript
 coercion. UI implementations are platform-native source and are not portable in this profile.
 Unsupported portable code is classified with a source-located diagnostic in Application IR;
 native generation rejects that classification and never falls back to executing application
@@ -48,8 +49,8 @@ source. Invalid authority, contracts, or unresolved symbols remain immediate com
 - Conditions and boolean operators accept booleans. There is no general truthiness conversion.
 - Property access requires a declared field on a record or tuple. Missing fields are not silently
   converted to `undefined`.
-- `for...of` iterates arrays from index zero to length minus one. A loop observes the
-  immutable value captured when it starts.
+- `for...of` iterates an array snapshot from index zero to length minus one. `for await...of`
+  advances one declared asynchronous stream in delivery order.
 - A function returns `void` when control reaches the end. `return` exits only the current function.
 - Profile v0 rejects local-name shadowing, which keeps lexical binding identity identical in every
   backend without exposing generated names.
@@ -57,9 +58,8 @@ source. Invalid authority, contracts, or unresolved symbols remain immediate com
   result or a structured Capability failure. A synchronous call must not return a promise.
 - Capability operations are the only authority/effect boundary. Pure helpers and local data
   structures lower directly.
-- Resources acquired through future resource-valued Capability operations are owned by the current
-  Program activation and disposed in reverse acquisition order. Resource values are not part of
-  profile v0 until this shape is represented explicitly in IR.
+- Owned resources returned by a Program or Feature-provided Capability are disposed exactly once
+  in reverse acquisition order.
 
 ## Translation
 

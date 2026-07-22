@@ -195,6 +195,13 @@ adapter additionally owns one `UIAdapter`, which pairs Component and
 Presentation realization. Adapter-specific engines are private drivers, not
 additional framework concepts.
 
+Application authors select neither path. `poggers dev` resolves every Platform
+required by the Application and owns its live sessions and hot replacement.
+`poggers build` resolves the same Application into optimized artifacts.
+`testApplication` states one black-box specification and lets the framework run
+it against both realizations; application tests never import compiler, host,
+adapter, process-launch, Cargo, or native-builder APIs.
+
 Adapter scratch work belongs to the operating-system temp directory and is
 owned by its live session or build operation. Generated applications contain
 only authored source and requested production artifacts.
@@ -212,27 +219,25 @@ restart an unrelated server Process. In production, each descriptor becomes an
 independently deployable `ProductionArtifact` identified by its Program and
 Environment.
 
-Portable headless logic follows a stricter realization path. The TypeScript compiler API resolves
-the authored types, symbols, generic specializations, factory object construction, and executable
-syntax without running source. The frontend lowers that meaning statement by statement into typed
-IR with source spans and a reachable pure-function graph. JavaScript development and native Rust
-generation consume the same IR; neither backend interprets TypeScript independently.
+Portable headless logic is intended to follow a stricter realization path. The TypeScript compiler
+API resolves authored types, symbols, generic specializations, factory object construction, and
+executable syntax without running source. The frontend lowers supported meaning statement by
+statement into typed IR with source spans and a reachable pure-function graph.
 
-Capabilities are the only effect boundary. Pure helpers and local data compile directly, while a
-known native Capability implementation can use static dispatch. Platform UI remains intentionally
-platform source. Host logic outside the current portable profile is recorded as `host-source` with
-its diagnostic so JavaScript development remains available, but native generation fails explicitly
-instead of embedding or invoking JavaScript. The normative subset and cross-backend semantics live
-in [portable-typescript.md](./portable-typescript.md).
+Capabilities are the only effect boundary. Pure helpers and local data lower to direct generated
+Rust control flow. External Capability adapters are selected by recursively matching the semantic
+contract extracted from the Program; missing, ambiguous, incompatible, and cyclic bindings fail
+before Cargo. Generated wiring names each concrete Rust type and constructor, then erases it behind
+one stable dynamic `Value` Capability ABI. This keeps independently distributed adapters possible.
+It is not yet whole-program monomorphization, and no performance claim should imply otherwise.
 
-The server production adapter links every contribution to a named Program before generation. It
-resolves Feature-provided Capabilities, validates the remaining host contract, and emits one stable
-Rust workspace per Program topology. Adapter runtime support, identity behavior, each entity
-Feature, and the thin executable are separate crates. Generated-source fingerprints preserve
-`rustfmt` output, so changing one Feature rebuilds that crate and the executable without touching
-unrelated Features or adapter runtime code. Complete semantic output is content-addressed; an exact
-repeat copies the executable without invoking Cargo. Strict Clippy validation is an explicit test
-gate rather than production build work.
+Platform UI remains intentionally platform source. Host logic outside the portable profile is
+recorded as `host-source` with its diagnostic, so JavaScript development remains available while
+native generation fails instead of embedding JavaScript. The generic native path is complete for
+the documented profile: compiler and runtime contain no knowledge of shipped Feature factories,
+and authenticated CRUD plus an unrelated factory lower through the same IR and generator. The
+normative subset lives in [portable-typescript.md](./portable-typescript.md); its executable gates
+are recorded in [native-runtime-correction.md](./native-runtime-correction.md).
 
 The web production adapter emits browser assets plus a versioned `WebDocumentIR`. It evaluates only
 the deterministic initial Component state: Program starts, Component mounts, Capabilities, native
@@ -243,11 +248,10 @@ nodes and attaches reactivity and listeners; a shape mismatch is diagnosed once 
 one clean client render. This is deliberately **initial-state SSR**. Request-derived authenticated
 SSR requires a future typed render-input Capability and is not implied by this mode.
 
-Stable native host code is ordinary Rust in `src/adapters/server/native`, checked by rustfmt,
-Clippy, and Rust tests. TypeScript assembles the generated workspace and semantic Feature crates;
-it does not store Rust in source strings or call JavaScript from the production executable.
-Development and native implementations are compared at observable boundaries, including the same
-black-box authentication, authorization, event persistence, restart, and CRUD scenarios.
+Stable native source is ordinary checked-in Rust and does not invoke JavaScript. The runtime owns
+only values, calls, streams, failures, and lifecycle. HTTP, authentication, clock, identifiers,
+SQLite events, and JetStream events are separate checked-in Capability adapters. Product routes,
+authorization, entity commands, and Feature composition exist only in translated Program code.
 
 Running one artifact once creates one Process. Running the same artifact more
 than once creates independent replicas with fresh host-capability scopes.
@@ -264,8 +268,9 @@ continuations; they are not shared work queues. The replica suite starts two sep
 Programs on different ports and with independent capability scopes, then proves cross-replica
 reads, principal isolation, compare-and-append contention, live continuation, and restart catch-up.
 Rendezvous placement is a deployment helper with property-tested stability and bounded remapping;
-it does not add topology syntax to Features. A real multi-node JetStream failure-domain test and a
-native Rust JetStream host remain deployment-adapter work, not claims of this single-machine suite.
+it does not add topology syntax to Features. The native adapter has an independently selectable
+JetStream implementation and a multi-process acceptance test for contention, catch-up, and live
+delivery. These are single-machine broker tests; they do not claim multi-node broker failover.
 
 The shipped web adapter owns browser Environments, DOM JSX, direct fine-grained
 updates, Vite development and production, and the web Presentation language.
@@ -427,19 +432,26 @@ src/
     compiler/
     jsx/
   contracts/
-    platform.ts
+    platform.ts       # Platform realization contract
+    native.ts         # native Capability adapter contract
   adapters/
     registry.ts
     server/
       adapter.ts
       host.ts
-      native.ts       # whole-Program generation, caching, and build
+      native.ts       # whole-Program workspace generation, caching, and build
       placement.ts    # deployment-only deterministic shard placement
       native/
-        Cargo.toml
-        domain.ts     # portable Feature callbacks to Rust
-        src/
-          lib.rs      # stable native host and document runtime
+        program.ts    # canonical Program IR to direct Rust control flow
+        capabilities.ts # shipped adapter descriptors
+        runtime/      # generic Value, Capability, stream, and lifecycle ABI
+        capabilities/
+          authentication/
+          clock/
+          events/     # SQLite single-node authority
+          events-jetstream/
+          http/
+          identifiers/
       platform.ts
       runtime.ts
     web/

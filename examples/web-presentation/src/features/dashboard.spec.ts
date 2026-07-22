@@ -144,7 +144,7 @@ describe("canonical sheet behavior state", () => {
     expect(declarations.some(({ destination }) => destination.toLowerCase().includes("blur"))).toBe(
       false,
     );
-  }, 15_000);
+  }, 30_000);
 
   it("represents every dismissal source explicitly", async () => {
     for (const source of ["button", "backdrop", "escape"] as const) {

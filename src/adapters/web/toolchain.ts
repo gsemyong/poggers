@@ -1,4 +1,4 @@
-import { accessSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, resolve } from "node:path";
@@ -380,7 +380,6 @@ function kitAliases() {
   const web = resolve(kit, "adapters/web");
   const extension = moduleExtension();
   return [
-    { find: /^@\/(.*)$/, replacement: `${kit}/$1` },
     {
       find: /^@poggers\/kit\/jsx-dev-runtime$/,
       replacement: resolve(core, `jsx/development${extension}`),
@@ -400,7 +399,7 @@ function moduleExtension(): ".ts" | ".js" {
 
 function vitePlugins(paths: ApplicationPaths): Plugin[] {
   return [
-    sourceAliasPlugin(paths.source),
+    applicationAliasPlugin(paths.source),
     presentationTransformPlugin(paths.source),
     componentTransformPlugin(paths.source),
   ];
@@ -437,23 +436,16 @@ function componentTransformPlugin(source: string): Plugin {
   };
 }
 
-function sourceAliasPlugin(source: string): Plugin {
+function applicationAliasPlugin(source: string): Plugin {
+  const kit = resolve(import.meta.dirname, "../..");
   return {
-    name: "poggers-source-alias",
+    name: "poggers-application-alias",
     enforce: "pre",
-    resolveId(id) {
-      if (!id.startsWith("src/")) return;
-      const base = resolve(source, id.slice("src/".length));
-      for (const extension of ["", ".tsx", ".ts", ".jsx", ".js"]) {
-        const candidate = `${base}${extension}`;
-        try {
-          accessSync(candidate);
-          return candidate;
-        } catch {
-          continue;
-        }
-      }
-      return base;
+    resolveId(id, importer) {
+      if (!id.startsWith("@/")) return;
+      const owner = importer ? cleanId(importer) : "";
+      const root = owner.startsWith(`${kit}/`) && !owner.startsWith(`${source}/`) ? kit : source;
+      return this.resolve(resolve(root, id.slice(2)), importer, { skipSelf: true });
     },
   };
 }
@@ -560,7 +552,7 @@ async function loadApplication(
       alias: kitAliases(),
       conditions: ["poggers-source", ...defaultServerConditions],
     },
-    plugins: [sourceAliasPlugin(paths.source)],
+    plugins: [applicationAliasPlugin(paths.source)],
     build: {
       emptyOutDir: true,
       minify: false,

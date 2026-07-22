@@ -31,7 +31,7 @@ describe("semantic identity Feature", () => {
     const authentication: AuthenticationBackend = {
       authenticate: async ({ cookie }) =>
         cookie ? { id: cookie, name: "Alice", email: "alice@example.com" } : undefined,
-      handle: async () => new Response(),
+      handle: async () => ({ status: 204, headers: [], body: undefined, stream: undefined }),
     };
     const process = await startProcess(
       application,
@@ -44,14 +44,11 @@ describe("semantic identity Feature", () => {
     );
     const service = process.capabilities.identity as IdentityService<Users>;
 
-    await expect(
-      service.authenticate({
-        request: new Request("http://test.local", { headers: { cookie: "alice" } }),
-      }),
-    ).resolves.toEqual({ id: "alice", role: "member" });
-    await expect(
-      service.authenticate({ request: new Request("http://test.local") }),
-    ).resolves.toBeUndefined();
+    await expect(service.authenticate({ cookie: "alice" })).resolves.toEqual({
+      id: "alice",
+      role: "member",
+    });
+    await expect(service.authenticate({ cookie: undefined })).resolves.toBeUndefined();
     await process.dispose();
   });
 

@@ -26,8 +26,8 @@ describe("server Platform host", () => {
       directory,
     });
     expect(Object.keys(utilities).sort()).toEqual(["clock", "identifiers"]);
-    expect(typeof utilities.clock.now()).toBe("number");
-    expect(utilities.identifiers.create()).toMatch(/^[0-9a-f-]{36}$/);
+    expect(typeof utilities.clock.now({})).toBe("number");
+    expect(utilities.identifiers.create({})).toMatch(/^[0-9a-f-]{36}$/);
     await expect(access(resolve(directory, ".data"))).rejects.toHaveProperty("code", "ENOENT");
   });
 

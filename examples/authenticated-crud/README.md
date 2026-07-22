@@ -25,8 +25,8 @@ POGGERS_WEB_ROOT="$PWD/dist/web" \
 ./dist/server/api
 ```
 
-Open `http://localhost:3000`. `dist/server/api` is a standalone native executable; it serves the
-built browser assets and renders its deterministic initial-state document in Rust when
+Open `http://localhost:3000`. `dist/server/api` is the standalone optimized server artifact; it
+serves the built browser assets and renders its deterministic initial-state document when
 `POGGERS_WEB_ROOT` is set; otherwise it exposes only the API. The browser reactivates the server
 nodes in place. Authenticated request-data SSR is intentionally not claimed yet. A CDN or reverse
 proxy may serve `dist/web` instead, provided same-origin `/api` requests reach the native Program.
@@ -115,14 +115,14 @@ shell only mounts `<Tasks.Admin />`.
 
 - factory tests use the semantic entity fixture without HTTP or credential setup;
 - type tests prove exact API inference and reject invalid models and calls;
-- the application test runs Better Auth, HTTP, SQLite persistence, live updates, authorization
-  isolation, malformed credentials, restart recovery, and sign-out against both JavaScript
-  development and native production;
+- one application test runs Better Auth, HTTP, SQLite persistence, live updates, authorization
+  isolation, malformed credentials, restart recovery, and sign-out unchanged through development
+  and optimized production;
 - the factory test loses a response after a successful commit, restores the pending command from
   local storage, retries it, and proves the server appends exactly one event;
 - adapter tests prove one host scope per Process instance and exact cleanup.
 
-Better Auth is the private development implementation of the identity contract. Native production
+Better Auth is the private development implementation of the identity contract. Production
 implements the same product-facing HTTP and session semantics without embedding JavaScript. Their
 private authentication tables and password formats are intentionally not a migration contract;
 moving existing production identity data between implementations requires an explicit identity

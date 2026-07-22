@@ -26,7 +26,8 @@ const entrypoints = [
       .filter(isBuildTarget)
       .map((target) => resolve(packageDir, target.slice("./dist/".length).replace(/\.js$/, ".ts"))),
   ),
-  // Generated applications import the private browser realization directly.
+  // Generated artifacts import these internal realization boundaries directly.
+  resolve(packageDir, "src/adapters/web/document.ts"),
   resolve(packageDir, "src/adapters/web/ui/adapter.ts"),
 ];
 for (const entrypoint of entrypoints) {
@@ -66,6 +67,7 @@ for (const pattern of ["**/*.spec.d.ts", "**/*.typecheck.d.ts"]) {
 await rm(resolve(distDir, "scripts"), { force: true, recursive: true });
 await rm(resolve(distDir, "examples"), { force: true, recursive: true });
 await rewriteDeclarationAliases();
+await copySemanticSources();
 
 await build({
   configFile: false,
@@ -100,11 +102,37 @@ await build({
 });
 const nativeSource = resolve(sourceDir, "adapters/server/native");
 const nativeOutput = resolve(distDir, "src/adapters/server/native");
-await mkdir(resolve(nativeOutput, "src"), { recursive: true });
-await copyFile(resolve(nativeSource, "Cargo.toml"), resolve(nativeOutput, "Cargo.toml"));
-await copyFile(resolve(nativeSource, "src/lib.rs"), resolve(nativeOutput, "src/lib.rs"));
+for (const pattern of [
+  "runtime/Cargo.toml",
+  "runtime/src/**/*.rs",
+  "capabilities/*/Cargo.toml",
+  "capabilities/*/src/**/*.rs",
+]) {
+  for await (const file of glob(pattern, { cwd: nativeSource })) {
+    const output = resolve(nativeOutput, file);
+    await mkdir(dirname(output), { recursive: true });
+    await copyFile(resolve(nativeSource, file), output);
+  }
+}
+await assertDistribution();
 await assertNoPrivateAliases();
 await assertServerEnvironment();
+
+async function assertDistribution(): Promise<void> {
+  const forbidden: string[] = [];
+  for await (const file of glob("**/*", { cwd: distDir })) {
+    if (
+      file.split("/").includes("target") ||
+      file.endsWith("Cargo.lock") ||
+      /(?:^|\/)[^/]+\.(?:spec|typecheck)\./.test(file)
+    ) {
+      forbidden.push(file);
+    }
+  }
+  if (forbidden.length) {
+    throw new Error(`Build output contains private files:\n${forbidden.sort().join("\n")}`);
+  }
+}
 
 async function rewriteDeclarationAliases(): Promise<void> {
   for await (const file of glob("src/**/*.d.ts", { cwd: distDir })) {
@@ -125,8 +153,29 @@ async function rewriteDeclarationAliases(): Promise<void> {
   }
 }
 
+async function copySemanticSources(): Promise<void> {
+  for await (const file of glob("**/*.{ts,tsx}", { cwd: sourceDir })) {
+    if (/(?:^|\/)[^/]+\.(?:spec|typecheck)\./.test(file)) continue;
+    const output = resolve(distDir, "source", file);
+    const contents = await readFile(resolve(sourceDir, file), "utf8");
+    const rewritten = contents.replaceAll(
+      /(["'])@\/([^"']+)\1/g,
+      (_match, quote: string, target: string) => {
+        let specifier = relative(dirname(output), resolve(distDir, "source", target)).replaceAll(
+          "\\",
+          "/",
+        );
+        if (!specifier.startsWith(".")) specifier = `./${specifier}`;
+        return `${quote}${specifier}${quote}`;
+      },
+    );
+    await mkdir(dirname(output), { recursive: true });
+    await writeFile(output, rewritten);
+  }
+}
+
 async function assertNoPrivateAliases(): Promise<void> {
-  for await (const file of glob("**/*.{js,d.ts}", { cwd: distDir })) {
+  for await (const file of glob("**/*.{js,ts,tsx}", { cwd: distDir })) {
     const contents = await readFile(resolve(distDir, file), "utf8");
     if (/(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+|\bdeclare\s+module\s*)["']@\//.test(contents)) {
       throw new Error(`Private source alias leaked into ${file}.`);

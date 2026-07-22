@@ -5,12 +5,8 @@ import { basename, dirname, resolve } from "node:path";
 import process from "node:process";
 
 import { platformAdapters } from "@/adapters/registry";
-import {
-  selectPlatformAdapters,
-  type DevelopmentSession,
-  type PlatformAdapterImplementation,
-} from "@/contracts/platform";
-import { compileApplication, resolveApplication } from "@/core/compiler/source";
+import type { PlatformAdapterImplementation } from "@/contracts/platform";
+import { buildApplication, developApplication } from "@/core/realization";
 
 export async function runCli(
   arguments_ = process.argv.slice(2),
@@ -22,49 +18,23 @@ export async function runCli(
   if (command === "create") {
     await createProject(commandArguments);
   } else if (command === "dev") {
-    const realization = resolveRealization(directory, adapters);
-    const sessions: DevelopmentSession[] = [];
-    try {
-      for (const adapter of realization.adapters) {
-        sessions.push(
-          await adapter.develop({
-            ...realization.input,
-            platform: adapter.name,
-            programs: realization.ir.programs.filter(
-              ({ environment }) => environment.platform === adapter.name,
-            ),
-          }),
-        );
-      }
-    } catch (error) {
-      await disposeSessions(sessions);
-      throw error;
-    }
-    for (const location of sessions.flatMap((session) => session.locations)) {
+    const application = await developApplication(directory, adapters);
+    for (const location of Object.values(application.locations).flat()) {
       console.log(`poggers dev running on ${location}`);
     }
     const stop = async () => {
-      await disposeSessions(sessions);
+      await application[Symbol.asyncDispose]();
       process.exit();
     };
     process.on("SIGINT", () => void stop());
     process.on("SIGTERM", () => void stop());
   } else if (command === "build") {
-    const realization = resolveRealization(directory, adapters);
     const root = resolve(
       directory,
       readFlag(commandArguments, "outdir") ?? readFlag(commandArguments, "outfile") ?? "dist",
     );
-    for (const adapter of realization.adapters) {
-      const output = realization.adapters.length === 1 ? root : resolve(root, adapter.name);
-      const artifacts = await adapter.build({
-        ...realization.input,
-        platform: adapter.name,
-        programs: realization.ir.programs.filter(
-          ({ environment }) => environment.platform === adapter.name,
-        ),
-        output,
-      });
+    const application = await buildApplication(directory, root, adapters);
+    for (const artifacts of Object.values(application.artifacts)) {
       console.log(`built ${artifacts.directory}`);
     }
   } else if (command === "typecheck") {
@@ -181,32 +151,6 @@ function hasCode(error: unknown, code: string): error is { readonly code: string
 function readFlag(arguments_: readonly string[], name: string): string | undefined {
   const index = arguments_.indexOf(`--${name}`);
   return index < 0 ? undefined : arguments_[index + 1];
-}
-
-function resolveRealization(
-  directory: string,
-  adapters: Readonly<Record<string, PlatformAdapterImplementation>>,
-) {
-  const paths = resolveApplication(directory);
-  const ir = compileApplication(paths.application);
-  return {
-    ir,
-    adapters: selectPlatformAdapters(ir, adapters),
-    input: {
-      directory: paths.directory,
-      application: paths.application,
-      ir,
-    },
-  };
-}
-
-async function disposeSessions(sessions: readonly DevelopmentSession[]): Promise<void> {
-  const results = await Promise.allSettled(
-    [...sessions].reverse().map((session) => session[Symbol.asyncDispose]()),
-  );
-  const errors = results.flatMap((result) => (result.status === "rejected" ? [result.reason] : []));
-  if (errors.length === 1) throw errors[0];
-  if (errors.length > 1) throw new AggregateError(errors, "Platform disposal failed.");
 }
 
 async function run(command: readonly string[], cwd: string): Promise<number> {

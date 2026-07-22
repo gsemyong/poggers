@@ -2,7 +2,6 @@ import { spawn } from "node:child_process";
 import { chmod, copyFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
-import { createInterface } from "node:readline";
 
 import type {
   CapabilityIR,
@@ -37,28 +36,6 @@ export function generateRustProgram(program: ProgramContributionIR): RustProgram
   return {
     name,
     manifest: `[package]\nname = "${name}"\nversion = "0.0.0"\nedition = "2024"\n\n[dependencies]\nserde = { version = "1", features = ["derive"] }\nserde_json = "1"\n`,
-    source,
-  };
-}
-
-/** Generates the production executable form. Capability-bearing Programs need an adapter first. */
-export function generateRustProductionProgram(program: ProgramContributionIR): RustProgramSource {
-  if (program.implementation.kind !== "portable") {
-    throw new Error(`Program ${JSON.stringify(program.id)} has no portable implementation.`);
-  }
-  if (program.requires.length) {
-    throw new Error(
-      `Program ${JSON.stringify(program.id)} requires a native Capability adapter for ${program.requires
-        .map(({ name }) => name)
-        .join(", ")}.`,
-    );
-  }
-  const generator = new RustGenerator(program);
-  const source = generator.generateProduction();
-  const name = `poggers_${stableHash(source)}`;
-  return {
-    name,
-    manifest: `[package]\nname = "${name}"\nversion = "0.0.0"\nedition = "2024"\n`,
     source,
   };
 }
@@ -126,7 +103,7 @@ export async function runRustProgram(executable: string, scenario: unknown): Pro
     `${JSON.stringify(scenario)}\n`,
   );
   if (result.code !== 0) throw new Error(result.stderr || result.stdout);
-  return JSON.parse(result.stdout.trim());
+  return JSON.parse(singleFrame(result.stdout));
 }
 
 /** Keeps the native conformance host alive across a property suite. */
@@ -134,21 +111,26 @@ export async function createRustProgramSession(
   executable: string,
 ): Promise<AsyncDisposable & Readonly<{ run(scenario: unknown): Promise<unknown> }>> {
   const child = spawn(executable, [], { cwd: dirname(executable), stdio: "pipe" });
-  const lines = createInterface({ input: child.stdout });
   const pending: Array<{
     resolve(value: unknown): void;
     reject(error: unknown): void;
   }> = [];
+  let stdout = "";
   let stderr = "";
   let closed: unknown;
   child.stderr.setEncoding("utf8").on("data", (chunk: string) => (stderr += chunk));
-  lines.on("line", (line) => {
-    const request = pending.shift();
-    if (!request) return;
-    try {
-      request.resolve(JSON.parse(line));
-    } catch (error) {
-      request.reject(error);
+  child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
+    stdout += chunk;
+    for (let boundary = stdout.indexOf("\0"); boundary >= 0; boundary = stdout.indexOf("\0")) {
+      const frame = stdout.slice(0, boundary);
+      stdout = stdout.slice(boundary + 1);
+      const request = pending.shift();
+      if (!request) continue;
+      try {
+        request.resolve(JSON.parse(frame));
+      } catch (error) {
+        request.reject(error);
+      }
     }
   });
   child.once("error", (error) => {
@@ -156,7 +138,7 @@ export async function createRustProgramSession(
     for (const request of pending.splice(0)) request.reject(error);
   });
   child.once("exit", (code) => {
-    if (code === 0) return;
+    if (code === 0 && !pending.length) return;
     closed = new Error(stderr || `Native conformance host exited with ${code}.`);
     for (const request of pending.splice(0)) request.reject(closed);
   });
@@ -173,9 +155,16 @@ export async function createRustProgramSession(
       if (child.exitCode === null) {
         await new Promise<void>((resolvePromise) => child.once("exit", () => resolvePromise()));
       }
-      lines.close();
     },
   };
+}
+
+function singleFrame(output: string): string {
+  const boundary = output.indexOf("\0");
+  if (boundary < 0 || output.slice(boundary + 1).trim()) {
+    throw new Error("Native conformance host returned an invalid response frame.");
+  }
+  return output.slice(0, boundary);
 }
 
 class RustGenerator {
@@ -290,48 +279,8 @@ fn main() {
                 json!({ "error": failure })
             },
         };
-        writeln!(stdout, "{}", json!({ "calls": capabilities.calls, "result": result })).expect("write result");
+        write!(stdout, "{}\\0", json!({ "calls": capabilities.calls, "result": result })).expect("write result");
         stdout.flush().expect("flush result");
-    }
-}
-`;
-  }
-
-  generateProduction(): string {
-    if (this.#program.implementation.kind !== "portable")
-      throw new Error("Expected portable Program.");
-    const helpers = this.#program.implementation.functions.map((function_) =>
-      this.#function(function_, false),
-    );
-    const start = this.#function(this.#program.implementation.start, true);
-    const operations = this.#capabilityOperations();
-    if (operations.length) {
-      throw new Error("Production Capability implementations belong to a Platform Adapter.");
-    }
-    return `// Generated by Poggers IR v10. Do not edit.
-${this.#types.declarations(false)}
-
-${numericRuntime(this.#program)}
-
-#[derive(Debug, Clone)]
-struct CapabilityError { message: String }
-
-trait Capabilities {
-${operations.map((operation) => this.#capabilityMethod(operation)).join("\n")}
-}
-
-${helpers.join("\n\n")}
-
-${start}
-
-struct ProductionCapabilities;
-impl Capabilities for ProductionCapabilities {}
-
-fn main() {
-    let mut capabilities = ProductionCapabilities;
-    if let Err(error) = start(&mut capabilities) {
-        eprintln!("{}", error.message);
-        std::process::exit(1);
     }
 }
 `;
@@ -349,6 +298,7 @@ fn main() {
   }
 
   #registerFunctionTypes(function_: FunctionIR): void {
+    for (const capture of function_.captures) this.#types.register(capture.type);
     for (const parameter of function_.parameters) this.#types.register(parameter.type);
     this.#types.register(function_.result);
     const visitExpression = (expression: ExpressionIR): void => {
@@ -359,6 +309,9 @@ fn main() {
         case "record":
           expression.fields.forEach(({ value }) => visitExpression(value));
           break;
+        case "record-merge":
+          expression.entries.forEach(({ value }) => visitExpression(value));
+          break;
         case "property":
         case "unary":
           visitExpression(expression.value);
@@ -367,11 +320,42 @@ fn main() {
           visitExpression(expression.left);
           visitExpression(expression.right);
           break;
+        case "conditional":
+          visitExpression(expression.condition);
+          visitExpression(expression.consequent);
+          visitExpression(expression.alternate);
+          break;
         case "call":
         case "capability-call":
           expression.arguments.forEach(visitExpression);
           break;
+        case "invoke":
+          visitExpression(expression.callee);
+          expression.arguments.forEach(visitExpression);
+          break;
+        case "method-call":
+          visitExpression(expression.receiver);
+          expression.arguments.forEach(visitExpression);
+          break;
+        case "json-parse":
+        case "json-stringify":
+          visitExpression(expression.value);
+          break;
+        case "stream-map":
+          visitExpression(expression.source);
+          visitExpression(expression.transform);
+          break;
+        case "error":
+          expression.arguments.forEach(visitExpression);
+          break;
+        case "error-match":
+          visitExpression(expression.value);
+          break;
+        case "closure":
+          expression.captures.forEach(visitExpression);
+          break;
         case "literal":
+        case "none":
         case "local":
           break;
       }
@@ -381,7 +365,9 @@ fn main() {
         if (statement.kind === "let") {
           this.#types.register(statement.value.type);
           visitExpression(statement.value);
-        } else if (statement.kind === "assign") visitExpression(statement.value);
+        } else if (statement.kind === "assign" || statement.kind === "array-push") {
+          visitExpression(statement.value);
+        } else if (statement.kind === "throw") visitExpression(statement.value);
         else if (statement.kind === "expression") visitExpression(statement.expression);
         else if (statement.kind === "if") {
           visitExpression(statement.condition);
@@ -390,6 +376,14 @@ fn main() {
         } else if (statement.kind === "for-of") {
           visitExpression(statement.values);
           visitStatements(statement.body);
+        } else if (statement.kind === "for-range") {
+          visitExpression(statement.from);
+          visitExpression(statement.to);
+          visitStatements(statement.body);
+        } else if (statement.kind === "try") {
+          visitStatements(statement.body);
+          visitStatements(statement.catch);
+          visitStatements(statement.finally);
         } else if (statement.value) visitExpression(statement.value);
       }
     };
@@ -427,7 +421,7 @@ fn main() {
 
   #function(function_: FunctionIR, start: boolean): string {
     const name = start ? "start" : rustName(function_.id);
-    const parameters = function_.parameters
+    const parameters = [...function_.captures, ...function_.parameters]
       .map((parameter) => `${rustName(parameter.name)}: ${this.#types.type(parameter.type)}`)
       .join(", ");
     const prefix = start
@@ -457,13 +451,28 @@ fn main() {
           case "let":
             return `${indent}let ${statement.mutable ? "mut " : ""}${rustName(statement.name)} = ${withoutOuterParentheses(this.#expression(statement.value))};\n`;
           case "assign":
-            return `${indent}${rustName(statement.name)} ${statement.operator} ${this.#expression(statement.value)};\n`;
+            return statement.operator === "??="
+              ? `${indent}if ${rustName(statement.name)}.is_none() { ${rustName(statement.name)} = Some(${this.#expression(statement.value)}); }\n`
+              : `${indent}${rustName(statement.name)} ${statement.operator} ${this.#expression(statement.value)};\n`;
           case "expression":
             return `${indent}${this.#expression(statement.expression)};\n`;
+          case "array-push":
+            return `${indent}${rustName(statement.array)}.push(${this.#expression(statement.value)});\n`;
+          case "throw":
+            return `${indent}return Err(${this.#expression(statement.value)});\n`;
           case "if":
             return `${indent}if ${withoutOuterParentheses(this.#expression(statement.condition))} {\n${this.#statements(statement.consequent, start, depth + 1)}${indent}}${statement.alternate.length ? ` else {\n${this.#statements(statement.alternate, start, depth + 1)}${indent}}` : ""}\n`;
           case "for-of":
+            if (statement.asynchronous) {
+              throw new Error(
+                "The static conformance backend does not lower asynchronous streams.",
+              );
+            }
             return `${indent}for ${rustName(statement.item)} in ${this.#expression(statement.values)}.iter().cloned() {\n${this.#statements(statement.body, start, depth + 1)}${indent}}\n`;
+          case "for-range":
+            return `${indent}for ${rustName(statement.item)} in (${this.#expression(statement.from)} as i64)..(${this.#expression(statement.to)} as i64) {\n${this.#statements(statement.body, start, depth + 1)}${indent}}\n`;
+          case "try":
+            throw new Error("Native try/catch lowering is not implemented yet.");
           case "return": {
             const value = statement.value ? this.#expression(statement.value) : "()";
             if (!start && functionBody && index === statements.length - 1) {
@@ -480,6 +489,12 @@ fn main() {
     switch (expression.kind) {
       case "literal":
         return this.#literal(expression.value, expected ?? expression.type);
+      case "none":
+        return "None";
+      case "error":
+        return `CapabilityError { message: ${this.#expression(expression.arguments[expression.name === "Error" ? 0 : 1] ?? expression.arguments[0]!)} }`;
+      case "error-match":
+        return `${this.#expression(expression.value)}.kind == ${rustString(expression.name)}`;
       case "local":
         return rustName(expression.name);
       case "array": {
@@ -505,13 +520,17 @@ fn main() {
           })
           .join(", ")} }`;
       }
+      case "record-merge":
+        throw new Error("Native record-spread lowering is not implemented yet.");
       case "property":
         if (expression.name === "length" && expression.value.type.kind === "array") {
           return `(${this.#expression(expression.value)}.len() as f64)`;
         }
         return `${this.#expression(expression.value)}.${rustName(expression.name)}`;
       case "unary":
-        return `${expression.operator}${this.#expression(expression.value)}`;
+        return expression.operator === "present"
+          ? `${this.#expression(expression.value)}.is_some()`
+          : `${expression.operator}${this.#expression(expression.value)}`;
       case "binary":
         if (expression.operator === "??") {
           return `${this.#expression(expression.left)}.unwrap_or(${this.#expression(expression.right, expression.type)})`;
@@ -538,12 +557,25 @@ fn main() {
           return `number_divide(${this.#expression(expression.left)}, ${this.#expression(expression.right)})`;
         }
         return `(${this.#expression(expression.left)} ${rustOperator(expression.operator)} ${this.#expression(expression.right)})`;
+      case "conditional":
+        return `(if ${this.#expression(expression.condition)} { ${this.#expression(expression.consequent)} } else { ${this.#expression(expression.alternate)} })`;
       case "call": {
         const function_ = this.#functions.get(expression.function);
         return `${rustName(expression.function)}(${expression.arguments
           .map((argument, index) => this.#expression(argument, function_?.parameters[index]?.type))
           .join(", ")})`;
       }
+      case "closure":
+      case "invoke":
+      case "method-call":
+        throw new Error("Native closure lowering is not implemented yet.");
+      case "json-parse":
+      case "json-stringify":
+        throw new Error("Native JSON lowering is not implemented yet.");
+      case "to-string":
+        return `format!("{}", ${this.#expression(expression.value)})`;
+      case "stream-map":
+        throw new Error("Native stream transformation lowering is not implemented yet.");
       case "capability-call": {
         const operation = this.#operation(expression.capability, expression.operation);
         return `_capabilities.${rustName(`${expression.capability}_${expression.operation}`)}(${expression.arguments
@@ -598,13 +630,35 @@ function numericRuntime(program: ProgramContributionIR): string {
       }
       visitExpression(expression.left);
       visitExpression(expression.right);
+    } else if (expression.kind === "conditional") {
+      visitExpression(expression.condition);
+      visitExpression(expression.consequent);
+      visitExpression(expression.alternate);
     } else if (expression.kind === "call" || expression.kind === "capability-call") {
       expression.arguments.forEach(visitExpression);
+    } else if (expression.kind === "invoke") {
+      visitExpression(expression.callee);
+      expression.arguments.forEach(visitExpression);
+    } else if (expression.kind === "method-call") {
+      visitExpression(expression.receiver);
+      expression.arguments.forEach(visitExpression);
+    } else if (expression.kind === "error") {
+      expression.arguments.forEach(visitExpression);
+    } else if (expression.kind === "error-match") {
+      visitExpression(expression.value);
+    } else if (expression.kind === "closure") {
+      expression.captures.forEach(visitExpression);
     }
   };
   const visitStatements = (statements: readonly StatementIR[]): void => {
     for (const statement of statements) {
-      if (statement.kind === "let" || statement.kind === "assign") {
+      if (
+        statement.kind === "let" ||
+        statement.kind === "assign" ||
+        statement.kind === "array-push"
+      ) {
+        visitExpression(statement.value);
+      } else if (statement.kind === "throw") {
         visitExpression(statement.value);
       } else if (statement.kind === "expression") {
         visitExpression(statement.expression);
@@ -615,6 +669,14 @@ function numericRuntime(program: ProgramContributionIR): string {
       } else if (statement.kind === "for-of") {
         visitExpression(statement.values);
         visitStatements(statement.body);
+      } else if (statement.kind === "for-range") {
+        visitExpression(statement.from);
+        visitExpression(statement.to);
+        visitStatements(statement.body);
+      } else if (statement.kind === "try") {
+        visitStatements(statement.body);
+        visitStatements(statement.catch);
+        visitStatements(statement.finally);
       } else if (statement.value) {
         visitExpression(statement.value);
       }
@@ -707,33 +769,25 @@ class RustTypes {
     }
   }
 
-  declarations(serializable = true): string {
+  declarations(): string {
     return [...this.#types.entries()]
       .map(([key, type]) => {
         const name = this.#names.get(key)!;
         if (type.kind === "record") {
-          const derive = serializable
-            ? "#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]"
-            : "#[derive(Debug, Clone, PartialEq)]";
-          return `${derive}\nstruct ${name} {\n${type.fields
+          return `#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]\nstruct ${name} {\n${type.fields
             .map((field) => {
               const name = rustName(field.name);
               const rename =
-                serializable && name !== field.name
-                  ? `    #[serde(rename = ${rustString(field.name)})]\n`
-                  : "";
+                name !== field.name ? `    #[serde(rename = ${rustString(field.name)})]\n` : "";
               return `${rename}    ${name}: ${field.optional ? `Option<${this.type(field.type)}>` : this.type(field.type)},`;
             })
             .join("\n")}\n}`;
         }
         if (type.kind === "union" && type.variants.every(isStringLiteral)) {
-          const derive = serializable
-            ? '#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]\n#[serde(rename_all = "camelCase")]'
-            : "#[derive(Debug, Clone, PartialEq)]";
-          return `${derive}\nenum ${name} {\n${type.variants
+          return `#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]\n#[serde(rename_all = "camelCase")]\nenum ${name} {\n${type.variants
             .map(
               (variant) =>
-                `${serializable ? `    #[serde(rename = ${rustString(variant.value)})]\n` : ""}    ${rustVariant(variant.value)},`,
+                `    #[serde(rename = ${rustString(variant.value)})]\n    ${rustVariant(variant.value)},`,
             )
             .join("\n")}\n}`;
         }

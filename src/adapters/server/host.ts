@@ -21,7 +21,7 @@ import { connect } from "@nats-io/transport-node";
 import { betterAuth } from "better-auth";
 import { getMigrations } from "better-auth/db/migration";
 
-import type { HttpServer } from "@/adapters/server/platform";
+import type { HttpField, HttpRequest, HttpResponse, HttpServer } from "@/adapters/server/platform";
 import type { Clock, EventStore, Identifiers, StoredEvent } from "@/features/entity";
 import type { AuthenticationBackend } from "@/features/identity";
 
@@ -132,10 +132,22 @@ export async function createNodeHost<Event = unknown>(
             ? { id: session.user.id, name: session.user.name, email: session.user.email }
             : undefined;
         },
-        handle: ({ request, path: mountedPath }) => {
-          const url = new URL(request.url);
-          url.pathname = `/api/auth${url.pathname.slice(mountedPath.length)}`;
-          return auth.handler(new Request(url, request));
+        async handle({ request, path: mountedPath }) {
+          const url = new URL(origin);
+          url.pathname = `/api/auth${request.path.slice(mountedPath.length)}`;
+          for (const { name, value } of request.query) url.searchParams.append(name, value);
+          const headers = new Headers();
+          for (const { name, value } of request.headers) headers.append(name, value);
+          const response = await auth.handler(
+            new Request(url, {
+              method: request.method,
+              headers,
+              ...(!["GET", "HEAD"].includes(request.method) && request.body
+                ? { body: request.body }
+                : {}),
+            }),
+          );
+          return semanticResponse(response);
         },
         [Symbol.dispose]: closeDatabase,
       });
@@ -146,8 +158,8 @@ export async function createNodeHost<Event = unknown>(
           ? await createJetStreamEventStore<Event>(eventStore)
           : createSqliteEventStore<Event>(database!, closeDatabase);
     }
-    if (requested.has("identifiers")) result.identifiers = { create: randomUUID };
-    if (requested.has("clock")) result.clock = { now: Date.now };
+    if (requested.has("identifiers")) result.identifiers = { create: () => randomUUID() };
+    if (requested.has("clock")) result.clock = { now: () => Date.now() };
     if (requested.has("http")) {
       result.http = await createNodeHttpServer({
         host,
@@ -535,7 +547,7 @@ async function createNodeHttpServer(input: {
   origin: string;
   webOrigin: string;
 }): Promise<HttpServer & AsyncDisposable & Readonly<{ locations: readonly string[] }>> {
-  const routes = new Map<string, (request: Request) => Promise<Response>>();
+  const routes = new Map<string, (request: HttpRequest) => Promise<HttpResponse>>();
   const server = createServer(async (incoming, outgoing) => {
     try {
       if (incoming.method === "OPTIONS") {
@@ -543,23 +555,24 @@ async function createNodeHttpServer(input: {
         outgoing.writeHead(204).end();
         return;
       }
-      const request = await webRequest(incoming, input.origin);
-      const pathname = new URL(request.url).pathname;
+      const request = await semanticRequest(incoming, input.origin);
+      const pathname = request.path;
       const route = [...routes]
         .filter(([path]) => pathname === path || pathname.startsWith(`${path}/`))
         .sort(([left], [right]) => right.length - left.length)[0];
       const response = route
         ? await route[1](request)
-        : Response.json({ message: "Not found." }, { status: 404 });
+        : jsonHttpResponse({ message: "Not found." }, 404);
       await writeResponse(incoming, outgoing, response, input.webOrigin);
     } catch (error) {
+      if (outgoing.headersSent) {
+        outgoing.destroy(error instanceof Error ? error : new Error(String(error)));
+        return;
+      }
       await writeResponse(
         incoming,
         outgoing,
-        Response.json(
-          { message: error instanceof Error ? error.message : String(error) },
-          { status: 500 },
-        ),
+        jsonHttpResponse({ message: error instanceof Error ? error.message : String(error) }, 500),
         input.webOrigin,
       );
     }
@@ -572,6 +585,9 @@ async function createNodeHttpServer(input: {
   return {
     locations: [input.origin],
     route({ path, handle }) {
+      if (typeof handle !== "function") {
+        throw new TypeError(`HTTP route ${JSON.stringify(path)} requires a handler function.`);
+      }
       if (routes.has(path)) {
         throw new Error(`HTTP route ${JSON.stringify(path)} is already mounted.`);
       }
@@ -582,9 +598,11 @@ async function createNodeHttpServer(input: {
       if (disposed) return;
       disposed = true;
       routes.clear();
-      await new Promise<void>((resolve, reject) =>
+      const closing = new Promise<void>((resolve, reject) =>
         server.close((error) => (error ? reject(error) : resolve())),
       );
+      server.closeIdleConnections();
+      await closing;
     },
   };
 }
@@ -629,38 +647,55 @@ function eventStream<Event>(
   };
 }
 
-async function webRequest(request: IncomingMessage, origin: string): Promise<Request> {
+async function semanticRequest(request: IncomingMessage, origin: string): Promise<HttpRequest> {
   const chunks: Uint8Array[] = [];
   for await (const chunk of request) {
     chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
   }
-  const body = chunks.length ? Buffer.concat(chunks) : undefined;
-  return new Request(new URL(request.url ?? "/", origin), {
-    method: request.method,
-    headers: request.headers as HeadersInit,
-    ...(body ? { body } : {}),
-  });
+  const url = new URL(request.url ?? "/", origin);
+  const headers: HttpField[] = [];
+  for (const [name, value] of Object.entries(request.headers)) {
+    if (Array.isArray(value)) {
+      for (const item of value) headers.push({ name, value: item });
+    } else if (value !== undefined) {
+      headers.push({ name, value });
+    }
+  }
+  return {
+    method: request.method ?? "GET",
+    path: url.pathname,
+    query: [...url.searchParams].map(([name, value]) => ({ name, value })),
+    headers,
+    body: chunks.length ? Buffer.concat(chunks).toString("utf8") : "",
+  };
 }
 
 async function writeResponse(
   request: IncomingMessage,
   response: ServerResponse,
-  value: Response,
+  value: HttpResponse,
   webOrigin: string,
 ): Promise<void> {
+  if (!Number.isInteger(value.status) || !Array.isArray(value.headers)) {
+    throw new TypeError(`HTTP handler returned an invalid response: ${JSON.stringify(value)}.`);
+  }
   writeCors(request, response, webOrigin);
-  for (const [name, header] of value.headers) response.setHeader(name, header);
+  for (const { name, value: header } of value.headers) response.appendHeader(name, header);
   response.writeHead(value.status);
-  if (!value.body) {
+  if (value.body !== undefined) {
+    response.end(value.body);
+    return;
+  }
+  if (!value.stream) {
     response.end();
     return;
   }
-  const reader = value.body.getReader();
-  const cancel = () => void reader.cancel().catch(() => undefined);
+  const reader = value.stream[Symbol.asyncIterator]();
+  const cancel = () => void reader.return?.().catch(() => undefined);
   response.once("close", cancel);
   try {
     while (!response.closed && !response.destroyed) {
-      const next = await reader.read();
+      const next = await reader.next();
       if (next.done) break;
       if (!response.write(next.value)) {
         await new Promise((resolve) => response.once("drain", resolve));
@@ -669,8 +704,33 @@ async function writeResponse(
     if (!response.closed && !response.destroyed) response.end();
   } finally {
     response.off("close", cancel);
-    await reader.cancel().catch(() => undefined);
+    await reader.return?.().catch(() => undefined);
   }
+}
+
+async function semanticResponse(response: Response): Promise<HttpResponse> {
+  const headers: HttpField[] = [];
+  for (const [name, value] of response.headers) headers.push({ name, value });
+  for (const value of response.headers.getSetCookie()) {
+    if (!headers.some((field) => field.name === "set-cookie" && field.value === value)) {
+      headers.push({ name: "set-cookie", value });
+    }
+  }
+  return {
+    status: response.status,
+    headers,
+    body: response.body ? await response.text() : undefined,
+    stream: undefined,
+  };
+}
+
+function jsonHttpResponse(value: object, status: number): HttpResponse {
+  return {
+    status,
+    headers: [{ name: "content-type", value: "application/json" }],
+    body: JSON.stringify(value),
+    stream: undefined,
+  };
 }
 
 function writeCors(request: IncomingMessage, response: ServerResponse, webOrigin: string): void {

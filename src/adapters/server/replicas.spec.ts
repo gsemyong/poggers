@@ -192,10 +192,8 @@ async function startReplica(
       identifiers: { create: randomUUID },
       clock: { now: Date.now },
       identity: {
-        authenticate: async ({ request }: { request: Request }) => {
-          const id = request.headers.get("x-user");
-          return id ? { id } : undefined;
-        },
+        authenticate: async ({ cookie }: { cookie: string | undefined }) =>
+          cookie ? { id: cookie } : undefined,
       },
     },
   });
@@ -224,7 +222,7 @@ async function request<Value>(
 ): Promise<Value> {
   const response = await fetch(`http://127.0.0.1:${port}${path}`, {
     ...init,
-    headers: { "x-user": principal, ...Object.fromEntries(new Headers(init.headers)) },
+    headers: { cookie: principal, ...Object.fromEntries(new Headers(init.headers)) },
   });
   if (!response.ok) throw new Error(`Replica request failed with ${response.status}.`);
   return (await response.json()) as Value;

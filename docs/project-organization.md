@@ -61,7 +61,8 @@ only when needed. Applications do not contain a `capabilities/` directory.
 - `features/<name>.spec.ts` tests that Feature through its semantic API or its factory-provided test
   fixture.
 - `presentations/<name>.ts` contains one complete platform-specific Presentation.
-- `app.spec.ts` verifies application composition and selected real adapters end to end.
+- `app.spec.ts` states observable product behavior once. The framework runs the same specification
+  through development and optimized production; the file does not select or start adapters.
 
 Files remain stem-based rather than moving into size-dependent subdirectories. Complexity should
 first be removed into a reusable semantic Feature factory.

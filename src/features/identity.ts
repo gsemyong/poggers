@@ -1,4 +1,9 @@
-import type { HttpServer, ServerProcess } from "@/adapters/server/platform";
+import type {
+  HttpRequest,
+  HttpResponse,
+  HttpServer,
+  ServerProcess,
+} from "@/adapters/server/platform";
 import type { BrowserMainThread, HttpClient } from "@/adapters/web/platform";
 import type { Feature, Program } from "@/core/application";
 
@@ -20,13 +25,13 @@ export type IdentitySession<Model extends IdentityModelDefinition> = Readonly<{
 
 /** Server-side identity authority exposed to other Features. */
 export type IdentityService<Model extends IdentityModelDefinition> = Readonly<{
-  authenticate(input: { request: Request }): Promise<PrincipalOf<Model> | undefined>;
+  authenticate(input: { cookie: string | undefined }): Promise<PrincipalOf<Model> | undefined>;
 }>;
 
 /** Host authentication implementation consumed only by the reusable identity Feature. */
 export type AuthenticationBackend = Readonly<{
   authenticate(input: { cookie?: string }): Promise<AuthenticatedUser | undefined>;
-  handle(input: { request: Request; path: string }): Promise<Response>;
+  handle(input: { request: HttpRequest; path: string }): Promise<HttpResponse>;
 }>;
 
 /** Browser-side semantic identity API. */
@@ -80,14 +85,16 @@ export function createIdentity<Model extends IdentityModelDefinition>(
         }: {
           capabilities: { authentication: AuthenticationBackend; http: HttpServer };
         }) {
+          const serverPath = `/api/${implementation.name}`;
           const route = capabilities.http.route({
-            path,
-            handle: (request) => capabilities.authentication.handle({ request, path }),
+            path: serverPath,
+            handle: async (request) =>
+              await capabilities.authentication.handle({ request, path: serverPath }),
           });
           const service: IdentityService<Model> & Disposable = Object.freeze({
-            async authenticate({ request }: { request: Request }) {
+            async authenticate({ cookie }: { cookie: string | undefined }) {
               const user = await capabilities.authentication.authenticate({
-                cookie: request.headers.get("cookie") ?? undefined,
+                cookie,
               });
               return user ? implementation.principal(user) : undefined;
             },

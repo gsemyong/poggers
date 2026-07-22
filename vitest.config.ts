@@ -32,6 +32,10 @@ export default defineConfig({
         replacement: resolve(import.meta.dirname, "src/adapters/server/platform.ts"),
       },
       {
+        find: /^@poggers\/kit\/testing$/,
+        replacement: resolve(import.meta.dirname, "src/testing.ts"),
+      },
+      {
         find: /^@poggers\/kit\/web$/,
         replacement: resolve(import.meta.dirname, "src/adapters/web/platform.ts"),
       },

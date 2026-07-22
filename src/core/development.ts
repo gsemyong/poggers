@@ -1,5 +1,6 @@
 import {
   assertApplicationIRVersion,
+  linkProgram,
   type ComponentIR,
   type ExpressionIR,
   type FunctionIR,
@@ -13,6 +14,11 @@ import {
 export type CapabilityImplementations = Readonly<
   Record<string, Readonly<Record<string, (...arguments_: readonly unknown[]) => unknown>>>
 >;
+
+export type LinkedProgramExecution = AsyncDisposable &
+  Readonly<{
+    capabilities: Readonly<Record<string, unknown>>;
+  }>;
 
 export type ExecutionTrace = Readonly<{
   calls: readonly CapabilityCallTrace[];
@@ -63,7 +69,7 @@ export async function executeProgramContributionIR(
   }
 
   const calls: CapabilityCallTrace[] = [];
-  const locals = new Map<string, unknown>();
+  const locals: PortableLocals = new Map([["capabilities", { value: capabilities }]]);
   const functions = new Map(
     program.implementation.functions.map((function_) => [function_.id, function_]),
   );
@@ -75,13 +81,91 @@ export async function executeProgramContributionIR(
       calls,
       functions,
     );
-    return { calls, result: completion.value };
+    return {
+      calls,
+      result: materializeCapabilityValue(completion.value, capabilities, calls, functions),
+    };
   } catch (error) {
     if (error && typeof error === "object") {
       Object.defineProperty(error, portableCalls, { value: [...calls] });
     }
     throw error;
   }
+}
+
+/** Executes every portable contribution through the canonical linked Capability graph. */
+export async function executeLinkedProgramIR(
+  program: ProgramIR,
+  external: CapabilityImplementations,
+): Promise<LinkedProgramExecution> {
+  const linked = linkProgram(program);
+  const expected = linked.external.map(({ name }) => name).sort();
+  const supplied = Object.keys(external).sort();
+  if (expected.join("\n") !== supplied.join("\n")) {
+    const missing = expected.filter((name) => !supplied.includes(name));
+    const excess = supplied.filter((name) => !expected.includes(name));
+    throw new Error(
+      `Program ${JSON.stringify(program.name)} external Capabilities are invalid` +
+        `${missing.length ? `; missing: ${missing.join(", ")}` : ""}` +
+        `${excess.length ? `; unexpected: ${excess.join(", ")}` : ""}.`,
+    );
+  }
+
+  const capabilities: Record<string, unknown> = Object.assign(Object.create(null), external);
+  const resources: unknown[] = [];
+  try {
+    for (const { contribution } of linked.contributions) {
+      if (contribution.implementation.kind === "none") continue;
+      if (contribution.implementation.kind !== "portable") {
+        throw new Error(
+          `${contribution.span.file}:${contribution.span.line}:${contribution.span.column}: ` +
+            `Program contribution ${JSON.stringify(contribution.id)} is source, not portable IR.`,
+        );
+      }
+      const required = Object.fromEntries(
+        contribution.requires.map(({ name }) => [name, capabilities[name]]),
+      ) as CapabilityImplementations;
+      const execution = await executeProgramContributionIR(contribution, required);
+      if (!contribution.provides.length) {
+        if (execution.result !== undefined) resources.push(execution.result);
+        continue;
+      }
+      if (!isRecord(execution.result)) {
+        throw new Error(
+          `Program contribution ${JSON.stringify(contribution.id)} must return its declared ` +
+            "Capability object.",
+        );
+      }
+      const declared = contribution.provides.map(({ name }) => name).sort();
+      const actual = Reflect.ownKeys(execution.result)
+        .filter((name): name is string => typeof name === "string")
+        .sort();
+      if (declared.join("\n") !== actual.join("\n")) {
+        throw new Error(
+          `Program contribution ${JSON.stringify(contribution.id)} provided ` +
+            `[${actual.join(", ")}] but its contract declares [${declared.join(", ")}].`,
+        );
+      }
+      for (const name of declared) {
+        const capability = execution.result[name];
+        capabilities[name] = capability;
+        resources.push(capability);
+      }
+    }
+  } catch (error) {
+    await disposePortableResources(resources).catch(() => undefined);
+    throw error;
+  }
+
+  let disposed = false;
+  return {
+    capabilities: Object.freeze({ ...capabilities }),
+    async [Symbol.asyncDispose]() {
+      if (disposed) return;
+      disposed = true;
+      await disposePortableResources(resources);
+    },
+  };
 }
 
 /** Runs one deterministic fixture through the reference backend using generated Capability doubles. */
@@ -204,10 +288,16 @@ function validateCapabilities(
 }
 
 type Completion = Readonly<{ returned: boolean; value?: unknown }>;
+type PortableCell = { value: unknown };
+type PortableLocals = Map<string, PortableCell>;
+type PortableClosure = Readonly<{
+  function: string;
+  captures: readonly unknown[];
+}>;
 
 async function executeStatements(
   statements: readonly StatementIR[],
-  locals: Map<string, unknown>,
+  locals: PortableLocals,
   capabilities: CapabilityImplementations,
   calls: CapabilityCallTrace[],
   functions: ReadonlyMap<string, FunctionIR>,
@@ -215,20 +305,28 @@ async function executeStatements(
   for (const statement of statements) {
     switch (statement.kind) {
       case "let":
-        locals.set(
-          statement.name,
-          await evaluate(statement.value, locals, capabilities, calls, functions),
-        );
+        locals.set(statement.name, {
+          value: await evaluate(statement.value, locals, capabilities, calls, functions),
+        });
         break;
       case "assign": {
         const current = locals.get(statement.name);
+        if (!current) throw new Error(`Unknown portable binding ${statement.name}.`);
         const value = await evaluate(statement.value, locals, capabilities, calls, functions);
-        locals.set(statement.name, assign(statement.operator, current, value));
+        current.value = assign(statement.operator, current.value, value);
         break;
       }
       case "expression":
         await evaluate(statement.expression, locals, capabilities, calls, functions);
         break;
+      case "array-push": {
+        const array = locals.get(statement.array)?.value;
+        if (!Array.isArray(array)) throw new Error(`${statement.array} is not an array.`);
+        array.push(await evaluate(statement.value, locals, capabilities, calls, functions));
+        break;
+      }
+      case "throw":
+        throw await evaluate(statement.value, locals, capabilities, calls, functions);
       case "if": {
         const branch = boolean(
           await evaluate(statement.condition, locals, capabilities, calls, functions),
@@ -241,13 +339,32 @@ async function executeStatements(
       }
       case "for-of": {
         const values = await evaluate(statement.values, locals, capabilities, calls, functions);
+        if (statement.asynchronous) {
+          if (!values || typeof values !== "object" || !(Symbol.asyncIterator in values)) {
+            throw new Error(
+              `${statement.span.file}:${statement.span.line}: for-await-of value is not an asynchronous stream.`,
+            );
+          }
+          for await (const value of values as AsyncIterable<unknown>) {
+            locals.set(statement.item, { value });
+            const completion = await executeStatements(
+              statement.body,
+              locals,
+              capabilities,
+              calls,
+              functions,
+            );
+            if (completion.returned) return completion;
+          }
+          break;
+        }
         if (!values || typeof values !== "object" || !(Symbol.iterator in values)) {
           throw new Error(
             `${statement.span.file}:${statement.span.line}: for-of value is not iterable.`,
           );
         }
         for (const value of values as Iterable<unknown>) {
-          locals.set(statement.item, value);
+          locals.set(statement.item, { value });
           const completion = await executeStatements(
             statement.body,
             locals,
@@ -257,6 +374,55 @@ async function executeStatements(
           );
           if (completion.returned) return completion;
         }
+        break;
+      }
+      case "for-range": {
+        const from = number(await evaluate(statement.from, locals, capabilities, calls, functions));
+        const to = number(await evaluate(statement.to, locals, capabilities, calls, functions));
+        for (let value = from; value < to; value += 1) {
+          locals.set(statement.item, { value });
+          const completion = await executeStatements(
+            statement.body,
+            locals,
+            capabilities,
+            calls,
+            functions,
+          );
+          if (completion.returned) return completion;
+        }
+        break;
+      }
+      case "try": {
+        let completion: Completion = { returned: false };
+        try {
+          completion = await executeStatements(
+            statement.body,
+            locals,
+            capabilities,
+            calls,
+            functions,
+          );
+        } catch (error) {
+          if (!statement.catch.length) throw error;
+          if (statement.error) locals.set(statement.error, { value: error });
+          completion = await executeStatements(
+            statement.catch,
+            locals,
+            capabilities,
+            calls,
+            functions,
+          );
+        } finally {
+          const finalized = await executeStatements(
+            statement.finally,
+            locals,
+            capabilities,
+            calls,
+            functions,
+          );
+          if (finalized.returned) completion = finalized;
+        }
+        if (completion.returned) return completion;
         break;
       }
       case "return":
@@ -273,9 +439,28 @@ async function executeStatements(
   return { returned: false };
 }
 
+function portableFailure(
+  name: string,
+  value: Readonly<{
+    arguments: readonly unknown[];
+    fields: Readonly<Record<string, unknown>>;
+  }>,
+): Error {
+  const message = String(
+    value.fields.message ??
+      value.arguments[name === "Error" || name === "TypeError" ? 0 : 1] ??
+      value.arguments[0] ??
+      name,
+  );
+  const error = new Error(message);
+  error.name = name;
+  Object.assign(error, value.fields, { arguments: value.arguments });
+  return error;
+}
+
 async function evaluate(
   expression: ExpressionIR,
-  locals: ReadonlyMap<string, unknown>,
+  locals: PortableLocals,
   capabilities: CapabilityImplementations,
   calls: CapabilityCallTrace[],
   functions: ReadonlyMap<string, FunctionIR>,
@@ -283,38 +468,109 @@ async function evaluate(
   switch (expression.kind) {
     case "literal":
       return expression.value;
+    case "none":
+      return undefined;
+    case "error":
+      return portableFailure(expression.name, {
+        arguments: await Promise.all(
+          expression.arguments.map((argument) =>
+            evaluate(argument, locals, capabilities, calls, functions),
+          ),
+        ),
+        fields: Object.fromEntries(
+          await Promise.all(
+            expression.fields.map(async ({ name, value }) => [
+              name,
+              await evaluate(value, locals, capabilities, calls, functions),
+            ]),
+          ),
+        ),
+      });
+    case "error-match": {
+      const value = await evaluate(expression.value, locals, capabilities, calls, functions);
+      return value instanceof Error && value.name === expression.name;
+    }
     case "local":
       if (!locals.has(expression.name))
         throw new Error(`Unknown portable binding ${expression.name}.`);
-      return locals.get(expression.name);
+      return locals.get(expression.name)!.value;
     case "array":
       return Promise.all(
         expression.values.map((value) => evaluate(value, locals, capabilities, calls, functions)),
       );
     case "record":
-      return Object.fromEntries(
-        await Promise.all(
-          expression.fields.map(async ({ name, value }) => [
-            name,
-            await evaluate(value, locals, capabilities, calls, functions),
-          ]),
+      return normalizePortableRecord(
+        Object.fromEntries(
+          await Promise.all(
+            expression.fields.map(async ({ name, value }) => [
+              wellKnownProperty(name),
+              await evaluate(value, locals, capabilities, calls, functions),
+            ]),
+          ),
         ),
       );
+    case "record-merge": {
+      const result: Record<string, unknown> = {};
+      for (const entry of expression.entries) {
+        const value = await evaluate(entry.value, locals, capabilities, calls, functions);
+        if (entry.kind === "field") {
+          Reflect.set(result, wellKnownProperty(entry.name), value);
+        } else {
+          if (!isRecord(value)) throw new Error("Portable record spread requires a record.");
+          Object.assign(result, value);
+        }
+      }
+      return normalizePortableRecord(result);
+    }
     case "property": {
       const value = await evaluate(expression.value, locals, capabilities, calls, functions);
-      if (!value || typeof value !== "object") throw new Error(`Cannot read ${expression.name}.`);
-      return (value as Readonly<Record<string, unknown>>)[expression.name];
+      if ((value === undefined || value === null) && expression.optional) return undefined;
+      if (expression.name === "length" && (typeof value === "string" || Array.isArray(value))) {
+        return value.length;
+      }
+      if (!value || typeof value !== "object") {
+        throw new Error(
+          `${expression.span.file}:${expression.span.line}:${expression.span.column}: ` +
+            `Cannot read ${expression.name} from ${String(value)}.`,
+        );
+      }
+      return (value as Readonly<Record<PropertyKey, unknown>>)[wellKnownProperty(expression.name)];
     }
     case "unary": {
       const value = await evaluate(expression.value, locals, capabilities, calls, functions);
+      if (expression.operator === "present") return value !== undefined && value !== null;
       return expression.operator === "!" ? !boolean(value) : -number(value);
     }
-    case "binary":
+    case "binary": {
+      const left = await evaluate(expression.left, locals, capabilities, calls, functions);
+      if (expression.operator === "&&" && !boolean(left)) return false;
+      if (expression.operator === "||" && boolean(left)) return true;
       return binary(
         expression.operator,
-        await evaluate(expression.left, locals, capabilities, calls, functions),
+        left,
         await evaluate(expression.right, locals, capabilities, calls, functions),
       );
+    }
+    case "conditional":
+      return boolean(await evaluate(expression.condition, locals, capabilities, calls, functions))
+        ? evaluate(expression.consequent, locals, capabilities, calls, functions)
+        : evaluate(expression.alternate, locals, capabilities, calls, functions);
+    case "closure": {
+      const function_ = functions.get(expression.function);
+      if (!function_) throw new Error(`Unknown portable function ${expression.function}.`);
+      const captures = await Promise.all(
+        expression.captures.map(async (capture): Promise<PortableCell> => {
+          if (capture.kind === "local") {
+            const cell = locals.get(capture.name);
+            if (!cell) throw new Error(`Unknown portable binding ${capture.name}.`);
+            return cell;
+          }
+          return { value: await evaluate(capture, locals, capabilities, calls, functions) };
+        }),
+      );
+      return (...arguments_: readonly unknown[]) =>
+        executePortableFunction(function_, captures, arguments_, capabilities, calls, functions);
+    }
     case "call": {
       const function_ = functions.get(expression.function);
       if (!function_) throw new Error(`Unknown portable function ${expression.function}.`);
@@ -323,18 +579,148 @@ async function evaluate(
           evaluate(argument, locals, capabilities, calls, functions),
         ),
       );
-      const functionLocals = new Map<string, unknown>();
-      for (const [index, parameter] of function_.parameters.entries()) {
-        functionLocals.set(parameter.name, arguments_[index]);
-      }
-      const completion = await executeStatements(
-        function_.body,
-        functionLocals,
+      return executePortableFunction(function_, [], arguments_, capabilities, calls, functions);
+    }
+    case "invoke": {
+      const closure = await evaluate(expression.callee, locals, capabilities, calls, functions);
+      const arguments_ = await Promise.all(
+        expression.arguments.map((argument) =>
+          evaluate(argument, locals, capabilities, calls, functions),
+        ),
+      );
+      if (typeof closure === "function") return Reflect.apply(closure, undefined, arguments_);
+      if (!isPortableClosure(closure))
+        throw new Error("Portable invocation target is not a function.");
+      const function_ = functions.get(closure.function);
+      if (!function_) throw new Error(`Unknown portable function ${closure.function}.`);
+      return executePortableFunction(
+        function_,
+        closure.captures,
+        arguments_,
         capabilities,
         calls,
         functions,
       );
-      return completion.value;
+    }
+    case "method-call": {
+      const receiver = await evaluate(expression.receiver, locals, capabilities, calls, functions);
+      const arguments_ = await Promise.all(
+        expression.arguments.map((argument) =>
+          evaluate(argument, locals, capabilities, calls, functions),
+        ),
+      );
+      if (expression.method === "find") {
+        if (!Array.isArray(receiver)) throw new Error("find requires an array.");
+        const predicate = arguments_[0];
+        if (typeof predicate === "function") {
+          for (const value of receiver) {
+            if (boolean(await Reflect.apply(predicate, undefined, [value]))) return value;
+          }
+          return undefined;
+        }
+        if (!isPortableClosure(predicate))
+          throw new Error("Array.find requires a portable closure.");
+        const function_ = functions.get(predicate.function);
+        if (!function_) throw new Error(`Unknown portable function ${predicate.function}.`);
+        for (const value of receiver) {
+          if (
+            boolean(
+              await executePortableFunction(
+                function_,
+                predicate.captures,
+                [value],
+                capabilities,
+                calls,
+                functions,
+              ),
+            )
+          ) {
+            return value;
+          }
+        }
+        return undefined;
+      }
+      if (isRecord(receiver)) {
+        const member = receiver[expression.method];
+        if (typeof member === "function") return Reflect.apply(member, receiver, arguments_);
+        if (isPortableClosure(member)) {
+          const function_ = functions.get(member.function);
+          if (!function_) throw new Error(`Unknown portable function ${member.function}.`);
+          return executePortableFunction(
+            function_,
+            member.captures,
+            arguments_,
+            capabilities,
+            calls,
+            functions,
+          );
+        }
+      }
+      const name = expression.method === "iterator" ? Symbol.asyncIterator : expression.method;
+      const method = (receiver as unknown as Record<PropertyKey, unknown>)[name];
+      if (typeof method !== "function") {
+        throw new Error(`Portable value has no ${expression.method} method.`);
+      }
+      return await Reflect.apply(method, receiver, arguments_);
+    }
+    case "json-parse": {
+      const value = await evaluate(expression.value, locals, capabilities, calls, functions);
+      if (typeof value !== "string") throw new Error("JSON.parse requires a string.");
+      return JSON.parse(value);
+    }
+    case "json-stringify": {
+      const value = await evaluate(expression.value, locals, capabilities, calls, functions);
+      const serialized = JSON.stringify(value);
+      if (serialized === undefined) throw new Error("JSON.stringify produced no value.");
+      return serialized;
+    }
+    case "to-string":
+      return String(await evaluate(expression.value, locals, capabilities, calls, functions));
+    case "stream-map": {
+      const source = await evaluate(expression.source, locals, capabilities, calls, functions);
+      const transform = await evaluate(
+        expression.transform,
+        locals,
+        capabilities,
+        calls,
+        functions,
+      );
+      if (!isAsyncIterable(source)) throw new Error("mapStream requires an asynchronous stream.");
+      const run = async (value: unknown) => {
+        if (typeof transform === "function") return Reflect.apply(transform, undefined, [value]);
+        if (!isPortableClosure(transform)) {
+          throw new Error("mapStream requires a portable transform.");
+        }
+        const function_ = functions.get(transform.function);
+        if (!function_) throw new Error(`Unknown portable function ${transform.function}.`);
+        return executePortableFunction(
+          function_,
+          transform.captures,
+          [value],
+          capabilities,
+          calls,
+          functions,
+        );
+      };
+      return {
+        [Symbol.asyncIterator]() {
+          const iterator = source[Symbol.asyncIterator]();
+          return {
+            async next() {
+              const next = await iterator.next();
+              if (next.done) return { done: true as const, value: undefined };
+              return {
+                done: false as const,
+                value: await run(next.value),
+              };
+            },
+            async return() {
+              await iterator.return?.();
+              return { done: true as const, value: undefined };
+            },
+          };
+        },
+      };
     }
     case "capability-call": {
       const capability = capabilities[expression.capability];
@@ -354,19 +740,146 @@ async function evaluate(
         operation: expression.operation,
         input: arguments_[0] ?? null,
       });
-      const result = Reflect.apply(operation, capability, arguments_);
+      const result = Reflect.apply(
+        operation,
+        capability,
+        arguments_.map((argument) =>
+          materializeCapabilityValue(argument, capabilities, calls, functions),
+        ),
+      );
       if (expression.awaited) return await result;
-      if (isPromiseLike(result)) {
-        throw new Error(
-          `Synchronous Capability ${expression.capability}.${expression.operation} returned a Promise.`,
-        );
-      }
       return result;
     }
   }
 }
 
-function assign(operator: "=" | "+=" | "-=" | "*=" | "/=", left: unknown, right: unknown) {
+function materializeCapabilityValue(
+  value: unknown,
+  capabilities: CapabilityImplementations,
+  calls: CapabilityCallTrace[],
+  functions: ReadonlyMap<string, FunctionIR>,
+): unknown {
+  if (isPortableClosure(value)) {
+    const function_ = functions.get(value.function);
+    if (!function_) throw new Error(`Unknown portable function ${value.function}.`);
+    return (...arguments_: readonly unknown[]) =>
+      executePortableFunction(
+        function_,
+        value.captures,
+        arguments_,
+        capabilities,
+        calls,
+        functions,
+      );
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => materializeCapabilityValue(item, capabilities, calls, functions));
+  }
+  if (isRecord(value) && !isAsyncIterable(value)) {
+    return Object.fromEntries(
+      Reflect.ownKeys(value).map((name) => [
+        typeof name === "string" ? wellKnownProperty(name) : name,
+        materializeCapabilityValue(Reflect.get(value, name), capabilities, calls, functions),
+      ]),
+    );
+  }
+  return value;
+}
+
+function wellKnownProperty(name: string): PropertyKey {
+  if (name === "@dispose") return Symbol.dispose;
+  if (name === "@asyncDispose") return Symbol.asyncDispose;
+  if (name === "@asyncIterator") return Symbol.asyncIterator;
+  return name;
+}
+
+function normalizePortableRecord<Value extends Record<PropertyKey, unknown>>(value: Value): Value {
+  const create = value[Symbol.asyncIterator];
+  if (typeof create === "function") {
+    Reflect.set(value, Symbol.asyncIterator, () => {
+      const pending = Promise.resolve(Reflect.apply(create, value, []));
+      return {
+        async next() {
+          const iterator = await pending;
+          return iterator.next();
+        },
+        async return() {
+          const iterator = await pending;
+          return iterator.return?.() ?? { done: true as const, value: undefined };
+        },
+      };
+    });
+  }
+  return value;
+}
+
+async function disposePortableResources(resources: readonly unknown[]): Promise<void> {
+  const errors: unknown[] = [];
+  for (const value of [...resources].reverse()) {
+    if (!value || (typeof value !== "object" && typeof value !== "function")) continue;
+    const resource = value as Partial<Disposable & AsyncDisposable>;
+    try {
+      const disposeAsync = resource[Symbol.asyncDispose];
+      const dispose = resource[Symbol.dispose];
+      if (typeof disposeAsync === "function") {
+        await disposeAsync.call(resource);
+      } else if (typeof dispose === "function") {
+        await Promise.resolve(dispose.call(resource));
+      }
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  if (errors.length === 1) throw errors[0];
+  if (errors.length > 1) {
+    throw new AggregateError(errors, "Portable Program disposal failed.");
+  }
+}
+
+async function executePortableFunction(
+  function_: FunctionIR,
+  captures: readonly (PortableCell | unknown)[],
+  arguments_: readonly unknown[],
+  capabilities: CapabilityImplementations,
+  calls: CapabilityCallTrace[],
+  functions: ReadonlyMap<string, FunctionIR>,
+): Promise<unknown> {
+  const locals: PortableLocals = new Map();
+  for (const [index, capture] of function_.captures.entries()) {
+    const value = captures[index];
+    locals.set(capture.name, isPortableCell(value) ? value : { value });
+  }
+  for (const [index, parameter] of function_.parameters.entries()) {
+    locals.set(parameter.name, { value: arguments_[index] });
+  }
+  try {
+    const completion = await executeStatements(
+      function_.body,
+      locals,
+      capabilities,
+      calls,
+      functions,
+    );
+    return completion.value;
+  } catch (error) {
+    if (error instanceof Error) {
+      error.message =
+        `${function_.span.file}:${function_.span.line}:${function_.span.column} ` +
+        `(${function_.name}): ${error.message}`;
+    }
+    throw error;
+  }
+}
+
+function isPortableCell(value: unknown): value is PortableCell {
+  return Boolean(value && typeof value === "object" && Object.hasOwn(value, "value"));
+}
+
+function isPortableClosure(value: unknown): value is PortableClosure {
+  return isRecord(value) && typeof value.function === "string" && Array.isArray(value.captures);
+}
+
+function assign(operator: "=" | "+=" | "-=" | "*=" | "/=" | "??=", left: unknown, right: unknown) {
   switch (operator) {
     case "=":
       return right;
@@ -378,6 +891,8 @@ function assign(operator: "=" | "+=" | "-=" | "*=" | "/=", left: unknown, right:
       return binary("*", left, right);
     case "/=":
       return binary("/", left, right);
+    case "??=":
+      return left ?? right;
   }
 }
 
@@ -457,8 +972,13 @@ function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
-  return isRecord(value) && typeof value.then === "function";
+function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
+  return (
+    value !== null &&
+    (typeof value === "object" || typeof value === "function") &&
+    Symbol.asyncIterator in value &&
+    typeof value[Symbol.asyncIterator] === "function"
+  );
 }
 
 export type HotReplacementManifest = Readonly<{

@@ -30,6 +30,39 @@ test("keeps canonical operators and traces equivalent across JavaScript and Rust
   await buildRustProgram(contribution, executable);
   await using native = await createRustProgramSession(executable);
 
+  type Input = Readonly<{
+    left: number;
+    right: number;
+    first: boolean;
+    second: boolean;
+    prefix: string;
+    suffix: string;
+    nested: Readonly<{ value: number; label: string }>;
+  }>;
+  const verify = async (input: Input) => {
+    const scenario = {
+      responses: {
+        "input.read": [{ ok: input }],
+        "output.write": [{ ok: null }],
+      },
+    };
+    const [javascript, rust] = await Promise.all([
+      executeProgramFixtureIR(ir, contribution.id, scenario),
+      native.run(scenario),
+    ]);
+    expect(rust).toEqual(javascript);
+  };
+
+  await verify({
+    left: 0,
+    right: 1,
+    first: false,
+    second: false,
+    prefix: "\u2028",
+    suffix: "\u2029",
+    nested: { value: 0, label: "\0" },
+  });
+
   await fc.assert(
     fc.asyncProperty(
       fc.record({
@@ -41,19 +74,7 @@ test("keeps canonical operators and traces equivalent across JavaScript and Rust
         suffix: fc.string({ unit: "grapheme", maxLength: 12 }),
         nested: fc.record({ value: fc.integer(), label: fc.string({ maxLength: 8 }) }),
       }),
-      async (input) => {
-        const scenario = {
-          responses: {
-            "input.read": [{ ok: input }],
-            "output.write": [{ ok: null }],
-          },
-        };
-        const [javascript, rust] = await Promise.all([
-          executeProgramFixtureIR(ir, contribution.id, scenario),
-          native.run(scenario),
-        ]);
-        expect(rust).toEqual(javascript);
-      },
+      verify,
     ),
     { numRuns: 60 },
   );

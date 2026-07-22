@@ -7,6 +7,7 @@ export type {
   EnvironmentDefinition,
   Feature,
   FeatureContract,
+  FeatureContractOf,
   FeatureDefinitions,
   FeatureUIAPIs,
   PlatformContract,
@@ -25,6 +26,7 @@ export type {
   UIState,
 } from "@/core/application";
 export { placePrograms } from "@/core/application";
+export { mapStream } from "@/core/portable";
 export {
   bindCapabilitiesToScope,
   createProgramContributionInstance,

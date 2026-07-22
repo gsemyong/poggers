@@ -219,6 +219,7 @@ function portableProgram(): ProgramIR {
             id: "start",
             name: "start",
             asynchronous: true,
+            captures: [],
             parameters: [],
             result: { kind: "primitive", name: "void" },
             body: [

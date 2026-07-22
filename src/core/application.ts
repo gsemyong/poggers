@@ -379,16 +379,16 @@ export function placePrograms<
   feature: Value,
   placement: Placement,
 ): Feature<PlacedFeature<FeatureContractOf<Value>, Placement>> &
-  Omit<Value, "programs" | "features"> {
+  Omit<Value, "programs" | "features" | typeof featureContract> {
   return placeFeaturePrograms(
     feature as Readonly<Record<string, unknown>>,
     placement as Readonly<Record<string, string>>,
     "",
   ) as Feature<PlacedFeature<FeatureContractOf<Value>, Placement>> &
-    Omit<Value, "programs" | "features">;
+    Omit<Value, "programs" | "features" | typeof featureContract>;
 }
 
-type FeatureContractOf<Value> =
+export type FeatureContractOf<Value> =
   Value extends Readonly<{
     [featureContract]?: infer Contract extends FeatureContract;
   }>

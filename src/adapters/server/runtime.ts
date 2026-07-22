@@ -2,7 +2,7 @@ import type { ProgramHostFactory } from "@/contracts/platform";
 import type { Application, ApplicationContract } from "@/core/application";
 import { collectProgramManifest } from "@/core/capability";
 import type { ProgramIR } from "@/core/compiler/ir";
-import { executeProgramContributionIR, type CapabilityImplementations } from "@/core/development";
+import { executeLinkedProgramIR, type CapabilityImplementations } from "@/core/development";
 import { startProcess } from "@/core/process";
 
 export type RunningServerProgram = AsyncDisposable &
@@ -24,11 +24,9 @@ export async function startServerProgram<Contract extends ApplicationContract>(
     throw new TypeError(`Program "${program.name}" ${profile} Capabilities must be an object.`);
   }
   if (isPortableProgram(program)) {
+    let execution: Awaited<ReturnType<typeof executeLinkedProgramIR>>;
     try {
-      for (const contribution of program.contributions) {
-        if (contribution.implementation.kind !== "portable") continue;
-        await executeProgramContributionIR(contribution, capabilities as CapabilityImplementations);
-      }
+      execution = await executeLinkedProgramIR(program, capabilities as CapabilityImplementations);
     } catch (error) {
       await disposeCapabilities(capabilities);
       throw error;
@@ -40,7 +38,17 @@ export async function startServerProgram<Contract extends ApplicationContract>(
       async [Symbol.asyncDispose]() {
         if (disposed) return;
         disposed = true;
-        await disposeCapabilities(capabilities);
+        const results = await Promise.allSettled([
+          execution[Symbol.asyncDispose](),
+          disposeCapabilities(capabilities),
+        ]);
+        const errors = results.flatMap((result) =>
+          result.status === "rejected" ? [result.reason] : [],
+        );
+        if (errors.length === 1) throw errors[0];
+        if (errors.length > 1) {
+          throw new AggregateError(errors, "Server Program disposal failed.");
+        }
       },
     };
   }
@@ -61,7 +69,6 @@ function isPortableProgram(program: ProgramIR): boolean {
   return program.contributions.every(
     (contribution) =>
       !contribution.ui &&
-      contribution.provides.length === 0 &&
       (contribution.implementation.kind === "none" ||
         contribution.implementation.kind === "portable"),
   );

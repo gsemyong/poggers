@@ -7,10 +7,6 @@
   },
   "files": [
     "dist",
-    "src",
-    "!src/**/*.spec.ts",
-    "!src/**/*.typecheck.ts",
-    "!src/**/*.typecheck.tsx",
     "template",
     "template/.gitignore",
     "tsconfig.json"
@@ -19,42 +15,46 @@
   "types": "./dist/src/index.d.ts",
   "exports": {
     ".": {
-      "poggers-source": "./src/index.ts",
+      "poggers-source": "./dist/source/index.ts",
       "types": "./dist/src/index.d.ts",
       "default": "./dist/src/index.js"
     },
     "./jsx-dev-runtime": {
-      "poggers-source": "./src/core/jsx/development.ts",
+      "poggers-source": "./dist/source/core/jsx/development.ts",
       "types": "./dist/src/core/jsx/development.d.ts",
       "default": "./dist/src/core/jsx/development.js"
     },
     "./jsx-runtime": {
-      "poggers-source": "./src/core/jsx/runtime.ts",
+      "poggers-source": "./dist/source/core/jsx/runtime.ts",
       "types": "./dist/src/core/jsx/runtime.d.ts",
       "default": "./dist/src/core/jsx/runtime.js"
     },
     "./web": {
-      "poggers-source": "./src/adapters/web/platform.ts",
+      "poggers-source": "./dist/source/adapters/web/platform.ts",
       "types": "./dist/src/adapters/web/platform.d.ts",
       "default": "./dist/src/adapters/web/platform.js"
     },
     "./adapters/web": {
-      "poggers-source": "./src/adapters/web/adapter.ts",
+      "poggers-source": "./dist/source/adapters/web/adapter.ts",
       "types": "./dist/src/adapters/web/adapter.d.ts",
       "default": "./dist/src/adapters/web/adapter.js"
     },
     "./server": {
-      "poggers-source": "./src/adapters/server/platform.ts",
+      "poggers-source": "./dist/source/adapters/server/platform.ts",
       "types": "./dist/src/adapters/server/platform.d.ts",
       "default": "./dist/src/adapters/server/platform.js"
     },
+    "./testing": {
+      "types": "./dist/src/testing.d.ts",
+      "default": "./dist/src/testing.js"
+    },
     "./adapters/server": {
-      "poggers-source": "./src/adapters/server/adapter.ts",
+      "poggers-source": "./dist/source/adapters/server/adapter.ts",
       "types": "./dist/src/adapters/server/adapter.d.ts",
       "default": "./dist/src/adapters/server/adapter.js"
     },
     "./cli": {
-      "poggers-source": "./src/cli.ts",
+      "poggers-source": "./dist/source/cli.ts",
       "types": "./dist/src/cli.d.ts",
       "default": "./dist/src/cli.js"
     },
@@ -72,8 +72,8 @@
     "fmt": "oxfmt",
     "fmt:check": "oxfmt --check",
     "lint": "oxlint src scripts examples vitest.config.ts",
-    "test": "vitest run",
-    "check": "nub run typecheck && nub run lint && nub run fmt:check && nub run test && nub run build"
+    "test": "nub run build && vitest run",
+    "check": "nub run typecheck && nub run lint && nub run fmt:check && nub run test"
   },
   "dependencies": {
     "@nats-io/jetstream": "3.4.0",

@@ -38,7 +38,7 @@ describe("server Platform adapter", () => {
       await access(artifact.path);
       await expect(run(artifact.path)).resolves.toBe(0);
     }
-  });
+  }, 120_000);
 
   test("restarts development Processes after a source update", async () => {
     const fixture = await createFixture(httpProgramSource("first"));
@@ -154,7 +154,6 @@ export default {
 
 function httpProgramSource(value: string): string {
   return `${types()}
-type Http = { route(input: { path: string; handle(request: Request): Promise<Response> }): Disposable };
 type App = { Features: {
   probe: { Programs: { api: Program<Server, { Requires: { http: Http } }> } };
 } };
@@ -167,7 +166,7 @@ export default {
           start({ capabilities }: { capabilities: { http: Http } }) {
             return capabilities.http.route({
               path: "/probe",
-              handle: async () => new Response(${JSON.stringify(value)}),
+              handle: async () => ({ status: 200, headers: [], body: ${JSON.stringify(value)}, stream: undefined }),
             });
           },
         },
@@ -180,11 +179,10 @@ export default {
 
 function metadataProgramSource(name: string): string {
   return `${types()}
-type Http = { route(input: { path: string; handle(request: Request): Promise<Response> }): Disposable };
 type App = { Features: {
   probe: { Programs: { api: Program<Server, { Requires: { http: Http } }> } };
 } };
-const identity = crypto.randomUUID();
+const identity = ${JSON.stringify(name)};
 export default {
   metadata: { name: ${JSON.stringify(name)} },
   features: {
@@ -194,7 +192,7 @@ export default {
           start({ capabilities }: { capabilities: { http: Http } }) {
             return capabilities.http.route({
               path: "/probe",
-              handle: async () => new Response(identity),
+              handle: async () => ({ status: 200, headers: [], body: identity, stream: undefined }),
             });
           },
         },
@@ -211,7 +209,6 @@ import { browser } from "./browser";
 import { server } from "./server";
 type BrowserPlatform = { Name: "web" };
 type Browser = { Name: "browser-main"; Platform: BrowserPlatform };
-type Http = { route(input: { path: string; handle(request: Request): Promise<Response> }): Disposable };
 type App = { Features: {
   browser: { Programs: { browser: Program<Browser> } };
   server: { Programs: { api: Program<Server, { Requires: { http: Http } }> } };
@@ -225,15 +222,16 @@ export default {
 
 function splitServerSource(): string {
   return `
-type Http = { route(input: { path: string; handle(request: Request): Promise<Response> }): Disposable };
-const identity = crypto.randomUUID();
+type HttpResponse = { status: number; headers: readonly { name: string; value: string }[]; body: string | undefined; stream: AsyncIterable<string> | undefined };
+type Http = { route(input: { path: string; handle(request: { method: string; path: string; query: readonly { name: string; value: string }[]; headers: readonly { name: string; value: string }[]; body: string }): Promise<HttpResponse> }): Disposable };
+const identity = "stable-server";
 export const server = {
   programs: {
     api: {
       start({ capabilities }: { capabilities: { http: Http } }) {
         return capabilities.http.route({
           path: "/probe",
-          handle: async () => new Response(identity),
+          handle: async () => ({ status: 200, headers: [], body: identity, stream: undefined }),
         });
       },
     },
@@ -252,6 +250,8 @@ type Platform = { Name: "server" };
 type Server = { Name: "server"; Platform: Platform };
 type Program<Environment, Contract extends object = {}> = Contract & { Environment: Environment };
 type Application<Contract> = unknown;
+type HttpResponse = { status: number; headers: readonly { name: string; value: string }[]; body: string | undefined; stream: AsyncIterable<string> | undefined };
+type Http = { route(input: { path: string; handle(request: { method: string; path: string; query: readonly { name: string; value: string }[]; headers: readonly { name: string; value: string }[]; body: string }): Promise<HttpResponse> }): Disposable };
 `;
 }
 
@@ -275,9 +275,21 @@ async function fetchText(url: string): Promise<string> {
 
 function run(file: string): Promise<number> {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(file, [], { stdio: "ignore" });
-    child.once("error", reject);
-    setTimeout(() => child.kill("SIGTERM"), 750);
-    child.once("exit", (code) => resolvePromise(code ?? 1));
+    const child = spawn(file, [], { stdio: "pipe" });
+    let error = "";
+    child.stderr.setEncoding("utf8").on("data", (value: string) => (error += value));
+    const timeout = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error(`Native Program did not exit: ${error || file}`));
+    }, 10_000);
+    child.once("error", (spawnError) => {
+      clearTimeout(timeout);
+      reject(spawnError);
+    });
+    child.once("exit", (code, signal) => {
+      clearTimeout(timeout);
+      if (signal) reject(new Error(`Native Program exited from ${signal}: ${error || file}`));
+      else resolvePromise(code ?? 1);
+    });
   });
 }

@@ -1,5 +1,6 @@
 import type { ConfiguredWebPresentation, WebPresentation, WebStyle } from "@poggers/kit/web";
-import type { App } from "src/app";
+
+import type { App } from "@/app";
 
 const parameters = {
   color: {

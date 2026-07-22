@@ -1,8 +1,12 @@
-node_modules
-dist
-coverage
-.poggers
-.data
+node_modules/
+dist/
+coverage/
+target/
+Cargo.lock
+.poggers/
+.data/
 .DS_Store
 .env
+.env.*
+!.env.example
 mise.local.toml

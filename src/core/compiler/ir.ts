@@ -1,6 +1,6 @@
 import type { PresentationSourceIR } from "@/core/compiler/presentation";
 
-export const POGGERS_IR_VERSION = 10 as const;
+export const POGGERS_IR_VERSION = 13 as const;
 
 export type SourceSpan = Readonly<{
   file: string;
@@ -31,10 +31,25 @@ export type LiteralIR = null | boolean | number | string;
 
 export type ExpressionValueIR =
   | Readonly<{ kind: "literal"; value: LiteralIR }>
+  | Readonly<{ kind: "none" }>
+  | Readonly<{
+      kind: "error";
+      name: string;
+      arguments: readonly ExpressionIR[];
+      fields: readonly Readonly<{ name: string; value: ExpressionIR }>[];
+    }>
+  | Readonly<{ kind: "error-match"; value: ExpressionIR; name: string }>
   | Readonly<{ kind: "local"; name: string }>
   | Readonly<{ kind: "array"; values: readonly ExpressionIR[] }>
   | Readonly<{ kind: "record"; fields: readonly Readonly<{ name: string; value: ExpressionIR }>[] }>
-  | Readonly<{ kind: "property"; value: ExpressionIR; name: string }>
+  | Readonly<{
+      kind: "record-merge";
+      entries: readonly (
+        | Readonly<{ kind: "field"; name: string; value: ExpressionIR }>
+        | Readonly<{ kind: "spread"; value: ExpressionIR }>
+      )[];
+    }>
+  | Readonly<{ kind: "property"; value: ExpressionIR; name: string; optional?: true }>
   | Readonly<{
       kind: "binary";
       operator:
@@ -55,11 +70,43 @@ export type ExpressionValueIR =
       left: ExpressionIR;
       right: ExpressionIR;
     }>
-  | Readonly<{ kind: "unary"; operator: "!" | "-"; value: ExpressionIR }>
+  | Readonly<{ kind: "unary"; operator: "!" | "-" | "present"; value: ExpressionIR }>
   | Readonly<{
       kind: "call";
       function: string;
       arguments: readonly ExpressionIR[];
+      awaited: boolean;
+    }>
+  | Readonly<{
+      kind: "invoke";
+      callee: ExpressionIR;
+      arguments: readonly ExpressionIR[];
+      awaited: boolean;
+    }>
+  | Readonly<{
+      kind: "method-call";
+      receiver: ExpressionIR;
+      method: string;
+      arguments: readonly ExpressionIR[];
+    }>
+  | Readonly<{ kind: "json-parse"; value: ExpressionIR }>
+  | Readonly<{ kind: "json-stringify"; value: ExpressionIR }>
+  | Readonly<{ kind: "to-string"; value: ExpressionIR }>
+  | Readonly<{
+      kind: "stream-map";
+      source: ExpressionIR;
+      transform: ExpressionIR;
+    }>
+  | Readonly<{
+      kind: "closure";
+      function: string;
+      captures: readonly ExpressionIR[];
+    }>
+  | Readonly<{
+      kind: "conditional";
+      condition: ExpressionIR;
+      consequent: ExpressionIR;
+      alternate: ExpressionIR;
     }>
   | Readonly<{
       kind: "capability-call";
@@ -87,11 +134,17 @@ export type StatementIR =
   | Readonly<{
       kind: "assign";
       name: string;
-      operator: "=" | "+=" | "-=" | "*=" | "/=";
+      operator: "=" | "+=" | "-=" | "*=" | "/=" | "??=";
       value: ExpressionIR;
       span: SourceSpan;
     }>
   | Readonly<{ kind: "expression"; expression: ExpressionIR; span: SourceSpan }>
+  | Readonly<{ kind: "array-push"; array: string; value: ExpressionIR; span: SourceSpan }>
+  | Readonly<{
+      kind: "throw";
+      value: ExpressionIR;
+      span: SourceSpan;
+    }>
   | Readonly<{
       kind: "if";
       condition: ExpressionIR;
@@ -101,9 +154,26 @@ export type StatementIR =
     }>
   | Readonly<{
       kind: "for-of";
+      asynchronous?: true;
       item: string;
       values: ExpressionIR;
       body: readonly StatementIR[];
+      span: SourceSpan;
+    }>
+  | Readonly<{
+      kind: "for-range";
+      item: string;
+      from: ExpressionIR;
+      to: ExpressionIR;
+      body: readonly StatementIR[];
+      span: SourceSpan;
+    }>
+  | Readonly<{
+      kind: "try";
+      body: readonly StatementIR[];
+      error?: string;
+      catch: readonly StatementIR[];
+      finally: readonly StatementIR[];
       span: SourceSpan;
     }>
   | Readonly<{ kind: "return"; value?: ExpressionIR; span: SourceSpan }>;
@@ -112,43 +182,16 @@ export type FunctionIR = Readonly<{
   id: string;
   name: string;
   asynchronous: boolean;
+  captures: readonly FieldIR[];
   parameters: readonly FieldIR[];
   result: TypeIR;
   body: readonly StatementIR[];
   span: SourceSpan;
 }>;
 
-export type IdentityFeatureImplementationIR = Readonly<{
-  kind: "identity";
-  name: string;
-  principal: TypeIR;
-  project: FunctionIR;
-  functions: readonly FunctionIR[];
-}>;
-
-export type EntityFeatureImplementationIR = Readonly<{
-  kind: "entity";
-  name: string;
-  principal: TypeIR;
-  value: TypeIR;
-  createInput: TypeIR;
-  updateInput: TypeIR;
-  filter: TypeIR;
-  create: FunctionIR;
-  update: FunctionIR;
-  authorize: FunctionIR;
-  matches?: FunctionIR;
-  functions: readonly FunctionIR[];
-}>;
-
-export type PortableFeatureImplementationIR =
-  | IdentityFeatureImplementationIR
-  | EntityFeatureImplementationIR;
-
 export type ProgramImplementationIR =
   | Readonly<{ kind: "none" }>
   | Readonly<{ kind: "portable"; start: FunctionIR; functions: readonly FunctionIR[] }>
-  | Readonly<{ kind: "portable-feature"; feature: PortableFeatureImplementationIR }>
   | Readonly<{
       kind: "source";
       reason: "host-source" | "platform-ui";

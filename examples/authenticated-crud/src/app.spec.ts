@@ -1,108 +1,35 @@
-import { spawn } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
-import { createServer } from "node:net";
-import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
-import {
-  startProcess,
-  type EntityEvent,
-  type EntitySnapshot,
-  type ProgramManifest,
-} from "@poggers/kit";
-import { createNodeHost } from "@poggers/kit/adapters/server";
-import { describe, expect, test } from "vitest";
+import type { EntitySnapshot } from "@poggers/kit";
+import { testApplication } from "@poggers/kit/testing";
+import { expect } from "vitest";
 
-import { buildNativeServerProgram } from "@/adapters/server/native";
-import { compileApplication } from "@/core/compiler/source";
-
-import application, { type App } from "./app";
 import type { Task } from "./features/tasks";
 
-describe("authenticated CRUD application", () => {
-  test("runs auth, durable event sourcing, authorization, and live updates in development", () =>
-    verifyApplication(startNode));
+testApplication({
+  name: "authenticated CRUD application",
+  directory: resolve(import.meta.dirname, ".."),
+  timeout: 240_000,
+  async verify({ location, locations, restart }) {
+    const page = await fetch(new URL("/tasks/new", location), {
+      signal: AbortSignal.timeout(10_000),
+    });
+    expect(page.status).toBe(200);
+    expect(page.headers.get("content-type")).toContain("text/html");
+    const document = await page.text();
+    const entry = document.match(/<script[^>]+src="([^"]+)"/)?.[1];
+    expect(entry).toBeDefined();
+    const asset = await fetch(new URL(entry!, location), {
+      signal: AbortSignal.timeout(10_000),
+    });
+    expect(asset.status).toBe(200);
+    expect(asset.headers.get("content-type")).toContain("javascript");
+    await asset.body?.cancel();
 
-  test("runs the same black-box behavior as a standalone native production Program", async () => {
-    const ir = compileApplication(resolve(import.meta.dirname, "app.tsx"));
-    const program = ir.programs.find(({ name }) => name === "api");
-    if (!program) throw new Error("The authenticated CRUD application has no api Program.");
-    const directory = await mkdtemp(resolve(tmpdir(), "poggers-authenticated-crud-native-"));
-    try {
-      const executable = resolve(directory, "api");
-      await buildNativeServerProgram({
-        application: ir.application.name,
-        directory: resolve(import.meta.dirname, ".."),
-        lint: true,
-        output: executable,
-        program,
-      });
-      await verifyApplication((database, port) => startNative(executable, database, port));
-    } finally {
-      await rm(directory, { recursive: true, force: true });
-    }
-  }, 120_000);
-
-  test("rebuilds only a changed Feature crate and its Program", async () => {
-    const ir = compileApplication(resolve(import.meta.dirname, "app.tsx"));
-    const program = ir.programs.find(({ name }) => name === "api");
-    if (!program) throw new Error("The authenticated CRUD application has no api Program.");
-    const changed = structuredClone(program);
-    const contribution = changed.contributions.find(({ feature }) => feature === "tasks.tasks");
-    if (contribution?.implementation.kind !== "portable-feature") {
-      throw new Error("The task contribution is not portable Feature meaning.");
-    }
-    const feature = contribution.implementation.feature;
-    if (feature.kind !== "entity") throw new Error("The task contribution is not an entity.");
-    const statement = feature.create.body[0];
-    if (statement?.kind !== "return" || statement.value?.kind !== "record") {
-      throw new Error("The task create function has an unexpected shape.");
-    }
-    const completed = statement.value.fields.find(({ name }) => name === "completed")?.value;
-    if (completed?.kind !== "literal") {
-      throw new Error("The task create function has no completed literal.");
-    }
-    Object.assign(completed, { value: !completed.value });
-
-    const directory = await mkdtemp(resolve(tmpdir(), "poggers-native-cache-"));
-    try {
-      const build = (name: string, value: typeof program) =>
-        buildNativeServerProgram({
-          application: ir.application.name,
-          cache: resolve(directory, "cache"),
-          directory: resolve(import.meta.dirname, ".."),
-          output: resolve(directory, name),
-          program: value,
-        });
-      const first = await build("first", program);
-      const second = await build("second", changed);
-      const third = await build("third", changed);
-
-      expect(first.cache).toBe("miss");
-      expect(second.cache).toBe("miss");
-      expect(second.workspace).toBe(first.workspace);
-      expect(second.compiledCrates).toContain("poggers_api");
-      expect(second.compiledCrates.some((name) => name.includes("tasks_tasks"))).toBe(true);
-      expect(second.compiledCrates.some((name) => name.includes("identity"))).toBe(false);
-      expect(second.compiledCrates).not.toContain("poggers_server_runtime");
-      expect(third).toMatchObject({ cache: "hit", compiledCrates: [] });
-    } finally {
-      await rm(directory, { recursive: true, force: true });
-    }
-  }, 120_000);
-});
-
-async function verifyApplication(
-  start: (database: string, port: number) => Promise<Readonly<{ dispose(): Promise<void> }>>,
-): Promise<void> {
-  const directory = await mkdtemp(resolve(tmpdir(), "poggers-authenticated-crud-"));
-  const database = resolve(directory, "application.sqlite");
-  const port = await availablePort();
-  const origin = `http://127.0.0.1:${port}`;
-  try {
-    const first = await start(database, port);
+    const origin = locations.server?.[0] ?? location;
     const alice = new Cookies(origin);
     const bob = new Cookies(origin);
+
     await expect(
       alice.post("/api/identity/sign-up/email", {
         name: "Alice",
@@ -159,9 +86,8 @@ async function verifyApplication(
       entities: [updated],
     });
     await subscription.close();
-    await first.dispose();
 
-    const second = await start(database, port);
+    await restart();
     await expect(
       alice.post("/api/identity/sign-in/email", {
         email: "alice@example.com",
@@ -178,83 +104,8 @@ async function verifyApplication(
     });
     await alice.post("/api/identity/sign-out", {});
     await expect(alice.get("/api/tasks")).rejects.toMatchObject({ status: 401 });
-    await second.dispose();
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
-}
-
-async function startNode(database: string, port: number) {
-  const capabilities = await createNodeHost<EntityEvent<Task>>({
-    appName: "Poggers Operations",
-    database,
-    host: "127.0.0.1",
-    port,
-    webOrigin: "http://localhost:3000",
-    secret: "poggers-authenticated-crud-test-secret",
-  });
-  const process = await startProcess<App>(application, "api", capabilities, serverManifest);
-  return { dispose: () => process.dispose() };
-}
-
-async function startNative(executable: string, database: string, port: number) {
-  const child = spawn(executable, [], {
-    env: {
-      ...process.env,
-      HOST: "127.0.0.1",
-      PORT: String(port),
-      POGGERS_DATABASE: database,
-      POGGERS_WEB_ORIGIN: "http://localhost:3000",
-    },
-    stdio: "pipe",
-  });
-  let output = "";
-  child.stdout.setEncoding("utf8").on("data", (value: string) => (output += value));
-  child.stderr.setEncoding("utf8").on("data", (value: string) => (output += value));
-  await expect
-    .poll(
-      async () => {
-        if (child.exitCode !== null)
-          throw new Error(output || `Native server exited ${child.exitCode}.`);
-        return fetch(`http://127.0.0.1:${port}/api/identity/get-session`)
-          .then(() => true)
-          .catch(() => false);
-      },
-      { timeout: 10_000 },
-    )
-    .toBe(true);
-  return {
-    dispose: () =>
-      new Promise<void>((resolvePromise, reject) => {
-        if (child.exitCode !== null) {
-          resolvePromise();
-          return;
-        }
-        child.once("error", reject);
-        child.once("exit", (code, signal) => {
-          if (code === 0 || signal === "SIGINT") resolvePromise();
-          else reject(new Error(output || `Native server exited ${code ?? signal}.`));
-        });
-        child.kill("SIGINT");
-      }),
-  };
-}
-
-const serverManifest: ProgramManifest = {
-  name: "api",
-  contributions: [
-    {
-      feature: "identity",
-      requires: ["authentication", "http"],
-      provides: ["identity"],
-    },
-    {
-      feature: "tasks.tasks",
-      requires: ["clock", "events", "http", "identifiers", "identity"],
-      provides: ["tasks"],
-    },
-  ],
-};
+  },
+});
 
 class HttpFailure extends Error {
   constructor(
@@ -369,18 +220,4 @@ class Subscription {
     this.controller.abort();
     await this.#reader.cancel().catch(() => undefined);
   }
-}
-
-async function availablePort(): Promise<number> {
-  const server = createServer();
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", resolve);
-  });
-  const address = server.address();
-  if (!address || typeof address === "string") throw new Error("Unable to allocate a test port.");
-  await new Promise<void>((resolve, reject) =>
-    server.close((error) => (error ? reject(error) : resolve())),
-  );
-  return address.port;
 }

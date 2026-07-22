@@ -2,32 +2,42 @@ import { realpathSync, statSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 
-import { createServer, defaultServerConditions, type ViteDevServer } from "vite";
+import { createServer, defaultServerConditions, type Plugin, type ViteDevServer } from "vite";
 
-import { createNodeHost } from "@/adapters/server/host";
+import { createNodeHost, type NodeHostOptions } from "@/adapters/server/host";
 import { buildNativeServerProgram } from "@/adapters/server/native";
 import type { ServerPlatform } from "@/adapters/server/platform";
 import { startServerProgram, type RunningServerProgram } from "@/adapters/server/runtime";
+import type { NativeCapabilityAdapter } from "@/contracts/native";
 import type { PlatformAdapter, ProgramHostFactory } from "@/contracts/platform";
 import type { Application, ApplicationContract } from "@/core/application";
 import { collectExternalCapabilityNames } from "@/core/capability";
 import type { ProgramIR } from "@/core/compiler/ir";
 import { createApplicationCompiler } from "@/core/compiler/source";
 
-export { startServerPrograms } from "@/adapters/server/runtime";
-export { createJetStreamEventStore, createNodeHost } from "@/adapters/server/host";
-export type {
-  NodeEventStoreOptions,
-  NodeHost,
-  NodeHostCapability,
-  NodeHostOptions,
-} from "@/adapters/server/host";
 export { placeShard } from "@/adapters/server/placement";
+export { nativeJetStreamEvents } from "@/adapters/server/native/capabilities";
+export {
+  defineNativeCapabilityAdapter,
+  nativeCapabilityContract,
+  resolveNativeCapabilityAdapters,
+} from "@/contracts/native";
+export type {
+  NativeCapabilityAdapter,
+  NativeCapabilityContract,
+  NativeConfigurationField,
+  NativeOperationContract,
+  NativeOperationMode,
+  NativeTypeContract,
+  ResolvedNativeCapability,
+} from "@/contracts/native";
 export type ServerHostFactory = ProgramHostFactory;
 
 export type ServerPlatformAdapter = PlatformAdapter<ServerPlatform>;
 export type ServerPlatformAdapterOptions = Readonly<{
   developmentPort?: number;
+  developmentHost?: NodeHostOptions;
+  nativeCapabilities?: readonly NativeCapabilityAdapter[];
   webOrigin?: string;
 }>;
 
@@ -38,9 +48,11 @@ export function createServerPlatformAdapter(
   return {
     name: "server",
     async develop(input) {
+      const source = resolve(input.directory, "src");
       const vite = await createServer({
         appType: "custom",
         configFile: false,
+        plugins: [applicationAliasPlugin(source)],
         root: input.directory,
         resolve: {
           alias: kitAliases(),
@@ -77,7 +89,6 @@ export function createServerPlatformAdapter(
       let reload = Promise.resolve();
       let disposed = false;
       let revision = 0;
-      const source = resolve(input.directory, "src");
       const observedRevisions = new Map<string, string>();
       vite.watcher.on("change", (file) => {
         if (disposed || !inside(source, file)) return;
@@ -148,6 +159,7 @@ export function createServerPlatformAdapter(
       for (const program of programs) {
         const path = resolve(input.output, programArtifactName(program.name));
         const result = await buildNativeServerProgram({
+          adapters: options.nativeCapabilities,
           application: input.ir.application.name,
           directory: input.directory,
           output: path,
@@ -181,9 +193,11 @@ async function startDevelopmentProgram(
     program,
     async ({ program: name, manifest }) =>
       createNodeHost({
+        ...options.developmentHost,
         appName,
         capabilities: collectExternalCapabilityNames(manifest),
         directory,
+        host: options.developmentHost?.host,
         port: serverPort(name, names, options.developmentPort),
         webOrigin: options.webOrigin,
       }),
@@ -389,7 +403,6 @@ function kitAliases() {
   const source = resolve(import.meta.dirname, "../..");
   const extension = import.meta.filename.endsWith(".ts") ? ".ts" : ".js";
   return [
-    { find: /^@\/(.*)$/, replacement: `${source}/$1` },
     {
       find: /^@poggers\/kit\/jsx-dev-runtime$/,
       replacement: resolve(source, `core/jsx/development${extension}`),
@@ -406,6 +419,24 @@ function kitAliases() {
       find: /^@poggers\/kit\/server$/,
       replacement: resolve(source, `adapters/server/platform${extension}`),
     },
+    {
+      find: /^@poggers\/kit\/web$/,
+      replacement: resolve(source, `adapters/web/platform${extension}`),
+    },
     { find: /^@poggers\/kit$/, replacement: resolve(source, `index${extension}`) },
   ];
+}
+
+function applicationAliasPlugin(source: string): Plugin {
+  const kit = resolve(import.meta.dirname, "../..");
+  return {
+    name: "poggers-application-alias",
+    enforce: "pre",
+    resolveId(id, importer) {
+      if (!id.startsWith("@/")) return;
+      const owner = importer?.split("?", 1)[0] ?? "";
+      const root = inside(source, owner) || !inside(kit, owner) ? source : kit;
+      return this.resolve(resolve(root, id.slice(2)), importer, { skipSelf: true });
+    },
+  };
 }

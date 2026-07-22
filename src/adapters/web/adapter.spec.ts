@@ -152,6 +152,7 @@ function programIR(environment: string): ProgramIR {
             id: "start",
             name: "start",
             asynchronous: false,
+            captures: [],
             parameters: [],
             result: { kind: "primitive", name: "void" },
             body: [],

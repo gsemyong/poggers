@@ -1,25 +1,29 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { access, chmod, copyFile, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { dirname, resolve } from "node:path";
-
-import { generateEntityDomain, generateIdentityDomain } from "@/adapters/server/native/domain";
 import {
-  linkProgram,
-  type CapabilityIR,
-  type EntityFeatureImplementationIR,
-  type IdentityFeatureImplementationIR,
-  type ProgramIR,
-  type TypeIR,
-} from "@/core/compiler/ir";
-import { generateRustProductionProgram } from "@/core/compiler/rust";
+  access,
+  chmod,
+  copyFile,
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
+import { homedir } from "node:os";
+import { dirname, relative, resolve } from "node:path";
 
-const NATIVE_ADAPTER_VERSION = 2;
-const nativeRuntime = resolve(import.meta.dirname, "native");
-const SERVER_RUNTIME_MANIFEST = readFileSync(resolve(nativeRuntime, "Cargo.toml"), "utf8");
-const SERVER_RUNTIME_SOURCE = readFileSync(resolve(nativeRuntime, "src/lib.rs"), "utf8");
+import { nativeServerCapabilities } from "@/adapters/server/native/capabilities";
+import { generateNativeProgram } from "@/adapters/server/native/program";
+import {
+  resolveNativeCapabilityAdapters,
+  type NativeCapabilityAdapter,
+  type ResolvedNativeCapability,
+} from "@/contracts/native";
+import { linkProgram, type LinkedProgramIR, type ProgramIR } from "@/core/compiler/ir";
+
+const NATIVE_ADAPTER_VERSION = 5;
 
 export type NativeServerBuild = Readonly<{
   executable: string;
@@ -33,6 +37,7 @@ export type NativeServerBuild = Readonly<{
 /** Builds one linked server Program as a standalone Rust executable. */
 export async function buildNativeServerProgram(input: {
   application: string;
+  adapters?: readonly NativeCapabilityAdapter[];
   cache?: string;
   directory: string;
   /** Runs strict Clippy verification in addition to the production build. */
@@ -42,26 +47,21 @@ export async function buildNativeServerProgram(input: {
 }): Promise<NativeServerBuild> {
   const started = performance.now();
   const linked = linkProgram(input.program);
-  const unknown = linked.external
-    .map(({ name }) => name)
-    .filter((name) => !Object.hasOwn(HOST_CONTRACTS, name));
-  if (unknown.length) {
-    throw new Error(
-      `Server native adapter does not implement external Capabilities: ${unknown.join(", ")}.`,
-    );
-  }
-  linked.external.forEach(validateHostCapability);
-  const only =
-    linked.contributions.length === 1 ? linked.contributions[0]!.contribution : undefined;
-  const generated = linked.contributions.every(
-    ({ contribution }) => contribution.implementation.kind === "none",
-  )
-    ? generateEmptyWorkspace(input.program.name)
-    : only?.implementation.kind === "portable" &&
-        only.provides.length === 0 &&
-        linked.external.length === 0
-      ? generatePortableWorkspace(only)
-      : generateFeatureWorkspace(input.application, input.program.name, linked.contributions);
+  assertNativeProgram(linked);
+  const overrides = new Set(
+    (input.adapters ?? []).map(({ contract, platform }) => `${platform}\0${contract.name}`),
+  );
+  const adapters = resolveNativeCapabilityAdapters({
+    platform: input.program.environment.platform,
+    capabilities: linked.external,
+    adapters: [
+      ...nativeServerCapabilities.filter(
+        ({ contract, platform }) => !overrides.has(`${platform}\0${contract.name}`),
+      ),
+      ...(input.adapters ?? []),
+    ],
+  });
+  const generated = await generateNativeWorkspace(linked, adapters);
   const toolchain = await rustToolchain();
   const semanticHash = digest(
     JSON.stringify({
@@ -77,15 +77,10 @@ export async function buildNativeServerProgram(input: {
   const project = digest(
     JSON.stringify({
       application: input.application,
-      program: input.program.name,
-      contributions: linked.contributions.map(({ contribution }) => ({
-        feature: contribution.feature,
-        requires: contribution.requires,
-        provides: contribution.provides,
-        implementation:
-          contribution.implementation.kind === "portable-feature"
-            ? stripFeatureFunctions(contribution.implementation.feature)
-            : contribution.implementation.kind,
+      program: semanticProgram(linked),
+      adapters: adapters.map(({ adapter }) => ({
+        name: adapter.name,
+        package: adapter.crate.package,
       })),
     }),
   ).slice(0, 16);
@@ -95,16 +90,8 @@ export async function buildNativeServerProgram(input: {
   await mkdir(dirname(input.output), { recursive: true });
   const artifactCached = await exists(cached);
   if (artifactCached && (!input.lint || (await exists(lintedMarker)))) {
-    await copyFile(cached, input.output);
-    await chmod(input.output, 0o755);
-    return {
-      executable: input.output,
-      semanticHash,
-      cache: "hit",
-      workspace,
-      compiledCrates: [],
-      durationMs: Math.round(performance.now() - started),
-    };
+    await copyExecutable(cached, input.output);
+    return result("hit", [], started, input.output, semanticHash, workspace);
   }
 
   for (const file of generated.files) {
@@ -125,10 +112,7 @@ export async function buildNativeServerProgram(input: {
       throw new Error(`Generated native server formatting failed:\n${format.stderr}`);
     }
   }
-  const environment = {
-    ...process.env,
-    CARGO_INCREMENTAL: process.env.CARGO_INCREMENTAL ?? "1",
-  };
+  const environment = { ...process.env, CARGO_INCREMENTAL: process.env.CARGO_INCREMENTAL ?? "1" };
   if (input.lint) {
     const lintArguments = ["clippy", "--release", "--message-format=json"];
     if (!dependencyGraphChanged && (await exists(resolve(workspace, "Cargo.lock")))) {
@@ -143,16 +127,8 @@ export async function buildNativeServerProgram(input: {
     await writeFile(lintedMarker, "");
   }
   if (artifactCached) {
-    await copyFile(cached, input.output);
-    await chmod(input.output, 0o755);
-    return {
-      executable: input.output,
-      semanticHash,
-      cache: "hit",
-      workspace,
-      compiledCrates: [],
-      durationMs: Math.round(performance.now() - started),
-    };
+    await copyExecutable(cached, input.output);
+    return result("hit", [], started, input.output, semanticHash, workspace);
   }
   const buildArguments = ["build", "--release", "--message-format=json"];
   if (!dependencyGraphChanged && (await exists(resolve(workspace, "Cargo.lock")))) {
@@ -173,40 +149,34 @@ export async function buildNativeServerProgram(input: {
     await rm(temporary, { force: true });
     if (!(await exists(cached))) throw error;
   });
-  await copyFile(cached, input.output);
-  await chmod(input.output, 0o755);
-  return {
-    executable: input.output,
+  await copyExecutable(cached, input.output);
+  return result(
+    "miss",
+    compiledCrates([built.stdout], generated.packages),
+    started,
+    input.output,
     semanticHash,
-    cache: "miss",
     workspace,
-    compiledCrates: compiledCrates([built.stdout], generated.packages),
-    durationMs: Math.round(performance.now() - started),
-  };
+  );
 }
 
-function stripFeatureFunctions(
-  feature: IdentityFeatureImplementationIR | EntityFeatureImplementationIR,
-): object {
-  return feature.kind === "identity"
-    ? { kind: feature.kind, name: feature.name, principal: feature.principal }
-    : {
-        kind: feature.kind,
-        name: feature.name,
-        principal: feature.principal,
-        value: feature.value,
-        createInput: feature.createInput,
-        updateInput: feature.updateInput,
-        filter: feature.filter,
-      };
+function assertNativeProgram(linked: LinkedProgramIR): void {
+  for (const { contribution } of linked.contributions) {
+    if (contribution.implementation.kind !== "source") continue;
+    const { span } = contribution.implementation;
+    throw new Error(
+      `${span.file}:${span.line}:${span.column}: Program contribution ` +
+        `${JSON.stringify(contribution.id)} is source, not native-realizable product meaning.`,
+    );
+  }
 }
 
 let rustToolchainResult: Promise<string> | undefined;
 
 function rustToolchain(): Promise<string> {
-  rustToolchainResult ??= command("rustc", ["-vV"], process.cwd()).then((result) => {
-    if (result.code !== 0) throw new Error(`Cannot inspect Rust toolchain:\n${result.stderr}`);
-    return result.stdout.trim();
+  rustToolchainResult ??= command("rustc", ["-vV"], process.cwd()).then((value) => {
+    if (value.code !== 0) throw new Error(`Cannot inspect Rust toolchain:\n${value.stderr}`);
+    return value.stdout.trim();
   });
   return rustToolchainResult;
 }
@@ -218,174 +188,222 @@ type NativeWorkspace = Readonly<{
   packages: readonly string[];
 }>;
 
-function generateEmptyWorkspace(program: string): NativeWorkspace {
-  const binary = packageName(program);
-  return {
-    binary,
-    packages: [binary],
-    files: [
-      {
-        path: "Cargo.toml",
-        source: `[package]\nname = ${JSON.stringify(binary)}\nversion = "0.0.0"\nedition = "2024"\n`,
-      },
-      { path: "src/main.rs", source: "fn main() {}\n" },
-    ],
-  };
-}
-
-function generatePortableWorkspace(
-  contribution: Extract<ProgramIR["contributions"][number], { implementation: unknown }>,
-): NativeWorkspace {
-  if (contribution.implementation.kind !== "portable") {
-    throw new Error("Expected a portable Program contribution.");
-  }
-  const generated = generateRustProductionProgram(contribution);
-  return {
-    binary: generated.name,
-    packages: [generated.name],
-    files: [
-      { path: "Cargo.toml", source: generated.manifest },
-      { path: "src/main.rs", source: generated.source },
-    ],
-  };
-}
-
-function generateFeatureWorkspace(
-  application: string,
-  program: string,
-  contributions: ReturnType<typeof linkProgram>["contributions"],
-): NativeWorkspace {
-  const features = contributions.map(({ contribution }) => {
-    if (contribution.implementation.kind !== "portable-feature") {
-      throw new Error(
-        `Program ${JSON.stringify(program)} contribution ${JSON.stringify(contribution.feature)} ` +
-          `is ${contribution.implementation.kind}, not native-realizable Feature meaning.`,
-      );
-    }
-    return { address: contribution.feature, feature: contribution.implementation.feature };
-  });
-  const identities = features.filter(
-    (value): value is Readonly<{ address: string; feature: IdentityFeatureImplementationIR }> =>
-      value.feature.kind === "identity",
+async function generateNativeWorkspace(
+  linked: LinkedProgramIR,
+  capabilities: readonly ResolvedNativeCapability[],
+): Promise<NativeWorkspace> {
+  duplicate(
+    capabilities.map(({ adapter }) => adapter.crate.package),
+    "native Cargo package",
   );
-  const entities = features.filter(
-    (value): value is Readonly<{ address: string; feature: EntityFeatureImplementationIR }> =>
-      value.feature.kind === "entity",
-  );
-  if (identities.length !== 1) {
-    throw new Error(
-      `Server native adapter requires exactly one identity Feature; received ${identities.length}.`,
+  const binary = packageName(linked.program.name);
+  const runtimeDirectory = resolve(import.meta.dirname, "native/runtime");
+  const files: NativeFile[] = [
+    ...(await crateFiles(runtimeDirectory, "crates/runtime")),
+    {
+      path: "Cargo.toml",
+      source: nativeManifest(binary, capabilities),
+    },
+    {
+      path: "src/main.rs",
+      source: nativeMain(capabilities),
+    },
+    {
+      path: "src/program.rs",
+      source: generateNativeProgram(linked),
+    },
+  ];
+  for (const { adapter } of capabilities) {
+    files.push(
+      ...(await crateFiles(
+        adapter.crate.directory,
+        `crates/capabilities/${fileName(adapter.crate.package)}`,
+      )),
     );
   }
-  if (!entities.length) {
-    throw new Error("Server native adapter requires at least one entity Feature.");
+  return {
+    binary,
+    files,
+    packages: [
+      binary,
+      "poggers-native-runtime",
+      ...capabilities.map(({ adapter }) => adapter.crate.package),
+    ],
+  };
+}
+
+function semanticProgram(linked: LinkedProgramIR): unknown {
+  return stripSourceSpans({
+    ...linked.program,
+    contributions: linked.contributions.map(({ contribution }) => contribution),
+  });
+}
+
+function stripSourceSpans(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stripSourceSpans);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([name]) => name !== "span")
+      .map(([name, child]) => [name, stripSourceSpans(child)]),
+  );
+}
+
+async function crateFiles(directory: string, destination: string): Promise<NativeFile[]> {
+  const files: NativeFile[] = [];
+  const visit = async (current: string): Promise<void> => {
+    for (const entry of await readdir(current, { withFileTypes: true })) {
+      if ([".git", "target"].includes(entry.name) || entry.name === "Cargo.lock") continue;
+      const path = resolve(current, entry.name);
+      if (entry.isDirectory()) await visit(path);
+      else if (entry.isFile()) {
+        files.push({
+          path: `${destination}/${relative(directory, path).replaceAll("\\", "/")}`,
+          source: await readFile(path, "utf8"),
+        });
+      } else {
+        throw new Error(`Native crate ${JSON.stringify(path)} contains an unsupported entry.`);
+      }
+    }
+  };
+  await visit(directory);
+  if (!files.some(({ path }) => path === `${destination}/Cargo.toml`)) {
+    throw new Error(`Native crate ${JSON.stringify(directory)} has no Cargo.toml.`);
   }
+  return files.sort((left, right) => left.path.localeCompare(right.path));
+}
 
-  const identity = featureCrate(identities[0]!.address);
-  const entityCrates = entities.map(({ address, feature }) => ({
-    ...featureCrate(address),
-    feature,
-  }));
-  const binary = packageName(program);
-  const members = [
-    "runtime",
-    identity.path,
-    ...entityCrates.map(({ path }) => path),
-    `programs/${fileName(program)}`,
-  ];
-  const featureManifest = (name: string) => `[package]
-name = ${JSON.stringify(name)}
-version = "0.0.0"
-edition = "2024"
-
-[dependencies]
-serde_json = "1.0.145"
-`;
-  const dependencies = [identity, ...entityCrates]
-    .map(({ name, path }) => `${name} = { path = ${JSON.stringify(`../../${path}`)} }`)
+function nativeManifest(binary: string, capabilities: readonly ResolvedNativeCapability[]): string {
+  const dependencies = capabilities
+    .map(
+      ({ adapter }) =>
+        `${adapter.crate.package} = { path = ${JSON.stringify(
+          `crates/capabilities/${fileName(adapter.crate.package)}`,
+        )} }`,
+    )
     .join("\n");
-  const programManifest = `[package]
+  return `[package]
 name = ${JSON.stringify(binary)}
 version = "0.0.0"
 edition = "2024"
 
 [dependencies]
-poggers_server_runtime = { path = "../../runtime" }
-tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread"] }
-${dependencies}
-`;
-  const entitySpecs = entityCrates
-    .map(
-      ({ name, feature }) => `        EntitySpec {
-            name: ${JSON.stringify(feature.name)},
-            create: ${name}::create,
-            update: ${name}::update,
-            authorize: ${name}::authorize,
-            matches: ${feature.matches ? `Some(${name}::matches)` : "None"},
-        },`,
-    )
-    .join("\n");
-  const main = `use poggers_server_runtime::{EntitySpec, IdentitySpec};
+poggers-native-runtime = { path = "crates/runtime" }
+serde_json = "1.0.145"
+tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread", "signal"] }
+${dependencies}${dependencies ? "\n" : ""}`;
+}
+
+function nativeMain(capabilities: readonly ResolvedNativeCapability[]): string {
+  const wiring = capabilities
+    .map(({ capability, adapter }, index) => {
+      const configuration = adapter.configuration
+        .map((field) => {
+          const value = field.required
+            ? `std::env::var(${rustString(field.environment)}).map_err(|_| NativeError::new(\
+                "MissingConfiguration", ${rustString(`Missing ${field.environment}.`)}))?`
+            : field.default === undefined
+              ? `std::env::var(${rustString(field.environment)}).unwrap_or_default()`
+              : `std::env::var(${rustString(field.environment)})\
+                  .unwrap_or_else(|_| ${rustString(field.default)}.to_owned())`;
+          return `(${rustString(field.name)}.to_owned(), ${value}),`;
+        })
+        .join("\n    ");
+      const dependencies = (adapter.requires ?? [])
+        .map(
+          (name) =>
+            `(${rustString(name)}.to_owned(), adapters.get(${rustString(
+              name,
+            )}).cloned().ok_or_else(|| NativeError::new("MissingCapability", ${rustString(
+              `Missing native adapter dependency ${name}.`,
+            )}))?),`,
+        )
+        .join("\n    ");
+      return `let configuration = BTreeMap::from([
+        ${configuration}
+    ]);
+    let dependencies = BTreeMap::from([
+        ${dependencies}
+    ]);
+    let implementation: ${adapter.rust.type} = ${adapter.rust.constructor}(CapabilityContext {
+        name: ${rustString(capability.name)}.to_owned(),
+        configuration,
+        dependencies,
+    }).await?;
+    let capability_${index}: Arc<dyn Capability> = Arc::new(implementation);
+    engine.register(${rustString(capability.name)}, capability_${index}.clone())?;
+    adapters.insert(${rustString(capability.name)}.to_owned(), capability_${index});`;
+    })
+    .join("\n\n    ");
+  return `use std::{collections::BTreeMap, sync::Arc};
+
+use poggers_native_runtime::{
+    Capability, CapabilityContext, Engine, NativeError, NativeResult,
+};
+
+mod program;
 
 #[tokio::main]
 async fn main() {
-    let identity = IdentitySpec {
-        name: ${JSON.stringify(identities[0]!.feature.name)},
-        project: ${identity.name}::project,
-    };
-    let entities = [
-${entitySpecs}
-    ];
-    poggers_server_runtime::serve(
-        ${JSON.stringify(application)},
-        ${JSON.stringify(program)},
-        identity,
-        &entities,
-    )
-    .await;
+    if let Err(error) = run().await {
+        eprintln!("{error}");
+        std::process::exit(1);
+    }
+}
+
+async fn run() -> NativeResult<()> {
+    let engine = Engine::new();
+    let mut adapters: BTreeMap<String, Arc<dyn Capability>> = BTreeMap::new();
+    ${wiring}
+
+    if let Err(error) = program::start(engine.clone()).await {
+        let _ = engine.shutdown().await;
+        return Err(error);
+    }
+    if engine.has_live_resources() {
+        tokio::signal::ctrl_c()
+            .await
+            .map_err(|error| NativeError::new("SignalFailure", error.to_string()))?;
+    }
+    engine.shutdown().await
 }
 `;
+}
+
+function rustString(value: string): string {
+  return JSON.stringify(value)
+    .replaceAll("\\u2028", "\\u{2028}")
+    .replaceAll("\\u2029", "\\u{2029}");
+}
+
+function result(
+  cache: NativeServerBuild["cache"],
+  compiled: readonly string[],
+  started: number,
+  executable: string,
+  semanticHash: string,
+  workspace: string,
+): NativeServerBuild {
   return {
-    binary,
-    packages: [
-      "poggers_server_runtime",
-      identity.name,
-      ...entityCrates.map(({ name }) => name),
-      binary,
-    ],
-    files: [
-      {
-        path: "Cargo.toml",
-        source: `[workspace]\nresolver = "3"\nmembers = ${JSON.stringify(members)}\n`,
-      },
-      { path: "runtime/Cargo.toml", source: SERVER_RUNTIME_MANIFEST },
-      { path: "runtime/src/lib.rs", source: SERVER_RUNTIME_SOURCE },
-      { path: `${identity.path}/Cargo.toml`, source: featureManifest(identity.name) },
-      {
-        path: `${identity.path}/src/lib.rs`,
-        source: generateIdentityDomain(identities[0]!.feature),
-      },
-      ...entityCrates.flatMap(({ name, path, feature }) => [
-        { path: `${path}/Cargo.toml`, source: featureManifest(name) },
-        { path: `${path}/src/lib.rs`, source: generateEntityDomain(feature) },
-      ]),
-      { path: `programs/${fileName(program)}/Cargo.toml`, source: programManifest },
-      { path: `programs/${fileName(program)}/src/main.rs`, source: main },
-    ],
+    executable,
+    semanticHash,
+    cache,
+    workspace,
+    compiledCrates: compiled,
+    durationMs: Math.round(performance.now() - started),
   };
 }
 
-function featureCrate(address: string): Readonly<{ name: string; path: string }> {
-  const suffix = digest(address).slice(0, 8);
-  const name = `poggers_feature_${rustName(address)}_${suffix}`;
-  return { name, path: `features/${fileName(address)}-${suffix}` };
+async function copyExecutable(source: string, output: string): Promise<void> {
+  await copyFile(source, output);
+  await chmod(output, 0o755);
 }
 
 function compiledCrates(
   outputs: readonly string[],
   packages: readonly string[],
 ): readonly string[] {
-  const expected = new Set(packages);
+  const expected = new Set(packages.map((name) => name.replaceAll("-", "_")));
   const compiled = new Set<string>();
   for (const line of outputs.flatMap((output) => output.split("\n"))) {
     try {
@@ -410,22 +428,22 @@ function compiledCrates(
   return [...compiled].sort();
 }
 
-function cargoErrors(result: Readonly<{ stdout: string; stderr: string }>): string {
+function cargoErrors(value: Readonly<{ stdout: string; stderr: string }>): string {
   const rendered: string[] = [];
-  for (const line of result.stdout.split("\n")) {
+  for (const line of value.stdout.split("\n")) {
     try {
-      const value = JSON.parse(line) as {
+      const message = JSON.parse(line) as {
         reason?: string;
         message?: { rendered?: string };
       };
-      if (value.reason === "compiler-message" && value.message?.rendered) {
-        rendered.push(value.message.rendered);
+      if (message.reason === "compiler-message" && message.message?.rendered) {
+        rendered.push(message.message.rendered);
       }
     } catch {
       // Preserve Cargo's stderr below when a line is not JSON.
     }
   }
-  return rendered.join("\n") || result.stderr || result.stdout;
+  return rendered.join("\n") || value.stderr || value.stdout;
 }
 
 function packageName(program: string): string {
@@ -446,166 +464,12 @@ function rustName(value: string): string {
   return /^[0-9]/.test(name) ? `value_${name}` : name;
 }
 
-type TypePattern =
-  | "any"
-  | TypeIR["kind"]
-  | Readonly<{ kind: "primitive" | "opaque"; name: string }>
-  | Readonly<{ kind: "array" | "stream"; element: TypePattern }>
-  | Readonly<{ kind: "option" | "promise"; value: TypePattern }>
-  | Readonly<{
-      kind: "function";
-      parameters: readonly TypePattern[];
-      result: TypePattern;
-    }>
-  | Readonly<{
-      kind: "record";
-      fields: Readonly<Record<string, TypePattern | readonly [TypePattern, "optional"]>>;
-    }>;
-
-const stringType = { kind: "primitive", name: "string" } as const;
-const numberType = { kind: "primitive", name: "number" } as const;
-const requestType = { kind: "opaque", name: "Request" } as const;
-const responseType = { kind: "opaque", name: "Response" } as const;
-const routeHandler = {
-  kind: "function",
-  parameters: [requestType],
-  result: { kind: "promise", value: responseType },
-} as const;
-const streamInput = {
-  kind: "record",
-  fields: { after: [numberType, "optional"], stream: stringType },
-} as const;
-const storedEvent = {
-  kind: "record",
-  fields: { event: "any", revision: numberType, stream: stringType },
-} as const;
-const storedEvents = { kind: "array", element: storedEvent } as const;
-const HOST_CONTRACTS: Readonly<Record<string, TypePattern>> = {
-  authentication: {
-    kind: "record",
-    fields: {
-      authenticate: {
-        kind: "function",
-        parameters: [{ kind: "record", fields: { cookie: [stringType, "optional"] } }],
-        result: {
-          kind: "promise",
-          value: {
-            kind: "option",
-            value: {
-              kind: "record",
-              fields: { email: stringType, id: stringType, name: stringType },
-            },
-          },
-        },
-      },
-      handle: {
-        kind: "function",
-        parameters: [{ kind: "record", fields: { path: stringType, request: requestType } }],
-        result: { kind: "promise", value: responseType },
-      },
-    },
-  },
-  clock: {
-    kind: "record",
-    fields: { now: { kind: "function", parameters: [], result: numberType } },
-  },
-  events: {
-    kind: "record",
-    fields: {
-      append: {
-        kind: "function",
-        parameters: [
-          {
-            kind: "record",
-            fields: {
-              events: { kind: "array", element: "any" },
-              expectedRevision: numberType,
-              stream: stringType,
-            },
-          },
-        ],
-        result: { kind: "promise", value: { kind: "option", value: storedEvents } },
-      },
-      read: {
-        kind: "function",
-        parameters: [streamInput],
-        result: { kind: "promise", value: storedEvents },
-      },
-      subscribe: {
-        kind: "function",
-        parameters: [streamInput],
-        result: { kind: "stream", element: storedEvent },
-      },
-    },
-  },
-  http: {
-    kind: "record",
-    fields: {
-      route: {
-        kind: "function",
-        parameters: [{ kind: "record", fields: { handle: routeHandler, path: stringType } }],
-        result: { kind: "opaque", name: "Disposable" },
-      },
-    },
-  },
-  identifiers: {
-    kind: "record",
-    fields: { create: { kind: "function", parameters: [], result: stringType } },
-  },
-};
-
-function validateHostCapability(capability: CapabilityIR): void {
-  const pattern = HOST_CONTRACTS[capability.name];
-  if (!pattern || matchesPattern(capability.type, pattern)) return;
-  throw new Error(
-    `Server native adapter cannot bind Capability ${JSON.stringify(capability.name)} because its ` +
-      "contract is incompatible with the adapter implementation.",
-  );
-}
-
-function matchesPattern(type: TypeIR, pattern: TypePattern): boolean {
-  if (pattern === "any") return true;
-  if (typeof pattern === "string") return type.kind === pattern;
-  if (type.kind !== pattern.kind) return false;
-  if (pattern.kind === "primitive" || pattern.kind === "opaque") {
-    return type.kind === pattern.kind && type.name === pattern.name;
+function duplicate(values: readonly string[], label: string): void {
+  const seen = new Set<string>();
+  for (const value of values) {
+    if (seen.has(value)) throw new Error(`${label} ${JSON.stringify(value)} is duplicated.`);
+    seen.add(value);
   }
-  if (pattern.kind === "array" || pattern.kind === "stream") {
-    return (
-      (type.kind === "array" || type.kind === "stream") &&
-      matchesPattern(type.element, pattern.element)
-    );
-  }
-  if (pattern.kind === "option" || pattern.kind === "promise") {
-    return (
-      (type.kind === "option" || type.kind === "promise") &&
-      matchesPattern(type.value, pattern.value)
-    );
-  }
-  if (pattern.kind === "function") {
-    return (
-      type.kind === "function" &&
-      type.parameters.length === pattern.parameters.length &&
-      type.parameters.every(
-        (parameter, index) =>
-          !parameter.optional && matchesPattern(parameter.type, pattern.parameters[index]!),
-      ) &&
-      matchesPattern(type.result, pattern.result)
-    );
-  }
-  if (pattern.kind === "record") {
-    if (type.kind !== "record") return false;
-    const expected = Object.entries(pattern.fields);
-    if (type.fields.length !== expected.length) return false;
-    return expected.every(([name, fieldPattern]) => {
-      const field = type.fields.find((value) => value.name === name);
-      if (!field) return false;
-      const optional = Array.isArray(fieldPattern);
-      const valuePattern = optional ? fieldPattern[0] : fieldPattern;
-      return field.optional === optional && matchesPattern(field.type, valuePattern as TypePattern);
-    });
-  }
-  return false;
 }
 
 function digest(value: string): string {
@@ -633,9 +497,7 @@ async function writeGeneratedFile(
   path: string,
   file: NativeFile,
 ): Promise<boolean> {
-  if (!file.path.endsWith(".rs")) {
-    return writeIfChanged(path, file.source);
-  }
+  if (!file.path.endsWith(".rs")) return writeIfChanged(path, file.source);
   const marker = resolve(workspace, ".poggers", `${digest(file.path)}.source`);
   const sourceHash = digest(file.source);
   if (
