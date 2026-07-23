@@ -6,15 +6,25 @@ Features; adapters realize its Programs for development and production.
 
 ## Create A Workspace
 
+Install [Mise](https://mise.jdx.dev/) once, then run the packaged CLI directly
+from a GitHub release:
+
 ```sh
-kit create my-app --package <private-package-location>
-cd my-app
+mise use -g github:nubjs/nub@0.4.13
+version=0.1.0
+package="https://github.com/gsemyong/poggers/releases/download/v${version}/duction-kit-${version}.tgz"
+nubx -y -p "$package" kit create my-system --package "$package"
+cd my-system
 mise install
-nub install
 nub run dev
 ```
 
-It creates the canonical System workspace:
+`nubx` is Nub's equivalent of `npx`: it downloads the requested package,
+executes its `kit` binary, and caches it. `kit create` also installs the new
+workspace. Passing the same immutable package URL to `--package` pins the
+generated System to the framework release that created it.
+
+The command creates the canonical System workspace:
 
 ```text
 src/

@@ -3,6 +3,10 @@
   "version": "0.0.0",
   "private": true,
   "description": "A portable TypeScript product language for programs, dependencies, and user interfaces.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gsemyong/poggers.git"
+  },
   "bin": {
     "kit": "./dist/src/cli.js"
   },
@@ -96,15 +100,15 @@
     "@typescript/typescript6": "^6.0.2",
     "alien-signals": "^3.2.1",
     "better-auth": "^1.6.24",
-    "vite": "^8.1.5"
+    "vite": "^8.1.5",
+    "vitest": "^4.1.10"
   },
   "devDependencies": {
     "@types/node": "^26.1.1",
     "fast-check": "^4.9.0",
     "oxfmt": "^0.60.0",
     "oxlint": "^1.75.0",
-    "typescript": "^7.0.2",
-    "vitest": "^4.1.10"
+    "typescript": "^7.0.2"
   },
   "engines": {
     "node": ">=26.0.0"
