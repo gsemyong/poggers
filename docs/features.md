@@ -7,7 +7,7 @@ Dependencies it provides or requires.
 ## Convention
 
 Reusable factories live in `src/features/<name>.ts` until their implementation
-needs several files, then in `src/features/<name>/`. Application-specific
+needs several files, then in `src/features/<name>/`. App-specific
 Features follow the same convention in a workspace. Size changes layout, not
 meaning.
 

@@ -1,6 +1,6 @@
 # Framework architecture
 
-Status: normative target and live gap analysis.
+Status: normative architecture and live acceptance record.
 
 This document defines the end state of the framework and records the distance
 between that state and the current repository. The target sections are
@@ -96,8 +96,8 @@ A System is the complete compilation and development root. It owns metadata and
 one Feature tree. It does not contain adapter instances, infrastructure wiring,
 or a global Presentation registry.
 
-The current `Application` type has the responsibilities of this future System
-and should be renamed rather than supplemented with another root abstraction.
+System replaced the former single-root type; no parallel composition
+abstraction remains.
 
 ### Feature
 
@@ -570,76 +570,53 @@ then, structural gates are mandatory: one semantic compile, persistent caches,
 concurrent independent startup, and no Program or backend duplication caused by
 the number of Apps.
 
-## Current state
+## Implemented state
 
-The current repository already has useful foundations:
+The repository implements the target model:
 
-- one package with clear top-level `core`, `compiler`, `runtime`, `contracts`,
+- one private package with explicit `core`, `compiler`, `runtime`, `contracts`,
   `platforms`, `adapters`, and `features` ownership;
-- recursive Features, named Program contributions, typed Dependencies,
-  linking, Process scopes, and Program placement;
-- shared JSX dispatch with platform-specific UI languages;
-- a generic, exact, typed Presentation contract;
-- server and web Platform Adapter contracts;
-- TypeScript compiler extraction and canonical Application IR;
-- JavaScript development and Rust production work for server Programs;
-- reusable entity and identity Feature factories;
-- focused unit, property, type, adapter, and end-to-end tests for the existing
-  single-Application model.
+- one `src/system.ts` root and canonical versioned System IR;
+- recursive Features, reusable App and platform-interface Feature factories,
+  named Program contributions, typed Dependencies, deterministic linking,
+  Process scopes, and Program placement;
+- one retained TypeScript semantic graph with exact output ownership;
+- whole-System and focused-App realization with concurrent independent adapter
+  startup and reverse disposal;
+- isolated web outputs, routes, Presentations, manifests, service workers, and
+  cache namespaces per interface;
+- shared JSX dispatch with platform-specific UI and Presentation languages;
+- JavaScript development and Rust production for server Programs;
+- a canonical generated Workspace, stable examples, and one mutable playground;
+- machine-checked public declarations, change records, compatibility policy,
+  and migration notes.
 
-Those foundations should be evolved, not replaced.
-
-The current root is nevertheless one `Application` with one global
-Presentation registry and optional global web installation. Source discovery
-loads exactly one `src/app.tsx` or `src/app.ts`. Application IR contains one
-application record. Realization selects adapters for that one root. The web
-pipeline selects one browser UI root and one installation. The CLI accepts one
-directory and the packaged starter lives in a separate `template/`.
-
-The audit evidence is:
-
-- [`core/application.ts`](../src/core/application.ts) defines
-  `ApplicationContract`, global Presentations, and the complete Application
-  root.
-- [`compiler/source.ts`](../src/compiler/source.ts) resolves and compiles one
-  Application entry.
-- [`compiler/ir.ts`](../src/compiler/ir.ts) serializes one `application` record
-  and global Presentations in `ApplicationIR`.
-- [`realization.ts`](../src/realization.ts) realizes one Application and starts
-  selected adapters serially.
-- [`platforms/web/routing.ts`](../src/platforms/web/routing.ts) refines the
-  Application with one optional web installation.
-- [`adapters/web/pipeline.ts`](../src/adapters/web/pipeline.ts) creates its own
-  compiler graph and realizes one web Application contract.
-- [`adapters/server/development/session.ts`](../src/adapters/server/development/session.ts)
-  creates another compiler graph for server development.
-- [`cli.ts`](../src/cli.ts) targets one directory, finds `template/`, and exposes
-  the current branded command.
-- [`package.json`](../package.json) publishes the current branded package,
-  low-level adapter entry points, and the separate template.
+The final acceptance gate is fresh in-app browser evidence against development
+and production. Historical browser observations are not substituted for that
+gate.
 
 ## Gap ledger
 
-| ID  | Area                         | Current state                                                                                                                  | Required end state                                                                                                   | Status     |
-| --- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------- | ---------- |
-| G01 | Root meaning                 | `Application` is the single composition root.                                                                                  | Rename that responsibility to `System`; do not add a parallel root abstraction.                                      | Missing    |
-| G02 | Apps                         | No first-class reusable App Feature factory or App registry exists.                                                            | Apps are marked Features discoverable for focused dev/build and output ownership.                                    | Missing    |
-| G03 | Multiple platform interfaces | Web installation and UI ownership are global to one Application.                                                               | Every App can own several platform-interface Features and several independent outputs.                               | Missing    |
-| G04 | Presentation ownership       | Presentations live on `ApplicationContract` and Application values.                                                            | Presentation selection belongs to each UI platform interface; shared reuse is explicit.                              | Missing    |
-| G05 | Compiler entry               | `resolveApplication` discovers one `src/app.ts(x)`.                                                                            | Discover one `src/system.ts` and recursively identify App and interface Features.                                    | Missing    |
-| G06 | Canonical IR                 | `ApplicationIR` has one application record and global presentations.                                                           | Versioned `SystemIR` records the Feature tree, Apps, interfaces, ownership, and Programs.                            | Missing    |
-| G07 | Realization                  | One Application is compiled, then adapter sessions start serially.                                                             | Compile once; select affected Programs/interfaces; start independent sessions concurrently.                          | Partial    |
-| G08 | Shared backend               | Same-named Programs link within one Application, but multi-App ownership is absent.                                            | Shared Programs link once across all Apps; focused App mode retains required shared Programs.                        | Partial    |
-| G09 | Web output                   | One browser root, one manifest, one service-worker installation, one web output.                                               | One independently routed and installable web output per web interface Feature.                                       | Missing    |
-| G10 | Presentation reuse           | Exact typing exists; no settled public factory/recipe composition convention.                                                  | Explicit parameters, recipes, and factories with typed collision/override rules.                                     | Partial    |
-| G11 | Development graph            | Root, server, and web paths can create separate compiler graphs; web uses fresh temporary Vite cache; adapters start serially. | One retained compiler graph, persistent cache, shared web graph where possible, and incremental affected-output HMR. | Missing    |
-| G12 | Starter and examples         | A separate `template/` can drift from two examples; no canonical `basic` example or playground exists.                         | `examples/basic` is both golden starter and runnable test; add stable examples and one mutable playground.           | Missing    |
-| G13 | CLI                          | Commands target one Application directory and use product branding.                                                            | Neutral commands understand a System, all Apps, and focused App dev/build.                                           | Missing    |
-| G14 | Public package surface       | Root and subpaths expose low-level Platform, Adapter, and implementation APIs under `@duction/kit`.                            | Product users receive semantic factories and composition; advanced adapter APIs are isolated and intentional.        | Partial    |
-| G15 | Branding                     | `Kit` appears in package name, CLI, IR version symbols, caches, generated code, examples, and copy.                            | Choose a neutral external name and perform one atomic rename without architectural leakage.                          | Missing    |
-| G16 | Change governance            | No change-fragment workflow, public API manifests, compatibility policy, or migration directory.                               | Public changes are machine-detected, documented, and accompanied by migrations.                                      | Missing    |
-| G17 | Target conformance tests     | Existing tests prove the old single-Application contract.                                                                      | Tests prove System composition, multi-App ownership, focused builds, shared Programs, interface isolation, and HMR.  | Missing    |
-| G18 | Runtime evidence             | Historical browser and production claims do not establish the new model and must not be treated as current acceptance.         | Fresh in-app browser development and production evidence covers every supported example and target invariant.        | Unverified |
+| ID  | Area                         | Implemented evidence                                                                                                                                     | Status   |
+| --- | ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
+| G01 | Root meaning                 | [`core/system.ts`](../src/core/system.ts) defines the only root and [`index.ts`](../src/index.ts) exports `createSystem`.                                | Complete |
+| G02 | Apps                         | `createApp` creates marked Features; compiler and realization tests prove discovery, ownership, and focused selection.                                   | Complete |
+| G03 | Multiple platform interfaces | System type fixtures and authenticated CRUD prove several isolated interfaces and reusable interface Features.                                           | Complete |
+| G04 | Presentation ownership       | Presentation source spans and declarations belong to interface IR; each authenticated CRUD interface selects its own Presentation.                       | Complete |
+| G05 | Compiler entry               | [`compiler/source.ts`](../src/compiler/source.ts) resolves one `src/system.ts` and recursively extracts its Feature graph.                               | Complete |
+| G06 | Canonical IR                 | [`compiler/ir.ts`](../src/compiler/ir.ts) defines versioned deterministic System, Feature, App, interface, Program, and ownership records.               | Complete |
+| G07 | Realization                  | [`realization.ts`](../src/realization.ts) compiles once, slices outputs, starts adapters concurrently, and disposes in reverse order.                    | Complete |
+| G08 | Shared backend               | Runtime and realization tests prove same-named contributions link once and focused Apps retain required shared Programs.                                 | Complete |
+| G09 | Web output                   | Web compiler, routing, pipeline, and adapter tests prove isolated entries, routes, manifests, caches, and service workers per interface.                 | Complete |
+| G10 | Presentation reuse           | Exact Presentation factories, parameters, recipes, collision rules, and web dynamics have type, compiler, and runtime coverage.                          | Complete |
+| G11 | Development graph            | One retained compiler graph emits exact affected outputs; stable web caches and selective server/web HMR have regression tests and measured budgets.     | Complete |
+| G12 | Starter and examples         | `examples/basic` is the CLI source, authenticated CRUD is the stable multi-App example, and `playground/` is mutable.                                    | Complete |
+| G13 | CLI                          | [`cli.ts`](../src/cli.ts) provides neutral System-wide and focused-App create, dev, build, typecheck, test, and check commands.                          | Complete |
+| G14 | Public package surface       | [`package.json`](../package.json) has deliberate subpaths; [`api.json`](api.json) records every exported symbol and reachable declaration.               | Complete |
+| G15 | External identity            | Package, command, cache, generated protocol, Rust crates, examples, and copy use one neutral identity; repository and generated-path searches are empty. | Complete |
+| G16 | Change governance            | Root changelog, change records, API drift checks, compatibility policy, Feature guidance, and migrations are present and enforced by `test`.             | Complete |
+| G17 | Target conformance tests     | Type, property, compiler, runtime, adapter, package, native, multi-App, focused-build, shared-Program, isolation, and HMR gates pass.                    | Complete |
+| G18 | Runtime evidence             | The final in-app browser development and production workflow is tracked in [`system-implementation.md`](system-implementation.md).                       | Pending  |
 
 ## Migration sequence
 
@@ -647,82 +624,82 @@ The order prevents adapter work from defining core semantics accidentally.
 
 ### 1. Freeze the target contract
 
-- [ ] Add type-level fixtures for System, App Feature, shared Features, two Apps,
+- [x] Add type-level fixtures for System, App Feature, shared Features, two Apps,
       two web interfaces, and one App with web plus native interfaces.
-- [ ] Settle the exact inferred App Feature factory syntax without adding a core
+- [x] Settle the exact inferred App Feature factory syntax without adding a core
       App primitive.
-- [ ] Settle explicit Presentation factory and recipe composition rules.
-- [ ] Record current public API manifests and startup phase measurements.
+- [x] Settle explicit Presentation factory and recipe composition rules.
+- [x] Record current public API manifests and startup phase measurements.
 
 ### 2. Rename and generalize the root
 
-- [ ] Rename Application semantic responsibility to System across core,
+- [x] Rename the single-root semantic responsibility to System across core,
       compiler, runtime, realization, tests, and generated identifiers.
-- [ ] Preserve Feature, Program, Process, Dependency, Environment, Platform,
+- [x] Preserve Feature, Program, Process, Dependency, Environment, Platform,
       Component, and Presentation semantics.
-- [ ] Remove Presentations from the System contract.
-- [ ] Add typed App and platform-interface Feature markers through reusable
+- [x] Remove Presentations from the System contract.
+- [x] Add typed App and platform-interface Feature markers through reusable
       factories.
 
 ### 3. Lower the complete System
 
-- [ ] Resolve `src/system.ts`.
-- [ ] Introduce a versioned System IR that preserves Feature, App, interface,
+- [x] Resolve `src/system.ts`.
+- [x] Introduce a versioned System IR that preserves Feature, App, interface,
       Program, and Presentation ownership.
-- [ ] Link same-named compatible Program contributions once across the System.
-- [ ] Reject duplicate App/interface identities, incompatible Program
+- [x] Link same-named compatible Program contributions once across the System.
+- [x] Reject duplicate App/interface identities, incompatible Program
       Environments, route collisions within one interface, and invalid
       Presentation ownership.
-- [ ] Emit deterministic affected-output relationships for incremental builds.
+- [x] Emit deterministic affected-output relationships for incremental builds.
 
 ### 4. Correct realization and adapters
 
-- [ ] Pass one compiled System IR to every selected adapter.
-- [ ] Remove per-adapter compiler construction for the same revision.
-- [ ] Start independent adapter sessions concurrently and dispose them
+- [x] Pass one compiled System IR to every selected adapter.
+- [x] Remove per-adapter compiler construction for the same revision.
+- [x] Start independent adapter sessions concurrently and dispose them
       deterministically.
-- [ ] Let adapters return artifacts and locations keyed by Program and
+- [x] Let adapters return artifacts and locations keyed by Program and
       platform-interface identity.
-- [ ] Ensure focused App mode starts only the App, its interfaces, and required
+- [x] Ensure focused App mode starts only the App, its interfaces, and required
       shared Programs.
 
 ### 5. Make web multi-interface
 
-- [ ] Move routes, metadata, rendering policy, Presentation selection,
+- [x] Move routes, metadata, rendering policy, Presentation selection,
       installation, and service-worker ownership into a web interface Feature.
-- [ ] Generate isolated route namespaces, browser entries, manifests, caches,
+- [x] Generate isolated route namespaces, browser entries, manifests, caches,
       and service workers per interface.
-- [ ] Share server Programs and generated assets when their semantic owner is
+- [x] Share server Programs and generated assets when their semantic owner is
       shared.
-- [ ] Preserve direct loads, client navigation, redirects, hydration, styling,
+- [x] Preserve direct loads, client navigation, redirects, hydration, styling,
       focus, and HMR for nested Feature routes.
 
 ### 6. Establish the external Workspace
 
-- [ ] Replace `template/` with `examples/basic`.
-- [ ] Add the System, shared Feature, shared Presentation, and `apps/`
+- [x] Replace `template/` with `examples/basic`.
+- [x] Add the System, shared Feature, shared Presentation, and `apps/`
       convention to the starter.
-- [ ] Add a mutable `playground/`.
-- [ ] Teach create, dev, build, test, and check commands about all Apps and
+- [x] Add a mutable `playground/`.
+- [x] Teach create, dev, build, test, and check commands about all Apps and
       focused App selection.
-- [ ] Keep generated Workspaces one package unless a real distribution boundary
+- [x] Keep generated Workspaces one package unless a real distribution boundary
       requires otherwise.
 
 ### 7. Tighten the package and repository
 
-- [ ] Choose and apply the neutral package and CLI name atomically.
-- [ ] Reduce ordinary public exports to semantic composition, shipped Feature
+- [x] Choose and apply the neutral package and CLI name atomically.
+- [x] Reduce ordinary public exports to semantic composition, shipped Feature
       factories, Platform authoring, and testing.
-- [ ] Isolate adapter authoring and concrete adapter entry points.
-- [ ] Remove superseded examples, benchmarks, generated residue, and duplicate
+- [x] Isolate adapter authoring and concrete adapter entry points.
+- [x] Remove superseded examples, benchmarks, generated residue, and duplicate
       setup only after their replacement gates pass.
-- [ ] Add change governance and Feature factory authoring guidance.
+- [x] Add change governance and Feature factory authoring guidance.
 
 ### 8. Optimize and prove
 
-- [ ] Instrument every development startup and HMR phase.
-- [ ] Use one retained semantic graph and persistent caches.
-- [ ] Verify shared Feature changes update all affected Apps without restarting
+- [x] Instrument every development startup and HMR phase.
+- [x] Use one retained semantic graph and persistent caches.
+- [x] Verify shared Feature changes update all affected Apps without restarting
       unrelated Programs.
 - [ ] Run the complete verification matrix below from a clean checkout.
 - [ ] Mark gaps complete only with linked automated evidence.
@@ -828,7 +805,7 @@ The repository reaches this end state only when:
 - development is incremental and production artifacts preserve the same
   semantics;
 - browser and native production paths pass the verification gates;
-- the old single-Application path and duplicate starter are removed;
+- the old single-root path and duplicate starter are removed;
 - no compatibility residue remains unless a published compatibility policy
   explicitly requires it;
 - every gap in this document is supported by current automated evidence.

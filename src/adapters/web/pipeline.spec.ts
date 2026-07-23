@@ -44,7 +44,7 @@ describe("web development workspace", () => {
 
 describe("web Presentation dependency manifest", () => {
   it("preserves exact destinations and classifies independent Components", () => {
-    const manifest = collectPresentationDependencies(applicationIR(), "browser");
+    const manifest = collectPresentationDependencies(systemIR(), "browser");
 
     expect(manifest).toEqual({
       "@feature/dashboard/component/Animated": [
@@ -64,7 +64,7 @@ describe("web Presentation dependency manifest", () => {
   });
 
   it("keeps unresolved temporal use conservative instead of guessing static", () => {
-    const source = applicationIR();
+    const source = systemIR();
     const manifest = collectPresentationDependencies(
       {
         ...source,
@@ -272,18 +272,18 @@ describe("web asset manifest", () => {
   it("emits byte-identical web artifacts from identical product meaning", async () => {
     const directory = await mkdtemp(resolve(tmpdir(), "kit-web-determinism-"));
     try {
-      const application = resolve(import.meta.dirname, "fixtures/request-render");
-      const ir = compileSystem(resolve(application, "src/system.ts"), [webCompilerExtension]);
+      const workspace = resolve(import.meta.dirname, "fixtures/request-render");
+      const ir = compileSystem(resolve(workspace, "src/system.ts"), [webCompilerExtension]);
       const interfaceId = ir.interfaces.find(({ id }) => id === "interface/product.web")?.id;
       if (!interfaceId) throw new Error("The request-render fixture has no product web interface.");
       const first = await buildWebInterface({
-        directory: application,
+        directory: workspace,
         outdir: resolve(directory, "first"),
         interface: interfaceId,
         ir,
       });
       const second = await buildWebInterface({
-        directory: application,
+        directory: workspace,
         outdir: resolve(directory, "second"),
         interface: interfaceId,
         ir,
@@ -308,12 +308,12 @@ describe("web asset manifest", () => {
       await mkdir(resolve(variant, "src"), { recursive: true });
       const marker = "Rendered in the browser";
       const payload = `${marker}:${"x".repeat(160_000)}`;
-      const authored = await readFile(resolve(application, "src/product.tsx"), "utf8");
+      const authored = await readFile(resolve(workspace, "src/product.tsx"), "utf8");
       expect(authored).toContain(marker);
       await writeFile(resolve(variant, "src/product.tsx"), authored.replace(marker, payload));
       await writeFile(
         resolve(variant, "src/system.ts"),
-        await readFile(resolve(application, "src/system.ts"), "utf8"),
+        await readFile(resolve(workspace, "src/system.ts"), "utf8"),
       );
       await writeFile(
         resolve(variant, "tsconfig.json"),
@@ -508,7 +508,7 @@ async function initialRouteClosureBytes(directory: string, identity: string): Pr
   return sizes.reduce((total, size) => total + size, 0);
 }
 
-function applicationIR(): SystemIR {
+function systemIR(): SystemIR {
   const span = { file: "src/presentation.ts", line: 1, column: 1 } as const;
   return {
     version: SYSTEM_IR_VERSION,

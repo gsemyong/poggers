@@ -16,7 +16,7 @@ const routes: readonly WebRouteIR[] = [
 const interfaceId = "interface/app.web";
 
 describe("web installation planning", () => {
-  it("resolves one typed application declaration into a conventional manifest", () => {
+  it("resolves one typed installation declaration into a conventional manifest", () => {
     const plan = planWebInstallation(system(), interfaceId, routes);
     expect(plan).toMatchObject({
       name: "Tasks",

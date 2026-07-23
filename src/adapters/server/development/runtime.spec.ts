@@ -44,7 +44,7 @@ describe("server Platform runtime", () => {
 
   test("creates and owns one host scope for each Process instance", async () => {
     const calls: string[] = [];
-    const application: System<App> = {
+    const system: System<App> = {
       features: {
         provider: {
           programs: {
@@ -85,7 +85,7 @@ describe("server Platform runtime", () => {
       };
     };
 
-    const running = await startServerPrograms(application, programs(), createHost, "development");
+    const running = await startServerPrograms(system, programs(), createHost, "development");
 
     expect(running.locations).toEqual(["http://localhost:4242/"]);
     expect(calls).toEqual(["host.development", "provider.start", "consumer.start:shared:42"]);
@@ -104,7 +104,7 @@ describe("server Platform runtime", () => {
     let host = 0;
     const observed: number[] = [];
     const disposed: number[] = [];
-    const application: System<App> = {
+    const system: System<App> = {
       features: {
         provider: {
           programs: {
@@ -136,8 +136,8 @@ describe("server Platform runtime", () => {
       };
     };
 
-    const first = await startServerPrograms(application, programs(), createHost, "development");
-    const second = await startServerPrograms(application, programs(), createHost, "development");
+    const first = await startServerPrograms(system, programs(), createHost, "development");
+    const second = await startServerPrograms(system, programs(), createHost, "development");
 
     expect(observed).toEqual([1, 2]);
     await second[Symbol.asyncDispose]();

@@ -65,6 +65,7 @@ const boundaries: readonly Boundary[] = [
 
 const modules: readonly ModuleBoundary[] = [
   { file: "index.ts", imports: ["core", "features"] },
+  { file: "ui.ts", imports: ["core"] },
   { file: "realization.ts", imports: ["compiler", "contracts"] },
   {
     file: "testing.ts",

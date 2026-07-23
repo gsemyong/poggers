@@ -31,7 +31,7 @@ Feature factories have explicit lifecycle meaning; unsupported resource shapes a
 The profile excludes ambient globals, dynamic imports and property access, classes, prototypes,
 reflection, `eval`, generators, shared mutable module state, and unbounded JavaScript
 coercion. UI implementations are Platform-owned source and are not portable in this profile.
-Unsupported portable code is classified with a source-located diagnostic in Application IR;
+Unsupported portable code is classified with a source-located diagnostic in System IR;
 production generation rejects that classification and never falls back to executing application
 source. Invalid authority, contracts, or unresolved symbols remain immediate compile errors.
 

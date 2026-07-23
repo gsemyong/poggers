@@ -115,7 +115,7 @@ describe("server Platform adapter", () => {
     }
   });
 
-  test("restarts server Processes when application metadata changes", async () => {
+  test("restarts server Processes when System metadata changes", async () => {
     const fixture = await createFixture(metadataProgramSource("first"));
     const port = await availablePort();
     const revisions = revisionSource(fixture.system);
@@ -161,7 +161,7 @@ async function createSplitFixture() {
   const browser = resolve(sourceDirectory, "browser.ts");
   await mkdir(sourceDirectory, { recursive: true });
   await Promise.all([
-    writeFile(system, splitApplicationSource()),
+    writeFile(system, splitSystemSource()),
     writeFile(server, splitServerSource()),
     writeFile(browser, browserProgramSource("first")),
   ]);
@@ -236,7 +236,7 @@ export default createSystem({
 `;
 }
 
-function splitApplicationSource(): string {
+function splitSystemSource(): string {
   return `${types()}
 import { browser } from "./browser";
 import { server } from "./server";

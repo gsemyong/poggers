@@ -32,7 +32,7 @@ const contracts: Record<string, WebDocumentComponentContract> = {
     state: [],
     propCallbacks: [],
   },
-  "@feature/shell/component/Application": {
+  "@feature/shell/component/Root": {
     elements: { Root: "main", Title: "h1", List: "ul", Empty: "p", Input: "input" },
     state: [],
     propCallbacks: [],
@@ -464,7 +464,7 @@ Read [the reference](/reference).
     const start = vi.fn();
     const mount = vi.fn();
     const click = vi.fn();
-    const application = {
+    const system = {
       metadata: { name: "A <safe> title" },
       features: {
         shell: {
@@ -491,7 +491,7 @@ Read [the reference](/reference).
               actions: { click },
               start,
               components: {
-                Application: {
+                Root: {
                   mount,
                   view({ components: { Items }, elements, feature, features }: ViewContext) {
                     const { Root, Title, List, Empty, Input } = elements;
@@ -513,7 +513,7 @@ Read [the reference](/reference).
                   },
                 },
               },
-              root: "Application",
+              root: "Root",
             },
           },
         },
@@ -521,7 +521,7 @@ Read [the reference](/reference).
     };
 
     const first = await prepareWebDocument({
-      system: application,
+      system,
       interface: "shell",
       program: "browser",
       presentation: emptyPresentation,
@@ -529,7 +529,7 @@ Read [the reference](/reference).
       components: contracts,
     });
     const second = await prepareWebDocument({
-      system: application,
+      system,
       interface: "shell",
       program: "browser",
       presentation: emptyPresentation,
@@ -553,7 +553,7 @@ Read [the reference](/reference).
   });
 
   test("uses route metadata while preparing route documents", async () => {
-    const application = {
+    const system = {
       metadata: { name: "Fallback" },
       features: {
         shell: {
@@ -561,7 +561,7 @@ Read [the reference](/reference).
             browser: {
               state: {},
               components: {
-                Application: {
+                Root: {
                   view({ elements: { Root } }: ViewContext) {
                     return Root!({ children: "Hello" });
                   },
@@ -580,7 +580,7 @@ Read [the reference](/reference).
       },
     };
     const document = await prepareWebDocument({
-      system: application,
+      system,
       interface: "shell",
       program: "browser",
       presentation: emptyPresentation,
@@ -589,7 +589,7 @@ Read [the reference](/reference).
         contributions: [{ feature: "shell", requires: [], provides: [] }],
       },
       components: {
-        "@feature/shell/component/Application": {
+        "@feature/shell/component/Root": {
           elements: { Root: "main" },
           state: [],
           propCallbacks: [],
@@ -679,20 +679,20 @@ Read [the reference](/reference).
   });
 
   test("rejects Dependency access and malformed canonical artifacts", async () => {
-    const application = {
+    const system = {
       features: {
         shell: {
           programs: {
             browser: {
               state: {},
               components: {
-                Application: {
+                Root: {
                   view({ elements: { Root } }: ViewContext) {
                     return Root!({ children: "Hello" });
                   },
                 },
               },
-              root: "Application",
+              root: "Root",
             },
           },
         },
@@ -703,13 +703,13 @@ Read [the reference](/reference).
       contributions: [{ feature: "shell", requires: ["repository"], provides: [] }],
     };
     const document = await prepareWebDocument({
-      system: application,
+      system,
       interface: "shell",
       program: "browser",
       presentation: emptyPresentation,
       manifest: shellManifest,
       components: {
-        "@feature/shell/component/Application": {
+        "@feature/shell/component/Root": {
           elements: { Root: "main" },
           state: [],
           propCallbacks: [],

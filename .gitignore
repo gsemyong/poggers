@@ -1,6 +1,5 @@
 node_modules/
 dist/
-coverage/
 target/
 Cargo.lock
 !src/adapters/server/production/Cargo.lock

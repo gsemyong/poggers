@@ -35,7 +35,7 @@ afterEach(async () => {
 
 describe("System compiler", () => {
   test("extracts stable System meaning and portable control flow without executing source", async () => {
-    const entry = await fixture(applicationSource());
+    const entry = await fixture(systemSource());
     const first = compileSystem(entry);
     const second = compileSystem(entry);
 
@@ -78,11 +78,11 @@ describe("System compiler", () => {
   });
 
   test("semantic IDs do not depend on declaration order", async () => {
-    const entry = await fixture(applicationSource());
+    const entry = await fixture(systemSource());
     const original = compileSystem(entry);
     await writeFile(
       entry,
-      applicationSource().replace("child: Child; worker: Worker", "worker: Worker; child: Child"),
+      systemSource().replace("child: Child; worker: Worker", "worker: Worker; child: Child"),
     );
     const reordered = compileSystem(entry);
 
@@ -180,7 +180,7 @@ describe("System compiler", () => {
   }, 15_000);
 
   test("assembles nested same-named contributions and isolates distinct Programs", async () => {
-    const ir = compileSystem(await fixture(multiProgramApplicationSource()));
+    const ir = compileSystem(await fixture(multiProgramSystemSource()));
 
     expect(ir.programs.map(({ name, environment }) => [name, environment.name])).toEqual([
       ["api", "server"],
@@ -201,7 +201,7 @@ describe("System compiler", () => {
 
   test("rejects one Program name assigned to incompatible execution contexts", async () => {
     const entry = await fixture(
-      applicationSource().replace(
+      systemSource().replace(
         'type Child = { Programs: { cloud: Program<{ Name: "server"; Platform: { Name: "server" } }> } };',
         'type Child = { Programs: { cloud: Program<{ Name: "device"; Platform: { Name: "device" } }> } };',
       ),
@@ -221,7 +221,7 @@ describe("System compiler", () => {
 
   test("reports invalid App and interface ownership at the authored Feature", async () => {
     const entry = await fixture(
-      componentApplicationSource().replace(
+      componentSystemSource().replace(
         "type Product = { App: true; Features: { web: Web } };",
         "type Product = { Features: { web: Web } };",
       ),
@@ -240,7 +240,7 @@ describe("System compiler", () => {
   });
 
   test("extracts deterministic Component state, actions, Elements, and lifecycle", async () => {
-    const ir = compileSystem(await fixture(componentApplicationSource()));
+    const ir = compileSystem(await fixture(componentSystemSource()));
     const component = ir.programs[0]?.contributions[0]?.ui?.components[0];
 
     expect(ir.programs[0]?.environment).toEqual({
@@ -296,7 +296,7 @@ describe("System compiler", () => {
       },
     };
     const entry = await fixture(
-      componentApplicationSource().replaceAll('Name: "web"', 'Name: "canvas"'),
+      componentSystemSource().replaceAll('Name: "web"', 'Name: "canvas"'),
     );
 
     const generic = compileSystem(entry);
@@ -311,7 +311,7 @@ describe("System compiler", () => {
 
   test("retains an incremental Program and identifies Presentation implementation sources", async () => {
     const entry = await fixture(
-      `import { clean } from "./presentation";\n${componentApplicationSource().replace(
+      `import { clean } from "./presentation";\n${componentSystemSource().replace(
         "presentation,",
         "presentation: clean,",
       )}`,
@@ -330,7 +330,7 @@ describe("System compiler", () => {
   });
 
   test("reuses the semantic graph while reading an edited source file", async () => {
-    const source = callbackFactoryApplicationSource();
+    const source = callbackFactorySystemSource();
     const entry = await fixture(source);
     const compiler = createSystemCompiler(entry);
     const first = compiler.compile();
@@ -346,7 +346,7 @@ describe("System compiler", () => {
 
   test("assigns compiled Presentation meaning to its exact interface output", async () => {
     const entry = await fixture(
-      `import { clean } from "./presentation";\n${componentApplicationSource().replace(
+      `import { clean } from "./presentation";\n${componentSystemSource().replace(
         "presentation,",
         "presentation: clean,",
       )}`,
@@ -377,7 +377,7 @@ export const clean = ({ parameters }: { parameters: { sheet: unknown } }) => ({
 
   test("rejects undeclared runtime calls at their source location", async () => {
     const entry = await fixture(
-      applicationSource().replace(
+      systemSource().replace(
         "const values = await dependencies.numbers.read({ count: 4 });",
         "const values = [Date.now()];",
       ),
@@ -388,7 +388,7 @@ export const clean = ({ parameters }: { parameters: { sheet: unknown } }) => ({
   });
 
   test("distinguishes synchronous and asynchronous Dependency operations", async () => {
-    const source = applicationSource()
+    const source = systemSource()
       .replace(
         "read(input: { count: number }): Promise<readonly number[]>;",
         "read(input: { count: number }): Promise<readonly number[]>;\n  offset(input: {}): number;",
@@ -403,7 +403,7 @@ export const clean = ({ parameters }: { parameters: { sheet: unknown } }) => ({
     expect(writes).toEqual([{ category: "large", value: 10 }]);
 
     const unawaited = await fixture(
-      applicationSource().replace(
+      systemSource().replace(
         "const values = await dependencies.numbers.read({ count: 4 });",
         "dependencies.numbers.read({ count: 4 });\n        const values: readonly number[] = [];",
       ),
@@ -413,7 +413,7 @@ export const clean = ({ parameters }: { parameters: { sheet: unknown } }) => ({
 
   test("lowers authored dependency callbacks as portable closures", async () => {
     const entry = await fixture(
-      applicationSource()
+      systemSource()
         .replace(
           "read(input: { count: number }): Promise<readonly number[]>;",
           "read(input: { count: number }): Promise<readonly number[]>;\n  subscribe(input: { receive(value: number): void }): Disposable;",
@@ -436,7 +436,7 @@ export const clean = ({ parameters }: { parameters: { sheet: unknown } }) => ({
 
   test("rejects any in portable Dependency contracts", async () => {
     const entry = await fixture(
-      applicationSource().replace("read(input: { count: number })", "read(input: any)"),
+      systemSource().replace("read(input: { count: number })", "read(input: any)"),
     );
 
     expect(() => compileSystem(entry)).toThrow(/cannot contain any/);
@@ -444,7 +444,7 @@ export const clean = ({ parameters }: { parameters: { sheet: unknown } }) => ({
 
   test("lowers real-time Dependency streams without exposing iterator machinery", async () => {
     const entry = await fixture(
-      applicationSource().replace(
+      systemSource().replace(
         "read(input: { count: number }): Promise<readonly number[]>;",
         "read(input: { count: number }): Promise<readonly number[]>;\n  changes(): AsyncIterable<{ revision: number }>;",
       ),
@@ -476,7 +476,7 @@ export const clean = ({ parameters }: { parameters: { sheet: unknown } }) => ({
   });
 
   test("lowers and executes for-await-of over Dependency streams", async () => {
-    const entry = await fixture(streamApplicationSource());
+    const entry = await fixture(streamSystemSource());
     const ir = compileSystem(entry);
     const contribution = programContribution(ir, "feature/worker/program/cloud");
     if (contribution?.implementation.kind !== "portable") {
@@ -503,7 +503,7 @@ export const clean = ({ parameters }: { parameters: { sheet: unknown } }) => ({
 
   test("rejects for-await-of over a non-stream value", async () => {
     const entry = await fixture(
-      streamApplicationSource()
+      streamSystemSource()
         .replace(
           "for await (const change of dependencies.changes.subscribe({}))",
           "for await (const change of [1, 2, 3])",
@@ -518,7 +518,7 @@ export const clean = ({ parameters }: { parameters: { sheet: unknown } }) => ({
 
   test("preserves host Dependency values as explicit opaque boundaries", async () => {
     const entry = await fixture(
-      applicationSource().replace(
+      systemSource().replace(
         "read(input: { count: number }): Promise<readonly number[]>;",
         "read(input: { count: number }): Promise<readonly number[]>;\n  exchange(request: Request): Promise<Response>;",
       ),
@@ -552,7 +552,7 @@ export const clean = ({ parameters }: { parameters: { sheet: unknown } }) => ({
 
   test("expands standard mapped types into their portable semantic shape", async () => {
     const entry = await fixture(
-      applicationSource()
+      systemSource()
         .replace("type Numbers = {", "type Numbers = Readonly<{")
         .replace("};\ntype Output = {", "}>;\ntype Output = {")
         .replace("input: { count: number }", "input: Readonly<{ count: number }>")
@@ -599,7 +599,7 @@ export const clean = ({ parameters }: { parameters: { sheet: unknown } }) => ({
 
   test("lowers tuples, optional fields, explicit options, null, and literals without ambiguity", async () => {
     const entry = await fixture(
-      applicationSource().replace(
+      systemSource().replace(
         "read(input: { count: number }): Promise<readonly number[]>;",
         `read(input: { count: number }): Promise<readonly number[]>;
   shape(input: {
@@ -645,7 +645,7 @@ export const clean = ({ parameters }: { parameters: { sheet: unknown } }) => ({
   });
 
   test("expands a headless Feature factory and lowers its supplied implementation", async () => {
-    const ir = compileSystem(await fixture(headlessFactoryApplicationSource()));
+    const ir = compileSystem(await fixture(headlessFactorySystemSource()));
 
     expect(ir.features).toEqual([
       {
@@ -672,7 +672,7 @@ export const clean = ({ parameters }: { parameters: { sheet: unknown } }) => ({
   });
 
   test("expands nested Feature factories through mounting and Program placement", async () => {
-    const ir = compileSystem(await fixture(nestedFactoryApplicationSource()));
+    const ir = compileSystem(await fixture(nestedFactorySystemSource()));
     const contribution = programContribution(ir, "feature/parent.child/program/api");
 
     expect(contribution?.implementation).toMatchObject({
@@ -682,7 +682,7 @@ export const clean = ({ parameters }: { parameters: { sheet: unknown } }) => ({
   });
 
   test("expands a differently shaped closure factory without a compiler special case", async () => {
-    const source = callbackFactoryApplicationSource();
+    const source = callbackFactorySystemSource();
     const entry = await fixture(source);
     const ir = compileSystem(entry);
 
@@ -702,7 +702,7 @@ export const clean = ({ parameters }: { parameters: { sheet: unknown } }) => ({
   });
 
   test("extracts state and actions from a Component-free UI Feature factory", async () => {
-    const ir = compileSystem(await fixture(uiFactoryApplicationSource()));
+    const ir = compileSystem(await fixture(uiFactorySystemSource()));
     const program = ir.programs[0];
     const contribution = program?.contributions[0];
 
@@ -719,7 +719,7 @@ export const clean = ({ parameters }: { parameters: { sheet: unknown } }) => ({
   });
 
   test("executes the extracted process through injected Dependencies", async () => {
-    const ir = compileSystem(await fixture(applicationSource()));
+    const ir = compileSystem(await fixture(systemSource()));
     const writes: unknown[] = [];
     const execution = await executeProgramIR(ir, "feature/worker/program/cloud", {
       numbers: { read: async () => [1, 2, 3, 4] },
@@ -742,7 +742,7 @@ export const clean = ({ parameters }: { parameters: { sheet: unknown } }) => ({
   });
 
   test("lowers and executes authored pure helpers through the portable call graph", async () => {
-    const source = `import { sum } from "./math";\n${applicationSource()}`.replace(
+    const source = `import { sum } from "./math";\n${systemSource()}`.replace(
       `let total = 0;
         for (const value of values) {
           total += value;
@@ -775,7 +775,7 @@ export const clean = ({ parameters }: { parameters: { sheet: unknown } }) => ({
   });
 
   test("preserves Dependency failures from their implementation", async () => {
-    const ir = compileSystem(await fixture(applicationSource()));
+    const ir = compileSystem(await fixture(systemSource()));
     const calls: string[] = [];
     await expect(
       executeProgramIR(ir, "feature/worker/program/cloud", {
@@ -792,7 +792,7 @@ export const clean = ({ parameters }: { parameters: { sheet: unknown } }) => ({
   });
 
   test("generates and runs a standalone Rust artifact from the same portable IR", async () => {
-    const ir = compileSystem(await fixture(applicationSource()));
+    const ir = compileSystem(await fixture(systemSource()));
     const program = programContribution(ir, "feature/worker/program/cloud")!;
     const directory = await temporaryDirectory("kit-production-");
     const executable = resolve(directory, "portable-program");
@@ -862,7 +862,7 @@ export const clean = ({ parameters }: { parameters: { sheet: unknown } }) => ({
       await executeProgramFixtureIR(ir, "feature/worker/program/cloud", failureScenario),
     );
 
-    const factoryIR = compileSystem(await fixture(headlessFactoryApplicationSource()));
+    const factoryIR = compileSystem(await fixture(headlessFactorySystemSource()));
     const factoryProgram = programContribution(factoryIR, "feature/tasks/program/server")!;
     const factoryExecutable = resolve(directory, "factory-program");
     const factoryScenario = {
@@ -901,7 +901,7 @@ function createSystem(definition: object): object {
 `;
 }
 
-function applicationSource(): string {
+function systemSource(): string {
   return `
 type UI = { readonly Name: string };
 type Platform = { readonly Name: string; readonly UI?: UI };
@@ -959,7 +959,7 @@ export default createSystem({
 `;
 }
 
-function streamApplicationSource(): string {
+function streamSystemSource(): string {
   return `
 type Platform = { readonly Name: "server" };
 type Environment = { readonly Name: "server"; readonly Platform: Platform };
@@ -994,7 +994,7 @@ export default createSystem({
 `;
 }
 
-function componentApplicationSource(): string {
+function componentSystemSource(): string {
   return `
 type UI = { readonly Name: string };
 type Platform = { readonly Name: string; readonly UI?: UI };
@@ -1065,7 +1065,7 @@ export default createSystem({
 `;
 }
 
-function multiProgramApplicationSource(): string {
+function multiProgramSystemSource(): string {
   return `
 type UI = { readonly Name: string };
 type Platform = { readonly Name: string; readonly UI?: UI };
@@ -1174,7 +1174,7 @@ export default createSystem({
 `;
 }
 
-function headlessFactoryApplicationSource(): string {
+function headlessFactorySystemSource(): string {
   return `
 type Platform = { readonly Name: string };
 type Environment = { readonly Name: string; readonly Platform: Platform };
@@ -1224,7 +1224,7 @@ export default createSystem({
 `;
 }
 
-function uiFactoryApplicationSource(): string {
+function uiFactorySystemSource(): string {
   return `
 type UI = { readonly Name: "web"; readonly Child: unknown; readonly Elements: {} };
 type Platform = { readonly Name: "web"; readonly UI: UI };
@@ -1253,7 +1253,7 @@ export default createSystem({
 `;
 }
 
-function nestedFactoryApplicationSource(): string {
+function nestedFactorySystemSource(): string {
   return `
 type Platform = { readonly Name: "server" };
 type Environment = { readonly Name: "server"; readonly Platform: Platform };
@@ -1289,7 +1289,7 @@ export default createSystem({
 `;
 }
 
-function callbackFactoryApplicationSource(): string {
+function callbackFactorySystemSource(): string {
   return `
 type Platform = { readonly Name: string };
 type Environment = { readonly Name: string; readonly Platform: Platform };

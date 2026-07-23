@@ -16,7 +16,7 @@ afterEach(async () => {
 
 describe("web compiler extension", () => {
   test("owns mounted paths, rendering, cache, metadata, and validation meaning", async () => {
-    const entry = await fixture(routeApplicationSource());
+    const entry = await fixture(routeSystemSource());
     const generic = compileSystem(entry);
     expect(generic.features[0]?.extensions).toBeUndefined();
     expect(generic.programs[0]?.contributions[0]?.extensions).toBeUndefined();
@@ -97,7 +97,7 @@ describe("web compiler extension", () => {
 
   test("rejects incomplete web Route implementations at the web boundary", async () => {
     const entry = await fixture(
-      routeApplicationSource().replace(
+      routeSystemSource().replace(
         "          view({ data }: { data: { title: string } }) { return data.title; },",
         "",
       ),
@@ -107,9 +107,7 @@ describe("web compiler extension", () => {
   });
 
   test("allows a public loader whose type omits request authority", async () => {
-    const entry = await fixture(
-      routeApplicationSource().replace('Scope: "private"', 'Scope: "public"'),
-    );
+    const entry = await fixture(routeSystemSource().replace('Scope: "private"', 'Scope: "public"'));
     expect(() => compileSystem(entry, [webCompilerExtension])).not.toThrow();
   });
 
@@ -125,7 +123,7 @@ describe("web compiler extension", () => {
   });
 
   test("lowers deferred Route data and its sole reveal boundary", async () => {
-    const entry = await fixture(deferredRouteApplicationSource(), "system.tsx");
+    const entry = await fixture(deferredRouteSystemSource(), "system.tsx");
     const ir = compileSystem(entry, [webCompilerExtension]);
     const route = webProgramCompilerIR(ir.programs[0]?.contributions[0]?.extensions?.web)
       .routes[0]!;
@@ -191,7 +189,7 @@ function createSystem(definition: object): object {
 `;
 }
 
-function deferredRouteApplicationSource(): string {
+function deferredRouteSystemSource(): string {
   return `
 declare const deferred: unique symbol;
 type Deferred<Value> = { readonly [deferred]: Value };
@@ -266,7 +264,7 @@ export default createSystem({ features: { product } });
 `;
 }
 
-function routeApplicationSource(): string {
+function routeSystemSource(): string {
   return `
 declare const validation: unique symbol;
 type Validate<Value, Rules = {}> = { readonly [validation]?: { Value: Value; Rules: Rules } };

@@ -481,7 +481,7 @@ describe("Program runtime", () => {
         >;
       };
     };
-    const application: System<{ Features: { watcher: Watcher } }> = {
+    const system: System<{ Features: { watcher: Watcher } }> = {
       features: {
         watcher: {
           programs: {
@@ -497,7 +497,7 @@ describe("Program runtime", () => {
 
     for (let revision = 0; revision < 100; revision++) {
       const process = await startProcess(
-        application,
+        system,
         "browser",
         dependencies,
         manifest("browser", { feature: "watcher", requires: ["changes"] }),
@@ -541,9 +541,9 @@ describe("Program runtime", () => {
         },
       },
     };
-    const application: System<App> = { features: { parent } };
+    const system: System<App> = { features: { parent } };
     const process = await startProcess(
-      application,
+      system,
       "cloud",
       {},
       manifest(
@@ -574,13 +574,13 @@ describe("Program runtime", () => {
         },
       },
     });
-    const application: System<App> = {
+    const system: System<App> = {
       features: { first: feature("first"), second: feature("second") },
     };
 
     await expect(
       startProcess(
-        application,
+        system,
         "cloud",
         {},
         manifest(
@@ -601,7 +601,7 @@ describe("Program runtime", () => {
     };
     type App = { Features: { first: Leaf; second: Leaf } };
     const events: string[] = [];
-    const application: System<App> = {
+    const system: System<App> = {
       features: {
         first: {
           programs: {
@@ -628,7 +628,7 @@ describe("Program runtime", () => {
 
     await expect(
       startProcess(
-        application,
+        system,
         "cloud",
         {
           resource: {
@@ -744,7 +744,7 @@ describe("Program runtime", () => {
         },
       },
     };
-    const application: System<App> = { features: { consumer } };
+    const system: System<App> = { features: { consumer } };
     const implementations = [
       { reader: { read: () => "local" } },
       { reader: { read: () => "proxy" } },
@@ -753,7 +753,7 @@ describe("Program runtime", () => {
 
     for (const [index, dependencies] of implementations.entries()) {
       const process = await startProcess(
-        application,
+        system,
         "browser",
         dependencies,
         manifest("browser", { feature: "consumer", requires: ["reader"] }),
@@ -778,14 +778,14 @@ describe("Program runtime", () => {
           maxLength: contributions.length,
         }),
         async (permutation) => {
-          const application = {
+          const system = {
             features: Object.fromEntries(
               [...permutation]
                 .reverse()
                 .map(({ feature }) => [feature, { programs: { server: {} } }]),
             ),
           };
-          const plan = planProgram(application, "server", manifest("server", ...permutation));
+          const plan = planProgram(system, "server", manifest("server", ...permutation));
 
           expect(plan.external).toEqual(["clock"]);
           expect(plan.contributions.map(({ feature }) => feature)).toEqual([
@@ -801,7 +801,7 @@ describe("Program runtime", () => {
   });
 
   test("rejects invalid Dependency graphs before starting user code", () => {
-    const application = {
+    const system = {
       features: {
         first: { programs: { server: {} } },
         second: { programs: { server: {} } },
@@ -810,7 +810,7 @@ describe("Program runtime", () => {
 
     expect(() =>
       planProgram(
-        application,
+        system,
         "server",
         manifest(
           "server",
@@ -822,7 +822,7 @@ describe("Program runtime", () => {
 
     expect(() =>
       planProgram(
-        application,
+        system,
         "server",
         manifest(
           "server",
@@ -848,7 +848,7 @@ describe("Program runtime", () => {
 
   test("owns external and Feature-provided Dependency resources exactly once", async () => {
     const disposals = { external: 0, provided: 0 };
-    const application = {
+    const system = {
       features: {
         provider: {
           programs: {
@@ -876,7 +876,7 @@ describe("Program runtime", () => {
       },
     };
     const process = await startProcess(
-      application,
+      system,
       "server",
       {
         clock: {
@@ -898,7 +898,7 @@ describe("Program runtime", () => {
 
   test("awaits asynchronous providers before starting their consumers", async () => {
     const events: string[] = [];
-    const application = {
+    const system = {
       features: {
         consumer: {
           programs: {
@@ -930,7 +930,7 @@ describe("Program runtime", () => {
     };
 
     const process = await startProcess(
-      application,
+      system,
       "api",
       {},
       manifest(
@@ -953,7 +953,7 @@ describe("Program runtime", () => {
   test("shares one Feature binding locally and recreates it for another Process", async () => {
     let created = 0;
     const observed: number[] = [];
-    const application = {
+    const system = {
       features: {
         provider: {
           programs: {
@@ -992,8 +992,8 @@ describe("Program runtime", () => {
       { feature: "second", requires: ["reader"] },
     );
 
-    const first = await startProcess(application, "server", {}, graph);
-    const second = await startProcess(application, "server", {}, graph);
+    const first = await startProcess(system, "server", {}, graph);
+    const second = await startProcess(system, "server", {}, graph);
 
     expect(observed).toEqual([1, 1, 2, 2]);
     await first.dispose();
