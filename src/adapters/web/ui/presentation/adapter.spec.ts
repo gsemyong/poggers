@@ -10,13 +10,13 @@ import {
   type WebPresentationFrameInspection,
   type WebStyleHost,
 } from "@/adapters/web/ui/presentation/adapter";
-import { follow, spring } from "@/adapters/web/ui/presentation/dynamics";
+import { animate, samplePresentationAnimation } from "@/core/ui/presentation";
 import {
   createAudioAsset,
   createImageAsset,
   type WebElementPresentation,
-} from "@/adapters/web/ui/presentation/language";
-import { animate, samplePresentationAnimation } from "@/core/presentation";
+} from "@/platforms/web/presentation";
+import { follow, spring } from "@/platforms/web/presentation/dynamics";
 
 type FakeElement = Element & {
   readonly classes: Set<string>;
@@ -1431,7 +1431,7 @@ describe("web Presentation adapter", () => {
     expect(log.at(-1)).toBe("dispose");
   });
 
-  it("rejects a native Element owned by conflicting names before mutation", () => {
+  it("rejects a DOM Element owned by conflicting names before mutation", () => {
     const ownerDocument = {};
     const target = createElement(ownerDocument);
     const session = createTestPresentationAdapter({ createStyleHost: () => createHost([]) }).create(

@@ -1,13 +1,21 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 
-import type { BrowserMainThread } from "@/adapters/web/platform";
+import type { WebRouteIR } from "@/adapters/web/routing";
 import { createWebUIAdapter } from "@/adapters/web/ui/adapter";
-import { createPresentationGraph } from "@/adapters/web/ui/component/adapter";
-import type { WebPresentationLanguage } from "@/adapters/web/ui/presentation/language";
-import type { Application, Feature, Program } from "@/core/application";
-import type { PresentationAdapterInstance } from "@/core/presentation";
+import {
+  createPresentationGraph,
+  ownedPresentationTargets,
+} from "@/adapters/web/ui/component/adapter";
+import { readScoped } from "@/adapters/web/ui/component/runtime";
+import { createWebPresentationAdapter } from "@/adapters/web/ui/presentation/adapter";
+import type { PresentationAdapterInstance } from "@/contracts/platform";
+import type { Application, Feature } from "@/core/application";
+import type { Program } from "@/core/program";
+import type { BrowserMainThread } from "@/platforms/web/platform";
+import type { WebPresentationLanguage } from "@/platforms/web/presentation";
 
-const createApplicationUI = createWebUIAdapter().component.createApplicationUI;
+const createApplicationUI = createWebUIAdapter(createWebPresentationAdapter()).component
+  .createApplicationUI;
 const boundary = {} as Element;
 
 afterEach(() => vi.unstubAllGlobals());
@@ -57,6 +65,221 @@ const counter = (count: number): Feature<Counter> => ({
 });
 
 describe("Program UI composition", () => {
+  test("cancels stale Route loads and subscribes before resolving initial redirects", async () => {
+    vi.stubGlobal("Element", class {});
+    vi.stubGlobal("document", {
+      title: "",
+      documentElement: { dataset: {}, lang: "" },
+      head: { querySelectorAll: () => [], append() {} },
+      createElement: () => ({ setAttribute() {}, textContent: "" }),
+      getElementById: () => null,
+    });
+    const subscribers = new Set<(location: URL) => void>();
+    let location = new URL("https://example.test/start");
+    const navigation = {
+      current: () => location,
+      navigate(destination: Readonly<{ to: PropertyKey }>) {
+        location = new URL(destination.to === "finish" ? "/finish" : "/slow", location);
+        for (const receive of subscribers) receive(location);
+      },
+      subscribe(receive: (location: URL) => void): Disposable {
+        subscribers.add(receive);
+        return { [Symbol.dispose]: () => subscribers.delete(receive) };
+      },
+    };
+    const slowSignals: AbortSignal[] = [];
+    let resolveSlow: (() => void) | undefined;
+    let finishViews = 0;
+    const application = {
+      features: {
+        routes: {
+          programs: {
+            browser: {
+              routes: {
+                start: {
+                  load: () => ({ redirect: { to: "finish" } }),
+                  view: () => "start",
+                },
+                finish: {
+                  view: () => {
+                    finishViews += 1;
+                    return "finish";
+                  },
+                },
+                slow: {
+                  load: ({ signal }: { signal: AbortSignal }) => {
+                    slowSignals.push(signal);
+                    return new Promise((resolve) => {
+                      resolveSlow = () => resolve({ data: "late" });
+                    });
+                  },
+                  view: ({ data }: { data: unknown }) => String(data),
+                },
+              },
+            },
+          },
+        },
+      },
+    } as unknown as Application<Contract>;
+    const routes: WebRouteIR[] = [
+      route("start", "/start", "Start"),
+      route("finish", "/finish", "Finish"),
+      route("slow", "/slow", "Slow"),
+    ];
+    const ui = await createApplicationUI({
+      application,
+      program: "browser",
+      presentations: { presentations: {} },
+      dependencies: { navigation },
+      programManifest: {
+        name: "browser",
+        contributions: [{ feature: "routes", requires: ["navigation"], provides: [] }],
+      },
+      routes,
+      boundary,
+    });
+    await Promise.resolve();
+    const initialRoute = ui.renderRoot();
+    expect(finishViews).toBe(0);
+    expect(readScoped(initialRoute)).toBe("finish");
+    expect(finishViews).toBe(1);
+    expect(document.title).toBe("Finish");
+
+    navigation.navigate({ to: "slow" });
+    await vi.waitFor(() => expect(slowSignals).toHaveLength(1));
+    expect(readScoped(ui.renderRoot())).toBe("finish");
+    expect(document.title).toBe("Finish");
+    expect(slowSignals[0]?.aborted).toBe(false);
+    navigation.navigate({ to: "finish" });
+    expect(slowSignals[0]?.aborted).toBe(true);
+    resolveSlow?.();
+    await Promise.resolve();
+    expect(readScoped(ui.renderRoot())).toBe("finish");
+
+    navigation.navigate({ to: "slow" });
+    await vi.waitFor(() => expect(slowSignals).toHaveLength(2));
+    await ui.dispose();
+    expect(slowSignals[1]?.aborted).toBe(true);
+    expect(subscribers.size).toBe(0);
+  });
+
+  test("awaits a navigation that supersedes initial Route resolution", async () => {
+    vi.stubGlobal("Element", class {});
+    let hydrationAvailable = true;
+    vi.stubGlobal("document", {
+      title: "",
+      documentElement: { dataset: {}, lang: "" },
+      head: { querySelectorAll: () => [], append() {} },
+      createElement: () => ({ setAttribute() {}, textContent: "" }),
+      getElementById: (id: string) =>
+        id === "poggers-hydration" && hydrationAvailable
+          ? {
+              textContent: JSON.stringify({
+                version: 1,
+                route: { feature: "routes", name: "start" },
+                location: "/start",
+                params: {},
+                search: {},
+                loader: false,
+                metadata: { title: "Start" },
+              }),
+              remove() {
+                hydrationAvailable = false;
+              },
+            }
+          : null,
+    });
+    let rendering = "hydrate";
+    const routeBoundary = {
+      getAttribute(name: string) {
+        return name === "data-poggers-rendering" ? rendering : null;
+      },
+      setAttribute(name: string, value: string) {
+        if (name === "data-poggers-rendering") rendering = value;
+      },
+    } as unknown as Element;
+    const subscribers = new Set<(location: URL) => void>();
+    let location = new URL("https://example.test/start");
+    const navigation = {
+      current: () => location,
+      navigate(destination: Readonly<{ to: PropertyKey }>) {
+        location = new URL(destination.to === "finish" ? "/finish" : "/start", location);
+        for (const receive of subscribers) receive(location);
+      },
+      subscribe(receive: (location: URL) => void): Disposable {
+        subscribers.add(receive);
+        return { [Symbol.dispose]: () => subscribers.delete(receive) };
+      },
+    };
+    type RouteDefinition = Readonly<{
+      view(input: Readonly<{ data: unknown }>): string;
+    }>;
+    let resolveStart: ((value: RouteDefinition) => void) | undefined;
+    let resolveFinish: ((value: RouteDefinition) => void) | undefined;
+    const application = {
+      features: {
+        routes: {
+          programs: {
+            browser: {
+              routes: {
+                start: {
+                  view: ({ data }: { data: unknown }) => String(data),
+                },
+                finish: {
+                  view: ({ data }: { data: unknown }) => String(data),
+                },
+              },
+            },
+          },
+        },
+      },
+    } as unknown as Application<Contract>;
+    const creating = createApplicationUI({
+      application,
+      program: "browser",
+      presentations: { presentations: {} },
+      dependencies: { navigation },
+      programManifest: {
+        name: "browser",
+        contributions: [{ feature: "routes", requires: ["navigation"], provides: [] }],
+      },
+      routes: [route("start", "/start", "Start"), route("finish", "/finish", "Finish")],
+      loadRoute: (current) =>
+        new Promise<RouteDefinition>((resolve) => {
+          if (current.name === "start") resolveStart = resolve;
+          else resolveFinish = resolve;
+        }),
+      boundary: routeBoundary,
+    });
+    await vi.waitFor(() => expect(resolveStart).toBeTypeOf("function"));
+    navigation.navigate({ to: "finish" });
+    await vi.waitFor(() => expect(resolveFinish).toBeTypeOf("function"));
+    let created = false;
+    void creating.then(() => {
+      created = true;
+    });
+
+    resolveStart?.({ view: () => "start" });
+    await Promise.resolve();
+    expect(created).toBe(false);
+    expect(rendering).toBe("client");
+
+    resolveFinish?.({ view: () => "finish" });
+    const ui = await creating;
+    expect(readScoped(ui.renderRoot())).toBe("finish");
+    expect(document.title).toBe("Finish");
+    await ui.dispose();
+  });
+
+  test("keeps detached but owned Elements available to Presentation", () => {
+    const detached = { isConnected: false } as unknown as Element;
+    const fallback = { isConnected: true } as unknown as Element;
+
+    expect(ownedPresentationTargets(new Set([detached]), fallback)).toEqual([detached]);
+    expect(ownedPresentationTargets(undefined, fallback)).toEqual([fallback]);
+    expect(ownedPresentationTargets(new Set(), null)).toEqual([]);
+  });
+
   test("composes isolated child APIs into a parent UI contribution", async () => {
     vi.stubGlobal("Element", class {});
     let renderedChildren: readonly number[] = [];
@@ -242,7 +465,7 @@ describe("Program UI composition", () => {
     ).rejects.toThrow("found 2");
   });
 
-  test("binds child-provided Capabilities into its parent contribution", async () => {
+  test("binds child-provided Dependencies into its parent contribution", async () => {
     type Provider = {
       Programs: {
         browser: Program<BrowserMainThread, { Provides: { reader: { read(): string } } }>;
@@ -274,8 +497,8 @@ describe("Program UI composition", () => {
       features: { provider },
       programs: {
         browser: {
-          start({ actions, capabilities }) {
-            actions.receive({ value: capabilities.reader.read() });
+          start({ actions, dependencies }) {
+            actions.receive({ value: dependencies.reader.read() });
           },
           state: { value: "" },
           actions: {
@@ -359,6 +582,20 @@ describe("Program UI composition", () => {
     await second.dispose();
   });
 });
+
+function route(name: string, path: string, title?: string): WebRouteIR {
+  return {
+    feature: "routes",
+    name,
+    path,
+    document: "shell",
+    cache: false,
+    metadata: title ? { title } : {},
+    params: [],
+    search: [],
+    deferred: [],
+  };
+}
 
 test("evaluates each Application and Feature Presentation scope once per root frame", () => {
   let applicationEvaluations = 0;

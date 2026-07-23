@@ -3,22 +3,15 @@ export type {
   ApplicationContract,
   ApplicationFeatures,
   ApplicationMetadata,
-  EnvironmentContract,
-  EnvironmentDefinition,
   Feature,
   FeatureContract,
   FeatureContractOf,
   FeatureDefinitions,
   FeatureUIAPIs,
-  PlatformContract,
   PlacedFeature,
   PresentationName,
-  Program,
-  ProgramContract,
   ProgramOwner,
   ProgramNamesIn,
-  ProgramProvides,
-  ProgramRequires,
   ProgramStartContext,
   UIActions,
   UIActionContext,
@@ -26,30 +19,31 @@ export type {
   UIState,
 } from "@/core/application";
 export { placePrograms } from "@/core/application";
-export { mapStream } from "@/core/portable";
-export {
-  bindCapabilitiesToScope,
-  createProgramContributionInstance,
-  createUIContributionInstance,
-  ResourceScope,
-  startProcess,
-} from "@/core/process";
-export type { Process, ProgramContributionInstance, UIContributionInstance } from "@/core/process";
-export { collectExternalCapabilityNames, collectProgramManifest } from "@/core/capability";
+export type {
+  EnvironmentContract,
+  EnvironmentDefinition,
+  PlatformContract,
+  Program,
+  ProgramActions,
+  ProgramComponents,
+  ProgramContract,
+  ProgramProvides,
+  ProgramRequires,
+  ProgramState,
+} from "@/core/program";
+export { mapStream } from "@/core/stream";
 export type {
   ProgramContributionAddress,
-  ProgramContributionManifest,
-  ProgramExternalCapabilities,
-  ProgramManifest,
+  ProgramExternalDependencies,
   ProgramName,
-  ProgramProvidedCapabilities,
-  ProgramRequiredCapabilities,
-} from "@/core/capability";
+  ProgramProvidedDependencies,
+  ProgramRequiredDependencies,
+} from "@/core/dependency";
 export type {
   ComponentActionArgs,
   ComponentActionContext,
   ComponentActions,
-  ComponentCapabilities,
+  ComponentDependencies,
   ComponentComposition,
   ComponentContract,
   ComponentContractOf,
@@ -70,7 +64,7 @@ export type {
   ComponentUI,
   ComponentViewContext,
   RootComponentName,
-} from "@/core/component";
+} from "@/core/ui/component";
 export type {
   UIChild,
   UIContract,
@@ -80,7 +74,7 @@ export type {
   UIElementProps,
   UIElementTarget,
   UITarget,
-} from "@/core/ui";
+} from "@/core/ui/language";
 export type {
   ActionCompleted,
   ActionEvent,
@@ -93,37 +87,14 @@ export type {
   Event,
   InvocationId,
   Presentation,
-  PresentationAdapter,
-  PresentationAdapterInstance,
-  PresentationAdapterSession,
   PresentationComponentDeclaration,
   PresentationComponentInput,
   PresentationComponentTree,
   PresentationDefinition,
-  PresentationData,
   PresentationElement,
-  PresentationElementResolver,
-  PresentationFrame,
   PresentationLanguage,
-} from "@/core/presentation";
-export { animate, createPresentationFrame, settled, velocity } from "@/core/presentation";
-export { selectPlatformAdapters } from "@/contracts/platform";
-export type {
-  ComponentAdapter,
-  ComponentAdapterSession,
-  DevelopmentSession,
-  PlatformAdapter,
-  PlatformAdapterImplementation,
-  PlatformAdapters,
-  PlatformDevelopmentInput,
-  PlatformInput,
-  PlatformProductionInput,
-  ProgramHostFactory,
-  ProgramHostInput,
-  ProductionArtifact,
-  ProductionArtifacts,
-  UIAdapter,
-} from "@/contracts/platform";
+} from "@/core/ui/presentation";
+export { animate, settled, velocity } from "@/core/ui/presentation";
 export { bindEntityPrincipal, createEntity, EntityFailure } from "@/features/entity";
 export type {
   Clock,
@@ -160,4 +131,3 @@ export type {
   IdentitySession,
   IdentityService,
 } from "@/features/identity";
-export { createEntityFixture, createMemoryEventStore } from "@/features/entity.testing";

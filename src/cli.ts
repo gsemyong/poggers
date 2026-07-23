@@ -6,7 +6,7 @@ import process from "node:process";
 
 import { platformAdapters } from "@/adapters/registry";
 import type { PlatformAdapterImplementation } from "@/contracts/platform";
-import { buildApplication, developApplication } from "@/core/realization";
+import { buildApplication, developApplication } from "@/realization";
 
 export async function runCli(
   arguments_ = process.argv.slice(2),

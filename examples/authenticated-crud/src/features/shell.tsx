@@ -1,18 +1,24 @@
-import type { Feature, Program } from "@poggers/kit";
-import type { BrowserMainThread } from "@poggers/kit/web";
+import type { Program } from "@poggers/kit";
+import type { BrowserMainThread, Child, Navigation, WebFeature, WebRoute } from "@poggers/kit/web";
 
 import type { App } from "../app";
 import type { IdentityClient, Session } from "./identity";
 
 type AuthMode = "sign-in" | "sign-up";
 type AuthPhase = "loading" | "signed-out" | "signed-in";
+type ShellRoutes = {
+  auth: WebRoute<{
+    Path: "auth";
+    Metadata: { Title: "Sign in"; Robots: "noindex" };
+  }>;
+};
 
 export type ShellFeature = Readonly<{
   Programs: {
     browser: Program<
       BrowserMainThread,
       {
-        Requires: { identity: IdentityClient };
+        Requires: { identity: IdentityClient; navigation: Navigation<ShellRoutes, App> };
         State: {
           phase: AuthPhase;
           mode: AuthMode;
@@ -34,6 +40,7 @@ export type ShellFeature = Readonly<{
         };
         Components: {
           Application: {
+            Slots: { Content: Child };
             Elements: {
               Root: "main";
               Topbar: "header";
@@ -59,12 +66,13 @@ export type ShellFeature = Readonly<{
             };
           };
         };
+        Routes: ShellRoutes;
       }
     >;
   };
 }>;
 
-export const shell = {
+export const shell: WebFeature<ShellFeature, App> = {
   programs: {
     browser: {
       state: {
@@ -78,15 +86,17 @@ export const shell = {
         error: undefined,
       },
       actions: {
-        async refresh({ capabilities, state }) {
+        async refresh({ dependencies, state }) {
           try {
-            const session = await capabilities.identity.session();
+            const session = await dependencies.identity.session();
             state.session = session;
             state.phase = session ? "signed-in" : "signed-out";
             state.error = undefined;
+            redirectForSession(dependencies.navigation, Boolean(session));
           } catch (error) {
             state.phase = "signed-out";
             state.error = message(error);
+            redirectForSession(dependencies.navigation, false);
           }
         },
         changeName({ state }, { value }) {
@@ -102,35 +112,37 @@ export const shell = {
           state.mode = state.mode === "sign-in" ? "sign-up" : "sign-in";
           state.error = undefined;
         },
-        async submit({ capabilities, state }) {
+        async submit({ dependencies, state }) {
           state.working = true;
           state.error = undefined;
           try {
             state.session =
               state.mode === "sign-up"
-                ? await capabilities.identity.signUp({
+                ? await dependencies.identity.signUp({
                     name: state.name.trim(),
                     email: state.email.trim(),
                     password: state.password,
                   })
-                : await capabilities.identity.signIn({
+                : await dependencies.identity.signIn({
                     email: state.email.trim(),
                     password: state.password,
                   });
             state.password = "";
             state.phase = "signed-in";
+            dependencies.navigation.navigate({ to: "tasks.list", replace: true });
           } catch (error) {
             state.error = message(error);
           } finally {
             state.working = false;
           }
         },
-        async signOut({ capabilities, state }) {
+        async signOut({ dependencies, state }) {
           state.working = true;
           try {
-            await capabilities.identity.signOut();
+            await dependencies.identity.signOut();
             state.session = undefined;
             state.phase = "signed-out";
+            dependencies.navigation.navigate({ to: "auth", replace: true });
           } catch (error) {
             state.error = message(error);
           } finally {
@@ -143,7 +155,7 @@ export const shell = {
           mount({ feature }) {
             void feature.refresh();
           },
-          view({ components: { Tasks }, elements, feature }) {
+          view({ elements, feature, slots }) {
             const {
               Root,
               Topbar,
@@ -273,9 +285,7 @@ export const shell = {
                           </SignOut>
                         </Account>
                       </Topbar>
-                      <Content>
-                        <Tasks.Admin />
-                      </Content>
+                      <Content>{slots.Content}</Content>
                     </>
                   )
                 }
@@ -284,10 +294,27 @@ export const shell = {
           },
         },
       },
-      root: "Application",
+      routes: {
+        auth: {
+          view({ components: { Shell } }) {
+            return <Shell.Application Content={null} />;
+          },
+        },
+      },
     },
   },
-} satisfies Feature<ShellFeature, App>;
+};
+
+function redirectForSession(navigation: Navigation<ShellRoutes, App>, authenticated: boolean) {
+  const current = navigation.current();
+  const auth = navigation.href({ to: "auth" });
+  const onAuthRoute = `${current.pathname}${current.search}` === auth;
+  if (authenticated && onAuthRoute) {
+    navigation.navigate({ to: "tasks.list", replace: true });
+  } else if (!authenticated && !onAuthRoute) {
+    navigation.navigate({ to: "auth", replace: true });
+  }
+}
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);

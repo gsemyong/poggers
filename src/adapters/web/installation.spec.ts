@@ -1,0 +1,129 @@
+import { describe, expect, it } from "vitest";
+
+import {
+  createWebServiceWorkerPlan,
+  planWebInstallation,
+  renderWebManifest,
+  renderWebServiceWorker,
+} from "@/adapters/web/installation";
+import type { WebRouteIR } from "@/adapters/web/routing";
+import { POGGERS_IR_VERSION, type ApplicationIR } from "@/compiler/ir";
+
+const routes: readonly WebRouteIR[] = [
+  route("tasks.list", "/tasks", { scope: "public", maxAge: "1h" }),
+  route("shell.auth", "/auth", false, "shell"),
+];
+
+describe("web installation planning", () => {
+  it("resolves one typed application declaration into a conventional manifest", () => {
+    const plan = planWebInstallation(application(), routes);
+    expect(plan).toMatchObject({
+      name: "Tasks",
+      shortName: "Tasks",
+      start: "/tasks",
+      offline: { fallback: "/auth" },
+    });
+    expect(JSON.parse(renderWebManifest(plan!))).toMatchObject({
+      name: "Tasks",
+      short_name: "Tasks",
+      id: "/tasks",
+      start_url: "/tasks",
+      scope: "/",
+      display: "standalone",
+      shortcuts: [{ name: "New task", url: "/tasks" }],
+    });
+  });
+
+  it("emits one versioned worker without forcing activation", () => {
+    const installation = planWebInstallation(application(), routes)!;
+    const plan = createWebServiceWorkerPlan({
+      installation,
+      assets: ["/assets/app-a1b2c3d4.js", "/assets/app-a1b2c3d4.js"],
+      routes,
+      modules: ["/workers/search-a1b2c3d4.js", "/workers/sync-a1b2c3d4.js"],
+    });
+    const source = renderWebServiceWorker(plan);
+
+    expect(plan.assets).toEqual(["/assets/app-a1b2c3d4.js"]);
+    expect(plan.documents).toEqual(["/auth", "/tasks"]);
+    expect(source.match(/^import /gm)).toHaveLength(2);
+    expect(source).toContain('event.data === "poggers:activate"');
+    expect(source).toContain("navigationPreload?.enable()");
+    expect(source).not.toContain("clients.claim()");
+    expect(source).not.toContain('"install", (event) => event.waitUntil(self.skipWaiting())');
+    expect(source).toContain("DOCUMENTS.includes(url.pathname)");
+    expect(source).toContain("documents.match(FALLBACK, { ignoreVary: true })");
+    expect(source).toContain("assets.match(request, { ignoreVary: true })");
+
+    const changed = createWebServiceWorkerPlan({
+      installation,
+      assets: ["/assets/app-changed.js"],
+      routes,
+      modules: ["/workers/search-a1b2c3d4.js", "/workers/sync-a1b2c3d4.js"],
+    });
+    expect(changed.version).not.toBe(plan.version);
+  });
+
+  it("refuses to persist a private content document as the offline fallback", () => {
+    expect(() =>
+      createWebServiceWorkerPlan({
+        installation: planWebInstallation(application(), routes)!,
+        assets: [],
+        routes: routes.map((value) =>
+          value.name === "auth" ? { ...value, document: "content" as const } : value,
+        ),
+      }),
+    ).toThrow(/offline fallback/);
+  });
+});
+
+function application(): ApplicationIR {
+  return {
+    version: POGGERS_IR_VERSION,
+    application: {
+      id: "application/Tasks",
+      name: "Tasks",
+      presentations: [],
+      extensions: {
+        web: {
+          version: 7,
+          installation: {
+            shortName: "Tasks",
+            start: { to: "tasks.list" },
+            display: "standalone",
+            icons: [
+              { src: "/icon-192.png", sizes: "192x192", type: "image/png" },
+              { src: "/icon-512.png", sizes: "512x512", type: "image/png" },
+            ],
+            shortcuts: [{ name: "New task", destination: { to: "tasks.list" }, icons: [] }],
+            offline: { fallback: { to: "shell.auth" } },
+          },
+        },
+      },
+    },
+    platforms: ["web"],
+    features: [],
+    programs: [],
+    presentations: [],
+  };
+}
+
+function route(
+  identity: string,
+  path: string,
+  cache: WebRouteIR["cache"],
+  document: WebRouteIR["document"] = "content",
+): WebRouteIR {
+  const separator = identity.lastIndexOf(".");
+  return {
+    feature: identity.slice(0, separator),
+    name: identity.slice(separator + 1),
+    path,
+    document,
+    cache,
+    metadata: {},
+    params: [],
+    search: [],
+    deferred: [],
+  };
+}

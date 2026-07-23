@@ -19,22 +19,43 @@
       }
     },
     {
-      "files": [
-        "src/core/application.ts",
-        "src/core/component.ts",
-        "src/core/development.ts",
-        "src/core/ui.ts",
-        "src/core/presentation.ts",
-        "src/core/process.ts",
-        "src/core/compiler/ir.ts",
-        "src/core/compiler/source.ts",
-        "src/core/jsx/development.ts",
-        "src/core/jsx/runtime.ts",
-        "src/core/capability.ts",
-        "src/contracts/platform.ts"
-      ],
+      "files": ["src/core/**/*.ts", "src/contracts/**/*.ts"],
       "rules": {
         "no-restricted-imports": ["error", { "patterns": ["./**", "../**", "**/adapters/**"] }]
+      }
+    },
+    {
+      "files": ["src/platforms/**/*.ts", "src/platforms/**/*.tsx"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              "./**",
+              "../**",
+              "@/adapters/**",
+              "@/compiler/**",
+              "@/contracts/**",
+              "@/features/**",
+              "@/runtime/**"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["src/adapters/server/**/*.ts"],
+      "rules": {
+        "no-restricted-imports": ["error", { "patterns": ["./**", "../**", "@/adapters/web/**"] }]
+      }
+    },
+    {
+      "files": ["src/adapters/web/**/*.ts"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          { "patterns": ["./**", "../**", "@/adapters/server/**"] }
+        ]
       }
     }
   ],

@@ -8,17 +8,17 @@ import {
   compileWebDynamicStyle,
   compileWebStyle,
 } from "../src/adapters/web/ui/presentation/compiler";
+import { createWebAnimationHost } from "../src/adapters/web/ui/presentation/runtime/animation";
+import { planWebExecution } from "../src/adapters/web/ui/presentation/runtime/execution";
+import { evaluatePresentationFrame } from "../src/core/ui/presentation";
 import {
   createDynamicsTrajectory,
   createSpringTrajectory,
   sampleSpringTrajectory,
   sampleTrack,
   spring,
-} from "../src/adapters/web/ui/presentation/dynamics";
-import { createWebAnimationHost } from "../src/adapters/web/ui/presentation/runtime/animation";
-import { planWebExecution } from "../src/adapters/web/ui/presentation/runtime/execution";
-import { evaluatePresentationFrame } from "../src/core/presentation";
-import { createReactiveState } from "../src/core/state";
+} from "../src/platforms/web/presentation/dynamics";
+import { createReactiveState } from "../src/runtime/state";
 
 type Result = Readonly<{
   benchmark: string;

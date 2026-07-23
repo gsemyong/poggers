@@ -1,7 +1,7 @@
 {
   "name": "@poggers/kit",
   "version": "0.0.0",
-  "description": "A portable TypeScript product language for programs, capabilities, and user interfaces.",
+  "description": "A portable TypeScript product language for programs, dependencies, and user interfaces.",
   "bin": {
     "poggers": "./dist/src/cli.js"
   },
@@ -20,19 +20,19 @@
       "default": "./dist/src/index.js"
     },
     "./jsx-dev-runtime": {
-      "poggers-source": "./dist/source/core/jsx/development.ts",
-      "types": "./dist/src/core/jsx/development.d.ts",
-      "default": "./dist/src/core/jsx/development.js"
+      "poggers-source": "./dist/source/jsx/development.ts",
+      "types": "./dist/src/jsx/development.d.ts",
+      "default": "./dist/src/jsx/development.js"
     },
     "./jsx-runtime": {
-      "poggers-source": "./dist/source/core/jsx/runtime.ts",
-      "types": "./dist/src/core/jsx/runtime.d.ts",
-      "default": "./dist/src/core/jsx/runtime.js"
+      "poggers-source": "./dist/source/jsx/runtime.ts",
+      "types": "./dist/src/jsx/runtime.d.ts",
+      "default": "./dist/src/jsx/runtime.js"
     },
     "./web": {
-      "poggers-source": "./dist/source/adapters/web/platform.ts",
-      "types": "./dist/src/adapters/web/platform.d.ts",
-      "default": "./dist/src/adapters/web/platform.js"
+      "poggers-source": "./dist/source/platforms/web/platform.ts",
+      "types": "./dist/src/platforms/web/platform.d.ts",
+      "default": "./dist/src/platforms/web/platform.js"
     },
     "./adapters/web": {
       "poggers-source": "./dist/source/adapters/web/adapter.ts",
@@ -40,13 +40,19 @@
       "default": "./dist/src/adapters/web/adapter.js"
     },
     "./server": {
-      "poggers-source": "./dist/source/adapters/server/platform.ts",
-      "types": "./dist/src/adapters/server/platform.d.ts",
-      "default": "./dist/src/adapters/server/platform.js"
+      "poggers-source": "./dist/source/platforms/server/platform.ts",
+      "types": "./dist/src/platforms/server/platform.d.ts",
+      "default": "./dist/src/platforms/server/platform.js"
     },
     "./testing": {
+      "poggers-source": "./dist/source/testing.ts",
       "types": "./dist/src/testing.d.ts",
       "default": "./dist/src/testing.js"
+    },
+    "./adapter": {
+      "poggers-source": "./dist/source/contracts/platform.ts",
+      "types": "./dist/src/contracts/platform.d.ts",
+      "default": "./dist/src/contracts/platform.js"
     },
     "./adapters/server": {
       "poggers-source": "./dist/source/adapters/server/adapter.ts",
@@ -72,24 +78,24 @@
     "fmt": "oxfmt",
     "fmt:check": "oxfmt --check",
     "lint": "oxlint src scripts examples vitest.config.ts",
-    "test": "nub run build && vitest run",
+    "test": "nub run build && vitest run && cargo test --manifest-path src/adapters/server/production/Cargo.toml --workspace",
     "check": "nub run typecheck && nub run lint && nub run fmt:check && nub run test"
   },
   "dependencies": {
     "@nats-io/jetstream": "3.4.0",
     "@nats-io/transport-node": "3.4.0",
-    "@tanstack/virtual-core": "^3.17.4",
+    "@tanstack/virtual-core": "^3.17.6",
     "@typescript/typescript6": "^6.0.2",
     "alien-signals": "^3.2.1",
-    "animejs": "^4.5.0",
-    "better-auth": "^1.6.23",
+    "better-auth": "^1.6.24",
     "vite": "^8.1.5"
   },
   "devDependencies": {
     "@types/node": "^26.1.1",
     "fast-check": "^4.9.0",
-    "oxfmt": "^0.59.0",
-    "oxlint": "^1.74.0",
+    "oxfmt": "^0.60.0",
+    "oxlint": "^1.75.0",
+    "playwright": "1.61.1",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10"
   },

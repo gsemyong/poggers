@@ -15,10 +15,10 @@ import { resolve } from "node:path";
 
 import { afterEach, describe, expect, test } from "vitest";
 
-import { validateUIProgramRoot } from "@/adapters/web/toolchain";
+import { validateUIProgramRoot } from "@/adapters/web/pipeline";
 import { createProject, runCli } from "@/cli";
-import { POGGERS_IR_VERSION } from "@/core/compiler/ir";
-import { compileApplication } from "@/core/compiler/source";
+import { POGGERS_IR_VERSION } from "@/compiler/ir";
+import { compileApplication } from "@/compiler/source";
 
 const directories: string[] = [];
 afterEach(async () => {
@@ -125,20 +125,12 @@ describe("project template", () => {
     ).toBe(0);
 
     await runCli(["build", "--dir", target, "--outdir", "dist"]);
-    await expect(access(resolve(target, "dist/app.js"))).resolves.toBeUndefined();
     await expect(access(resolve(target, ".poggers"))).rejects.toHaveProperty("code", "ENOENT");
-    const manifest = JSON.parse(
-      await readFile(resolve(target, "dist/application.ir.json"), "utf8"),
-    ) as {
-      version: number;
-      features: readonly { id: string }[];
-      platforms: readonly string[];
-      programs: readonly {
-        id: string;
-        environment: { name: string; platform: string };
-        ui?: unknown;
-      }[];
-    };
+    await expect(access(resolve(target, "dist/application.ir.json"))).rejects.toHaveProperty(
+      "code",
+      "ENOENT",
+    );
+    const manifest = compileApplication(resolve(target, "src/app.tsx"));
     expect(manifest.version).toBe(POGGERS_IR_VERSION);
     expect(manifest.platforms).toEqual(["web"]);
     expect(manifest.features.map(({ id }) => id)).toEqual(["feature/shell"]);
@@ -153,7 +145,11 @@ describe("project template", () => {
     expect(html).toContain(":where(dialog)::backdrop{background:transparent}");
     expect(html).not.toContain("stylex");
     expect(html).not.toContain('href="/styles.css"');
-    expect(html.indexOf("@layer poggers.reset{")).toBeLessThan(html.indexOf('src="/app.js"'));
+    const entry = html.match(/<script type="module" async src="([^"]+)"/)?.[1];
+    expect(entry).toMatch(/^\/assets\/app-[A-Za-z0-9_-]+\.js$/);
+    await expect(access(resolve(target, "dist", entry!.slice(1)))).resolves.toBeUndefined();
+    expect(html).toContain(`<link rel="modulepreload" href="${entry}">`);
+    expect(html.indexOf("@layer poggers.reset{")).toBeLessThan(html.indexOf(`src="${entry}"`));
 
     expect(() =>
       validateUIProgramRoot({ features: { shell: { programs: { browser: {} } } } }, "browser"),
@@ -180,7 +176,7 @@ describe("project template", () => {
       await expectCanonicalSourceRoot(source);
       expect(compileApplication(resolve(source, "app.tsx")).programs.length).toBeGreaterThan(0);
     }
-  }, 15_000);
+  }, 30_000);
 
   test("realizes a custom process-only Platform through an injected adapter", async () => {
     const directory = await mkdtemp(resolve(tmpdir(), "poggers-custom-platform-"));
@@ -217,7 +213,7 @@ describe("project template", () => {
   });
 
   test("builds a portable server Program through the normal production path", async () => {
-    const directory = await mkdtemp(resolve(tmpdir(), "poggers-native-cli-"));
+    const directory = await mkdtemp(resolve(tmpdir(), "poggers-production-cli-"));
     directories.push(directory);
     await mkdir(resolve(directory, "src"), { recursive: true });
     await writeFile(resolve(directory, "src/app.ts"), portableServerApplication());
@@ -262,7 +258,7 @@ async function expectCanonicalSourceRoot(source: string): Promise<void> {
       /from\s+["'](?:@\/(?:adapters|contracts|core)\/|@poggers\/kit\/adapters\/)/,
     );
     expect(contents, `${file} names a backend implementation detail`).not.toMatch(
-      /\b(?:buildNativeServerProgram|compileApplication|createNodeHost|startServerProgram)\b/,
+      /\b(?:buildServerProgram|compileApplication|createNodeHost|startServerProgram)\b/,
     );
   }
 }

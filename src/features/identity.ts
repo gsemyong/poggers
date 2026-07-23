@@ -1,11 +1,12 @@
+import type { Feature } from "@/core/application";
+import type { Program } from "@/core/program";
 import type {
   HttpRequest,
   HttpResponse,
   HttpServer,
   ServerProcess,
-} from "@/adapters/server/platform";
-import type { BrowserMainThread, HttpClient } from "@/adapters/web/platform";
-import type { Feature, Program } from "@/core/application";
+} from "@/platforms/server/platform";
+import type { BrowserMainThread, HttpClient } from "@/platforms/web/platform";
 
 export type AuthenticatedUser = Readonly<{ id: string; name: string; email: string }>;
 
@@ -81,19 +82,19 @@ export function createIdentity<Model extends IdentityModelDefinition>(
     programs: {
       server: {
         start({
-          capabilities,
+          dependencies,
         }: {
-          capabilities: { authentication: AuthenticationBackend; http: HttpServer };
+          dependencies: { authentication: AuthenticationBackend; http: HttpServer };
         }) {
           const serverPath = `/api/${implementation.name}`;
-          const route = capabilities.http.route({
+          const route = dependencies.http.route({
             path: serverPath,
             handle: async (request) =>
-              await capabilities.authentication.handle({ request, path: serverPath }),
+              await dependencies.authentication.handle({ request, path: serverPath }),
           });
           const service: IdentityService<Model> & Disposable = Object.freeze({
             async authenticate({ cookie }: { cookie: string | undefined }) {
-              const user = await capabilities.authentication.authenticate({
+              const user = await dependencies.authentication.authenticate({
                 cookie,
               });
               return user ? implementation.principal(user) : undefined;
@@ -104,10 +105,10 @@ export function createIdentity<Model extends IdentityModelDefinition>(
         },
       },
       browser: {
-        start({ capabilities }: { capabilities: { http: HttpClient } }) {
+        start({ dependencies }: { dependencies: { http: HttpClient } }) {
           return {
             [implementation.name]: createIdentityClient<Model>(
-              capabilities.http,
+              dependencies.http,
               path,
               implementation.principal,
             ),
@@ -124,6 +125,7 @@ function createIdentityClient<Model extends IdentityModelDefinition>(
   principal: (user: AuthenticatedUser) => PrincipalOf<Model>,
 ): IdentityClient<Model> {
   const listeners = new Set<(session: IdentitySession<Model> | undefined) => void>();
+  let pendingSession: Promise<IdentitySession<Model> | undefined> | undefined;
   const publish = (value: IdentitySession<Model> | undefined) => {
     for (const receive of listeners) receive(value);
   };
@@ -150,11 +152,17 @@ function createIdentityClient<Model extends IdentityModelDefinition>(
   };
 
   return Object.freeze({
-    async session() {
-      const value = await request<Readonly<{ user?: AuthenticatedUser }> | null>("get-session");
-      const current = value?.user ? session(value) : undefined;
-      publish(current);
-      return current;
+    session() {
+      pendingSession ??= request<Readonly<{ user?: AuthenticatedUser }> | null>("get-session")
+        .then((value) => {
+          const current = value?.user ? session(value) : undefined;
+          publish(current);
+          return current;
+        })
+        .finally(() => {
+          pendingSession = undefined;
+        });
+      return pendingSession;
     },
     async signIn(input) {
       const current = session(await request("sign-in/email", input));

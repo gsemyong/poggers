@@ -1,21 +1,27 @@
 import { endBatch, startBatch } from "alien-signals";
 
-import {
-  getHttpValue,
-  type HttpRequest,
-  type HttpResponse,
-  type HttpServer,
-  type ServerProcess,
-} from "@/adapters/server/platform";
-import type { BrowserMainThread, HttpClient, LocalStore, Scheduler } from "@/adapters/web/platform";
-import type { Feature, Program } from "@/core/application";
-import { mapStream } from "@/core/portable";
+import type { Feature } from "@/core/application";
+import type { Program } from "@/core/program";
+import { mapStream } from "@/core/stream";
 import type {
   IdentityClient,
   IdentityModel,
   IdentityService,
   IdentitySession,
 } from "@/features/identity";
+import {
+  getHttpValue,
+  type HttpRequest,
+  type HttpResponse,
+  type HttpServer,
+  type ServerProcess,
+} from "@/platforms/server/platform";
+import type {
+  BrowserMainThread,
+  HttpClient,
+  LocalStore,
+  Scheduler,
+} from "@/platforms/web/platform";
 
 type MaybePromise<Value> = Value | PromiseLike<Value>;
 
@@ -245,7 +251,7 @@ export type EntityFeature<Model extends EntityModelDefinition> = Readonly<{
 export type DefinedEntityFeature<Model extends EntityModelDefinition> = Feature<
   EntityFeature<Model>
 > &
-  Readonly<{ capability: Model["Name"] }>;
+  Readonly<{ dependency: Model["Name"] }>;
 
 /** Creates the complete server and browser entity slice from one semantic model. */
 export function createEntity<Model extends EntityModelDefinition>(
@@ -256,12 +262,12 @@ export function createEntity<Model extends EntityModelDefinition>(
   return {
     programs: {
       server: {
-        start({ capabilities }: { capabilities: Requirements<Model> }) {
+        start({ dependencies }: { dependencies: Requirements<Model> }) {
           const serverPath = `/api/${implementation.name}`;
-          const service = createEntityService(implementation, capabilities);
-          const route = capabilities.http.route({
+          const service = createEntityService(implementation, dependencies);
+          const route = dependencies.http.route({
             path: serverPath,
-            handle: createEntityHandler(service, capabilities.identity, serverPath),
+            handle: createEntityHandler(service, dependencies.identity, serverPath),
           });
           return {
             [implementation.name]: Object.freeze({
@@ -279,46 +285,46 @@ export function createEntity<Model extends EntityModelDefinition>(
           synchronization: "signed-out",
         },
         actions: {
-          synchronize({ capabilities, state }) {
-            let replica = replicas.get(capabilities);
+          synchronize({ dependencies, state }) {
+            let replica = replicas.get(dependencies);
             if (!replica) {
-              replica = new EntityReplica(implementation, path, capabilities, state);
-              replicas.set(capabilities, replica);
+              replica = new EntityReplica(implementation, path, dependencies, state);
+              replicas.set(dependencies, replica);
             }
             replica.synchronize();
           },
-          create({ capabilities }, input) {
-            return requireReplica(replicas, capabilities).create(input);
+          create({ dependencies }, input) {
+            return requireReplica(replicas, dependencies).create(input);
           },
-          update({ capabilities }, input) {
-            return requireReplica(replicas, capabilities).update(input);
+          update({ dependencies }, input) {
+            return requireReplica(replicas, dependencies).update(input);
           },
-          remove({ capabilities }, input) {
-            return requireReplica(replicas, capabilities).remove(input);
+          remove({ dependencies }, input) {
+            return requireReplica(replicas, dependencies).remove(input);
           },
-          retry({ capabilities }, { mutation }) {
-            requireReplica(replicas, capabilities).retry(mutation);
+          retry({ dependencies }, { mutation }) {
+            requireReplica(replicas, dependencies).retry(mutation);
           },
-          dismiss({ capabilities }, { mutation }) {
-            requireReplica(replicas, capabilities).dismiss(mutation);
+          dismiss({ dependencies }, { mutation }) {
+            requireReplica(replicas, dependencies).dismiss(mutation);
           },
         },
         start({
-          capabilities,
+          dependencies,
           actions,
         }: {
-          capabilities: BrowserRequirements<Model>;
+          dependencies: BrowserRequirements<Model>;
           actions: EntityActions<Model>;
         }) {
           actions.synchronize();
-          const replica = requireReplica(replicas, capabilities);
+          const replica = requireReplica(replicas, dependencies);
           return {
             [implementation.name]: replica.api,
           } as unknown as BrowserProvision<Model>;
         },
       },
     },
-    capability: implementation.name,
+    dependency: implementation.name,
   } as DefinedEntityFeature<Model>;
 }
 
@@ -441,7 +447,7 @@ type EntityRemote<Model extends EntityModelDefinition> = EntityApi<Model> &
 class EntityReplica<Model extends EntityModelDefinition> implements AsyncDisposable {
   readonly api: EntityApi<Model> & AsyncDisposable;
   readonly #implementation: EntityImplementation<Model>;
-  readonly #capabilities: BrowserRequirements<Model>;
+  readonly #dependencies: BrowserRequirements<Model>;
   readonly #state: MutableEntityState<Model>;
   readonly #remote: EntityRemote<Model>;
   readonly #storageKey: (principal: PrincipalOf<Model>) => string;
@@ -463,13 +469,13 @@ class EntityReplica<Model extends EntityModelDefinition> implements AsyncDisposa
   constructor(
     implementation: EntityImplementation<Model>,
     path: string,
-    capabilities: BrowserRequirements<Model>,
+    dependencies: BrowserRequirements<Model>,
     state: MutableEntityState<Model>,
   ) {
     this.#implementation = implementation;
-    this.#capabilities = capabilities;
+    this.#dependencies = dependencies;
     this.#state = state;
-    this.#remote = createEntityClient(capabilities.http, path);
+    this.#remote = createEntityClient(dependencies.http, path);
     this.#storageKey = (principal) => `entity:${implementation.name}:${principal.id}`;
     const api: EntityApi<Model> & AsyncDisposable = {
       list: async (filter?: FilterOf<Model>) => this.#snapshot(filter),
@@ -490,10 +496,10 @@ class EntityReplica<Model extends EntityModelDefinition> implements AsyncDisposa
   synchronize(): void {
     if (this.#disposed) return;
     if (!this.#identitySubscription) {
-      this.#identitySubscription = this.#capabilities.identity.subscribe((session) => {
+      this.#identitySubscription = this.#dependencies.identity.subscribe((session) => {
         void this.#useSession(session).catch((error: unknown) => this.#goOffline(error));
       });
-      void this.#capabilities.identity
+      void this.#dependencies.identity
         .session()
         .then((session) => this.#useSession(session))
         .catch((error: unknown) => this.#goOffline(error));
@@ -505,8 +511,8 @@ class EntityReplica<Model extends EntityModelDefinition> implements AsyncDisposa
   create(input: CreateOf<Model>): ValueOf<Model> {
     const principal = this.#requirePrincipal();
     const command: EntityCommand<Model> = {
-      id: this.#capabilities.identifiers.create({}),
-      entityId: this.#capabilities.identifiers.create({}),
+      id: this.#dependencies.identifiers.create({}),
+      entityId: this.#dependencies.identifiers.create({}),
       operation: "create",
       input,
     };
@@ -533,7 +539,7 @@ class EntityReplica<Model extends EntityModelDefinition> implements AsyncDisposa
     });
     if (entity.id !== previous.id) throw new TypeError("An update cannot change an entity id.");
     this.#pending.push({
-      id: this.#capabilities.identifiers.create({}),
+      id: this.#dependencies.identifiers.create({}),
       entityId: input.id,
       operation: "update",
       input: input.changes,
@@ -549,7 +555,7 @@ class EntityReplica<Model extends EntityModelDefinition> implements AsyncDisposa
     const entity = find(this.#snapshot(), id);
     if (!entity) throw notFound(id);
     this.#pending.push({
-      id: this.#capabilities.identifiers.create({}),
+      id: this.#dependencies.identifiers.create({}),
       entityId: id,
       operation: "remove",
     });
@@ -616,9 +622,9 @@ class EntityReplica<Model extends EntityModelDefinition> implements AsyncDisposa
     this.#rejected = [];
     this.#setSynchronization("loading");
     this.#publish();
-    const stored = await this.#capabilities.storage.read<StoredReplica<Model>>(
-      this.#storageKey(session.user),
-    );
+    const stored = await this.#dependencies.storage.read<StoredReplica<Model>>({
+      key: this.#storageKey(session.user),
+    });
     if (!this.#active(generation)) return;
     if (stored?.version === 1 && stored.principalId === session.user.id) {
       this.#committed = stored.committed;
@@ -711,9 +717,12 @@ class EntityReplica<Model extends EntityModelDefinition> implements AsyncDisposa
     this.#setSynchronization("offline");
     if (this.#retry) return;
     const delay = Math.min(5_000, 250 * 2 ** this.#retryAttempt++);
-    this.#retry = this.#capabilities.scheduler.after(delay, () => {
-      this.#retry = undefined;
-      void this.#connect(this.#generation);
+    this.#retry = this.#dependencies.scheduler.after({
+      milliseconds: delay,
+      run: () => {
+        this.#retry = undefined;
+        void this.#connect(this.#generation);
+      },
     });
   }
 
@@ -780,7 +789,12 @@ class EntityReplica<Model extends EntityModelDefinition> implements AsyncDisposa
     };
     this.#write = this.#write
       .catch(() => undefined)
-      .then(() => this.#capabilities.storage.write(this.#storageKey(principal), record))
+      .then(() =>
+        this.#dependencies.storage.write({
+          key: this.#storageKey(principal),
+          value: record,
+        }),
+      )
       .catch((error: unknown) => this.#goOffline(error));
   }
 
@@ -809,9 +823,9 @@ class EntityReplica<Model extends EntityModelDefinition> implements AsyncDisposa
 
 function requireReplica<Model extends EntityModelDefinition>(
   replicas: WeakMap<object, EntityReplica<Model>>,
-  capabilities: object,
+  dependencies: object,
 ): EntityReplica<Model> {
-  const replica = replicas.get(capabilities);
+  const replica = replicas.get(dependencies);
   if (!replica) throw new Error("The entity Feature has not started.");
   return replica;
 }
@@ -931,13 +945,13 @@ function createEntityClient<Model extends EntityModelDefinition>(
 
 function createEntityService<Model extends EntityModelDefinition>(
   implementation: EntityImplementation<Model>,
-  capabilities: Requirements<Model>,
+  dependencies: Requirements<Model>,
 ): EntityService<Model> {
   const stream = (principal: PrincipalOf<Model>) => `${implementation.name}:${principal.id}`;
   const read = async (principal: PrincipalOf<Model>) =>
     reduceEvents<ValueOf<Model>>(
       stream(principal),
-      await capabilities.events.read({ stream: stream(principal) }),
+      await dependencies.events.read({ stream: stream(principal) }),
       { revision: 0, entities: [] },
     );
   const authorize = async (input: EntityAuthorization<Model>) => {
@@ -975,7 +989,7 @@ function createEntityService<Model extends EntityModelDefinition>(
   ) => {
     const name = stream(principal);
     for (let attempt = 0; attempt < 32; attempt += 1) {
-      const history = await capabilities.events.read({ stream: name });
+      const history = await dependencies.events.read({ stream: name });
       if (commandId) {
         const committed = history.find(({ event }) => event.commandId === commandId)?.event;
         if (committed) {
@@ -988,7 +1002,7 @@ function createEntityService<Model extends EntityModelDefinition>(
         entities: [],
       });
       const decision = await decide(snapshot);
-      const appended = await capabilities.events.append({
+      const appended = await dependencies.events.append({
         stream: name,
         expectedRevision: snapshot.revision,
         events: [decision.event],
@@ -1011,7 +1025,7 @@ function createEntityService<Model extends EntityModelDefinition>(
     create({ principal, value, command }) {
       return commit(principal, command?.id, async () => {
         const entity = implementation.create({
-          id: command?.entityId ?? capabilities.identifiers.create({}),
+          id: command?.entityId ?? dependencies.identifiers.create({}),
           principal,
           input: value,
         });
@@ -1020,7 +1034,7 @@ function createEntityService<Model extends EntityModelDefinition>(
           event: {
             type: "entity.created",
             entity,
-            at: capabilities.clock.now({}),
+            at: dependencies.clock.now({}),
             commandId: command?.id,
           },
           result: entity,
@@ -1038,7 +1052,7 @@ function createEntityService<Model extends EntityModelDefinition>(
           event: {
             type: "entity.replaced",
             entity,
-            at: capabilities.clock.now({}),
+            at: dependencies.clock.now({}),
             commandId: command?.id,
           },
           result: entity,
@@ -1055,7 +1069,7 @@ function createEntityService<Model extends EntityModelDefinition>(
             type: "entity.removed",
             id,
             entity,
-            at: capabilities.clock.now({}),
+            at: dependencies.clock.now({}),
             commandId: command?.id,
           },
           result: entity,
@@ -1065,7 +1079,7 @@ function createEntityService<Model extends EntityModelDefinition>(
     changes({ principal, filter }) {
       return snapshots(
         () => read(principal),
-        (after) => capabilities.events.subscribe({ stream: stream(principal), after }),
+        (after) => dependencies.events.subscribe({ stream: stream(principal), after }),
         (snapshot) => visible(snapshot, principal, filter),
       );
     },

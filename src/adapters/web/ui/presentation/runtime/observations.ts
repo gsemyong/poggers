@@ -3,7 +3,7 @@ import { signal } from "alien-signals";
 import type {
   WebPresentationElement,
   WebPresentationEnvironment,
-} from "@/adapters/web/ui/presentation/language";
+} from "@/platforms/web/presentation";
 
 export type WebEnvironmentHost = Readonly<{
   value: WebPresentationEnvironment;

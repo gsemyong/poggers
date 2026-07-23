@@ -1,8 +1,8 @@
 # Poggers
 
 Poggers is a TypeScript product language for portable Programs, typed
-Capabilities, platform Components, and complete Presentations. Applications
-compose reusable Features; adapters own native realization.
+Dependencies, platform Components, and complete Presentations. Applications
+compose reusable Features; Platform Adapters own realization.
 
 ## Create An Application
 
@@ -57,19 +57,17 @@ The example demonstrates direct fine-grained state updates, semantic
 Presentation HMR with preserved DOM, state, temporal values, and Event cursors;
 container-aware styling; and parameterized control sound and icon assets.
 Switching the accent changes
-both assets without changing Structure or remounting its native Elements. Its
+both assets without changing Structure or remounting its platform Elements. Its
 sheet demonstrates direct drag following, velocity-aware spring release,
 rubber-band overscroll, interruptible presence, contextual crossfade, keyed
 reorder and layout continuity, repeated action feedback, shared environment
 observations, reduced motion, frame inspection, and deterministic realization
 of each frame.
 
-See [the architecture document](docs/architecture.md) for the product model and
-adapter boundaries, and [the project organization](docs/project-organization.md)
-for the application and reusable Feature conventions. Headless code intended
-for both JavaScript development and optimized production follows the deliberately
-small [Portable TypeScript profile](docs/portable-typescript.md); unsupported
-host code is identified in IR and can never become a silent production source
-fallback. The generic native path, its adapter contract, verified scope, and
-remaining optimization boundary are recorded in the
-[native runtime verification](docs/native-runtime-correction.md).
+See [the architecture document](docs/architecture.md) for the product model,
+project convention, adapter boundaries, and package surface. Headless code
+intended for both JavaScript development and optimized production follows the
+deliberately small [Portable TypeScript profile](docs/portable-typescript.md);
+unsupported host code is identified in IR and can never become a silent
+production fallback. The active migration and its acceptance evidence are
+tracked in [the architecture migration ledger](docs/architecture-migration.md).

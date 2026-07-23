@@ -7,7 +7,7 @@ import { resolve } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 
 import { createServerPlatformAdapter } from "@/adapters/server/adapter";
-import { compileApplication } from "@/core/compiler/source";
+import { compileApplication } from "@/compiler/source";
 
 const temporaryDirectories: string[] = [];
 
@@ -54,10 +54,28 @@ describe("server Platform adapter", () => {
 
     try {
       expect(await fetchText(`http://localhost:${port}/probe`)).toBe("first");
+      let sampling = true;
+      const observed: string[] = [];
+      const requests = (async () => {
+        while (sampling) {
+          try {
+            observed.push(await fetchText(`http://localhost:${port}/probe`));
+          } catch (error) {
+            observed.push(`error:${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
+      })();
       await writeFile(fixture.application, httpProgramSource("second"));
       await expect
         .poll(() => fetchText(`http://localhost:${port}/probe`), { timeout: 5_000 })
         .toBe("second");
+      sampling = false;
+      await requests;
+      expect(observed.length).toBeGreaterThan(0);
+      expect(
+        observed.every((value) => value === "first" || value === "second"),
+        `observed responses during replacement: ${JSON.stringify([...new Set(observed)])}`,
+      ).toBe(true);
     } finally {
       await session[Symbol.asyncDispose]();
     }
@@ -163,8 +181,8 @@ export default {
     probe: {
       programs: {
         api: {
-          start({ capabilities }: { capabilities: { http: Http } }) {
-            return capabilities.http.route({
+          start({ dependencies }: { dependencies: { http: Http } }) {
+            return dependencies.http.route({
               path: "/probe",
               handle: async () => ({ status: 200, headers: [], body: ${JSON.stringify(value)}, stream: undefined }),
             });
@@ -189,8 +207,8 @@ export default {
     probe: {
       programs: {
         api: {
-          start({ capabilities }: { capabilities: { http: Http } }) {
-            return capabilities.http.route({
+          start({ dependencies }: { dependencies: { http: Http } }) {
+            return dependencies.http.route({
               path: "/probe",
               handle: async () => ({ status: 200, headers: [], body: identity, stream: undefined }),
             });
@@ -228,8 +246,8 @@ const identity = "stable-server";
 export const server = {
   programs: {
     api: {
-      start({ capabilities }: { capabilities: { http: Http } }) {
-        return capabilities.http.route({
+      start({ dependencies }: { dependencies: { http: Http } }) {
+        return dependencies.http.route({
           path: "/probe",
           handle: async () => ({ status: 200, headers: [], body: identity, stream: undefined }),
         });
@@ -280,7 +298,7 @@ function run(file: string): Promise<number> {
     child.stderr.setEncoding("utf8").on("data", (value: string) => (error += value));
     const timeout = setTimeout(() => {
       child.kill("SIGKILL");
-      reject(new Error(`Native Program did not exit: ${error || file}`));
+      reject(new Error(`Production Program did not exit: ${error || file}`));
     }, 10_000);
     child.once("error", (spawnError) => {
       clearTimeout(timeout);
@@ -288,7 +306,7 @@ function run(file: string): Promise<number> {
     });
     child.once("exit", (code, signal) => {
       clearTimeout(timeout);
-      if (signal) reject(new Error(`Native Program exited from ${signal}: ${error || file}`));
+      if (signal) reject(new Error(`Production Program exited from ${signal}: ${error || file}`));
       else resolvePromise(code ?? 1);
     });
   });

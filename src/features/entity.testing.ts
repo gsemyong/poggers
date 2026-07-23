@@ -1,4 +1,3 @@
-import { createProgramContributionInstance } from "@/core/process";
 import {
   bindEntityPrincipal,
   type DefinedEntityFeature,
@@ -9,6 +8,7 @@ import {
   type EventStore,
   type StoredEvent,
 } from "@/features/entity";
+import { createProgramContributionInstance } from "@/runtime/process";
 
 export function createMemoryEventStore<Event>(): EventStore<Event> {
   const streams = new Map<string, StoredEvent<Event>[]>();
@@ -58,9 +58,9 @@ export async function createEntityFixture<Model extends EntityModelDefinition>(
   let identifier = 0;
   let time = 0;
   const instance = createProgramContributionInstance(feature.programs.server as never, {
-    address: { program: "server", feature: feature.capability },
-    provides: [feature.capability],
-    capabilities: {
+    address: { program: "server", feature: feature.dependency },
+    provides: [feature.dependency],
+    dependencies: {
       identity: { authenticate: async () => input.principal },
       events,
       identifiers: { create: () => `entity-${++identifier}` },
@@ -68,7 +68,7 @@ export async function createEntityFixture<Model extends EntityModelDefinition>(
       http: { route: () => ({ [Symbol.dispose]: () => undefined }) },
     },
   });
-  const service = (await instance.start())[feature.capability] as EntityService<Model>;
+  const service = (await instance.start())[feature.dependency] as EntityService<Model>;
   return {
     api: bindEntityPrincipal(service, input.principal),
     service,

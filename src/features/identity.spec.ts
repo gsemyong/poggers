@@ -1,8 +1,7 @@
 import { describe, expect, test } from "vitest";
 
+import type { ProgramManifest } from "@/compiler/ir";
 import type { Application } from "@/core/application";
-import type { ProgramManifest } from "@/core/capability";
-import { startProcess } from "@/core/process";
 import {
   createIdentity,
   type AuthenticationBackend,
@@ -11,6 +10,7 @@ import {
   type IdentityModel,
   type IdentityService,
 } from "@/features/identity";
+import { startProcess } from "@/runtime/process";
 
 type Users = IdentityModel<{
   Name: "identity";
@@ -42,7 +42,7 @@ describe("semantic identity Feature", () => {
       },
       manifest("server", ["authentication", "http"]),
     );
-    const service = process.capabilities.identity as IdentityService<Users>;
+    const service = process.dependencies.identity as IdentityService<Users>;
 
     await expect(service.authenticate({ cookie: "alice" })).resolves.toEqual({
       id: "alice",
@@ -69,7 +69,7 @@ describe("semantic identity Feature", () => {
       },
       manifest("browser", ["http"]),
     );
-    const client = process.capabilities.identity as IdentityClient<Users>;
+    const client = process.dependencies.identity as IdentityClient<Users>;
     const sessions: Array<Readonly<{ user: Users["Principal"] }> | undefined> = [];
     const subscription = client.subscribe((session) => sessions.push(session));
 
@@ -79,6 +79,34 @@ describe("semantic identity Feature", () => {
     expect(sessions).toEqual([{ user: { id: "alice", role: "member" } }]);
     expect(requests).toEqual(["/api/identity/sign-in/email"]);
     subscription[Symbol.dispose]();
+    await process.dispose();
+  });
+
+  test("coalesces concurrent initial session reads across composed Features", async () => {
+    let requests = 0;
+    const process = await startProcess(
+      application,
+      "browser",
+      {
+        http: {
+          async request() {
+            requests += 1;
+            await Promise.resolve();
+            return Response.json({
+              user: { id: "alice", name: "Alice", email: "alice@example.com" },
+            });
+          },
+        },
+      },
+      manifest("browser", ["http"]),
+    );
+    const client = process.dependencies.identity as IdentityClient<Users>;
+
+    await expect(Promise.all([client.session(), client.session()])).resolves.toEqual([
+      { user: { id: "alice", role: "member" } },
+      { user: { id: "alice", role: "member" } },
+    ]);
+    expect(requests).toBe(1);
     await process.dispose();
   });
 });

@@ -7,9 +7,9 @@ import {
   planWebPresentationArtifacts,
   validateWebPresentationSource,
 } from "@/adapters/web/ui/presentation/compiler";
-import { spring } from "@/adapters/web/ui/presentation/dynamics";
-import type { WebStyle } from "@/adapters/web/ui/presentation/language";
-import { compilePresentationSource } from "@/core/compiler/presentation";
+import { compilePresentationSource } from "@/compiler/presentation";
+import type { WebStyle } from "@/platforms/web/presentation";
+import { spring } from "@/platforms/web/presentation/dynamics";
 
 describe("web Presentation compiler", () => {
   it("accepts only compositor-safe temporal destinations", () => {

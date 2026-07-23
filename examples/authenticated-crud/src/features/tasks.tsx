@@ -1,12 +1,21 @@
 import {
   createEntity,
   type EntityModel,
-  type Feature,
   type FeatureContractOf,
   placePrograms,
   type Program,
 } from "@poggers/kit";
-import { For, type BrowserMainThread, type Navigation } from "@poggers/kit/web";
+import {
+  For,
+  type BrowserMainThread,
+  type MountedWebFeature,
+  type Navigation,
+  type Validate,
+  type WebDestination,
+  type WebFeature,
+  type WebRoute,
+  mountFeature,
+} from "@poggers/kit/web";
 
 import type { App } from "../app";
 import type { User } from "./identity";
@@ -27,32 +36,48 @@ export type Tasks = EntityModel<{
   Filter: Readonly<{ completed?: boolean }>;
 }>;
 
-export type TaskDestination =
-  | Readonly<{ name: "list" }>
-  | Readonly<{ name: "create" }>
-  | Readonly<{ name: "edit"; id: string }>;
+type TaskRoutes = {
+  list: WebRoute<{
+    Path: "";
+    Metadata: {
+      Title: "Tasks";
+      Description: "Manage workspace tasks";
+      Robots: "noindex";
+    };
+  }>;
+  create: WebRoute<{
+    Path: "new";
+    Metadata: { Title: "New task"; Robots: "noindex" };
+  }>;
+  edit: WebRoute<{
+    Path: ":id";
+    Metadata: { Title: "Edit task"; Robots: "noindex" };
+    Params: { id: Validate<string, { Format: "uuid" }> };
+  }>;
+};
+
+export type TaskDestination = WebDestination<TaskRoutes>;
 
 type TasksBrowser = Program<
   BrowserMainThread,
   {
-    Requires: { navigation: Navigation };
+    Requires: { navigation: Navigation<TaskRoutes, App> };
     State: {
-      destination: TaskDestination;
-      title: string;
       error: string | undefined;
     };
     Actions: {
-      navigate(input: { destination: TaskDestination }): void;
       create(): void;
       edit(input: { id: string }): void;
       back(): void;
-      changeTitle(input: { title: string }): void;
-      save(): void;
+      save(input: { destination: TaskDestination; title: string }): void;
       toggle(input: { id: string; completed: boolean }): void;
       remove(input: { id: string }): void;
     };
     Components: {
       Admin: {
+        Props: { destination: TaskDestination };
+        State: { title: string | undefined };
+        Actions: { changeTitle(input: { title: string }): void };
         Elements: {
           Root: "section";
           Header: "header";
@@ -85,15 +110,16 @@ type TasksBrowser = Program<
         };
       };
     };
+    Routes: TaskRoutes;
   }
 >;
 
-export type TasksFeature = Readonly<{
-  Features: {
-    tasks: FeatureContractOf<typeof placedTaskEntity>;
-  };
+type TasksFeatureDefinition = Readonly<{
+  Features: { tasks: FeatureContractOf<typeof placedTaskEntity> };
   Programs: { browser: TasksBrowser };
 }>;
+
+export type TasksFeature = MountedWebFeature<TasksFeatureDefinition, "tasks">;
 
 export const taskEntity = createEntity<Tasks>({
   name: "tasks",
@@ -114,46 +140,32 @@ export const taskEntity = createEntity<Tasks>({
 
 const placedTaskEntity = placePrograms(taskEntity, { server: "api", browser: "browser" });
 
-export const tasks = {
+const taskFeature: WebFeature<TasksFeatureDefinition, App> = {
   features: { tasks: placedTaskEntity },
   programs: {
     browser: {
-      state: {
-        destination: { name: "list" },
-        title: "",
-        error: undefined,
-      },
+      state: { error: undefined },
       actions: {
-        navigate({ features, state }, { destination }) {
-          state.destination = destination;
-          state.title =
-            destination.name === "edit"
-              ? (features.tasks.entities.find((task) => task.id === destination.id)?.title ?? "")
-              : "";
+        create({ dependencies }) {
+          dependencies.navigation.navigate({ to: "create" });
         },
-        create({ capabilities }) {
-          capabilities.navigation.navigate({ path: destinationUrl({ name: "create" }) });
+        edit({ dependencies }, { id }) {
+          dependencies.navigation.navigate({ to: "edit", params: { id } });
         },
-        edit({ capabilities }, { id }) {
-          capabilities.navigation.navigate({ path: destinationUrl({ name: "edit", id }) });
+        back({ dependencies }) {
+          dependencies.navigation.navigate({ to: "list" });
         },
-        back({ capabilities }) {
-          capabilities.navigation.navigate({ path: destinationUrl({ name: "list" }) });
-        },
-        changeTitle({ state }, { title }) {
-          state.title = title;
-        },
-        save({ capabilities, features, state }) {
-          const title = state.title.trim();
+        save({ dependencies, features, state }, { destination, title: inputTitle }) {
+          const title = inputTitle.trim();
           if (!title) return;
           state.error = undefined;
           try {
-            if (state.destination.name === "edit") {
-              features.tasks.update({ id: state.destination.id, changes: { title } });
+            if (destination.to === "edit") {
+              features.tasks.update({ id: destination.params.id, changes: { title } });
             } else {
               features.tasks.create({ title });
             }
-            capabilities.navigation.navigate({ path: destinationUrl({ name: "list" }) });
+            dependencies.navigation.navigate({ to: "list" });
           } catch (error) {
             state.error = message(error);
           }
@@ -175,15 +187,13 @@ export const tasks = {
       },
       components: {
         Admin: {
-          mount({ capabilities, feature }) {
-            feature.navigate({
-              destination: parseDestination(capabilities.navigation.current().pathname),
-            });
-            return capabilities.navigation.subscribe((location) =>
-              feature.navigate({ destination: parseDestination(location.pathname) }),
-            );
+          state: { title: undefined },
+          actions: {
+            changeTitle({ state }, { title }) {
+              state.title = title;
+            },
           },
-          view({ feature, features: { tasks }, elements }) {
+          view({ feature, features: { tasks }, elements, props, state, actions }) {
             const {
               Root,
               Header,
@@ -214,6 +224,15 @@ export const tasks = {
               Save,
               Back,
             } = elements;
+            const title = () => {
+              const destination = props.destination;
+              return (
+                state.title ??
+                (destination.to === "edit"
+                  ? (tasks.entities.find((task) => task.id === destination.params.id)?.title ?? "")
+                  : "")
+              );
+            };
             return (
               <Root aria-label="Task administration">
                 <Header>
@@ -223,7 +242,7 @@ export const tasks = {
                     <Copy>Plan the work, keep it moving, and close the loop.</Copy>
                   </Heading>
                   {() =>
-                    feature.destination.name === "list" ? (
+                    props.destination.to === "list" ? (
                       <New type="button" onClick={() => feature.create()}>
                         New task
                       </New>
@@ -244,7 +263,7 @@ export const tasks = {
                   }
                 </Status>
                 {() =>
-                  feature.destination.name === "list" ? (
+                  props.destination.to === "list" ? (
                     tasks.entities.length ? (
                       <List>
                         <For each={() => tasks.entities} by="id">
@@ -289,17 +308,16 @@ export const tasks = {
                     <Form
                       onSubmit={(event) => {
                         event.preventDefault();
-                        void feature.save();
+                        void feature.save({
+                          destination: props.destination,
+                          title: title(),
+                        });
                       }}
                     >
                       <FormHeader>
-                        <Eyebrow>
-                          {() => (feature.destination.name === "edit" ? "Edit" : "New")}
-                        </Eyebrow>
+                        <Eyebrow>{props.destination.to === "edit" ? "Edit" : "New"}</Eyebrow>
                         <FormTitle>
-                          {() =>
-                            feature.destination.name === "edit" ? "Update task" : "Create task"
-                          }
+                          {props.destination.to === "edit" ? "Update task" : "Create task"}
                         </FormTitle>
                       </FormHeader>
                       <Label for="task-title">Task title</Label>
@@ -307,9 +325,9 @@ export const tasks = {
                         id="task-title"
                         name="title"
                         autofocus
-                        value={() => feature.title}
+                        value={() => title()}
                         onInput={(event) =>
-                          feature.changeTitle({ title: event.currentTarget.value })
+                          actions.changeTitle({ title: event.currentTarget.value })
                         }
                       />
                       <FormActions>
@@ -326,27 +344,32 @@ export const tasks = {
           },
         },
       },
+      routes: {
+        list: {
+          view({ components: { Shell, Tasks } }) {
+            return <Shell.Application Content={<Tasks.Admin destination={{ to: "list" }} />} />;
+          },
+        },
+        create: {
+          view({ components: { Shell, Tasks } }) {
+            return <Shell.Application Content={<Tasks.Admin destination={{ to: "create" }} />} />;
+          },
+        },
+        edit: {
+          view({ components: { Shell, Tasks }, params }) {
+            return (
+              <Shell.Application
+                Content={<Tasks.Admin destination={{ to: "edit", params: { id: params.id } }} />}
+              />
+            );
+          },
+        },
+      },
     },
   },
-} satisfies Feature<TasksFeature, App>;
+};
 
-const taskPath = "/tasks";
-
-function parseDestination(pathname: string): TaskDestination {
-  const normalized = pathname.replace(/\/$/, "") || "/";
-  if (normalized === `${taskPath}/new`) return { name: "create" };
-  if (normalized.startsWith(`${taskPath}/`)) {
-    const id = decodeURIComponent(normalized.slice(taskPath.length + 1));
-    if (id) return { name: "edit", id };
-  }
-  return { name: "list" };
-}
-
-function destinationUrl(destination: TaskDestination): string {
-  if (destination.name === "create") return `${taskPath}/new`;
-  if (destination.name === "edit") return `${taskPath}/${encodeURIComponent(destination.id)}`;
-  return taskPath;
-}
+export const tasks = mountFeature(taskFeature, { path: "tasks" });
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);

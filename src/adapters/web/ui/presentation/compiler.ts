@@ -1,3 +1,4 @@
+import type { PresentationSourceIR } from "@/compiler/presentation";
 import type {
   WebElementPresentation,
   WebFeedback,
@@ -18,8 +19,7 @@ import type {
   WebStyle,
   WebStyleFragment,
   WebText,
-} from "@/adapters/web/ui/presentation/language";
-import type { PresentationSourceIR } from "@/core/compiler/presentation";
+} from "@/platforms/web/presentation";
 
 type CSSDeclarations = Record<string, string>;
 

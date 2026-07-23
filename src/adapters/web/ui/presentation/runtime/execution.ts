@@ -1,5 +1,5 @@
 import { compileWebStyleDeclarations } from "@/adapters/web/ui/presentation/compiler";
-import type { WebElementPresentation } from "@/adapters/web/ui/presentation/language";
+import type { WebElementPresentation } from "@/platforms/web/presentation";
 
 const nativeProperties = new Set(["opacity", "rotate", "scale", "translate"]);
 const adaptiveSafetyMargin = 0.5;
@@ -453,7 +453,7 @@ function capture<ElementName extends string>(
     for (const target of source()) {
       const previous = captured.get(target);
       if (previous && !sameValue(previous, entry)) {
-        throw new TypeError("A web Presentation native target has conflicting declarations.");
+        throw new TypeError("A web Presentation animation target has conflicting declarations.");
       }
       captured.set(target, entry);
     }

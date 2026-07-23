@@ -1,6 +1,23 @@
 import {
+  applyWebDocumentHead,
+  consumeWebRouteHydration,
+  isWebDeferredData,
+  parseWebRouteData,
+  validateWebDeferredFrame,
+  WEB_ROUTE_DATA_MEDIA_TYPE,
+  type WebRouteHydrationIR,
+} from "@/adapters/web/document";
+import {
+  matchWebRoute,
+  validateWebRouteMetadata,
+  type WebRouteIR,
+  type WebRouteMatch,
+} from "@/adapters/web/routing";
+import {
   allocatePresenceOwner,
   captureSignalOnHotRefresh,
+  createDeferredResource,
+  createHydratedDeferredResource,
   currentPresenceGraph,
   currentStructuralKey,
   effect,
@@ -8,7 +25,9 @@ import {
   onCleanup,
   onMount,
   runtimeSignal,
+  scoped,
   signal,
+  isDeferredResource,
   type Child,
   type Component,
   type Props,
@@ -16,20 +35,16 @@ import {
   type Signal,
 } from "@/adapters/web/ui/component/runtime";
 import { PresenceGraph } from "@/adapters/web/ui/presence";
-import type {
-  WebElementPresentation,
-  WebPresentationLanguage,
-} from "@/adapters/web/ui/presentation/language";
+import { publishWebDeferredState, readWebJSONLines } from "@/adapters/web/ui/stream";
+import type { ProgramManifest } from "@/compiler/ir";
+import type { PresentationAdapter, PresentationAdapterInstance } from "@/contracts/platform";
 import type { Application, ApplicationContract, PresentationName } from "@/core/application";
-import type { ProgramManifest } from "@/core/capability";
-import type { ComponentProps, ComponentName, ComponentState } from "@/core/component";
-import {
-  createActionEventLedger,
-  type PresentationAdapter,
-  type PresentationAdapterInstance,
-} from "@/core/presentation";
-import { assembleProgram, bindCapabilitiesToScope, ResourceScope } from "@/core/process";
-import { createReactiveState } from "@/core/state";
+import type { ComponentProps, ComponentName, ComponentState } from "@/core/ui/component";
+import type { WebElementPresentation, WebPresentationLanguage } from "@/platforms/web/presentation";
+import type { WebDestination } from "@/platforms/web/routing";
+import { createActionEventLedger } from "@/runtime/presentation";
+import { assembleProgram, bindDependenciesToScope, ResourceScope } from "@/runtime/process";
+import { createReactiveState } from "@/runtime/state";
 
 export type ComponentRuntimeElements<Contract extends ApplicationContract> = {
   [Name in ComponentName<Contract>]?: {
@@ -76,8 +91,13 @@ export type CreateApplicationUIOptions<Contract extends ApplicationContract> = R
   presentationDependencies?: PresentationDependencyManifest;
   components?: ComponentRuntimeElements<Contract>;
   hotState?: HotRenderState;
-  capabilities?: Readonly<Record<string, unknown>>;
+  dependencies?: Readonly<Record<string, unknown>>;
   programManifest?: ProgramManifest;
+  routes?: readonly WebRouteIR[];
+  /** @internal Lazily resolves the authored implementation for one compiler-known Route. */
+  loadRoute?(route: WebRouteIR): Promise<RuntimeRouteDefinition>;
+  /** @internal Route identities whose server data can start alongside their code chunk. */
+  routeLoaders?: readonly string[];
   boundary: Element;
   presentationAdapter: PresentationAdapter<WebPresentationLanguage, Element>;
 }>;
@@ -101,6 +121,7 @@ type RuntimeFeature = Readonly<{
   features?: Readonly<Record<string, RuntimeFeature>>;
 }>;
 type RuntimeApplication = Readonly<{
+  metadata?: Readonly<{ name?: string }>;
   features?: Readonly<Record<string, RuntimeFeature>>;
 }>;
 
@@ -121,7 +142,30 @@ type RuntimeProgramDefinition = Readonly<{
     Record<string, (scope: Record<string, unknown>, ...args: readonly unknown[]) => unknown>
   >;
   components?: Readonly<Record<string, RuntimeComponentDefinition>>;
+  routes?: Readonly<Record<string, RuntimeRouteDefinition>>;
   root?: string;
+}>;
+
+type RuntimeRouteDefinition = Readonly<{
+  load?: (context: RuntimeRouteLoadContext) => unknown;
+  view(context: RuntimeRouteViewContext): Child;
+}>;
+
+type RuntimeRouteLoadContext = Readonly<{
+  dependencies: Readonly<Record<string, unknown>>;
+  url: string;
+  signal: AbortSignal;
+  params: Readonly<Record<string, unknown>>;
+  search: Readonly<Record<string, unknown>>;
+}>;
+
+type RuntimeRouteViewContext = Readonly<{
+  data: unknown;
+  params: Readonly<Record<string, unknown>>;
+  search: Readonly<Record<string, unknown>>;
+  feature: Readonly<Record<string, unknown>>;
+  features: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
+  components: Record<string, unknown>;
 }>;
 
 type RuntimeComponentDefinition = {
@@ -149,7 +193,7 @@ type RuntimeComponentComposition = {
   >;
   readonly componentNamespaces: Record<string, Record<string, unknown>>;
   readonly apis: Record<string, Readonly<Record<string, unknown>>>;
-  readonly capabilities: Record<string, Readonly<Record<string, unknown>>>;
+  readonly dependencies: Record<string, Readonly<Record<string, unknown>>>;
   readonly events: Record<string, Readonly<Record<string, unknown>>>;
   readonly actionEventRevision: () => void;
   readonly lifecycles: Set<ResourceScope>;
@@ -173,8 +217,11 @@ export async function createApplicationUI<Contract extends ApplicationContract>(
   presentationDependencies,
   components,
   hotState,
-  capabilities = {},
+  dependencies = {},
   programManifest,
+  routes = [],
+  loadRoute,
+  routeLoaders,
   boundary,
   presentationAdapter,
 }: CreateApplicationUIOptions<Contract>): Promise<ApplicationUI> {
@@ -203,17 +250,18 @@ export async function createApplicationUI<Contract extends ApplicationContract>(
   const programUI = await createProgramUI(
     runtimeApplication,
     program,
-    capabilities,
+    dependencies,
     programManifest ?? inferEmptyProgramManifest(runtimeApplication, program),
     hotState,
     notifyActionEvent,
+    routes.length > 0,
   );
   const composition: RuntimeComponentComposition = {
     components: componentGroups[""]!,
     componentGroups,
     componentNamespaces,
     apis: programUI.apis,
-    capabilities: programUI.capabilities,
+    dependencies: programUI.dependencies,
     events: programUI.events,
     actionEventRevision: notifyActionEvent,
     lifecycles: new Set(),
@@ -261,6 +309,20 @@ export async function createApplicationUI<Contract extends ApplicationContract>(
     componentGroups,
     componentNamespaces,
   );
+  const router = routes.length
+    ? await createRouteRuntime({
+        application: runtimeApplication,
+        program,
+        routes,
+        dependencies,
+        apis: programUI.apis,
+        featureDependencies: programUI.dependencies,
+        components: componentNamespaces[""],
+        loadRoute,
+        routeLoaders,
+        boundary,
+      })
+    : undefined;
   updateRootPresentation(defaultPresentation);
 
   const captureHotState = (): HotRenderState => {
@@ -274,7 +336,10 @@ export async function createApplicationUI<Contract extends ApplicationContract>(
     features: programUI.features,
     components: componentGroups[""]!,
     renderRoot() {
+      if (router) return router.render();
       const rootName = collectProgramRoots(runtimeApplication, program);
+      if (!rootName)
+        throw new Error(`UI Program ${JSON.stringify(program)} has no root Component.`);
       const root = renderers[rootName];
       if (!root) throw new Error(`Unknown root Component "${rootName}".`);
       return root();
@@ -307,6 +372,11 @@ export async function createApplicationUI<Contract extends ApplicationContract>(
         errors.push(error);
       }
       try {
+        router?.dispose();
+      } catch (error) {
+        errors.push(error);
+      }
+      try {
         await programUI.dispose();
       } catch (error) {
         errors.push(error);
@@ -320,6 +390,490 @@ export async function createApplicationUI<Contract extends ApplicationContract>(
       if (errors.length > 1) throw new AggregateError(errors, "Application UI disposal failed.");
     },
   };
+}
+
+async function createRouteRuntime(options: {
+  application: RuntimeApplication;
+  program: string;
+  routes: readonly WebRouteIR[];
+  dependencies: Readonly<Record<string, unknown>>;
+  apis: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
+  featureDependencies: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
+  components: Record<string, unknown>;
+  loadRoute?(route: WebRouteIR): Promise<RuntimeRouteDefinition>;
+  routeLoaders?: readonly string[];
+  boundary: Element;
+}): Promise<Readonly<{ render(): Child; dispose(): void }>> {
+  const navigation = options.dependencies.navigation as
+    | Readonly<{
+        current(): URL;
+        navigate(destination: WebDestination & Readonly<{ replace?: boolean }>): void;
+        subscribe(receive: (location: URL) => void): Disposable;
+      }>
+    | undefined;
+  if (!navigation) throw new Error("A routed web Program requires the navigation Dependency.");
+  const revision = signal(0);
+  let generation = 0;
+  let current:
+    | Readonly<{
+        match: WebRouteMatch;
+        definition: RuntimeRouteDefinition;
+        data: unknown;
+        metadata: WebRouteIR["metadata"];
+      }>
+    | undefined;
+  let failure: unknown;
+  let disposed = false;
+  let pending: AbortController | undefined;
+  const hydration: WebRouteHydrationIR | undefined = consumeWebRouteHydration();
+  const knownLoaders = options.routeLoaders ? new Set(options.routeLoaders) : undefined;
+  const definitions = new Map<string, Promise<RuntimeRouteDefinition>>();
+  const loadDefinition = (route: WebRouteIR): Promise<RuntimeRouteDefinition> => {
+    const identity = routeIdentity(route);
+    let definition = definitions.get(identity);
+    if (!definition) {
+      const requested = options.loadRoute
+        ? options.loadRoute(route)
+        : Promise.resolve(routeDefinition(options.application, options.program, route));
+      definition = requested.catch((error: unknown) => {
+        if (definitions.get(identity) === definition) definitions.delete(identity);
+        throw error;
+      });
+      definitions.set(identity, definition);
+    }
+    return definition;
+  };
+
+  const resolve = async (location: URL): Promise<void> => {
+    const ownGeneration = ++generation;
+    pending?.abort();
+    const controller = new AbortController();
+    pending = controller;
+    failure = undefined;
+    try {
+      let match = matchWebRoute(options.routes, location);
+      if (!match) {
+        invalidatePendingHydration(options.boundary);
+        current = undefined;
+        applyRouteMetadata(options.application, {});
+        revision(revision() + 1);
+        return;
+      }
+      let activeLocation = location;
+      const hydrationPending =
+        options.boundary.getAttribute?.("data-poggers-rendering") === "hydrate";
+      let seeded =
+        hydrationPending && hydrationMatches(hydration, match, location) ? hydration : undefined;
+      if (hydrationPending && !seeded) invalidatePendingHydration(options.boundary);
+      let outcome: unknown;
+      let definition: RuntimeRouteDefinition;
+      for (let redirects = 0; ; redirects += 1) {
+        if (redirects > 10) throw new Error("The Route state request redirected too many times.");
+        const requested = match;
+        const identity = routeIdentity(requested.route);
+        const definitionTask = loadDefinition(requested.route);
+        const serverDataTask =
+          !seeded && requested.route.document === "content" && knownLoaders?.has(identity)
+            ? requestWebRouteData(activeLocation, controller.signal)
+            : undefined;
+        definition = await definitionTask;
+        if (controller.signal.aborted || disposed || ownGeneration !== generation) return;
+        if (knownLoaders && knownLoaders.has(identity) !== Boolean(definition.load)) {
+          throw new Error(
+            `Browser Route module ${JSON.stringify(identity)} disagrees with its compiler manifest.`,
+          );
+        }
+        if (seeded) {
+          outcome = routeHydrationOutcome(seeded);
+          break;
+        }
+        if (definition.load && requested.route.document === "content") {
+          const remote = await (serverDataTask ??
+            requestWebRouteData(activeLocation, controller.signal));
+          if ("redirect" in remote) {
+            activeLocation = remote.redirect;
+            const remoteMatch = matchWebRoute(options.routes, activeLocation);
+            if (!remoteMatch) throw new Error("The server redirected to an unknown Route.");
+            history.replaceState(
+              null,
+              "",
+              `${activeLocation.pathname}${activeLocation.search}${activeLocation.hash}`,
+            );
+            match = remoteMatch;
+            continue;
+          }
+          activeLocation = new URL(remote.hydration.location, remote.url);
+          const remoteMatch = matchWebRoute(options.routes, activeLocation);
+          if (!remoteMatch || !hydrationMatches(remote.hydration, remoteMatch, activeLocation)) {
+            throw new Error("The server returned Route state for a different location.");
+          }
+          if (
+            activeLocation.pathname !== location.pathname ||
+            activeLocation.search !== location.search
+          ) {
+            history.replaceState(
+              null,
+              "",
+              `${activeLocation.pathname}${activeLocation.search}${remote.url.hash}`,
+            );
+          }
+          match = remoteMatch;
+          if (routeIdentity(match.route) !== identity)
+            definition = await loadDefinition(match.route);
+          outcome = routeHydrationOutcome(remote.hydration);
+          break;
+        }
+        if (definition.load) {
+          outcome = await definition.load({
+            dependencies: options.featureDependencies[requested.route.feature] ?? {},
+            url: activeLocation.href,
+            signal: controller.signal,
+            params: requested.params,
+            search: requested.search,
+          });
+        } else {
+          outcome = { data: undefined };
+        }
+        break;
+      }
+      if (disposed || ownGeneration !== generation) return;
+      if (isRecord(outcome) && "redirect" in outcome) {
+        const scoped = options.featureDependencies[match.route.feature]?.navigation as
+          | typeof navigation
+          | undefined;
+        (scoped ?? navigation).navigate({
+          ...(outcome.redirect as WebDestination),
+          replace: true,
+        });
+        return;
+      }
+      current = {
+        match,
+        definition,
+        data:
+          isRecord(outcome) && "data" in outcome
+            ? prepareDeferredRouteData(outcome.data, match.route.deferred, controller.signal)
+            : undefined,
+        metadata: mergeRouteMetadata(match.route.metadata, outcome),
+      };
+      applyRouteMetadata(options.application, current.metadata);
+    } catch (error) {
+      if (disposed || ownGeneration !== generation) return;
+      current = undefined;
+      failure = error;
+      applyRouteMetadata(options.application, {});
+    }
+    revision(revision() + 1);
+  };
+
+  const routeNavigation = installRouteNavigation(options.boundary, options.routes, loadDefinition);
+  let activeResolution: Promise<void> | undefined;
+  const beginResolution = (location: URL): Promise<void> => {
+    const task = resolve(location);
+    activeResolution = task;
+    return task;
+  };
+  const subscription = navigation.subscribe((location) => void beginResolution(location));
+  let initialResolution = beginResolution(navigation.current());
+  for (;;) {
+    await initialResolution;
+    if (activeResolution === initialResolution) break;
+    initialResolution = activeResolution!;
+  }
+  const renderCurrent = (): Child => {
+    if (failure)
+      return `Route failed: ${failure instanceof Error ? failure.message : String(failure)}`;
+    if (!current) return "Not found.";
+    const feature = current.match.route.feature;
+    return current.definition.view({
+      data: current.data,
+      params: current.match.params,
+      search: current.match.search,
+      feature: options.apis[feature] ?? {},
+      features: childFeatureAPIs(feature, options.apis),
+      components: options.components,
+    });
+  };
+  return {
+    render() {
+      void revision();
+      return scoped(renderCurrent);
+    },
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      generation += 1;
+      pending?.abort();
+      pending = undefined;
+      subscription[Symbol.dispose]();
+      routeNavigation[Symbol.dispose]();
+    },
+  };
+}
+
+function prepareDeferredRouteData(
+  value: unknown,
+  fields: readonly string[],
+  signal: AbortSignal,
+): unknown {
+  if (!fields.length) return value;
+  if (!isRecord(value)) throw new TypeError("Deferred web Route data must be an object.");
+  const data: Record<string, unknown> = { ...value };
+  for (const field of fields) {
+    const run = data[field];
+    if (isDeferredResource(run)) continue;
+    if (isWebDeferredData(run)) {
+      if (run.field !== field) {
+        throw new TypeError(`Deferred web Route data ${JSON.stringify(field)} is mismatched.`);
+      }
+      data[field] = createHydratedDeferredResource(run, signal);
+      continue;
+    }
+    if (typeof run !== "function") {
+      throw new TypeError(`Deferred web Route data ${JSON.stringify(field)} must be a function.`);
+    }
+    data[field] = createDeferredResource(() => Reflect.apply(run, undefined, []), signal);
+  }
+  return Object.freeze(data);
+}
+
+function routeHydrationOutcome(
+  hydration: WebRouteHydrationIR,
+): Readonly<{ data: unknown; metadata: WebRouteHydrationIR["metadata"] }> {
+  return {
+    data: hydration.loader === false ? undefined : hydration.loader.data,
+    metadata: hydration.metadata,
+  };
+}
+
+async function requestWebRouteData(
+  location: URL,
+  signal: AbortSignal,
+): Promise<Readonly<{ hydration: WebRouteHydrationIR; url: URL }> | Readonly<{ redirect: URL }>> {
+  const response = await fetch(location, {
+    credentials: "same-origin",
+    headers: { accept: WEB_ROUTE_DATA_MEDIA_TYPE },
+    signal,
+  });
+  if (!response.ok) {
+    throw new Error(`Unable to load Route state (${response.status}).`);
+  }
+  const contentType = response.headers.get("content-type")?.split(";", 1)[0]?.trim();
+  if (contentType !== WEB_ROUTE_DATA_MEDIA_TYPE) {
+    throw new Error(`Unexpected Route state media type ${JSON.stringify(contentType)}.`);
+  }
+  const framed = response.headers
+    .get("content-type")
+    ?.split(";")
+    .slice(1)
+    .some((parameter) => parameter.trim().toLowerCase() === "framing=ndjson");
+  const data = framed
+    ? await readInitialWebRouteRecord(response, signal)
+    : parseWebRouteData(await response.json());
+  return "redirect" in data
+    ? { redirect: new URL(data.redirect, response.url) }
+    : { hydration: data, url: new URL(response.url) };
+}
+
+async function readInitialWebRouteRecord(
+  response: Response,
+  signal: AbortSignal,
+): Promise<ReturnType<typeof parseWebRouteData>> {
+  if (!response.body) throw new TypeError("Streamed Route state has no response body.");
+  const records = readWebJSONLines(response.body)[Symbol.asyncIterator]();
+  const initial = await records.next();
+  if (initial.done) throw new TypeError("Streamed Route state is empty.");
+  const hydration = parseWebRouteData(initial.value);
+  if ("redirect" in hydration) return hydration;
+  void (async () => {
+    try {
+      while (!signal.aborted) {
+        const record = await records.next();
+        if (record.done) return;
+        validateWebDeferredFrame(record.value as Parameters<typeof validateWebDeferredFrame>[0]);
+        const frame = record.value as Parameters<typeof validateWebDeferredFrame>[0];
+        publishWebDeferredState(frame.boundary, frame.state);
+      }
+    } catch (error) {
+      if (!signal.aborted) console.error("[poggers] Route state stream failed", error);
+    }
+  })();
+  return hydration;
+}
+
+function hydrationMatches(
+  hydration: WebRouteHydrationIR | undefined,
+  match: WebRouteMatch,
+  location: URL,
+): hydration is WebRouteHydrationIR {
+  return Boolean(
+    hydration &&
+    hydration.route.feature === match.route.feature &&
+    hydration.route.name === match.route.name &&
+    hydration.location === `${location.pathname}${location.search}`,
+  );
+}
+
+function invalidatePendingHydration(boundary: Element): void {
+  if (boundary.getAttribute?.("data-poggers-rendering") === "hydrate") {
+    boundary.setAttribute("data-poggers-rendering", "client");
+  }
+}
+
+function routeDefinition(
+  application: RuntimeApplication,
+  program: string,
+  route: WebRouteIR,
+): RuntimeRouteDefinition {
+  let feature: RuntimeFeature | undefined;
+  let features = application.features;
+  for (const name of route.feature.split(".")) {
+    feature = features?.[name];
+    features = feature?.features;
+  }
+  const definition = feature?.programs?.[program]?.routes?.[route.name];
+  if (!definition)
+    throw new Error(`Missing implementation for web Route ${route.feature}.${route.name}.`);
+  return definition;
+}
+
+function routeIdentity(route: Pick<WebRouteIR, "feature" | "name">): string {
+  return `${route.feature}.${route.name}`;
+}
+
+function installRouteNavigation(
+  boundary: Element,
+  routes: readonly WebRouteIR[],
+  load: (route: WebRouteIR) => Promise<RuntimeRouteDefinition>,
+): Disposable {
+  if (typeof boundary.addEventListener !== "function") {
+    return { [Symbol.dispose]() {} };
+  }
+  const timers = new Map<HTMLAnchorElement, ReturnType<typeof setTimeout>>();
+  const anchorFrom = (target: EventTarget | null): HTMLAnchorElement | undefined => {
+    if (!(target instanceof Element)) return undefined;
+    const anchor = target.closest("a[href]");
+    return anchor instanceof HTMLAnchorElement && boundary.contains(anchor) ? anchor : undefined;
+  };
+  const matchAnchor = (anchor: HTMLAnchorElement): WebRouteMatch | undefined => {
+    const target = new URL(anchor.href, location.href);
+    if (target.origin !== location.origin) return undefined;
+    return matchWebRoute(routes, target);
+  };
+  const prefetch = (anchor: HTMLAnchorElement): void => {
+    const connection = (
+      navigator as Navigator & {
+        connection?: Readonly<{ saveData?: boolean; effectiveType?: string }>;
+      }
+    ).connection;
+    if (
+      connection?.saveData ||
+      connection?.effectiveType === "slow-2g" ||
+      connection?.effectiveType === "2g"
+    ) {
+      return;
+    }
+    const match = matchAnchor(anchor);
+    if (match) void load(match.route).catch(() => undefined);
+  };
+  const onPointerOver = (event: Event): void => {
+    const anchor = anchorFrom(event.target);
+    if (!anchor || timers.has(anchor)) return;
+    timers.set(
+      anchor,
+      setTimeout(() => {
+        timers.delete(anchor);
+        prefetch(anchor);
+      }, 60),
+    );
+  };
+  const onPointerOut = (event: Event): void => {
+    const pointer = event as PointerEvent;
+    const anchor = anchorFrom(pointer.target);
+    if (
+      !anchor ||
+      (pointer.relatedTarget instanceof Node && anchor.contains(pointer.relatedTarget))
+    ) {
+      return;
+    }
+    const timer = timers.get(anchor);
+    if (timer !== undefined) clearTimeout(timer);
+    timers.delete(anchor);
+  };
+  const onFocus = (event: Event): void => {
+    const anchor = anchorFrom(event.target);
+    if (anchor) prefetch(anchor);
+  };
+  const onClick = (event: Event): void => {
+    const click = event as MouseEvent;
+    const anchor = anchorFrom(click.target);
+    if (
+      !anchor ||
+      click.defaultPrevented ||
+      click.button !== 0 ||
+      click.metaKey ||
+      click.ctrlKey ||
+      click.shiftKey ||
+      click.altKey ||
+      anchor.hasAttribute("download") ||
+      (anchor.target && anchor.target !== "_self")
+    ) {
+      return;
+    }
+    const target = new URL(anchor.href, location.href);
+    if (!matchAnchor(anchor)) return;
+    if (
+      target.pathname === location.pathname &&
+      target.search === location.search &&
+      target.hash !== location.hash
+    ) {
+      return;
+    }
+    click.preventDefault();
+    history.pushState(null, "", `${target.pathname}${target.search}${target.hash}`);
+    dispatchEvent(new PopStateEvent("popstate"));
+  };
+  boundary.addEventListener("pointerover", onPointerOver);
+  boundary.addEventListener("pointerout", onPointerOut);
+  boundary.addEventListener("focusin", onFocus);
+  boundary.addEventListener("touchstart", onFocus, { passive: true });
+  boundary.addEventListener("click", onClick);
+  return {
+    [Symbol.dispose]() {
+      for (const timer of timers.values()) clearTimeout(timer);
+      timers.clear();
+      boundary.removeEventListener("pointerover", onPointerOver);
+      boundary.removeEventListener("pointerout", onPointerOut);
+      boundary.removeEventListener("focusin", onFocus);
+      boundary.removeEventListener("touchstart", onFocus);
+      boundary.removeEventListener("click", onClick);
+    },
+  };
+}
+
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function mergeRouteMetadata(
+  base: WebRouteIR["metadata"],
+  outcome: unknown,
+): WebRouteIR["metadata"] {
+  if (!isRecord(outcome) || !isRecord(outcome.metadata)) return base;
+  const dynamic = outcome.metadata as WebRouteIR["metadata"];
+  validateWebRouteMetadata(dynamic, "dynamic");
+  return Object.freeze({ ...base, ...dynamic });
+}
+
+function applyRouteMetadata(
+  application: RuntimeApplication,
+  metadata: WebRouteIR["metadata"],
+): void {
+  applyWebDocumentHead({
+    title: metadata.title ?? application.metadata?.name ?? "Poggers",
+    language: metadata.language ?? "en",
+    metadata,
+  });
 }
 
 function inferEmptyProgramManifest(
@@ -410,8 +964,8 @@ function createComponentInstance(
     });
     return lifecycleDisposal;
   };
-  const capabilities = bindCapabilitiesToScope(
-    options.composition.capabilities[owner] ?? {},
+  const dependencies = bindDependenciesToScope(
+    options.composition.dependencies[owner] ?? {},
     lifecycle,
   );
   const actions = Object.create(null) as Record<string, (...args: unknown[]) => unknown>;
@@ -440,7 +994,7 @@ function createComponentInstance(
 
   const actionContext = Object.assign(pickServices(services, ["feature", "features"]), {
     props,
-    capabilities,
+    dependencies,
     state: stateRuntime.mutable,
     elements,
   });
@@ -512,7 +1066,7 @@ function createComponentInstance(
           definition.mount?.(
             Object.assign(pickServices(services, ["feature", "features"]), {
               props,
-              capabilities,
+              dependencies,
               state,
               actions,
               elements,
@@ -686,31 +1240,29 @@ function mountAuthoredPresentationComponent(options: {
   graph: RuntimePresentationGraph;
 }): void {
   onMount(() => {
-    const boundary = options.mountedTargets.Root?.values().next().value ?? options.refs.Root;
-    if (!(boundary instanceof Element)) return;
-    options.graph.mount();
     const targetSources = Object.fromEntries(
       Object.keys(options.elements).map((name) => [
         name,
-        () => {
-          const repeated = options.mountedTargets[name];
-          if (repeated?.size) return [...repeated].filter((element) => element.isConnected);
-          const first = options.refs[name];
-          return first?.isConnected ? [first] : [];
-        },
+        () => ownedPresentationTargets(options.mountedTargets[name], options.refs[name]),
       ]),
     );
-    const session = options.adapter.create({
-      boundary,
-      identity: options.identity,
-      elements: targetSources,
-      scopes: options.graph.scopes(options.componentName),
-    });
+    let session: ReturnType<typeof options.adapter.create> | undefined;
     let currentPresentationRevision: number | undefined;
     let currentGraphDynamic: boolean | undefined;
     let currentTargetRevision: number | undefined;
     const disposeEffect = effect(() => {
       const targetRevision = options.targetRevision();
+      if (!session) {
+        const boundary = options.mountedTargets.Root?.values().next().value ?? options.refs.Root;
+        if (!(boundary instanceof Element)) return;
+        options.graph.mount();
+        session = options.adapter.create({
+          boundary,
+          identity: options.identity,
+          elements: targetSources,
+          scopes: options.graph.scopes(options.componentName),
+        });
+      }
       const revision = options.presentationRevision();
       void options.graph.revision(options.componentName);
       const graphDynamic = options.graph.dynamic(options.componentName);
@@ -744,9 +1296,18 @@ function mountAuthoredPresentationComponent(options: {
     });
     return () => {
       disposeEffect();
-      session.dispose();
+      session?.dispose();
     };
   });
+}
+
+/** @internal Resolves every live target owned by a Component, connected or not. */
+export function ownedPresentationTargets(
+  repeated: ReadonlySet<Element> | undefined,
+  first: Element | null | undefined,
+): readonly Element[] {
+  if (repeated?.size) return [...repeated];
+  return first ? [first] : [];
 }
 
 /** @internal Creates the single Application/Feature Presentation evaluation graph. */
@@ -1132,15 +1693,16 @@ function normalizeRuntimeComponents<Contract extends ApplicationContract>(
 async function createProgramUI(
   application: RuntimeApplication,
   program: string,
-  externalCapabilities: Readonly<Record<string, unknown>>,
+  externalDependencies: Readonly<Record<string, unknown>>,
   manifest: ProgramManifest,
   hotState?: HotRenderState,
   onActionEvent: () => void = () => undefined,
+  routed = false,
 ): Promise<{
   api: Readonly<Record<string, unknown>>;
   features: Record<string, Readonly<Record<string, unknown>>>;
   apis: Record<string, Readonly<Record<string, unknown>>>;
-  capabilities: Record<string, Readonly<Record<string, unknown>>>;
+  dependencies: Record<string, Readonly<Record<string, unknown>>>;
   events: Record<string, Readonly<Record<string, unknown>>>;
   captureHotState(): HotRenderState;
   dispose(): Promise<void>;
@@ -1148,21 +1710,21 @@ async function createProgramUI(
   const assembly = await assembleProgram({
     application,
     name: program,
-    capabilities: externalCapabilities,
+    dependencies: externalDependencies,
     manifest,
     initialState: hotState?.programs,
     onActionEvent,
   });
   const apis = { ...assembly.ui };
-  const capabilities: Record<string, Readonly<Record<string, unknown>>> = Object.create(null);
+  const dependencies: Record<string, Readonly<Record<string, unknown>>> = Object.create(null);
   const events: Record<string, Readonly<Record<string, unknown>>> = Object.create(null);
   for (const instance of assembly.contributions) {
-    capabilities[instance.address.feature] = instance.capabilities;
+    dependencies[instance.address.feature] = instance.dependencies;
     events[instance.address.feature] = instance.ui?.events ?? Object.freeze({});
   }
 
-  const root = collectProgramRoots(application, program);
-  const owner = componentOwner(root);
+  const root = collectProgramRoots(application, program, !routed);
+  const owner = root ? componentOwner(root) : undefined;
   const api = owner ? (apis[owner] ?? Object.freeze({})) : Object.freeze({});
 
   let disposed = false;
@@ -1181,7 +1743,7 @@ async function createProgramUI(
       Object.keys(application.features ?? {}).map((name) => [name, apis[name] ?? {}]),
     ),
     apis,
-    capabilities,
+    dependencies,
     events,
     captureHotState,
     async dispose() {
@@ -1216,7 +1778,11 @@ function collectComponentNames(
   return [...names];
 }
 
-function collectProgramRoots(application: RuntimeApplication, program: string): string {
+function collectProgramRoots(
+  application: RuntimeApplication,
+  program: string,
+  required = true,
+): string | undefined {
   const roots: string[] = [];
   const visit = (
     features: Readonly<Record<string, RuntimeFeature>> | undefined,
@@ -1232,12 +1798,12 @@ function collectProgramRoots(application: RuntimeApplication, program: string): 
     }
   };
   visit(application.features, "");
-  if (roots.length !== 1) {
+  if (roots.length !== 1 && (required || roots.length > 1)) {
     throw new Error(
       `UI Program "${program}" must define exactly one root Component; found ${roots.length}.`,
     );
   }
-  return roots[0]!;
+  return roots[0];
 }
 
 function firstPresentation<Contract extends ApplicationContract>(

@@ -5,8 +5,8 @@ import { resolve } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 
 import { createWebPlatformAdapter } from "@/adapters/web/adapter";
-import { POGGERS_IR_VERSION, type ProgramIR } from "@/core/compiler/ir";
-import { compileApplication } from "@/core/compiler/source";
+import { POGGERS_IR_VERSION, type ProgramIR } from "@/compiler/ir";
+import { compileApplication } from "@/compiler/source";
 
 const temporaryDirectories: string[] = [];
 
@@ -28,7 +28,7 @@ describe("web Platform Adapter", () => {
     expect(adapter.ui.presentation.mount).toBeTypeOf("function");
   });
 
-  test("rejects unsupported Environments before starting native work", async () => {
+  test("rejects unsupported Environments before starting platform work", async () => {
     const adapter = createWebPlatformAdapter();
     const program = programIR("browser-audio-worklet");
     const ir = {
@@ -89,7 +89,9 @@ describe("web Platform Adapter", () => {
     expect(document).toContain("poggers:disposed");
     expect(worker).toContain("poggers:dispose");
     expect(worker).toContain("poggers:disposed");
-    expect(worker).toContain("capabilities:[`http`]");
+    expect(worker).toContain(
+      "dependencies:[{name:`http`,operations:[{name:`request`,mode:`asynchronous`",
+    );
     const bundledJavaScript = await Promise.all(
       (await readdir(output, { recursive: true }))
         .filter((path) => path.endsWith(".js"))
@@ -123,8 +125,8 @@ export default {
     background: {
       programs: {
         background: {
-          start({ capabilities }: { capabilities: { http: HttpClient } }) {
-            void capabilities.http.request({ path: "/api/telemetry" });
+          start({ dependencies }: { dependencies: { http: HttpClient } }) {
+            void dependencies.http.request({ path: "/api/telemetry" });
           },
         },
       },

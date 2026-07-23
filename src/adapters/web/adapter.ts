@@ -1,13 +1,16 @@
-import type { WebPlatform } from "@/adapters/web/platform";
-import { buildApplication, runApplication } from "@/adapters/web/toolchain";
+import { webCompilerExtension } from "@/adapters/web/compiler";
+import {
+  developWebApplication,
+  type WebDevelopmentOptions,
+} from "@/adapters/web/development/server";
+import { buildWebApplication } from "@/adapters/web/production/build";
 import { createWebUIAdapter, type WebUIAdapter } from "@/adapters/web/ui/adapter";
+import { createWebPresentationAdapter } from "@/adapters/web/ui/presentation/adapter";
 import type { PlatformAdapter } from "@/contracts/platform";
+import type { WebPlatform } from "@/platforms/web/platform";
 
 export type WebPlatformAdapter = PlatformAdapter<WebPlatform, WebUIAdapter>;
-export type WebPlatformAdapterOptions = Readonly<{
-  developmentPort?: number;
-  serverOrigin?: string;
-}>;
+export type WebPlatformAdapterOptions = WebDevelopmentOptions;
 
 /** Creates the complete development, production, Component, and Presentation web realization. */
 export function createWebPlatformAdapter(
@@ -15,31 +18,15 @@ export function createWebPlatformAdapter(
 ): WebPlatformAdapter {
   return {
     name: "web",
-    ui: createWebUIAdapter(),
+    compiler: [webCompilerExtension],
+    ui: createWebUIAdapter(createWebPresentationAdapter()),
     async develop(input) {
       assertWebInput(input.platform, input.programs);
-      const server = await runApplication({
-        directory: input.directory,
-        port: options.developmentPort,
-        serverOrigin: options.serverOrigin,
-      });
-      let disposed = false;
-      return {
-        locations: [`http://localhost:${server.port}`],
-        async [Symbol.asyncDispose]() {
-          if (disposed) return;
-          disposed = true;
-          await server.stop();
-        },
-      };
+      return developWebApplication(input, options);
     },
     async build(input) {
       assertWebInput(input.platform, input.programs);
-      const build = await buildApplication({
-        directory: input.directory,
-        outdir: input.output,
-      });
-      return build;
+      return buildWebApplication(input);
     },
   };
 }

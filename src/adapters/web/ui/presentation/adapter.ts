@@ -5,14 +5,6 @@ import {
   type CompiledWebStyle,
   type WebPresentationArtifactPlan,
 } from "@/adapters/web/ui/presentation/compiler";
-import type {
-  WebAudioAsset,
-  WebElementPresentation,
-  WebFeedback,
-  WebImageAsset,
-  WebLayoutContinuity,
-  WebPresentationLanguage,
-} from "@/adapters/web/ui/presentation/language";
 import {
   createNativeWebFrameHost,
   createWebAnimationHost,
@@ -39,16 +31,22 @@ import {
   createWebEnvironmentHost,
   type WebElementSnapshot,
 } from "@/adapters/web/ui/presentation/runtime/observations";
-import {
-  createPresentationFrame,
-  evaluatePresentationFrame,
-  isPresentationTemporalValue,
-  type PresentationAdapter,
-  type PresentationAdapterInstance,
-  type PresentationAdapterSession,
-  type PresentationElementResolver,
-  type PresentationFrame,
-} from "@/core/presentation";
+import type {
+  PresentationAdapter,
+  PresentationAdapterInstance,
+  PresentationAdapterSession,
+  PresentationElementResolver,
+} from "@/contracts/platform";
+import { evaluatePresentationFrame, isPresentationTemporalValue } from "@/core/ui/presentation";
+import type {
+  WebAudioAsset,
+  WebElementPresentation,
+  WebFeedback,
+  WebImageAsset,
+  WebLayoutContinuity,
+  WebPresentationLanguage,
+} from "@/platforms/web/presentation";
+import { createPresentationFrame, type PresentationFrame } from "@/runtime/presentation";
 
 export type WebPresentationHotSnapshot = Readonly<{
   shared: readonly WebAnimationHostSnapshot[];
@@ -1164,7 +1162,7 @@ function resolveStyles<ElementName extends string>(
           !sameStructuredValue(current.variables, variables))
       ) {
         throw new TypeError(
-          `Web Presentation Element ${String(name)} resolves to a native Element already owned by another name.`,
+          `Web Presentation Element ${String(name)} resolves to a DOM Element already owned by another name.`,
         );
       }
       result.set(target, {
@@ -1406,6 +1404,9 @@ function createNativeStyleHost(boundary: Element): WebStyleHost {
   return {
     replace(css) {
       element.textContent = css;
+      for (const server of ownerDocument.querySelectorAll("style[data-poggers-ssr]")) {
+        server.remove();
+      }
     },
     dispose() {
       element.remove();

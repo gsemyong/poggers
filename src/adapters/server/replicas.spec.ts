@@ -7,9 +7,9 @@ import { resolve } from "node:path";
 
 import { afterEach, expect, test } from "vitest";
 
-import { createJetStreamEventStore, createNodeHost } from "@/adapters/server/host";
-import { createProgramContributionInstance } from "@/core/process";
+import { createJetStreamEventStore, createNodeHost } from "@/adapters/server/development/host";
 import { createEntity, type EntityEvent, type EntityModel } from "@/features/entity";
+import { createProgramContributionInstance } from "@/runtime/process";
 
 type Note = Readonly<{ id: string; ownerId: string; text: string }>;
 type Notes = EntityModel<{
@@ -181,12 +181,29 @@ async function startReplica(
 ) {
   const [events, host] = await Promise.all([
     createJetStreamEventStore<EntityEvent<Note>>(eventStore),
-    createNodeHost({ capabilities: ["http"] as const, directory, host: "127.0.0.1", port }),
+    createNodeHost({
+      dependencies: [
+        {
+          name: "http",
+          operations: [
+            {
+              name: "route",
+              mode: "synchronous",
+              input: { kind: "opaque", name: "Input" },
+              output: { kind: "opaque", name: "Disposable" },
+            },
+          ],
+        },
+      ] as const,
+      directory,
+      host: "127.0.0.1",
+      port,
+    }),
   ]);
   const process = createProgramContributionInstance(notes.programs.server as never, {
     address: { program: "api", feature: "notes" },
     provides: ["notes"],
-    capabilities: {
+    dependencies: {
       events,
       http: host.http,
       identifiers: { create: randomUUID },

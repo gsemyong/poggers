@@ -1,43 +1,14 @@
-import { createDraggable } from "animejs";
-
 import { mountDialog as mountRetainedDialog } from "@/adapters/web/ui/component/runtime";
-
-export type DragAxis = "inline" | "block" | "both";
-
-export type DragBounds = {
-  readonly inline?: readonly [minimum: number, maximum: number];
-  readonly block?: readonly [minimum: number, maximum: number];
-};
-
-export type DragSample = {
-  readonly offset: number;
-  readonly velocity: number;
-  readonly progress: number;
-  readonly inline: number;
-  readonly block: number;
-  readonly deltaInline: number;
-  readonly deltaBlock: number;
-  readonly velocityInline: number;
-  readonly velocityBlock: number;
-  readonly progressInline: number;
-  readonly progressBlock: number;
-};
-
-export type DragRelease = DragSample;
-
-export type DragOptions = {
-  readonly axis: DragAxis;
-  readonly bounds: () => DragBounds;
-  readonly threshold?: number;
-  /** Maximum reported velocity in logical pixels per second. */
-  readonly maxVelocity?: number;
-  readonly resistance?: number;
-  readonly cursor?: { readonly idle: string; readonly active: string } | false;
-  readonly start?: () => void;
-  readonly change: (sample: DragSample) => void;
-  readonly release: (sample: DragRelease) => void;
-  readonly cancel?: () => void;
-};
+import type {
+  DialogMode,
+  DragAxis,
+  DragBounds,
+  DragOptions,
+  DragSample,
+  PressBindings,
+  Shortcut,
+  ShortcutBinding,
+} from "@/platforms/web/ui";
 
 export type DragDriverMount = {
   readonly read: () => DragSample;
@@ -50,93 +21,86 @@ export type DragDriver = {
   mount(trigger: HTMLElement, options: DragOptions): DragDriverMount;
 };
 
-export type AnimeDraggable = {
-  readonly x: number;
-  readonly y: number;
-  readonly angle: number;
-  readonly velocity: number;
-  setX(value: number, muteCallbacks?: boolean): unknown;
-  setY(value: number, muteCallbacks?: boolean): unknown;
-  stop(): unknown;
-  refresh(): unknown;
-  revert(): unknown;
-};
-
-export type AnimeDragParameters = {
-  readonly trigger: HTMLElement;
-  readonly x: false | { readonly modifier: (value: number) => number };
-  readonly y: false | { readonly modifier: (value: number) => number };
-  readonly dragThreshold: number;
-  readonly maxVelocity: number;
-  readonly dragSpeed: number;
-  readonly cursor: false | { readonly onHover: string; readonly onGrab: string };
-  readonly onGrab: (draggable: AnimeDraggable) => void;
-  readonly onDrag: (draggable: AnimeDraggable) => void;
-  readonly onUpdate: (draggable: AnimeDraggable) => void;
-  readonly onRelease: (draggable: AnimeDraggable) => void;
-};
-
-export type AnimeDragFactory = (
-  target: HTMLElement,
-  parameters: AnimeDragParameters,
-) => AnimeDraggable;
-
-export type PressBindings = {
-  readonly onPointerDown: (event: PointerEvent) => void;
-  readonly onClick: (event: MouseEvent) => void;
-};
-
-export type Shortcut = {
-  readonly key: string;
-  readonly modifiers?: readonly ("mod" | "shift" | "alt")[];
-};
-
-export type ShortcutBinding = {
-  readonly aria: string;
-  readonly handle: (event: KeyboardEvent) => void;
-};
-
-export type DialogMode = false | "modal" | "nonmodal";
-
 export function mountDialog(element: HTMLDialogElement, readMode: () => DialogMode): void {
   mountRetainedDialog(element, readMode);
 }
 
 export function mountDrag(element: HTMLElement, options: DragOptions): Disposable {
-  const dispose = mountAnimeDrag(element, options);
+  const dispose = mountDragDriver(element, options, pointerDragDriver);
   return { [Symbol.dispose]: dispose };
 }
 
-export function createAnimeDragDriver(
-  factory: AnimeDragFactory = createDraggable as AnimeDragFactory,
-): DragDriver {
+/** Creates the dependency-free Pointer Events driver used by the web adapter. */
+export function createPointerDragDriver(): DragDriver {
   return {
     mount(trigger, options) {
-      const proxy = createDragProxy(trigger);
-      const alignProxy = () => alignDragProxy(proxy, trigger);
-      alignProxy();
-      trigger.addEventListener("pointerdown", alignProxy, true);
-      let active = false;
+      const idleCursor = options.cursor === false ? undefined : (options.cursor?.idle ?? "grab");
+      const activeCursor =
+        options.cursor === false ? undefined : (options.cursor?.active ?? "grabbing");
+      const originalCursor = trigger.style.cursor;
+      if (idleCursor) trigger.style.cursor = idleCursor;
+
+      let bounds = normalizedDragBounds(options.bounds());
+      let pointer: number | undefined;
+      let started = false;
       let disposed = false;
+      let startInline = 0;
+      let startBlock = 0;
       let previousInline = 0;
       let previousBlock = 0;
+      let previousTime = 0;
       let latest = emptyDragSample();
-      let currentBounds = normalizedDragBounds(options.bounds());
-      const refreshBounds = () => {
-        currentBounds = normalizedDragBounds(options.bounds());
+
+      const refresh = () => {
+        bounds = normalizedDragBounds(options.bounds());
       };
-      const sample = (draggable: AnimeDraggable): DragSample => {
-        const inline = clamp(draggable.x, ...currentBounds.inline);
-        const block = clamp(draggable.y, ...currentBounds.block);
-        const velocityInline = Math.cos(draggable.angle) * draggable.velocity * 1_000;
-        const velocityBlock = Math.sin(draggable.angle) * draggable.velocity * 1_000;
+      const releaseCapture = () => {
+        if (pointer === undefined || !trigger.hasPointerCapture?.(pointer)) return;
+        trigger.releasePointerCapture(pointer);
+      };
+      const complete = (cancelled: boolean, event?: PointerEvent) => {
+        if (pointer === undefined) return;
+        if (!cancelled && event) update(event);
+        releaseCapture();
+        pointer = undefined;
+        if (idleCursor) trigger.style.cursor = idleCursor;
+        if (!started) return;
+        started = false;
+        if (cancelled) options.cancel?.();
+        else options.release(latest);
+      };
+      const update = (event: PointerEvent) => {
+        if (event.pointerId !== pointer) return;
+        const speed = Math.max(0, finiteOr(options.resistance, 1));
+        const inline = clamp((event.clientX - startInline) * speed, ...bounds.inline);
+        const block = clamp((event.clientY - startBlock) * speed, ...bounds.block);
+        if (
+          !started &&
+          Math.hypot(inline - previousInline, block - previousBlock) <
+            Math.max(0, finiteOr(options.threshold, 3))
+        ) {
+          return;
+        }
+        if (!started) {
+          started = true;
+          options.start?.();
+          options.change(latest);
+        }
+        const elapsed = Math.max(1, event.timeStamp - previousTime);
+        const maximum = Math.max(0, finiteOr(options.maxVelocity, 3_000));
+        const velocityInline = clamp(
+          ((inline - previousInline) / elapsed) * 1_000,
+          -maximum,
+          maximum,
+        );
+        const velocityBlock = clamp(((block - previousBlock) / elapsed) * 1_000, -maximum, maximum);
         const primary = primarySample(options.axis, {
           inline,
           block,
           velocityInline,
           velocityBlock,
-          progressInline: progress(inline, currentBounds.inline),
-          progressBlock: progress(block, currentBounds.block),
+          progressInline: progress(inline, bounds.inline),
+          progressBlock: progress(block, bounds.block),
         });
         latest = {
           ...primary,
@@ -144,86 +108,57 @@ export function createAnimeDragDriver(
           block,
           deltaInline: inline - previousInline,
           deltaBlock: block - previousBlock,
-          velocityInline: Number.isFinite(velocityInline) ? velocityInline : 0,
-          velocityBlock: Number.isFinite(velocityBlock) ? velocityBlock : 0,
+          velocityInline,
+          velocityBlock,
           progressInline: primary.progressInline,
           progressBlock: primary.progressBlock,
         };
         previousInline = inline;
         previousBlock = block;
-        return latest;
+        previousTime = event.timeStamp;
+        options.change(latest);
       };
-      const draggable = factory(proxy, {
-        trigger,
-        x:
-          options.axis === "block"
-            ? false
-            : { modifier: (value) => clamp(value, ...currentBounds.inline) },
-        y:
-          options.axis === "inline"
-            ? false
-            : { modifier: (value) => clamp(value, ...currentBounds.block) },
-        dragThreshold: Math.max(0, finiteOr(options.threshold, 3)),
-        maxVelocity: Math.max(0, finiteOr(options.maxVelocity, 3_000)) / 1_000,
-        dragSpeed: Math.max(0, finiteOr(options.resistance, 1)),
-        cursor:
-          options.cursor === false
-            ? false
-            : {
-                onHover: options.cursor?.idle ?? "grab",
-                onGrab: options.cursor?.active ?? "grabbing",
-              },
-        onGrab(instance) {
-          if (disposed) return;
-          refreshBounds();
-          active = true;
-          previousInline = 0;
-          previousBlock = 0;
-          if (options.axis !== "block") instance.setX(0, true);
-          if (options.axis !== "inline") instance.setY(0, true);
-          latest = emptyDragSample();
-          options.start?.();
-          options.change(latest);
-        },
-        onDrag() {},
-        onUpdate(instance) {
-          if (!active || disposed) return;
-          options.change(sample(instance));
-        },
-        onRelease(instance) {
-          if (!active || disposed) return;
-          latest = sample(instance);
-          active = false;
-          instance.stop();
-          resetDragPosition(instance, options.axis);
-          options.release(latest);
-        },
-      });
+      const onPointerDown = (event: PointerEvent) => {
+        if (disposed || pointer !== undefined || event.button !== 0 || !event.isPrimary) return;
+        refresh();
+        pointer = event.pointerId;
+        started = false;
+        startInline = event.clientX;
+        startBlock = event.clientY;
+        previousInline = 0;
+        previousBlock = 0;
+        previousTime = event.timeStamp;
+        latest = emptyDragSample();
+        if (activeCursor) trigger.style.cursor = activeCursor;
+        trigger.setPointerCapture?.(event.pointerId);
+      };
+      const onPointerMove = (event: PointerEvent) => {
+        update(event);
+        if (started) event.preventDefault();
+      };
+      const onPointerUp = (event: PointerEvent) => complete(false, event);
+      const onPointerCancel = (event: PointerEvent) => {
+        if (event.pointerId === pointer) complete(true);
+      };
+
+      trigger.addEventListener("pointerdown", onPointerDown);
+      trigger.addEventListener("pointermove", onPointerMove);
+      trigger.addEventListener("pointerup", onPointerUp);
+      trigger.addEventListener("pointercancel", onPointerCancel);
+
       return {
         read: () => latest,
-        stop() {
-          if (disposed || !active) return;
-          active = false;
-          draggable.stop();
-          resetDragPosition(draggable, options.axis);
-          options.cancel?.();
-        },
-        refresh() {
-          if (disposed) return;
-          refreshBounds();
-          alignProxy();
-          draggable.refresh();
-        },
+        stop: () => complete(true),
+        refresh,
         dispose() {
           if (disposed) return;
           disposed = true;
-          if (active) {
-            active = false;
-            options.cancel?.();
-          }
-          draggable.revert();
-          trigger.removeEventListener("pointerdown", alignProxy, true);
-          proxy.remove();
+          complete(true);
+          trigger.removeEventListener("pointerdown", onPointerDown);
+          trigger.removeEventListener("pointermove", onPointerMove);
+          trigger.removeEventListener("pointerup", onPointerUp);
+          trigger.removeEventListener("pointercancel", onPointerCancel);
+          trigger.style.cursor = originalCursor;
         },
       };
     },
@@ -247,39 +182,7 @@ export function mountDragDriver(
   };
 }
 
-const animeDragDriver = createAnimeDragDriver();
-
-function mountAnimeDrag(trigger: HTMLElement, options: DragOptions): () => void {
-  return mountDragDriver(trigger, options, animeDragDriver);
-}
-
-function createDragProxy(trigger: HTMLElement): HTMLElement {
-  const document = trigger.ownerDocument;
-  if (!document?.body) {
-    throw new TypeError("Anime drag requires a trigger attached to a document.");
-  }
-  const proxy = document.createElement("span");
-  proxy.setAttribute("aria-hidden", "true");
-  proxy.setAttribute(
-    "style",
-    "position:fixed;inset:auto;opacity:0;pointer-events:none;contain:strict",
-  );
-  document.body.append(proxy);
-  return proxy;
-}
-
-function alignDragProxy(proxy: HTMLElement, trigger: HTMLElement): void {
-  const bounds = trigger.getBoundingClientRect();
-  proxy.style.left = `${finiteOr(bounds.left, 0)}px`;
-  proxy.style.top = `${finiteOr(bounds.top, 0)}px`;
-  proxy.style.width = `${Math.max(1, finiteOr(bounds.width, 1))}px`;
-  proxy.style.height = `${Math.max(1, finiteOr(bounds.height, 1))}px`;
-}
-
-function resetDragPosition(draggable: AnimeDraggable, axis: DragAxis): void {
-  if (axis !== "block") draggable.setX(0, true);
-  if (axis !== "inline") draggable.setY(0, true);
-}
+const pointerDragDriver = createPointerDragDriver();
 
 function emptyDragSample(): DragSample {
   return {

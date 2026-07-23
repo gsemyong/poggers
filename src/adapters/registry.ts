@@ -1,11 +1,26 @@
-import { createServerPlatformAdapter } from "@/adapters/server/adapter";
-import type { ServerPlatform } from "@/adapters/server/platform";
-import { createWebPlatformAdapter } from "@/adapters/web/adapter";
-import type { WebPlatform } from "@/adapters/web/platform";
+import { createDevelopmentWebLoaderRegistry } from "@/adapters/integration/web-server";
+import {
+  createServerPlatformAdapter,
+  type ServerPlatformAdapterOptions,
+} from "@/adapters/server/adapter";
+import { createWebPlatformAdapter, type WebPlatformAdapterOptions } from "@/adapters/web/adapter";
 import type { PlatformAdapters } from "@/contracts/platform";
+import type { ServerPlatform } from "@/platforms/server/platform";
+import type { WebPlatform } from "@/platforms/web/platform";
 
-/** The explicit set of Platform implementations shipped by this package. */
-export const platformAdapters = {
-  server: createServerPlatformAdapter(),
-  web: createWebPlatformAdapter(),
-} satisfies PlatformAdapters<ServerPlatform | WebPlatform>;
+/** Creates one coordinated set of the Platform implementations shipped by this package. */
+export function createPlatformAdapters(
+  options: Readonly<{
+    server?: ServerPlatformAdapterOptions;
+    web?: WebPlatformAdapterOptions;
+  }> = {},
+): PlatformAdapters<ServerPlatform | WebPlatform> {
+  const webLoaders = createDevelopmentWebLoaderRegistry();
+  return {
+    server: createServerPlatformAdapter({ ...options.server, webLoaders }),
+    web: createWebPlatformAdapter({ ...options.web, webLoaders }),
+  };
+}
+
+/** The default coordinated Platform implementations. */
+export const platformAdapters = createPlatformAdapters();

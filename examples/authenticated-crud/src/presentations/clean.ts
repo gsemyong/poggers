@@ -199,6 +199,14 @@ const createClean = (({ parameters: values }) => {
             stroke: { width: 1, color: values.color.line },
             radius: values.radius.surface,
           },
+          rules: [
+            {
+              when: { container: { name: "application", maxInlineSize: 560 } },
+              use: {
+                layout: { model: { kind: "flow", direction: "block", gap: 14 }, padding: 16 },
+              },
+            },
+          ],
         },
         Header: {
           layout: {
@@ -210,6 +218,16 @@ const createClean = (({ parameters: values }) => {
               gap: 20,
             },
           },
+          rules: [
+            {
+              when: { container: { name: "tasks", maxInlineSize: 620 } },
+              use: {
+                layout: {
+                  model: { kind: "flow", direction: "block", gap: 12, align: "stretch" },
+                },
+              },
+            },
+          ],
         },
         Heading: { layout: { model: { kind: "flow", direction: "block", gap: 4 } } },
         Eyebrow: {
@@ -248,7 +266,17 @@ const createClean = (({ parameters: values }) => {
           rules: [
             {
               when: { container: { name: "tasks", maxInlineSize: 620 } },
-              use: { layout: { model: { kind: "flow", direction: "block", gap: 12 } } },
+              use: {
+                layout: {
+                  model: {
+                    kind: "flow",
+                    direction: "block",
+                    gap: 12,
+                    align: "stretch",
+                    distribute: "start",
+                  },
+                },
+              },
             },
           ],
         },
@@ -257,6 +285,16 @@ const createClean = (({ parameters: values }) => {
         TaskState: muted,
         Actions: {
           layout: { model: { kind: "flow", direction: "inline", gap: 7, align: "center" } },
+          rules: [
+            {
+              when: { container: { name: "tasks", maxInlineSize: 360 } },
+              use: {
+                layout: {
+                  model: { kind: "flow", direction: "block", gap: 7, align: "stretch" },
+                },
+              },
+            },
+          ],
         },
         Edit: button(),
         Toggle: button(),

@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 
 import { defineConfig } from "vitest/config";
 
-import { transformPresentationSource } from "./src/core/compiler/presentation";
+import { transformPresentationSource } from "./src/compiler/presentation";
 
 export default defineConfig({
   plugins: [
@@ -24,12 +24,20 @@ export default defineConfig({
         replacement: `${resolve(import.meta.dirname, "src")}/$1`,
       },
       {
+        find: /^@poggers\/kit\/adapter$/,
+        replacement: resolve(import.meta.dirname, "src/contracts/platform.ts"),
+      },
+      {
         find: /^@poggers\/kit\/adapters\/server$/,
         replacement: resolve(import.meta.dirname, "src/adapters/server/adapter.ts"),
       },
       {
+        find: /^@poggers\/kit\/adapters\/web$/,
+        replacement: resolve(import.meta.dirname, "src/adapters/web/adapter.ts"),
+      },
+      {
         find: /^@poggers\/kit\/server$/,
-        replacement: resolve(import.meta.dirname, "src/adapters/server/platform.ts"),
+        replacement: resolve(import.meta.dirname, "src/platforms/server/platform.ts"),
       },
       {
         find: /^@poggers\/kit\/testing$/,
@@ -37,15 +45,15 @@ export default defineConfig({
       },
       {
         find: /^@poggers\/kit\/web$/,
-        replacement: resolve(import.meta.dirname, "src/adapters/web/platform.ts"),
+        replacement: resolve(import.meta.dirname, "src/platforms/web/platform.ts"),
       },
       {
         find: /^@poggers\/kit\/jsx-dev-runtime$/,
-        replacement: resolve(import.meta.dirname, "src/core/jsx/development.ts"),
+        replacement: resolve(import.meta.dirname, "src/jsx/development.ts"),
       },
       {
         find: /^@poggers\/kit\/jsx-runtime$/,
-        replacement: resolve(import.meta.dirname, "src/core/jsx/runtime.ts"),
+        replacement: resolve(import.meta.dirname, "src/jsx/runtime.ts"),
       },
       {
         find: /^@poggers\/kit$/,

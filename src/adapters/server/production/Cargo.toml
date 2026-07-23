@@ -1,0 +1,12 @@
+[workspace]
+resolver = "3"
+members = [
+  "runtime",
+  "dependencies/authentication",
+  "dependencies/clock",
+  "dependencies/events/sqlite",
+  "dependencies/events/jetstream",
+  "dependencies/http",
+  "dependencies/identifiers",
+  "fixtures/recorder",
+]

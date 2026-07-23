@@ -1,84 +1,19 @@
-import type { ComponentContract, ComponentDefinitions, RootComponentName } from "@/core/component";
-import type { UIContract, UIDefinition, UIElementName } from "@/core/ui";
+import type {
+  EnvironmentContract,
+  HasProgramUI,
+  ProgramActions,
+  ProgramComponents,
+  ProgramContract,
+  ProgramProvides as ProvidedByProgram,
+  ProgramRequires as RequiredByProgram,
+  ProgramState,
+} from "@/core/program";
+import type { ComponentDefinitions, RootComponentName } from "@/core/ui/component";
 
 type Empty = Record<never, never>;
-type ActionRecord = Record<string, (...args: never[]) => unknown>;
-type UIKey = "State" | "Actions" | "Components";
 type ProgramResource = Disposable | AsyncDisposable | AsyncIterable<unknown>;
 type ProgramResourceResult = void | ProgramResource | PromiseLike<void | ProgramResource>;
 declare const featureContract: unique symbol;
-
-/** One technical realization family. Every Platform supports Processes; UI is optional. */
-export type PlatformContract = Readonly<{
-  Name: string;
-  UI?: UIContract;
-}>;
-
-/** One authored execution context realized by exactly one Platform. */
-export type EnvironmentContract = Readonly<{
-  Name: string;
-  Platform: PlatformContract;
-  UI?: UIContract;
-}>;
-
-/** Rejects an Environment whose UI is not the UI language owned by its Platform. */
-export type EnvironmentDefinition<Environment extends EnvironmentContract> = Environment extends {
-  UI: infer UI extends UIContract;
-}
-  ? Environment["Platform"] extends { UI: infer PlatformUI extends UIContract }
-    ? [UI] extends [PlatformUI]
-      ? [PlatformUI] extends [UI]
-        ? Environment
-        : never
-      : never
-    : never
-  : Environment;
-
-export type ProgramContract = {
-  Environment: EnvironmentContract;
-  Requires?: object;
-  Provides?: object;
-  State?: object;
-  Actions?: ActionRecord;
-  Components?: Record<string, ComponentContract>;
-};
-
-type HasUI<Contract> = [Extract<keyof Contract, UIKey>] extends [never] ? false : true;
-
-type ComponentPrimitiveNames<Contract> = [keyof ComponentsOf<Contract>] extends [never]
-  ? never
-  : ComponentsOf<Contract>[keyof ComponentsOf<Contract>] extends {
-        Elements: infer Elements extends Record<string, string>;
-      }
-    ? Elements[keyof Elements]
-    : never;
-
-type SupportsComponents<Environment extends EnvironmentContract, Contract> = Environment extends {
-  UI: infer UI extends UIContract;
-}
-  ? UI extends UIDefinition<UI>
-    ? [ComponentPrimitiveNames<Contract>] extends [never]
-      ? true
-      : Exclude<ComponentPrimitiveNames<Contract>, UIElementName<UI>> extends never
-        ? true
-        : false
-    : false
-  : false;
-
-/** Declares one Program and the Environment in which its Processes execute. */
-export type Program<
-  Environment extends EnvironmentContract,
-  Contract extends Omit<ProgramContract, "Environment"> = Empty,
-> =
-  Environment extends EnvironmentDefinition<Environment>
-    ? HasUI<Contract> extends true
-      ? Environment extends { UI: UIContract }
-        ? SupportsComponents<Environment, Contract> extends true
-          ? Readonly<Contract & { Environment: Environment }>
-          : never
-        : never
-      : Readonly<Contract & { Environment: Environment }>
-    : never;
 
 export type FeatureContract = {
   Programs?: Record<string, ProgramContract>;
@@ -89,21 +24,12 @@ export type ApplicationContract = FeatureContract & {
   Presentations?: string | Record<string, unknown>;
 };
 
-type StateOf<Contract> = Contract extends { State: infer Value extends object } ? Value : Empty;
-type ActionsOf<Contract> = Contract extends { Actions: infer Value extends ActionRecord }
-  ? Value
-  : Empty;
-type ComponentsOf<Contract> = Contract extends {
-  Components: infer Value extends Record<string, ComponentContract>;
-}
-  ? Value
-  : Empty;
-type RequiresOf<Contract> = Contract extends { Requires: infer Value extends object }
-  ? Value
-  : Empty;
-type ProvidesOf<Contract> = Contract extends { Provides: infer Value extends object }
-  ? Value
-  : Empty;
+type StateOf<Contract> = ProgramState<Contract>;
+type ActionsOf<Contract> = ProgramActions<Contract>;
+type ComponentsOf<Contract> = ProgramComponents<Contract>;
+type RequiresOf<Contract> = RequiredByProgram<Contract>;
+type ProvidesOf<Contract> = ProvidedByProgram<Contract>;
+type HasUI<Contract> = HasProgramUI<Contract>;
 type ProgramsOf<Contract> = Contract extends {
   Programs: infer Value extends Record<string, ProgramContract>;
 }
@@ -203,15 +129,12 @@ export type FeatureUIAPIs<
   >;
 };
 
-export type ProgramRequires<Contract extends ProgramContract> = Readonly<RequiresOf<Contract>>;
-export type ProgramProvides<Contract extends ProgramContract> = Readonly<ProvidesOf<Contract>>;
-
 export type UIActionContext<
   Owner extends FeatureContract,
   ProgramName extends keyof ProgramsOf<Owner>,
   Contract extends ProgramContract = Extract<ProgramsOf<Owner>[ProgramName], ProgramContract>,
 > = Readonly<{
-  capabilities: Readonly<RequiresOf<Contract> & ProvidesOf<Contract>>;
+  dependencies: Readonly<RequiresOf<Contract> & ProvidesOf<Contract>>;
   features: FeatureUIAPIs<Owner, ProgramName>;
   state: Mutable<StateOf<Contract>>;
 }>;
@@ -250,7 +173,7 @@ export type ProgramStartContext<
   Contract extends ProgramContract = Extract<ProgramsOf<Owner>[ProgramName], ProgramContract>,
 > = Readonly<
   {
-    capabilities: ProgramRequires<Contract>;
+    dependencies: RequiredByProgram<Contract>;
   } & (HasUI<Contract> extends true
     ? {
         actions: ActionAPI<Contract>;
@@ -263,7 +186,7 @@ type ProgramStartResult<Contract extends ProgramContract> = keyof ProvidesOf<Con
   ? ProgramResourceResult
   : ProvidesOf<Contract> | PromiseLike<ProvidesOf<Contract>>;
 
-type ProgramDefinition<
+export type ProgramDefinition<
   Owner extends FeatureContract,
   ProgramName extends keyof ProgramsOf<Owner>,
   Root extends FeatureContract,
@@ -290,7 +213,7 @@ type ProgramDefinition<
         })
 >;
 
-type ProgramDefinitions<Owner extends FeatureContract, Root extends FeatureContract> = {
+export type ProgramDefinitions<Owner extends FeatureContract, Root extends FeatureContract> = {
   readonly [Name in keyof ProgramsOf<Owner>]: ProgramDefinition<Owner, Name, Root>;
 };
 

@@ -1,4 +1,4 @@
-import { createEntityFixture } from "@poggers/kit";
+import { createEntityFixture } from "@poggers/kit/testing";
 import { describe, expect, test } from "vitest";
 
 import { taskEntity } from "./tasks";

@@ -16,7 +16,7 @@ import {
   setActiveSub as alienSetActiveSub,
 } from "alien-signals";
 
-import type { Child } from "@/adapters/web/ui/component/language";
+import type { WebDeferredDataIR } from "@/adapters/web/document";
 import {
   adoptSceneChildren,
   hasPresentationPresence,
@@ -28,7 +28,17 @@ import {
   unmountPresenceElement,
   type SceneElementRegistration,
 } from "@/adapters/web/ui/presence";
-import type { JSXElement } from "@/core/jsx/runtime";
+import { observeWebDeferredState, type WebDeferredState } from "@/adapters/web/ui/stream";
+import type { JSXElement } from "@/jsx/runtime";
+import type { Deferred } from "@/platforms/web/routing";
+import type {
+  Child,
+  VirtualForOptions,
+  WebForBaseProps as ForProps,
+  WebForKey as ForKey,
+  WebVirtualForProps as VirtualForProps,
+  WebVirtualPropertyKey as VirtualPropertyKey,
+} from "@/platforms/web/ui";
 
 export type VirtualCollectionGeometry = {
   readonly axis: "block" | "inline";
@@ -107,6 +117,8 @@ type LifecycleScope = {
 type HydrationContext = {
   readonly elements: ReadonlyMap<string, HTMLElement>;
   readonly textMarkers: ReadonlyMap<string, Comment>;
+  readonly elementOrder: readonly Readonly<[string, HTMLElement]>[];
+  readonly textOrder: readonly Readonly<[string, Comment]>[];
   elementCursor: number;
   textCursor: number;
 };
@@ -115,6 +127,10 @@ let currentOwner: Owner | null = null;
 let currentLifecycleScope: LifecycleScope | null = null;
 let currentChildHost: HTMLElement | null = null;
 let currentHydration: HydrationContext | null = null;
+let detachedPresenceSequence = 0;
+
+const scopedChild = Symbol("poggers.scoped-child");
+type ScopedChild = Readonly<{ [scopedChild]: () => Child }>;
 
 export function currentPresenceGraph(): PresenceGraph<Element> | undefined {
   return currentOwner?.scene;
@@ -122,8 +138,18 @@ export function currentPresenceGraph(): PresenceGraph<Element> | undefined {
 
 export function allocatePresenceOwner(name: string): string {
   const owner = currentOwner;
-  if (!owner) return `${name}:detached`;
+  if (!owner) return `${name}:detached:${detachedPresenceSequence++}`;
   return `${name}:${owner.sceneSequence++}`;
+}
+
+/** @internal Defers a reactive replacement subtree into its own lifecycle scope. */
+export function scoped(read: () => Child): Child {
+  return Object.freeze({ [scopedChild]: read }) as unknown as Child;
+}
+
+/** @internal Evaluates an owned subtree without mounting it. */
+export function readScoped(child: Child): Child {
+  return isScopedChild(child) ? child[scopedChild]() : child;
 }
 
 const virtualCollectionHosts = new WeakMap<
@@ -187,6 +213,109 @@ export function signal<T>(initialValue: T, hotKey?: string): Signal<T> {
   }
 
   return runtimeSignal(initialValue);
+}
+
+type DeferredState<Value> =
+  | Readonly<{ status: "pending" }>
+  | Readonly<{ status: "resolved"; value: Value }>
+  | Readonly<{ status: "rejected"; error: unknown }>;
+
+const deferredResource = Symbol("poggers.deferred-resource");
+
+type DeferredResource<Value> = Deferred<Value> &
+  Readonly<{
+    [deferredResource]: Signal<DeferredState<Value>>;
+  }>;
+
+/** @internal Creates the reactive value consumed by an Await boundary. */
+export function createDeferredResource<Value>(
+  run: () => Value | PromiseLike<Value>,
+  abort?: AbortSignal,
+): Deferred<Value> {
+  const current = runtimeSignal<DeferredState<Value>>({ status: "pending" });
+  let active = !abort?.aborted;
+  const stop = () => {
+    active = false;
+  };
+  abort?.addEventListener("abort", stop, { once: true });
+  void Promise.resolve()
+    .then(run)
+    .then(
+      (value) => {
+        if (active) current({ status: "resolved", value });
+      },
+      (error: unknown) => {
+        if (active) current({ status: "rejected", error });
+      },
+    )
+    .finally(() => abort?.removeEventListener("abort", stop));
+  return Object.freeze({ [deferredResource]: current }) as DeferredResource<Value>;
+}
+
+/** @internal Reconstructs a server-completed deferred value during hydration. */
+export function createSettledDeferredResource<Value>(
+  state: Exclude<DeferredState<Value>, { status: "pending" }>,
+): Deferred<Value> {
+  return Object.freeze({
+    [deferredResource]: runtimeSignal<DeferredState<Value>>(state),
+  }) as DeferredResource<Value>;
+}
+
+/** @internal Adopts a server boundary without repeating its deferred computation. */
+export function createHydratedDeferredResource<Value>(
+  marker: WebDeferredDataIR,
+  abort?: AbortSignal,
+): Deferred<Value> {
+  const current = runtimeSignal<DeferredState<Value>>({ status: "pending" });
+  let active = !abort?.aborted;
+  const subscription = observeWebDeferredState(marker.boundary, (state) => {
+    if (active) current(deferredRuntimeState(state) as DeferredState<Value>);
+  });
+  const stop = () => {
+    if (!active) return;
+    active = false;
+    subscription[Symbol.dispose]();
+  };
+  abort?.addEventListener("abort", stop, { once: true });
+  return Object.freeze({ [deferredResource]: current }) as DeferredResource<Value>;
+}
+
+export function isDeferredResource(value: unknown): value is Deferred<unknown> {
+  return Boolean(value && typeof value === "object" && deferredResource in value);
+}
+
+function deferredRuntimeState(state: WebDeferredState): DeferredState<unknown> {
+  return state.status === "resolved"
+    ? { status: "resolved", value: state.value }
+    : { status: "rejected", error: state.error };
+}
+
+/** The sole structural boundary for deferred Route data. */
+export function Await<Value>(props: {
+  value: Deferred<Value>;
+  fallback?: Child;
+  error: (error: unknown) => Child;
+  children: (value: Value) => Child;
+}): JSXElement {
+  if (typeof document === "undefined" && typeof props.value === "function") {
+    return props.fallback as JSXElement;
+  }
+  if (!isDeferredResource(props.value)) {
+    throw new TypeError("Await requires deferred Route data.");
+  }
+  const current = (props.value as DeferredResource<Value>)[deferredResource];
+  const resolved = (): Child => {
+    const state = current();
+    if (state.status === "pending") return props.fallback;
+    if (state.status === "rejected") return props.error(state.error);
+    return props.children(state.value);
+  };
+  if (typeof document === "undefined") return resolved() as JSXElement;
+  return Show({
+    when: () => current().status !== "pending",
+    fallback: props.fallback,
+    children: resolved,
+  });
 }
 
 export function isHotRefresh(): boolean {
@@ -268,7 +397,7 @@ function renderAttempt(
   const hydration = allowHydration && !hotRefresh ? createHydrationContext(root) : null;
   currentHydration = hydration;
   try {
-    mountedNodes = toNodes(resolveChild(child));
+    mountedNodes = toNodes(child);
     root.replaceChildren(...mountedNodes);
     if (hydration) finishHydration(root, hydration);
     currentHydration = null;
@@ -280,6 +409,9 @@ function renderAttempt(
     }
     if (hotRefresh && hotScroll) restoreHotScroll(root, hotScroll);
     if (hotRefresh && hotFocus) restoreHotFocus(root, hotFocus);
+    if (!hydration && !hotRefresh && root.getAttribute("data-poggers-rendering") === "client") {
+      releaseServerStyles(root);
+    }
   } catch (error) {
     owner.disposed = true;
     for (const cleanup of owner.cleanups.splice(0).reverse()) cleanup();
@@ -301,7 +433,9 @@ function renderAttempt(
     console.error(`[poggers] ${message} Recovering with a client render.`);
     root.replaceChildren();
     root.setAttribute("data-poggers-rendering", "client-recovered");
-    return renderAttempt(child, root, hotState, false);
+    const recovered = renderAttempt(child, root, hotState, false);
+    releaseServerStyles(root);
+    return recovered;
   }
   if (hotState) hotState.mounted = true;
 
@@ -409,6 +543,12 @@ function restoreHotScroll(
 }
 
 type ErasedComponent = (props: never) => Child;
+const hydrationElement = Symbol("poggers.hydration-element");
+type HydrationElement = Readonly<{
+  [hydrationElement]: true;
+  type: string;
+  props: Props;
+}>;
 
 export function jsx(type: string | ErasedComponent, props: Props | null): Child {
   return createNode(type, props ?? {});
@@ -419,52 +559,6 @@ export const jsxs = jsx;
 export function Fragment(props: { children?: Child }): Child {
   return props.children ?? null;
 }
-
-type ForKey = string | number;
-
-export type VirtualForOptions = {
-  readonly anchor?: "start" | "end";
-  readonly follow?: "never" | "auto" | "smooth" | "instant";
-};
-
-type ForProps<Items extends readonly unknown[]> = {
-  each: Items | (() => Items);
-  by?: Extract<keyof Items[number], string> | ((item: Items[number], index: number) => ForKey);
-  children: (item: Items[number], index: number) => Child;
-  fallback?: Child;
-  virtual?: false;
-};
-
-type VirtualActive<Key extends ForKey> = Key | (() => Key | undefined);
-
-type VirtualPropertyKey<Items extends readonly unknown[]> = {
-  [Key in Extract<keyof Items[number], string>]: Extract<Items[number][Key], ForKey> extends never
-    ? never
-    : Key;
-}[Extract<keyof Items[number], string>];
-
-type VirtualForByProperty<
-  Items extends readonly unknown[],
-  Key extends VirtualPropertyKey<Items> = VirtualPropertyKey<Items>,
-> = Omit<ForProps<Items>, "by" | "virtual"> & {
-  by: Key;
-  virtual: true | VirtualForOptions;
-  active?: VirtualActive<NoInfer<Extract<Items[number][Key], ForKey>>>;
-};
-
-type VirtualForByFunction<Items extends readonly unknown[]> = Omit<
-  ForProps<Items>,
-  "by" | "virtual"
-> & {
-  by: (item: Items[number], index: number) => ForKey;
-  virtual: true | VirtualForOptions;
-  active?: VirtualActive<ForKey>;
-};
-
-type VirtualForProps<
-  Items extends readonly unknown[],
-  Key extends VirtualPropertyKey<Items> = VirtualPropertyKey<Items>,
-> = VirtualForByProperty<Items, Key> | VirtualForByFunction<Items>;
 
 type ScopedNodes = {
   nodes: Node[];
@@ -1357,7 +1451,13 @@ function createNode(type: string | ErasedComponent, props: Props): Child {
   if (typeof type === "function") return untrack(() => type(props as never));
 
   const hydration = currentHydration;
-  const element = hydration ? claimHydrationElement(hydration, type) : document.createElement(type);
+  if (hydration) {
+    return Object.freeze({ [hydrationElement]: true, type, props }) as unknown as Child;
+  }
+  return populateElement(document.createElement(type), props, false);
+}
+
+function populateElement(element: HTMLElement, props: Props, hydrating: boolean): HTMLElement {
   const { children, __poggersStructuralChildren, __poggersScene, ...attributes } = props;
 
   if (__poggersScene) {
@@ -1378,13 +1478,24 @@ function createNode(type: string | ErasedComponent, props: Props): Child {
         ? untrack(() => resolveChild(children))
         : children;
     const nodes = toNodes(resolvedChildren);
-    if (hydration) element.replaceChildren(...nodes);
+    if (hydrating) element.replaceChildren(...nodes);
     else element.append(...nodes);
     adoptSceneChildren(element);
   } finally {
     currentChildHost = previousHost;
   }
   return element;
+}
+
+function materializeHydrationElement(value: HydrationElement): HTMLElement {
+  const hydration = currentHydration;
+  return hydration
+    ? populateElement(claimHydrationElement(hydration, value.type), value.props, true)
+    : populateElement(document.createElement(value.type), value.props, false);
+}
+
+function isHydrationElement(value: unknown): value is HydrationElement {
+  return Boolean(value && typeof value === "object" && hydrationElement in value);
 }
 
 function applyProp(element: HTMLElement, name: string, value: unknown) {
@@ -1894,6 +2005,7 @@ function toNodes(child: Child): Node[] {
   const resolved = resolveChild(child);
   if (resolved == null || resolved === false || resolved === true) return [];
   if (Array.isArray(resolved)) return resolved.flatMap(toNodes);
+  if (isHydrationElement(resolved)) return [materializeHydrationElement(resolved)];
   if (resolved instanceof Node && resolved.nodeType === 11) {
     return Array.from(resolved.childNodes);
   }
@@ -1912,21 +2024,43 @@ function dynamicNodes(readChild: () => Child): Node[] {
   const parent = document.createDocumentFragment();
   parent.append(start, end);
   let rendered: Node[] = [];
+  let renderedScope: ScopedNodes | undefined;
+  let initial = true;
 
   blockEffect(() => {
     const resolved = resolveChild(readChild());
+    const hydrate = initial ? currentHydration : null;
+    initial = false;
+    if (isScopedChild(resolved)) {
+      const nextScope = createScopedNodes(resolved[scopedChild]);
+      const nextNodes = nextScope.nodes;
+      renderedScope?.dispose();
+      replaceBetween(start, end, nextNodes);
+      rendered = nextNodes;
+      renderedScope = nextScope;
+      untrack(() => nextScope.mount());
+      return;
+    }
     const text = primitiveText(resolved);
     if (text !== undefined && rendered.length === 1 && rendered[0]?.nodeType === Node.TEXT_NODE) {
       const current = rendered[0] as Text;
       if (current.data !== text) current.data = text;
       return;
     }
-    const nextNodes = text === undefined ? toNodes(resolved) : [document.createTextNode(text)];
+    const nextScope = text === undefined ? createScopedNodes(() => resolved) : undefined;
+    const nextNodes = nextScope?.nodes ?? [
+      hydrate ? claimHydrationText(hydrate, text!) : document.createTextNode(text!),
+    ];
+    renderedScope?.dispose();
     replaceBetween(start, end, nextNodes);
     rendered = nextNodes;
+    renderedScope = nextScope;
+    nextScope?.mount();
   });
 
   registerCleanup(() => {
+    renderedScope?.dispose();
+    renderedScope = undefined;
     for (const node of rendered) node.parentNode?.removeChild(node);
     rendered = [];
   });
@@ -1936,6 +2070,10 @@ function dynamicNodes(readChild: () => Child): Node[] {
 
 function primitiveText(value: Child): string | undefined {
   return typeof value === "string" || typeof value === "number" ? String(value) : undefined;
+}
+
+function isScopedChild(value: Child): value is Child & ScopedChild {
+  return Boolean(value && typeof value === "object" && scopedChild in value);
 }
 
 function replaceBetween(start: Node, end: Node, nodes: Node[]) {
@@ -2030,7 +2168,7 @@ function blockEffect(fn: () => void | (() => void)) {
 }
 
 function createHydrationContext(root: Element): HydrationContext | null {
-  if (root.getAttribute("data-poggers-rendering") !== "initial-state-ssr") return null;
+  if (root.getAttribute("data-poggers-rendering") !== "hydrate") return null;
   const elements = new Map<string, HTMLElement>();
   for (const element of root.querySelectorAll<HTMLElement>("[data-poggers-h]")) {
     const identity = element.getAttribute("data-poggers-h");
@@ -2045,12 +2183,11 @@ function createHydrationContext(root: Element): HydrationContext | null {
       const marker = (node as Comment).data;
       if (marker.startsWith("poggers:")) {
         const identity = marker.slice("poggers:".length);
-        if (
-          !identity ||
-          textMarkers.has(identity) ||
-          node.nextSibling?.nodeType !== Node.TEXT_NODE
-        ) {
+        if (!identity || textMarkers.has(identity)) {
           throw new Error(`Invalid SSR text hydration identity ${JSON.stringify(identity)}.`);
+        }
+        if (node.nextSibling?.nodeType !== Node.TEXT_NODE) {
+          node.parentNode?.insertBefore(document.createTextNode(""), node.nextSibling);
         }
         textMarkers.set(identity, node as Comment);
       }
@@ -2058,12 +2195,18 @@ function createHydrationContext(root: Element): HydrationContext | null {
     for (const childNode of node.childNodes) visit(childNode);
   };
   visit(root);
-  return { elements, textMarkers, elementCursor: 0, textCursor: 0 };
+  return {
+    elements,
+    textMarkers,
+    elementOrder: [...elements],
+    textOrder: [...textMarkers],
+    elementCursor: 0,
+    textCursor: 0,
+  };
 }
 
 function claimHydrationElement(hydration: HydrationContext, tag: string): HTMLElement {
-  const identity = `e${hydration.elementCursor++}`;
-  const element = hydration.elements.get(identity);
+  const [identity = "end", element] = hydration.elementOrder[hydration.elementCursor++] ?? [];
   if (!element || element.localName !== tag) {
     throw new Error(
       `SSR hydration mismatch at ${identity}: expected <${tag}>, found ${element ? `<${element.localName}>` : "nothing"}.`,
@@ -2073,8 +2216,7 @@ function claimHydrationElement(hydration: HydrationContext, tag: string): HTMLEl
 }
 
 function claimHydrationText(hydration: HydrationContext, value: string): Text {
-  const identity = `t${hydration.textCursor++}`;
-  const marker = hydration.textMarkers.get(identity);
+  const [identity = "end", marker] = hydration.textOrder[hydration.textCursor++] ?? [];
   const text = marker?.nextSibling;
   if (!marker || !(text instanceof Text) || text.data !== value) {
     throw new Error(
@@ -2096,6 +2238,16 @@ function finishHydration(root: Element, hydration: HydrationContext): void {
   }
   for (const element of hydration.elements.values()) element.removeAttribute("data-poggers-h");
   root.setAttribute("data-poggers-rendering", "hydrated");
+  releaseServerStyles(root);
+}
+
+function releaseServerStyles(root: Element): void {
+  const document = root.ownerDocument;
+  const client = document.querySelector<HTMLStyleElement>("style[data-poggers-presentation]");
+  if (!client?.textContent) return;
+  for (const style of document.querySelectorAll("style[data-poggers-ssr]")) {
+    style.remove();
+  }
 }
 
 function createScopedNodes(readNodes: () => Child): ScopedNodes {
@@ -2154,4 +2306,4 @@ export type {
   HTMLAttributes,
   IntrinsicElements,
   SVGAttributes,
-} from "@/adapters/web/ui/component/language";
+} from "@/platforms/web/ui";

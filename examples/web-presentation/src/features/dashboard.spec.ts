@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 
-import { createPresentationFrame, createUIContributionInstance } from "@poggers/kit";
+import { createPresentationFrame, createUIContributionInstance } from "@poggers/kit/testing";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 
@@ -9,8 +9,9 @@ import {
   validateWebPresentationSource,
 } from "@/adapters/web/ui/presentation/compiler";
 import { createWebAnimationHost } from "@/adapters/web/ui/presentation/runtime/animation";
-import { compilePresentationSource } from "@/core/compiler/presentation";
-import { createActionEventLedger, evaluatePresentationFrame } from "@/core/presentation";
+import { compilePresentationSource } from "@/compiler/presentation";
+import { evaluatePresentationFrame } from "@/core/ui/presentation";
+import { createActionEventLedger } from "@/runtime/presentation";
 
 import { editorial } from "../presentations/editorial";
 import { dashboard, type SheetState } from "./dashboard";

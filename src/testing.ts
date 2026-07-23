@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
 import { createServer as createPortServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -7,24 +7,35 @@ import { extname, resolve, sep } from "node:path";
 
 import { describe, test } from "vitest";
 
-import { platformAdapters } from "@/adapters/registry";
-import { createServerPlatformAdapter } from "@/adapters/server/adapter";
-import { createWebPlatformAdapter } from "@/adapters/web/adapter";
+import { createPlatformAdapters, platformAdapters } from "@/adapters/registry";
+import { linkProgram } from "@/compiler/linker";
 import type { PlatformAdapterImplementation } from "@/contracts/platform";
-import { linkProgram } from "@/core/compiler/ir";
 import {
   buildApplication,
   developApplication,
   resolveApplicationRealization,
   type BuiltApplication,
   type RunningApplication,
-} from "@/core/realization";
+} from "@/realization";
+
+export { createEntityFixture, createMemoryEventStore } from "@/features/entity.testing";
+export { createUIContributionInstance } from "@/runtime/process";
+export { createPresentationFrame } from "@/runtime/presentation";
 
 export type ApplicationTestContext = Readonly<{
+  /** Realization under the same black-box specification. */
+  realization: "development" | "production";
   /** Public location through which a user reaches the complete application. */
   location: string;
   /** Public locations exposed by the Application's semantic Platforms. */
   locations: Readonly<Record<string, readonly string[]>>;
+  /** Realization timings and emitted bytes for broad regression budgets. */
+  metrics: Readonly<{
+    buildMs?: number;
+    startupMs: number;
+    artifactBytes?: number;
+    environment: string;
+  }>;
   /** Restarts the realized application while preserving its durable test data. */
   restart(): Promise<void>;
 }>;
@@ -61,19 +72,22 @@ async function verifyDevelopment(definition: ApplicationTestDefinition): Promise
   let application: RunningApplication | undefined;
 
   const start = async () => {
+    const started = performance.now();
     application = await developApplication(directory, adapters);
     const location = publicLocation(application.locations);
     await ready(location);
-    return location;
+    return { location, startupMs: performance.now() - started };
   };
 
   try {
-    const location = await start();
+    const { location, startupMs } = await start();
     const active = application;
     if (!active) throw new Error("The development Application did not start.");
     await definition.verify({
+      realization: "development",
       location,
       locations: active.locations,
+      metrics: testMetrics({ startupMs }),
       async restart() {
         await application?.[Symbol.asyncDispose]();
         application = undefined;
@@ -94,20 +108,26 @@ async function verifyProduction(definition: ApplicationTestDefinition): Promise<
   let running: ProductionApplication | undefined;
 
   try {
+    const buildStarted = performance.now();
     const built = await buildApplication(directory, output, platformAdapters);
+    const buildMs = performance.now() - buildStarted;
+    const artifactBytes = await directoryBytes(output);
     const serverCount = built.artifacts.server?.entries.length ?? 0;
     const ports = await availablePortRange(Math.max(serverCount + 1, 1));
     const start = async () => {
+      const started = performance.now();
       running = await startProductionApplication(built, directory, database, ports[0]!);
       await ready(running.location);
-      return running.location;
+      return { location: running.location, startupMs: performance.now() - started };
     };
-    const location = await start();
+    const { location, startupMs } = await start();
     const active = running;
     if (!active) throw new Error("The production Application did not start.");
     await definition.verify({
+      realization: "production",
       location,
       locations: active.locations,
+      metrics: testMetrics({ artifactBytes, buildMs, startupMs }),
       async restart() {
         await running?.dispose();
         running = undefined;
@@ -120,6 +140,25 @@ async function verifyProduction(definition: ApplicationTestDefinition): Promise<
   }
 }
 
+function testMetrics(input: {
+  artifactBytes?: number;
+  buildMs?: number;
+  startupMs: number;
+}): ApplicationTestContext["metrics"] {
+  return Object.freeze({
+    ...input,
+    environment: `${process.platform}/${process.arch} ${process.version}`,
+  });
+}
+
+async function directoryBytes(path: string): Promise<number> {
+  const metadata = await stat(path);
+  if (!metadata.isDirectory()) return metadata.size;
+  const entries = await readdir(path);
+  const sizes = await Promise.all(entries.map((entry) => directoryBytes(resolve(path, entry))));
+  return sizes.reduce((total, size) => total + size, 0);
+}
+
 function testAdapters(input: {
   database: string;
   serverPort: number;
@@ -127,22 +166,22 @@ function testAdapters(input: {
 }): Readonly<Record<string, PlatformAdapterImplementation>> {
   const webOrigin = `http://localhost:${input.webPort}`;
   const serverOrigin = `http://localhost:${input.serverPort}`;
-  return {
-    ...platformAdapters,
-    server: createServerPlatformAdapter({
+  return createPlatformAdapters({
+    server: {
       developmentPort: input.serverPort,
       developmentHost: {
         database: input.database,
         host: "localhost",
         secret: "poggers-application-test-secret",
+        shutdownTimeout: 500,
       },
       webOrigin,
-    }),
-    web: createWebPlatformAdapter({
+    },
+    web: {
       developmentPort: input.webPort,
       serverOrigin,
-    }),
-  };
+    },
+  });
 }
 
 function publicLocation(locations: Readonly<Record<string, readonly string[]>>): string {
@@ -190,6 +229,9 @@ async function startProductionApplication(
           HOST: "127.0.0.1",
           PORT: String(port),
           POGGERS_DATABASE: database,
+          POGGERS_HTTP_BODY_LIMIT: "1024",
+          POGGERS_HTTP_TIMEOUT_MS: "2000",
+          POGGERS_HTTP_SHUTDOWN_TIMEOUT_MS: "500",
           POGGERS_WEB_ORIGIN: `http://127.0.0.1:${port}`,
           ...(webRoot ? { POGGERS_WEB_ROOT: webRoot } : {}),
         }),

@@ -1,12 +1,12 @@
-import type { BrowserMainThread, BrowserServiceWorker } from "@/adapters/web/platform";
 import {
   placePrograms,
   type Application,
   type Feature,
   type FeatureContractOf,
   type PlacedFeature,
-  type Program,
 } from "@/core/application";
+import type { Program } from "@/core/program";
+import type { BrowserMainThread, BrowserServiceWorker } from "@/platforms/web/platform";
 
 type Message = Readonly<{ id: string; text: string }>;
 type ServerPlatform = { readonly Name: "server" };
@@ -69,7 +69,7 @@ type ChatFeature = {
 const chatFeature = {
   programs: {
     cloud: {
-      start({ capabilities: { store } }) {
+      start({ dependencies: { store } }) {
         let closed = false;
         const messages: Messages = {
           async list() {
@@ -91,8 +91,8 @@ const chatFeature = {
       },
     },
     browser: {
-      start({ actions, capabilities }) {
-        capabilities.messages.list() satisfies Promise<readonly Message[]>;
+      start({ actions, dependencies }) {
+        dependencies.messages.list() satisfies Promise<readonly Message[]>;
         actions.send satisfies (input: { text: string }) => Promise<void>;
       },
       state: { messages: [] },
@@ -100,19 +100,19 @@ const chatFeature = {
         receive({ state }, { messages }) {
           state.messages = messages;
         },
-        send({ capabilities }, input) {
-          return capabilities.messages.send(input);
+        send({ dependencies }, input) {
+          return dependencies.messages.send(input);
         },
       },
       components: {
         Chat: {
           state: { draft: "" },
           actions: {
-            change({ state, capabilities }, { value }) {
-              capabilities.messages satisfies Messages;
+            change({ state, dependencies }, { value }) {
+              dependencies.messages satisfies Messages;
               state.draft = value;
-              // @ts-expect-error Components may access only declared Capabilities.
-              void capabilities.unknown;
+              // @ts-expect-error Components may access only declared Dependencies.
+              void dependencies.unknown;
               return state.draft;
             },
             clear({ state }) {
@@ -124,7 +124,7 @@ const chatFeature = {
             scope.state.draft satisfies string;
             // @ts-expect-error Component mount receives readonly state.
             scope.state.draft = "invalid";
-            return scope.capabilities.clock.subscribe(scope.actions.clear);
+            return scope.dependencies.clock.subscribe(scope.actions.clear);
           },
           view({ feature, state, actions, elements: { Root, Send } }) {
             feature.messages satisfies readonly Message[];
@@ -143,8 +143,8 @@ const chatFeature = {
       },
     },
     worker: {
-      async start({ capabilities }) {
-        for await (const messages of capabilities.messages.changes()) {
+      async start({ dependencies }) {
+        for await (const messages of dependencies.messages.changes()) {
           messages satisfies readonly Message[];
         }
       },
@@ -174,8 +174,8 @@ const shellFeature = {
     browser: {
       state: { route: "chat" },
       actions: {
-        navigate({ capabilities, state }, input) {
-          capabilities.navigation.push(input);
+        navigate({ dependencies, state }, input) {
+          dependencies.navigation.push(input);
           state.route = input.route;
         },
       },
@@ -227,7 +227,7 @@ type BrokenProvider = {
 const brokenProvider: Feature<BrokenProvider> = {
   programs: {
     cloud: {
-      // @ts-expect-error Provided Capability surfaces must be exact.
+      // @ts-expect-error Provided Dependency surfaces must be exact.
       start: () => ({ wrong: true }),
     },
   },

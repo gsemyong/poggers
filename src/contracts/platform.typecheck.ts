@@ -1,22 +1,22 @@
 import type {
   DevelopmentSession,
+  PresentationAdapter,
   PlatformAdapter,
   PlatformAdapters,
   ProductionArtifacts,
   UIAdapter,
 } from "@/contracts/platform";
-import type { Program } from "@/core/application";
-import type { PresentationAdapter } from "@/core/presentation";
-import type { UIElement } from "@/core/ui";
+import type { Program } from "@/core/program";
+import type { UIElement } from "@/core/ui/language";
 
-type NativeTarget = { readonly kind: "native" };
+type IOSView = { readonly kind: "ios-view" };
 type OtherTarget = { readonly kind: "other" };
 
-type NativeUI = {
-  readonly Name: "native";
+type IOSUI = {
+  readonly Name: "ios";
   readonly Child: string;
   readonly Elements: {
-    readonly stack: UIElement<object, NativeTarget>;
+    readonly stack: UIElement<object, IOSView>;
   };
 };
 
@@ -28,7 +28,7 @@ type OtherUI = {
   };
 };
 
-type NativePresentation = {
+type IOSPresentation = {
   readonly Declarations: { readonly stack: Readonly<{ color?: string }> };
   readonly Environment: Readonly<{ scale: number }>;
   readonly Observations: { readonly stack: Readonly<{ size: number }> };
@@ -41,37 +41,43 @@ type OtherPresentation = {
 };
 
 type ServerPlatform = { readonly Name: "server" };
-type NativePlatform = { readonly Name: "native"; readonly UI: NativeUI };
+type IOSPlatform = { readonly Name: "ios"; readonly UI: IOSUI };
 type Server = { readonly Name: "server"; readonly Platform: ServerPlatform };
-type NativeMain = {
-  readonly Name: "native-main";
-  readonly Platform: NativePlatform;
-  readonly UI: NativeUI;
+type IOSForeground = {
+  readonly Name: "ios-foreground";
+  readonly Platform: IOSPlatform;
+  readonly UI: IOSUI;
 };
-type NativeWorker = { readonly Name: "native-worker"; readonly Platform: NativePlatform };
-type NativeSecondary = {
-  readonly Name: "native-secondary";
-  readonly Platform: NativePlatform;
-  readonly UI: NativeUI;
+type IOSBackground = { readonly Name: "ios-background"; readonly Platform: IOSPlatform };
+type IOSWidget = {
+  readonly Name: "ios-widget";
+  readonly Platform: IOSPlatform;
+  readonly UI: IOSUI;
 };
 
 type ServerProgram = Program<Server>;
-type NativeProgram = Program<NativeMain, { Components: { Root: { Elements: { Root: "stack" } } } }>;
-type NativeWorkerProgram = Program<NativeWorker>;
-type NativeSecondaryProgram = Program<NativeSecondary>;
+type IOSProgram = Program<IOSForeground, { Components: { Root: { Elements: { Root: "stack" } } } }>;
+type IOSBackgroundProgram = Program<IOSBackground>;
+type IOSWidgetProgram = Program<
+  IOSWidget,
+  { Components: { Root: { Elements: { Root: "stack" } } } }
+>;
 
 const serverProgram: ServerProgram = { Environment: {} as Server };
-const nativeProgram: NativeProgram = {
-  Environment: {} as NativeMain,
+const iosProgram: IOSProgram = {
+  Environment: {} as IOSForeground,
   Components: { Root: { Elements: { Root: "stack" } } },
 };
-const nativeWorkerProgram: NativeWorkerProgram = { Environment: {} as NativeWorker };
-const nativeSecondaryProgram: NativeSecondaryProgram = { Environment: {} as NativeSecondary };
-void [serverProgram, nativeProgram, nativeWorkerProgram, nativeSecondaryProgram];
+const iosBackgroundProgram: IOSBackgroundProgram = { Environment: {} as IOSBackground };
+const iosWidgetProgram: IOSWidgetProgram = {
+  Environment: {} as IOSWidget,
+  Components: { Root: { Elements: { Root: "stack" } } },
+};
+void [serverProgram, iosProgram, iosBackgroundProgram, iosWidgetProgram];
 
 type WrongUIEnvironment = {
   readonly Name: "wrong";
-  readonly Platform: NativePlatform;
+  readonly Platform: IOSPlatform;
   readonly UI: OtherUI;
 };
 type WrongUIProgram = Program<WrongUIEnvironment, { Components: {} }>;
@@ -86,22 +92,22 @@ void headlessUIProgram;
 
 const session = {} as DevelopmentSession;
 const artifacts = {} as ProductionArtifacts;
-const nativeComponentAdapter = {
+const iosComponentAdapter = {
   createApplicationUI() {
     return {
       renderRoot() {
-        return "native";
+        return "ios";
       },
       dispose() {},
     };
   },
 };
-const nativePresentationAdapter = {} as PresentationAdapter<NativePresentation, NativeTarget>;
-const nativeUIAdapter = {
-  name: "native",
-  component: nativeComponentAdapter,
-  presentation: nativePresentationAdapter,
-} satisfies UIAdapter<NativeUI, typeof nativeComponentAdapter, typeof nativePresentationAdapter>;
+const iosPresentationAdapter = {} as PresentationAdapter<IOSPresentation, IOSView>;
+const iosUIAdapter = {
+  name: "ios",
+  component: iosComponentAdapter,
+  presentation: iosPresentationAdapter,
+} satisfies UIAdapter<IOSUI, typeof iosComponentAdapter, typeof iosPresentationAdapter>;
 
 const wrongComponentAdapter = {
   createApplicationUI() {
@@ -109,29 +115,29 @@ const wrongComponentAdapter = {
   },
 };
 const wrongComponentUIAdapter = {
-  name: "native",
+  name: "ios",
   // @ts-expect-error A Component adapter must render the UI language's Child type.
   component: wrongComponentAdapter,
-  presentation: nativePresentationAdapter,
-} satisfies UIAdapter<NativeUI, typeof wrongComponentAdapter, typeof nativePresentationAdapter>;
+  presentation: iosPresentationAdapter,
+} satisfies UIAdapter<IOSUI, typeof wrongComponentAdapter, typeof iosPresentationAdapter>;
 void wrongComponentUIAdapter;
 
-const wrongPresentationLanguage = {} as PresentationAdapter<OtherPresentation, NativeTarget>;
+const wrongPresentationLanguage = {} as PresentationAdapter<OtherPresentation, IOSView>;
 const wrongPresentationUIAdapter = {
-  name: "native",
-  component: nativeComponentAdapter,
+  name: "ios",
+  component: iosComponentAdapter,
   // @ts-expect-error Presentation declarations and observations must cover the same UI Elements.
   presentation: wrongPresentationLanguage,
-} satisfies UIAdapter<NativeUI, typeof nativeComponentAdapter, typeof wrongPresentationLanguage>;
+} satisfies UIAdapter<IOSUI, typeof iosComponentAdapter, typeof wrongPresentationLanguage>;
 void wrongPresentationUIAdapter;
 
-const wrongPresentationTarget = {} as PresentationAdapter<NativePresentation, OtherTarget>;
+const wrongPresentationTarget = {} as PresentationAdapter<IOSPresentation, OtherTarget>;
 const wrongTargetUIAdapter = {
-  name: "native",
-  component: nativeComponentAdapter,
-  // @ts-expect-error Presentation native targets must accept every target exposed by the UI language.
+  name: "ios",
+  component: iosComponentAdapter,
+  // @ts-expect-error Presentation targets must accept every target exposed by the UI language.
   presentation: wrongPresentationTarget,
-} satisfies UIAdapter<NativeUI, typeof nativeComponentAdapter, typeof wrongPresentationTarget>;
+} satisfies UIAdapter<IOSUI, typeof iosComponentAdapter, typeof wrongPresentationTarget>;
 void wrongTargetUIAdapter;
 
 const serverAdapter = {
@@ -144,42 +150,42 @@ const serverAdapter = {
   },
 } satisfies PlatformAdapter<ServerPlatform>;
 
-const nativeAdapter = {
-  name: "native",
-  ui: nativeUIAdapter,
+const iosAdapter = {
+  name: "ios",
+  ui: iosUIAdapter,
   async develop() {
     return session;
   },
   async build() {
     return artifacts;
   },
-} satisfies PlatformAdapter<NativePlatform, typeof nativeUIAdapter>;
+} satisfies PlatformAdapter<IOSPlatform, typeof iosUIAdapter>;
 
 const adapters = {
-  native: nativeAdapter,
+  ios: iosAdapter,
   server: serverAdapter,
-} satisfies PlatformAdapters<NativePlatform | ServerPlatform>;
+} satisfies PlatformAdapters<IOSPlatform | ServerPlatform>;
 void adapters;
 
 const missingAdapter = {
-  native: nativeAdapter,
+  ios: iosAdapter,
   // @ts-expect-error Every declared Platform requires an adapter binding.
-} satisfies PlatformAdapters<NativePlatform | ServerPlatform>;
+} satisfies PlatformAdapters<IOSPlatform | ServerPlatform>;
 void missingAdapter;
 
 const extraAdapter = {
-  native: nativeAdapter,
+  ios: iosAdapter,
   server: serverAdapter,
   // @ts-expect-error Adapter maps reject undeclared Platform bindings.
-  other: nativeAdapter,
-} satisfies PlatformAdapters<NativePlatform | ServerPlatform>;
+  other: iosAdapter,
+} satisfies PlatformAdapters<IOSPlatform | ServerPlatform>;
 void extraAdapter;
 
 const wrongAdapter = {
   // @ts-expect-error Adapter identity must match its Platform key.
-  native: serverAdapter,
+  ios: serverAdapter,
   server: serverAdapter,
-} satisfies PlatformAdapters<NativePlatform | ServerPlatform>;
+} satisfies PlatformAdapters<IOSPlatform | ServerPlatform>;
 void wrongAdapter;
 
 const otherComponentAdapter = {
@@ -198,7 +204,7 @@ const crossedUIAdapter = {
 >;
 
 const crossedPlatformAdapter = {
-  name: "native",
+  name: "ios",
   ui: crossedUIAdapter,
   async develop() {
     return session;
@@ -208,9 +214,9 @@ const crossedPlatformAdapter = {
   },
 };
 // @ts-expect-error A Platform Adapter cannot realize another Platform's UI contract.
-const invalidNativeAdapter: PlatformAdapter<NativePlatform> = crossedPlatformAdapter;
-void invalidNativeAdapter;
+const invalidIOSAdapter: PlatformAdapter<IOSPlatform> = crossedPlatformAdapter;
+void invalidIOSAdapter;
 
-type MultiPlatformPrograms = readonly [ServerProgram, NativeProgram, NativeWorkerProgram];
+type MultiPlatformPrograms = readonly [ServerProgram, IOSProgram, IOSBackgroundProgram];
 const multiPlatformPrograms = [] as unknown as MultiPlatformPrograms;
 void multiPlatformPrograms;

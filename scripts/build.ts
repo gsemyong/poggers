@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
-import { access, copyFile, glob, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { access, copyFile, glob, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, relative, resolve } from "node:path";
 import process from "node:process";
 
@@ -20,6 +21,13 @@ const targets = [
 ];
 const isBuildTarget = (target: unknown): target is string =>
   typeof target === "string" && target.startsWith("./dist/") && target.endsWith(".js");
+const generatedRuntimeEntrypoints = [
+  resolve(packageDir, "src/adapters/web/document.ts"),
+  resolve(packageDir, "src/adapters/web/host.ts"),
+  resolve(packageDir, "src/adapters/web/ui/adapter.ts"),
+  resolve(packageDir, "src/adapters/web/ui/stream.ts"),
+  resolve(packageDir, "src/runtime/process.ts"),
+];
 const entrypoints = [
   ...new Set(
     targets
@@ -27,8 +35,7 @@ const entrypoints = [
       .map((target) => resolve(packageDir, target.slice("./dist/".length).replace(/\.js$/, ".ts"))),
   ),
   // Generated artifacts import these internal realization boundaries directly.
-  resolve(packageDir, "src/adapters/web/document.ts"),
-  resolve(packageDir, "src/adapters/web/ui/adapter.ts"),
+  ...generatedRuntimeEntrypoints,
 ];
 for (const entrypoint of entrypoints) {
   try {
@@ -39,24 +46,7 @@ for (const entrypoint of entrypoints) {
 }
 
 await rm(distDir, { force: true, recursive: true });
-const declarationCode = await run(
-  resolve(packageDir, "node_modules/typescript/bin/tsc"),
-  [
-    "-p",
-    "tsconfig.json",
-    "--declaration",
-    "--emitDeclarationOnly",
-    "--noEmit",
-    "false",
-    "--outDir",
-    "dist",
-    "--allowImportingTsExtensions",
-    "true",
-    "--pretty",
-    "false",
-  ],
-  packageDir,
-);
+const declarationCode = await emitDeclarations();
 if (declarationCode !== 0) process.exit(1);
 
 for (const pattern of ["**/*.spec.d.ts", "**/*.typecheck.d.ts"]) {
@@ -100,22 +90,24 @@ await build({
     target: "node26",
   },
 });
-const nativeSource = resolve(sourceDir, "adapters/server/native");
-const nativeOutput = resolve(distDir, "src/adapters/server/native");
+const productionSource = resolve(sourceDir, "adapters/server/production");
+const productionOutput = resolve(distDir, "src/adapters/server/production");
 for (const pattern of [
   "runtime/Cargo.toml",
   "runtime/src/**/*.rs",
-  "capabilities/*/Cargo.toml",
-  "capabilities/*/src/**/*.rs",
+  "dependencies/**/Cargo.toml",
+  "dependencies/**/src/**/*.rs",
 ]) {
-  for await (const file of glob(pattern, { cwd: nativeSource })) {
-    const output = resolve(nativeOutput, file);
+  for await (const file of glob(pattern, { cwd: productionSource })) {
+    const output = resolve(productionOutput, file);
     await mkdir(dirname(output), { recursive: true });
-    await copyFile(resolve(nativeSource, file), output);
+    await copyFile(resolve(productionSource, file), output);
   }
 }
 await assertDistribution();
+await assertGeneratedRuntimeEntrypoints();
 await assertNoPrivateAliases();
+await assertVocabulary();
 await assertServerEnvironment();
 
 async function assertDistribution(): Promise<void> {
@@ -123,6 +115,7 @@ async function assertDistribution(): Promise<void> {
   for await (const file of glob("**/*", { cwd: distDir })) {
     if (
       file.split("/").includes("target") ||
+      file.split("/").includes("fixtures") ||
       file.endsWith("Cargo.lock") ||
       /(?:^|\/)[^/]+\.(?:spec|typecheck)\./.test(file)
     ) {
@@ -131,6 +124,17 @@ async function assertDistribution(): Promise<void> {
   }
   if (forbidden.length) {
     throw new Error(`Build output contains private files:\n${forbidden.sort().join("\n")}`);
+  }
+}
+
+async function assertGeneratedRuntimeEntrypoints(): Promise<void> {
+  for (const entrypoint of generatedRuntimeEntrypoints) {
+    const output = resolve(distDir, relative(packageDir, entrypoint).replace(/\.ts$/, ".js"));
+    try {
+      await access(output);
+    } catch {
+      throw new Error(`Package build omitted generated runtime entry ${output}.`);
+    }
   }
 }
 
@@ -155,7 +159,9 @@ async function rewriteDeclarationAliases(): Promise<void> {
 
 async function copySemanticSources(): Promise<void> {
   for await (const file of glob("**/*.{ts,tsx}", { cwd: sourceDir })) {
-    if (/(?:^|\/)[^/]+\.(?:spec|typecheck)\./.test(file)) continue;
+    if (file.split("/").includes("fixtures") || /(?:^|\/)[^/]+\.(?:spec|typecheck)\./.test(file)) {
+      continue;
+    }
     const output = resolve(distDir, "source", file);
     const contents = await readFile(resolve(sourceDir, file), "utf8");
     const rewritten = contents.replaceAll(
@@ -183,10 +189,61 @@ async function assertNoPrivateAliases(): Promise<void> {
   }
 }
 
+async function assertVocabulary(): Promise<void> {
+  for await (const file of glob("**/*.{js,json,rs,ts,tsx}", { cwd: distDir })) {
+    const contents = await readFile(resolve(distDir, file), "utf8");
+    if (/capabilit(?:y|ies)/i.test(contents)) {
+      throw new Error(`Legacy dependency terminology leaked into ${file}.`);
+    }
+  }
+}
+
 async function assertServerEnvironment(): Promise<void> {
-  const native = await readFile(resolve(distDir, "src/adapters/server/native.js"), "utf8");
-  if (!native.includes("process.env.POGGERS_NATIVE_CACHE")) {
+  const production = await readFile(
+    resolve(distDir, "src/adapters/server/production/compiler.js"),
+    "utf8",
+  );
+  if (!production.includes("process.env.POGGERS_PRODUCTION_CACHE")) {
     throw new Error("The package build replaced the server environment with a client constant.");
+  }
+}
+
+async function emitDeclarations(): Promise<number> {
+  const directory = await mkdtemp(resolve(tmpdir(), "poggers-declarations-"));
+  try {
+    const config = resolve(directory, "tsconfig.json");
+    await writeFile(
+      config,
+      JSON.stringify(
+        {
+          extends: resolve(packageDir, "tsconfig.json"),
+          files: entrypoints,
+          compilerOptions: { rootDir: packageDir },
+        },
+        null,
+        2,
+      ),
+    );
+    return await run(
+      resolve(packageDir, "node_modules/typescript/bin/tsc"),
+      [
+        "-p",
+        config,
+        "--declaration",
+        "--emitDeclarationOnly",
+        "--noEmit",
+        "false",
+        "--outDir",
+        "dist",
+        "--allowImportingTsExtensions",
+        "true",
+        "--pretty",
+        "false",
+      ],
+      packageDir,
+    );
+  } finally {
+    await rm(directory, { force: true, recursive: true });
   }
 }
 

@@ -1,8 +1,12 @@
-import type { PlatformContract } from "@/core/application";
-import type { ProgramManifest } from "@/core/capability";
-import type { ApplicationIR, ProgramIR } from "@/core/compiler/ir";
-import type { PresentationAdapter, PresentationLanguage } from "@/core/presentation";
-import type { UIChild, UIContract, UIDefinition, UITarget } from "@/core/ui";
+import type { SourceCompilerExtension } from "@/compiler/extension";
+import type { ApplicationIR, ProgramIR } from "@/compiler/ir";
+import type { PlatformContract } from "@/core/program";
+import type { UIChild, UIContract, UIDefinition, UITarget } from "@/core/ui/language";
+import type {
+  PresentationAnimationScope,
+  PresentationElement,
+  PresentationLanguage,
+} from "@/core/ui/presentation";
 
 export type PlatformInput<Platform extends PlatformContract = PlatformContract> = Readonly<{
   directory: string;
@@ -36,16 +40,62 @@ export type ProductionArtifacts = Readonly<{
   entries: readonly ProductionArtifact[];
 }>;
 
-export type ProgramHostInput = Readonly<{
-  program: string;
-  profile: "development" | "production";
-  manifest: ProgramManifest;
-}>;
+export type PresentationElementResolver<ElementName extends string, Target> = Readonly<
+  Record<ElementName, () => readonly Target[]>
+>;
 
-/** Creates the external Capability scope owned by one running Program instance. */
-export type ProgramHostFactory = (
-  input: ProgramHostInput,
-) => Readonly<Record<string, unknown>> | PromiseLike<Readonly<Record<string, unknown>>>;
+type PresentationDeclaration<Language extends PresentationLanguage> =
+  Language["Declarations"][keyof Language["Declarations"]];
+
+type PresentationObservation<Language extends PresentationLanguage> =
+  Language["Observations"][keyof Language["Observations"]];
+
+export type PresentationAdapterSession<
+  Language extends PresentationLanguage,
+  ElementName extends string,
+> = {
+  render(
+    frame: (input: {
+      readonly elements: Readonly<{
+        [Element in ElementName]: PresentationElement<
+          Element,
+          unknown,
+          Extract<PresentationObservation<Language>, object>
+        >;
+      }>;
+      readonly scopes: readonly PresentationAnimationScope[];
+    }) => Readonly<Partial<Record<ElementName, Readonly<PresentationDeclaration<Language>>>>>,
+    options?: Readonly<{
+      dynamic?: boolean;
+      behavior?: Readonly<{
+        state: Readonly<object>;
+        props?: Readonly<object>;
+      }>;
+    }>,
+  ): void;
+  reconfigure(options?: Readonly<{ scopes?: boolean }>): void;
+  dispose(): void;
+};
+
+export type PresentationAdapterInstance<Language extends PresentationLanguage, Target> = {
+  readonly environment: Readonly<Language["Environment"]>;
+  create<const ElementName extends string>(options: {
+    readonly boundary: Target;
+    readonly elements: PresentationElementResolver<ElementName, Target>;
+    readonly identity?: string;
+    readonly scopes?: readonly object[];
+  }): PresentationAdapterSession<Language, ElementName>;
+  snapshot(): unknown;
+  dispose(): void;
+};
+
+/** Realizes and disposes Presentation declarations for one platform. */
+export type PresentationAdapter<Language extends PresentationLanguage, Target> = {
+  mount(options: {
+    readonly boundary: Target;
+    readonly snapshot?: unknown;
+  }): PresentationAdapterInstance<Language, Target>;
+};
 
 /** The common mounted result required from every UI Component implementation. */
 export type ComponentAdapterSession<UI extends UIContract> = Readonly<{
@@ -86,10 +136,10 @@ type PresentationBinding<UI extends UIContract, Implementation> = unknown extend
   ? Implementation
   : Implementation extends PresentationAdapter<
         infer Language extends PresentationLanguage,
-        infer NativeTarget
+        infer Target
       >
     ? LanguageMatchesUI<UI, Language> extends true
-      ? UITarget<UI> extends NativeTarget
+      ? UITarget<UI> extends Target
         ? Implementation
         : never
       : never
@@ -115,6 +165,7 @@ export type PlatformAdapter<
   UIAdapter = DefaultUIAdapter<Platform>,
 > = Readonly<{
   name: Platform["Name"];
+  compiler?: readonly SourceCompilerExtension[];
   develop(input: PlatformDevelopmentInput<Platform>): Promise<DevelopmentSession>;
   build(input: PlatformProductionInput<Platform>): Promise<ProductionArtifacts>;
 }> &
@@ -140,6 +191,7 @@ export type PlatformAdapters<Platforms extends PlatformContract> = Readonly<{
 
 export type PlatformAdapterImplementation = Readonly<{
   name: string;
+  compiler?: readonly SourceCompilerExtension[];
   ui?: unknown;
   develop(input: PlatformDevelopmentInput): Promise<DevelopmentSession>;
   build(input: PlatformProductionInput): Promise<ProductionArtifacts>;

@@ -1,8 +1,6 @@
 import fc from "fast-check";
 import { describe, expect, test, vi } from "vitest";
 
-import type { HttpRequest, HttpResponse } from "@/adapters/server/platform";
-import { createProgramContributionInstance } from "@/core/process";
 import {
   createEntity,
   type EntityApi,
@@ -10,6 +8,8 @@ import {
   type EntityModel,
 } from "@/features/entity";
 import { createEntityFixture, createMemoryEventStore } from "@/features/entity.testing";
+import type { HttpRequest, HttpResponse } from "@/platforms/server/platform";
+import { createProgramContributionInstance } from "@/runtime/process";
 
 type Note = Readonly<{ id: string; ownerId: string; text: string; archived: boolean }>;
 type Notes = EntityModel<{
@@ -140,7 +140,7 @@ describe("semantic entity Feature", () => {
     const server = createProgramContributionInstance(notes.programs.server as never, {
       address: { program: "server", feature: "notes" },
       provides: ["notes"],
-      capabilities: {
+      dependencies: {
         identity: {
           authenticate: async () => ({ id: "alice" }),
         },
@@ -159,7 +159,7 @@ describe("semantic entity Feature", () => {
     const browser = createProgramContributionInstance(notes.programs.browser as never, {
       address: { program: "browser", feature: "notes" },
       provides: ["notes"],
-      capabilities: {
+      dependencies: {
         identity: {
           session: async () => ({ user: { id: "alice" } }),
           signIn: async () => ({ user: { id: "alice" } }),
@@ -209,7 +209,7 @@ describe("semantic entity Feature", () => {
     const server = createProgramContributionInstance(notes.programs.server as never, {
       address: { program: "server", feature: "notes" },
       provides: ["notes"],
-      capabilities: {
+      dependencies: {
         identity: { authenticate: async () => ({ id: "alice" }) },
         events,
         identifiers: sequenceIdentifiers("server"),
@@ -228,7 +228,7 @@ describe("semantic entity Feature", () => {
       createProgramContributionInstance(notes.programs.browser as never, {
         address: { program: "browser", feature: "notes" },
         provides: ["notes"],
-        capabilities: {
+        dependencies: {
           identity: {
             session: async () => ({ user: { id: "alice" } }),
             signIn: async () => ({ user: { id: "alice" } }),
@@ -293,13 +293,13 @@ function createFixture() {
 function createMemoryStore() {
   const values = new Map<string, unknown>();
   return {
-    async read<Value>(key: string): Promise<Value | undefined> {
+    async read<Value>({ key }: { key: string }): Promise<Value | undefined> {
       return structuredClone(values.get(key)) as Value | undefined;
     },
-    async write<Value>(key: string, value: Value): Promise<void> {
+    async write<Value>({ key, value }: { key: string; value: Value }): Promise<void> {
       values.set(key, structuredClone(value));
     },
-    async remove(key: string): Promise<void> {
+    async remove({ key }: { key: string }): Promise<void> {
       values.delete(key);
     },
   };

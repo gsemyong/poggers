@@ -7,7 +7,7 @@ This example composes three vertical slices without application dependency plumb
 - `shell.tsx` composes the feature Components;
 - `app.tsx` only names the product and composes Features and Presentations.
 
-The selected web and server adapters create their host Capability scopes automatically. Identity
+The selected web and server adapters create their host Dependency scopes automatically. Identity
 owns its authentication protocol, entity owns its CRUD protocol, and the application contains no
 HTTP client, route handler, credentials, database, or profile module.
 
@@ -25,11 +25,17 @@ POGGERS_WEB_ROOT="$PWD/dist/web" \
 ./dist/server/api
 ```
 
-Open `http://localhost:3000`. `dist/server/api` is the standalone optimized server artifact; it
-serves the built browser assets and renders its deterministic initial-state document when
-`POGGERS_WEB_ROOT` is set; otherwise it exposes only the API. The browser reactivates the server
-nodes in place. Authenticated request-data SSR is intentionally not claimed yet. A CDN or reverse
-proxy may serve `dist/web` instead, provided same-origin `/api` requests reach the native Program.
+Open `http://localhost:3000`. `dist/server/api` is the standalone optimized server artifact. When
+`POGGERS_WEB_ROOT` is set it serves the compiled web plan and browser assets; otherwise it exposes
+only the API. The authenticated Routes deliberately return private application shells, then the
+browser owns session-aware content. Critical CSS is inline, the content-hashed module graph is
+preloaded, and immutable assets can be cached indefinitely. Route loaders receive validated address
+data and declared semantic Dependencies. The adapter derives document delivery from indexing,
+privacy, portability, and cache meaning rather than an authored rendering mode. A CDN or reverse
+proxy may serve `dist/web` instead, provided same-origin `/api` requests reach the server Program.
+
+The supported contract and conformance evidence are in the
+[architecture document](../../docs/architecture.md).
 
 ## Semantic model
 
@@ -75,7 +81,7 @@ function view({ features: { tasks } }) {
 }
 ```
 
-Programs that need cross-Feature communication request the same factory's semantic Capability:
+Programs that need cross-Feature communication request the same factory's semantic Dependency:
 
 ```ts
 type TasksApi = EntityApi<Tasks>;
