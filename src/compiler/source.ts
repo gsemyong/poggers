@@ -283,6 +283,7 @@ function compileSystemProgram(
     root,
   });
   const features: FeatureIR[] = [];
+  const featureSourceFiles = new Map<string, ReadonlySet<string>>();
   const contributions: UnassembledProgramIR[] = [];
   const interfaceSources: InterfaceSource[] = [];
   extractFeatures(
@@ -291,10 +292,12 @@ function compileSystemProgram(
     featureValues,
     "",
     features,
+    featureSourceFiles,
     contributions,
     interfaceSources,
     extensions,
     root,
+    new Set([file]),
     featureValues,
     undefined,
     undefined,
@@ -371,6 +374,7 @@ function compileSystemProgram(
       outputSources: collectSystemOutputSources({
         checker,
         entry: file,
+        featureSourceFiles,
         interfaceSourceFiles,
         interfaces,
         program,
@@ -522,6 +526,7 @@ function runtimeModuleSpecifier(statement: ts.Statement): ts.Expression | undefi
 function collectSystemOutputSources(input: {
   checker: ts.TypeChecker;
   entry: string;
+  featureSourceFiles: ReadonlyMap<string, ReadonlySet<string>>;
   interfaceSourceFiles: ReadonlyMap<string, ReadonlySet<string>>;
   interfaces: readonly PlatformInterfaceIR[];
   program: ts.Program;
@@ -534,6 +539,9 @@ function collectSystemOutputSources(input: {
       program.id,
       new Set([
         canonicalSourceFile(input.entry),
+        ...program.contributions.flatMap(({ feature }) => [
+          ...(input.featureSourceFiles.get(feature) ?? []),
+        ]),
         ...transitiveLocalSources(
           input.program,
           input.checker,
@@ -550,6 +558,7 @@ function collectSystemOutputSources(input: {
       interface_.id,
       new Set([
         canonicalSourceFile(input.entry),
+        ...(input.featureSourceFiles.get(interface_.feature) ?? []),
         ...(input.interfaceSourceFiles.get(interface_.feature) ?? []),
         ...input.programs
           .filter(({ interface: owner }) => owner === interface_.feature)
@@ -614,10 +623,12 @@ function extractFeatures(
   values: ts.ObjectLiteralExpression | undefined,
   parent: string,
   features: FeatureIR[],
+  featureSourceFiles: Map<string, ReadonlySet<string>>,
   programs: UnassembledProgramIR[],
   interfaces: InterfaceSource[],
   extensions: readonly SourceCompilerExtension[],
   root: string,
+  parentSourceFiles: ReadonlySet<string>,
   at: ts.Node = values!,
   owner?: ts.Expression,
   app?: string,
@@ -660,6 +671,14 @@ function extractFeatures(
         : value
           ? objectExpression(checker, value)
           : undefined;
+    const sourceFiles = new Set(parentSourceFiles);
+    for (const node of [value, staticFeature?.node, featureValue]) {
+      const source = node?.getSourceFile();
+      if (source && !source.isDeclarationFile && inside(root, source.fileName)) {
+        sourceFiles.add(canonicalSourceFile(source.fileName));
+      }
+    }
+    featureSourceFiles.set(path, sourceFiles);
     const featureLocation = value ?? location;
     const isApp = booleanLiteralProperty(checker, contract, "App", location) === true;
     const interfaceMarker = propertyType(checker, contract, "Interface", location);
@@ -774,10 +793,12 @@ function extractFeatures(
         childValues,
         path,
         features,
+        featureSourceFiles,
         programs,
         interfaces,
         extensions,
         root,
+        sourceFiles,
         featureLocation,
         value,
         ownedApp,

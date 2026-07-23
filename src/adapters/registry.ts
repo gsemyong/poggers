@@ -17,7 +17,12 @@ export function createPlatformAdapters(
 ): PlatformAdapters<ServerPlatform | WebPlatform> {
   const webLoaders = createDevelopmentWebLoaderRegistry();
   return {
-    server: createServerPlatformAdapter({ ...options.server, webLoaders }),
+    server: createServerPlatformAdapter({
+      developmentWebPort:
+        options.server?.developmentWebPort ?? options.web?.developmentPort ?? 3000,
+      ...options.server,
+      webLoaders,
+    }),
     web: createWebPlatformAdapter({ ...options.web, webLoaders }),
   };
 }

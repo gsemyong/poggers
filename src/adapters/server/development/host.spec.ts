@@ -41,26 +41,34 @@ describe("server Platform host", () => {
     ).rejects.toThrow('Server Platform does not implement host Dependency "unknown".');
   });
 
-  test("allows browser command identity headers across the development origin", async () => {
+  test("allows browser commands from every declared interface origin", async () => {
     const port = await availablePort();
     const host = await createNodeHost({
       dependencies: [httpDependency],
       host: "127.0.0.1",
       port,
-      webOrigin: "http://localhost:3000",
+      webOrigins: ["http://localhost:3000", "http://localhost:3001"],
     });
-    const response = await fetch(`http://127.0.0.1:${port}/api/tasks`, {
-      method: "OPTIONS",
-      headers: {
-        origin: "http://localhost:3000",
-        "access-control-request-headers": "content-type,x-kit-command,x-kit-entity",
-        "access-control-request-method": "POST",
-      },
-    });
+    for (const origin of ["http://localhost:3000", "http://localhost:3001"]) {
+      const response = await fetch(`http://127.0.0.1:${port}/api/tasks`, {
+        method: "OPTIONS",
+        headers: {
+          origin,
+          "access-control-request-headers": "content-type,x-kit-command,x-kit-entity",
+          "access-control-request-method": "POST",
+        },
+      });
 
-    expect(response.status).toBe(204);
-    expect(response.headers.get("access-control-allow-headers")).toContain("x-kit-command");
-    expect(response.headers.get("access-control-allow-headers")).toContain("x-kit-entity");
+      expect(response.status).toBe(204);
+      expect(response.headers.get("access-control-allow-origin")).toBe(origin);
+      expect(response.headers.get("access-control-allow-headers")).toContain("x-kit-command");
+      expect(response.headers.get("access-control-allow-headers")).toContain("x-kit-entity");
+    }
+    const rejected = await fetch(`http://127.0.0.1:${port}/api/tasks`, {
+      method: "OPTIONS",
+      headers: { origin: "https://untrusted.example" },
+    });
+    expect(rejected.headers.get("access-control-allow-origin")).toBeNull();
     await host.http[Symbol.asyncDispose]();
   });
 

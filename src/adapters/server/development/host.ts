@@ -57,7 +57,7 @@ export type NodeHostOptions = Readonly<{
   host?: string;
   port?: number;
   shutdownTimeout?: number;
-  webOrigin?: string;
+  webOrigins?: readonly string[];
   appName?: string;
   secret?: string;
   eventStore?: NodeEventStoreOptions;
@@ -127,6 +127,7 @@ export async function createNodeHost<Event = unknown>(
   const host = input.host ?? "localhost";
   const port = input.port ?? numberEnvironment("PORT") ?? 3010;
   const origin = `http://${host}:${port}`;
+  const webOrigins = normalizeWebOrigins(input.webOrigins ?? ["http://localhost:3000"]);
   let database: DatabaseSync | undefined;
   let databaseClosed = false;
   const closeDatabase = () => {
@@ -162,7 +163,7 @@ export async function createNodeHost<Event = unknown>(
         emailAndPassword: { enabled: true },
         secret:
           input.secret ?? process.env.BETTER_AUTH_SECRET ?? "kit-development-authentication-secret",
-        trustedOrigins: [input.webOrigin ?? "http://localhost:3000"],
+        trustedOrigins: [...webOrigins],
       });
       await (await getMigrations(auth.options)).runMigrations();
       result.authentication = Object.freeze({
@@ -209,7 +210,7 @@ export async function createNodeHost<Event = unknown>(
         origin,
         shutdownTimeout:
           input.shutdownTimeout ?? durationEnvironment("KIT_HTTP_SHUTDOWN_TIMEOUT_MS") ?? 10_000,
-        webOrigin: input.webOrigin ?? "http://localhost:3000",
+        webOrigins,
       });
     }
     return conformExternalDependencies(input.dependencies, result);
@@ -600,20 +601,21 @@ async function createNodeHttpServer(input: {
   port: number;
   origin: string;
   shutdownTimeout: number;
-  webOrigin: string;
+  webOrigins: readonly string[];
 }): Promise<ReloadableHttpServer> {
   if (!Number.isSafeInteger(input.shutdownTimeout) || input.shutdownTimeout < 1) {
     throw new TypeError("HTTP shutdownTimeout must be a positive integer.");
   }
   type Route = Readonly<{ handle(request: HttpRequest): Promise<HttpResponse> }>;
   const routes = new Map<string, Route[]>();
+  const webOrigins = new Set(input.webOrigins);
   const streams = new Set<ServerResponse>();
   const shutdown = new AbortController();
   let replacementScopes = 0;
   const server = createServer(async (incoming, outgoing) => {
     try {
       if (incoming.method === "OPTIONS") {
-        writeCors(incoming, outgoing, input.webOrigin);
+        writeCors(incoming, outgoing, webOrigins);
         outgoing.writeHead(204).end();
         return;
       }
@@ -628,7 +630,7 @@ async function createNodeHttpServer(input: {
       const response = route
         ? await route[1].at(-1)!.handle(request)
         : jsonHttpResponse({ message: "Not found." }, 404);
-      await writeResponse(incoming, outgoing, response, input.webOrigin, shutdown.signal, streams);
+      await writeResponse(incoming, outgoing, response, webOrigins, shutdown.signal, streams);
     } catch (error) {
       if (outgoing.headersSent) {
         outgoing.destroy(error instanceof Error ? error : new Error(String(error)));
@@ -638,7 +640,7 @@ async function createNodeHttpServer(input: {
         incoming,
         outgoing,
         jsonHttpResponse({ message: error instanceof Error ? error.message : String(error) }, 500),
-        input.webOrigin,
+        webOrigins,
         shutdown.signal,
         streams,
       );
@@ -770,14 +772,14 @@ async function writeResponse(
   request: IncomingMessage,
   response: ServerResponse,
   value: HttpResponse,
-  webOrigin: string,
+  webOrigins: ReadonlySet<string>,
   shutdown: AbortSignal,
   streams: Set<ServerResponse>,
 ): Promise<void> {
   if (!Number.isInteger(value.status) || !Array.isArray(value.headers)) {
     throw new TypeError(`HTTP handler returned an invalid response: ${JSON.stringify(value)}.`);
   }
-  writeCors(request, response, webOrigin);
+  writeCors(request, response, webOrigins);
   for (const { name, value: header } of value.headers) response.appendHeader(name, header);
   response.writeHead(value.status);
   if (value.body !== undefined) {
@@ -839,12 +841,25 @@ function jsonHttpResponse(value: object, status: number): HttpResponse {
   };
 }
 
-function writeCors(request: IncomingMessage, response: ServerResponse, webOrigin: string): void {
-  if (request.headers.origin === webOrigin) {
-    response.setHeader("access-control-allow-origin", webOrigin);
+function writeCors(
+  request: IncomingMessage,
+  response: ServerResponse,
+  webOrigins: ReadonlySet<string>,
+): void {
+  const origin = request.headers.origin;
+  if (origin && webOrigins.has(origin)) {
+    response.setHeader("access-control-allow-origin", origin);
     response.setHeader("vary", "origin");
   }
   response.setHeader("access-control-allow-credentials", "true");
   response.setHeader("access-control-allow-headers", "content-type, x-kit-command, x-kit-entity");
   response.setHeader("access-control-allow-methods", "DELETE, GET, OPTIONS, PATCH, POST");
+}
+
+function normalizeWebOrigins(origins: readonly string[]): readonly string[] {
+  return Object.freeze(
+    [...new Set(origins.map((origin) => new URL(origin).origin))].sort((left, right) =>
+      left.localeCompare(right),
+    ),
+  );
 }

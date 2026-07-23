@@ -22,7 +22,7 @@ export async function developWebSystem(
         interface: interface_.id,
         revisions: input.revisions,
         port: (options.developmentPort ?? 3000) + index,
-        strictPort: options.developmentPort !== undefined,
+        strictPort: true,
         serverOrigin: options.serverOrigin,
         webLoaders: options.webLoaders,
       }),

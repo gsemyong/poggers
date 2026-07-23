@@ -1034,6 +1034,7 @@ export type HotReplacementManifest = Readonly<{
 export type HotActivation<Value, Snapshot> = Readonly<{
   value: Value;
   snapshot: Snapshot;
+  resume?(): void;
   dispose(): void | Promise<void>;
 }>;
 
@@ -1143,6 +1144,7 @@ export class HotUpdateCoordinator<Value, Snapshot> {
     this.#active = activated;
     this.#manifest = candidate.manifest;
     await previous?.dispose();
+    activated.resume?.();
     return { status: "activated", value: activated.value };
   }
 }

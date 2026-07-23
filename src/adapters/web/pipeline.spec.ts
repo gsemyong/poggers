@@ -14,13 +14,14 @@ import {
   createWebAssetManifest,
   inspectClientManifest,
   negotiateWebRepresentation,
+  routeSourcePlugin,
   validateProductionWebRoute,
   webDevelopmentWorkspace,
   writeDevelopmentWebStream,
 } from "@/adapters/web/pipeline";
 import type { WebRouteIR } from "@/adapters/web/routing";
 import { SYSTEM_IR_VERSION, type SystemIR } from "@/compiler/ir";
-import { compileSystem } from "@/compiler/source";
+import { compileSystem, resolveSystem } from "@/compiler/source";
 
 describe("web representation negotiation", () => {
   it("keeps HTML canonical and selects alternates only when named", () => {
@@ -40,6 +41,31 @@ describe("web development workspace", () => {
     expect(webDevelopmentWorkspace("/tmp/company", "interface/customer.web")).not.toBe(first);
     expect(first).toContain("/node_modules/.cache/kit/web/interface-operations-web-");
   });
+
+  it("retains the selected Route when one source Feature is reused by multiple Apps", async () => {
+    const workspace = resolve(import.meta.dirname, "../../..", "examples/authenticated-crud");
+    const paths = resolveSystem(workspace);
+    const ir = compileSystem(paths.system, [webCompilerExtension]);
+    const source = resolve(paths.source, "features/shell.tsx");
+    const hook = routeSourcePlugin(paths, ir).transform;
+    const handler = (typeof hook === "function" ? hook : hook?.handler) as unknown as (
+      code: string,
+      id: string,
+    ) => Promise<string | Readonly<{ code: string }> | null | undefined>;
+    expect(handler).toBeTypeOf("function");
+
+    const authored = await readFile(source, "utf8");
+    const result = await handler(authored, `${source}?kit-route=customer.web.shell.auth&lang.tsx`);
+    const code = (typeof result === "string" ? result : result?.code) ?? authored;
+
+    expect(code).toContain("view({ components: { Shell } })");
+    expect(code).not.toMatch(/routes:\s*{\s*auth:\s*{}\s*}/);
+
+    const base = await handler(authored, `${source}?kit-route=base&lang.tsx`);
+    const baseCode = (typeof base === "string" ? base : base?.code) ?? authored;
+    expect(baseCode).toContain('phase: "loading"');
+    expect(baseCode).toMatch(/routes:\s*{\s*auth:\s*{},?\s*}/);
+  }, 15_000);
 });
 
 describe("web Presentation dependency manifest", () => {

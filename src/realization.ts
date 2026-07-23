@@ -122,38 +122,55 @@ export function createSystemRevisionSource(
   extensions: Parameters<typeof createSystemCompiler>[1],
 ): SystemRevisionSource {
   const compiler = createSystemCompiler(system, extensions);
-  let current: SystemCompilationRevision = compiler.compile();
+  let revision = 0;
+  let current: SystemCompilationRevision = { ...compiler.compile(), revision };
   const signatures = new Map<string, string>();
+  retainOutputSignatures(signatures, current);
   return {
     get current() {
       return current;
     },
     compile(changedFile) {
-      let signature: string;
-      try {
-        signature = createHash("sha256").update(readFileSync(changedFile)).digest("hex");
-      } catch {
-        signature = "<missing>";
-      }
-      if (signatures.get(changedFile) === signature) return current;
+      const source = canonicalSourceFile(changedFile);
+      const signature = sourceSignature(source);
+      if (signatures.get(source) === signature) return current;
       const previous = current;
       const compiled = compiler.compile(changedFile);
       current = {
         ...compiled,
+        revision: ++revision,
         change: {
-          source: canonicalSourceFile(changedFile),
+          source,
           outputs: affectedOutputs(previous, compiled, changedFile),
         },
       };
-      signatures.set(changedFile, signature);
+      signatures.set(source, signature);
+      retainOutputSignatures(signatures, current);
       return current;
     },
   };
 }
 
+function retainOutputSignatures(
+  signatures: Map<string, string>,
+  revision: SystemCompilationRevision,
+): void {
+  for (const source of new Set(Object.values(revision.outputSources).flat())) {
+    if (!signatures.has(source)) signatures.set(source, sourceSignature(source));
+  }
+}
+
+function sourceSignature(source: string): string {
+  try {
+    return createHash("sha256").update(readFileSync(source)).digest("hex");
+  } catch {
+    return "<missing>";
+  }
+}
+
 function affectedOutputs(
-  previous: SystemCompilationRevision,
-  current: SystemCompilationRevision,
+  previous: Pick<SystemCompilationRevision, "ir" | "outputSources">,
+  current: Pick<SystemCompilationRevision, "ir" | "outputSources">,
   changedFile: string,
 ): readonly string[] {
   const source = canonicalSourceFile(changedFile);

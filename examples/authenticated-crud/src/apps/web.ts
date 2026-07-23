@@ -2,7 +2,7 @@ import type { PlatformInterfaceContract } from "@duction/kit";
 import { createWebInterface, type WebPlatform } from "@duction/kit/web";
 
 import { identityBrowser, type IdentityBrowserFeature } from "../features/identity";
-import { shell, type ShellFeature } from "../features/shell";
+import { createShell, type ShellFeature } from "../features/shell";
 import { tasks, type TasksFeature } from "../features/tasks";
 import { clean } from "../presentations/clean";
 
@@ -22,7 +22,11 @@ const icon =
 /** Creates one independently routed and installable interface over the shared product Features. */
 export function createWorkspaceWeb(input: Readonly<{ shortName: string }>) {
   return createWebInterface<WebContract>({
-    features: { identity: identityBrowser, shell, tasks },
+    features: {
+      identity: identityBrowser,
+      shell: createShell({ name: input.shortName }),
+      tasks,
+    },
     presentation: clean,
     installation: {
       shortName: input.shortName,

@@ -31,9 +31,10 @@ import type { ServerPlatform } from "@/platforms/server/platform";
 
 export type ServerDevelopmentOptions = Readonly<{
   developmentPort?: number;
+  developmentWebPort?: number;
   developmentHost?: NodeHostOptions;
   webLoaders?: DevelopmentWebLoaderRegistry;
-  webOrigin?: string;
+  webOrigins?: readonly string[];
 }>;
 
 /** Starts every server Program and owns their hot-replacement lifecycle. */
@@ -41,6 +42,12 @@ export async function developServerPrograms(
   input: PlatformDevelopmentInput<ServerPlatform>,
   options: ServerDevelopmentOptions = {},
 ): Promise<DevelopmentSession> {
+  const developmentOptions: ServerDevelopmentOptions = {
+    ...options,
+    webOrigins:
+      options.webOrigins ??
+      developmentWebOrigins(input.ir, input.app, options.developmentWebPort ?? 3000),
+  };
   const source = resolve(input.directory, "src");
   const vite = await createServer({
     appType: "custom",
@@ -67,7 +74,7 @@ export async function developServerPrograms(
           input.directory,
           input.ir.system.name,
           input.ir,
-          options,
+          developmentOptions,
         ),
       );
     }
@@ -118,7 +125,7 @@ export async function developServerPrograms(
           programs: nextPrograms,
           appName: nextIR.system.name,
           ir: nextIR,
-          options,
+          options: developmentOptions,
         });
       } catch (error) {
         vite.config.logger.error(message(error));
@@ -169,7 +176,7 @@ async function startDevelopmentProgram(
     directory,
     host: options.developmentHost?.host,
     port: serverPort(program.name, names, options.developmentPort),
-    webOrigin: options.webOrigin,
+    webOrigins: options.webOrigins,
   });
   try {
     return await activateDevelopmentProgram({
@@ -186,6 +193,18 @@ async function startDevelopmentProgram(
     await disposeServerDependencies(dependencies);
     throw error;
   }
+}
+
+function developmentWebOrigins(
+  ir: SystemIR,
+  app: string | undefined,
+  firstPort: number,
+): readonly string[] {
+  return Object.freeze(
+    selectSystemOutputs(ir, app)
+      .interfaces.filter(({ platform }) => platform === "web")
+      .map((_, index) => `http://localhost:${firstPort + index}`),
+  );
 }
 
 async function activateDevelopmentProgram(input: {

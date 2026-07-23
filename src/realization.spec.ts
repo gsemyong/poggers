@@ -123,6 +123,7 @@ describe("System realization", () => {
   test("identifies exact shared and App-private outputs from one retained graph", async () => {
     const fixture = await incrementalFixture();
     const revisions = createSystemRevisionSource(fixture.system, []);
+    expect(revisions.current.revision).toBe(0);
 
     expect(
       revisions.current.outputSources["interface/operations.web"]?.some((path) =>
@@ -139,10 +140,13 @@ describe("System realization", () => {
       fixture.operations,
       fixture.operationsSource.replace('label: "operations"', 'label: "operations-2"'),
     );
-    expect(revisions.compile(fixture.operations).change?.outputs).toEqual([
+    const operationsRevision = revisions.compile(fixture.operations);
+    expect(operationsRevision.revision).toBe(1);
+    expect(operationsRevision.change?.outputs).toEqual([
       "interface/operations.web",
       "program/operations.web.operations.web.browser",
     ]);
+    expect(revisions.compile(fixture.operations)).toBe(operationsRevision);
 
     await writeFile(fixture.sharedUI, 'export const marker = "shared-2";\n');
     expect(revisions.compile(fixture.sharedUI).change?.outputs).toEqual([
@@ -169,7 +173,30 @@ describe("System realization", () => {
     );
 
     expect(serializeSystemIR(revision.ir)).toBe(initial);
-    expect(revision.change?.outputs).toEqual([]);
+    expect(revision.change).toBeUndefined();
+  }, 30_000);
+
+  test("assigns App composition sources only to their owned outputs", () => {
+    const root = resolve(import.meta.dirname, "../examples/authenticated-crud/src");
+    const revisions = createSystemRevisionSource(resolve(root, "system.ts"), [
+      webCompilerExtension,
+    ]);
+    const customer = resolve(root, "apps/customer/app.tsx");
+    const operations = resolve(root, "apps/operations/app.tsx");
+
+    expect(revisions.current.outputSources["interface/customer.web"]).toContain(customer);
+    expect(revisions.current.outputSources["program/customer.web.browser"]).toContain(customer);
+    expect(revisions.current.outputSources["interface/customer.web"]).not.toContain(operations);
+    expect(revisions.current.outputSources["program/customer.web.browser"]).not.toContain(
+      operations,
+    );
+
+    expect(revisions.current.outputSources["interface/operations.web"]).toContain(operations);
+    expect(revisions.current.outputSources["program/operations.web.browser"]).toContain(operations);
+    expect(revisions.current.outputSources["interface/operations.web"]).not.toContain(customer);
+    expect(revisions.current.outputSources["program/operations.web.browser"]).not.toContain(
+      customer,
+    );
   }, 30_000);
 
   test("disposes every successful owner once when concurrent startup fails", async () => {

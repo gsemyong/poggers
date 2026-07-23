@@ -25,6 +25,7 @@ export type SystemCompilationChange = Readonly<{
 }>;
 
 export type SystemCompilationRevision = Readonly<{
+  revision: number;
   ir: SystemIR;
   presentationSources: ReadonlySet<string>;
   outputSources: SystemOutputSources;

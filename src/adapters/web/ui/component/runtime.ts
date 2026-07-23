@@ -76,7 +76,9 @@ export type Component<P extends object = Record<string, never>> = (props: P) => 
 
 export type HotRenderState = {
   focus?: Readonly<{
+    id?: string;
     path: readonly number[];
+    tag: string;
     selectionEnd?: number | null;
     selectionStart?: number | null;
     selectionDirection?: "backward" | "forward" | "none" | null;
@@ -91,6 +93,7 @@ export type HotRenderState = {
 
 export type RenderDisposer = (() => void) & {
   capture(): HotRenderState;
+  resume(): void;
 };
 
 type Owner = {
@@ -327,7 +330,9 @@ export function computed<T>(getter: (previousValue?: T) => T): () => T {
 }
 
 export function effect(fn: () => void | (() => void)): () => void {
-  const dispose = alienEffect(fn);
+  const owner = currentOwner;
+  const scope = currentLifecycleScope;
+  const dispose = alienEffect(() => runInRuntimeContext(owner, scope, fn));
   registerCleanup(dispose);
   return dispose;
 }
@@ -408,7 +413,6 @@ function renderAttempt(
       }
     }
     if (hotRefresh && hotScroll) restoreHotScroll(root, hotScroll);
-    if (hotRefresh && hotFocus) restoreHotFocus(root, hotFocus);
     if (!hydration && !hotRefresh && root.getAttribute("data-kit-rendering") === "client") {
       releaseServerStyles(root);
     }
@@ -438,6 +442,7 @@ function renderAttempt(
     return recovered;
   }
   if (hotState) hotState.mounted = true;
+  let restoreFocus: (() => void) | undefined;
 
   const capture = () => {
     const state = owner.hotState ?? {};
@@ -456,6 +461,7 @@ function renderAttempt(
   const dispose = () => {
     if (owner.disposed) return;
     owner.disposed = true;
+    restoreFocus?.();
     capture();
     for (const cleanup of owner.cleanups.splice(0).reverse()) cleanup();
     owner.scene.dispose();
@@ -464,7 +470,11 @@ function renderAttempt(
       if (node.parentNode === root) root.removeChild(node);
     }
   };
-  return Object.assign(dispose, { capture });
+  const resume = () => {
+    restoreFocus?.();
+    restoreFocus = hotRefresh && hotFocus ? restoreHotFocusAfterRefresh(root, hotFocus) : undefined;
+  };
+  return Object.assign(dispose, { capture, resume });
 }
 
 function captureHotFocus(root: Element): HotRenderState["focus"] {
@@ -479,7 +489,9 @@ function captureHotFocus(root: Element): HotRenderState["focus"] {
   }
   const input = active as HTMLInputElement | HTMLTextAreaElement;
   return {
+    id: input.id || undefined,
     path: path.reverse(),
+    tag: active.tagName,
     ...(typeof input.selectionStart === "number"
       ? {
           selectionStart: input.selectionStart,
@@ -490,14 +502,53 @@ function captureHotFocus(root: Element): HotRenderState["focus"] {
   };
 }
 
-function restoreHotFocus(root: Element, focus: NonNullable<HotRenderState["focus"]>): void {
-  let current: Element = root;
-  for (const index of focus.path) {
-    const child = current.children.item(index);
-    if (!child) return;
-    current = child;
+function restoreHotFocusAfterRefresh(
+  root: Element,
+  focus: NonNullable<HotRenderState["focus"]>,
+): () => void {
+  let active = true;
+  let frame: number | undefined;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const stop = () => {
+    if (!active) return;
+    active = false;
+    if (frame !== undefined) cancelAnimationFrame(frame);
+    if (timeout !== undefined) clearTimeout(timeout);
+  };
+  const restore = () => {
+    if (!active) return;
+    if (focusChanged(root, focus)) {
+      stop();
+      return;
+    }
+    if (!focusMatches(root, focus)) restoreHotFocus(root, focus);
+    frame = requestAnimationFrame(restore);
+  };
+
+  timeout = setTimeout(stop, 500);
+  restore();
+  return stop;
+}
+
+function restoreHotFocus(root: Element, focus: NonNullable<HotRenderState["focus"]>): boolean {
+  let current =
+    focus.id && root.ownerDocument?.getElementById(focus.id)
+      ? root.ownerDocument.getElementById(focus.id)!
+      : root;
+  if (current === root) {
+    for (const index of focus.path) {
+      const child = current.children.item(index);
+      if (!child) return false;
+      current = child;
+    }
   }
-  if (!(current instanceof HTMLElement)) return;
+  if (
+    !root.contains(current) ||
+    current.tagName !== focus.tag ||
+    !(current instanceof HTMLElement)
+  ) {
+    return false;
+  }
   current.focus({ preventScroll: true });
   if (typeof focus.selectionStart === "number" && "setSelectionRange" in current) {
     (current as HTMLInputElement | HTMLTextAreaElement).setSelectionRange(
@@ -506,6 +557,30 @@ function restoreHotFocus(root: Element, focus: NonNullable<HotRenderState["focus
       focus.selectionDirection ?? undefined,
     );
   }
+  return root.ownerDocument?.activeElement === current;
+}
+
+function focusChanged(root: Element, focus: NonNullable<HotRenderState["focus"]>): boolean {
+  const active = root.ownerDocument?.activeElement;
+  if (
+    !active ||
+    active === root.ownerDocument?.body ||
+    active === root.ownerDocument?.documentElement
+  ) {
+    return false;
+  }
+  if (!root.contains(active)) return true;
+  return !focusMatches(root, focus);
+}
+
+function focusMatches(root: Element, focus: NonNullable<HotRenderState["focus"]>): boolean {
+  const active = root.ownerDocument?.activeElement;
+  return Boolean(
+    active &&
+    root.contains(active) &&
+    (active.id || undefined) === focus.id &&
+    active.tagName === focus.tag,
+  );
 }
 
 function readHotSignal(current: Signal<unknown>): unknown {
@@ -2149,22 +2224,41 @@ function registerCleanup(cleanup: () => void) {
 }
 
 function blockEffect(fn: () => void | (() => void)) {
-  if (currentHydration) {
-    registerCleanup(alienEffect(fn));
-    return;
-  }
-  if (currentLifecycleScope) {
-    currentLifecycleScope.cleanups.push(alienEffect(fn));
-    return;
-  }
   const owner = currentOwner;
+  const scope = currentLifecycleScope;
+  const run = () => runInRuntimeContext(owner, scope, fn);
+  if (currentHydration) {
+    registerCleanup(alienEffect(run));
+    return;
+  }
+  if (scope) {
+    scope.cleanups.push(alienEffect(run));
+    return;
+  }
   if (owner) {
-    owner.mounts.push(() => alienEffect(fn));
+    owner.mounts.push(() => alienEffect(run));
     return;
   }
   queueMicrotask(() => {
-    alienEffect(fn);
+    alienEffect(run);
   });
+}
+
+function runInRuntimeContext<T>(
+  owner: Owner | null,
+  scope: LifecycleScope | null,
+  run: () => T,
+): T {
+  const previousOwner = currentOwner;
+  const previousScope = currentLifecycleScope;
+  currentOwner = owner;
+  currentLifecycleScope = scope;
+  try {
+    return run();
+  } finally {
+    currentOwner = previousOwner;
+    currentLifecycleScope = previousScope;
+  }
 }
 
 function createHydrationContext(root: Element): HydrationContext | null {

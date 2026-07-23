@@ -227,12 +227,13 @@ const taskFeature: WebFeature<TasksFeatureDefinition, WorkspaceWeb> = {
             } = elements;
             const title = () => {
               const destination = props.destination;
-              return (
-                state.title ??
-                (destination.to === "edit"
-                  ? (tasks.entities.find((task) => task.id === destination.params.id)?.title ?? "")
-                  : "")
-              );
+              return state.title ?? (destination.to === "edit" ? (editingTask()?.title ?? "") : "");
+            };
+            const editingTask = () => {
+              const destination = props.destination;
+              return destination.to === "edit"
+                ? tasks.entities.find((task) => task.id === destination.params.id)
+                : undefined;
             };
             return (
               <Root aria-label="Task administration">
@@ -305,6 +306,16 @@ const taskFeature: WebFeature<TasksFeatureDefinition, WorkspaceWeb> = {
                         <EmptyCopy>Create the first task to start this workspace.</EmptyCopy>
                       </Empty>
                     )
+                  ) : props.destination.to === "edit" &&
+                    tasks.synchronization === "synchronized" &&
+                    !editingTask() ? (
+                    <Empty>
+                      <EmptyTitle>Task not found</EmptyTitle>
+                      <EmptyCopy>This task no longer exists.</EmptyCopy>
+                      <Back type="button" onClick={() => feature.back()}>
+                        Back to tasks
+                      </Back>
+                    </Empty>
                   ) : (
                     <Form
                       onSubmit={(event) => {

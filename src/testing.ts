@@ -196,7 +196,7 @@ function testAdapters(input: {
         secret: "kit-system-test-secret",
         shutdownTimeout: 500,
       },
-      webOrigin,
+      webOrigins: [webOrigin],
     },
     web: {
       developmentPort: input.webPort,

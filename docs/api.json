@@ -1,7 +1,7 @@
 {
   "version": 1,
   "package": "@duction/kit",
-  "intent": "changes/system-workspaces.md",
+  "intent": "changes/incremental-system-revisions.md",
   "bin": {
     "kit": "./dist/src/cli.js"
   },
@@ -372,16 +372,16 @@
   "declarations": {
     "dist/src/adapters/integration/web-server.d.ts": "fdeb13df2099deda06ef9858fa74f6260c3567d336f9b147ce79b77644c73990",
     "dist/src/adapters/server/adapter.d.ts": "c191b3118e54218c68ac3196ff44e92a2b4168c38e495c2fa5e46fa795e46868",
-    "dist/src/adapters/server/development/host.d.ts": "66760a3dab93b56b93eed28749fdccfa0f015a8f016c9e6be147bc6bd9531eca",
-    "dist/src/adapters/server/development/session.d.ts": "d666191ff8415ac4017020baa93b2474eaba6e1e9236c14acf22b5f4149eeb4c",
+    "dist/src/adapters/server/development/host.d.ts": "cda3c25ff6cd6121393c4fd4c53be3f7094724c00ca6b108f8511bea6ad2d7ed",
+    "dist/src/adapters/server/development/session.d.ts": "a28fc5a846a6e511ca7e0585d89c82900749e2c4f008efd97ef3096563b4813c",
     "dist/src/adapters/server/production/dependencies.d.ts": "22ca9410c2feec655f12025e022a8245d6843464b8c1261e385de528ad133235",
     "dist/src/adapters/web/adapter.d.ts": "778923bb7921939ec1db633e4b498e95cd6059a48004e3cecd7093207e5a5fe2",
     "dist/src/adapters/web/development/server.d.ts": "b23c82ef6ab035f6dec6daba54430a46f633147b521eb22faea5db92aeed8c09",
     "dist/src/adapters/web/document.d.ts": "e77fa82cc3c2d9c55426e4e5e1e074609919d5b8337070db0f893a3fe383342b",
     "dist/src/adapters/web/routing.d.ts": "fc7fdaf496edd98f599f1cd096f35dc52a0ae26cfe4b3b9417bc56f2205b44d6",
     "dist/src/adapters/web/ui/adapter.d.ts": "322bf99e17c94e30071a7eee17631fd3a391963e92c08379153b424c9c729216",
-    "dist/src/adapters/web/ui/component/adapter.d.ts": "20447c467860246e3c9da80cf68de40ed0aebb05d99523e6ff0c1aa31ff33e8c",
-    "dist/src/adapters/web/ui/component/runtime.d.ts": "f9518b914bfb778621064e62fa01298caf44f3544b8cd8e6ab3ef4e3b99fa154",
+    "dist/src/adapters/web/ui/component/adapter.d.ts": "f28a6bf2351b6c6985898b9b33fb4b7d29fb623fed0e875bb8f649bf016a8a51",
+    "dist/src/adapters/web/ui/component/runtime.d.ts": "96eff71c3e053de5c72f481083199aea8d1600a5e4b8e07279d35fc1ff55199c",
     "dist/src/adapters/web/ui/presence.d.ts": "644bcd4a56fb6a050824bf9c73e8b91c7f8dae32382b2ab53850feb37874a488",
     "dist/src/adapters/web/ui/presentation/adapter.d.ts": "7db11fae63b3d39c2a9ce3a074bd55fa5b09fb08ef8ad8b40a28531e9084149d",
     "dist/src/adapters/web/ui/presentation/compiler.d.ts": "720d02489c22ae3e2a983845b590be86123fad21efcd52509906a4644ea19b9f",
@@ -393,7 +393,7 @@
     "dist/src/compiler/ir.d.ts": "2c5fd1626c213ba818cfd4abb8ab8038e2eb3cc235ccd7977721746f9907dcc7",
     "dist/src/compiler/presentation.d.ts": "e0a47347a6567d2f82fdb6845fe2e0b7c621529b6ab5f32fe5444acb0c9c2e5f",
     "dist/src/compiler/source.d.ts": "956ced65a84f484b52d742a92e5d54125c066f88515f25012c19c4ab9b0cf6e6",
-    "dist/src/contracts/platform.d.ts": "d1c53c70cb19a13d7b0bd84cee88c840214cbee8dc2752b86150344d15bee570",
+    "dist/src/contracts/platform.d.ts": "edda0991d7c2170b1f895688fecd5280bf58f08e6f57675d6a7cc725fa6d145a",
     "dist/src/core/dependency.d.ts": "2ccb579a56c9ac6fa16ee182ab0e6fc244714822a999fffc121b5ad7385ca339",
     "dist/src/core/feature.d.ts": "a0b060738a3b3a528d486275436a03516cc43f0f7f9c0c29911736d939c09b67",
     "dist/src/core/program.d.ts": "604b14c8566e4eec35b689cc5bd0e85676a5e529570b35fe44df75e81352af99",
@@ -414,11 +414,11 @@
     "dist/src/platforms/web/presentation/dynamics.d.ts": "d8fea514c4685caec2f52f818ddbc551d1520119a9a7c3eba416be9eaef7a42f",
     "dist/src/platforms/web/routing.d.ts": "a2c1820484c2650c7b50297ab00146c94cc4776e8ea3d492c986d5b00b687c05",
     "dist/src/platforms/web/ui.d.ts": "f3779e7c810270f8155e27938dd1240a764efa3d921ee8e8a5bfbd99f8d0142c",
-    "dist/src/runtime/interpreter.d.ts": "caa8a9f75b7a39c1c0876a98300922d06a615ad0b3d444f783d7b92036132364",
+    "dist/src/runtime/interpreter.d.ts": "d6d8be2cfd51de07742202dd050412ece610394157628574c8b39c60892c9e23",
     "dist/src/runtime/presentation.d.ts": "c19129de7aaad8b401bf46dd9632b03cf813d07b70387b9457ee9db249741c40",
     "dist/src/runtime/process.d.ts": "d7234d114cdac6de2700e213ae3208ee8bbbf4df926b6bf1adba9855a393bd70",
     "dist/src/testing.d.ts": "7f950e9e4554cb79d7d66c62a36dcb8ad306121dc5c0f31afefa4d1722032b75",
     "dist/src/ui.d.ts": "bd6b75357c993a1c5e252f12810a65ccafa68164ce116f6b83b39e037fa2d54f"
   },
-  "fingerprint": "7f81a468e578303c701e6e6c9ec659cfbcf0f0ecab599121c87776965be9ddfb"
+  "fingerprint": "5a622d52b7683941ba024cc2426009554e8262f1b8a843fe8cd471ab39f57419"
 }

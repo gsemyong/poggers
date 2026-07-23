@@ -276,7 +276,7 @@ export async function buildWebInterface(options: {
       work,
       options.interface,
       options.development ?? false,
-      { ir: options.ir, presentationSources: new Set(), outputSources: {} },
+      { revision: 0, ir: options.ir, presentationSources: new Set(), outputSources: {} },
     );
     const contract = webInterfaceContract(prepared.ir, prepared.interface);
     const compiledComponents = collectCompiledWebComponents(prepared.ir, contract.uiProgram);
@@ -844,7 +844,8 @@ function vitePlugins(paths: SystemPaths, ir?: SystemIR | (() => SystemIR)): Plug
   ];
 }
 
-function routeSourcePlugin(paths: SystemPaths, system: SystemIR | (() => SystemIR)): Plugin {
+/** @internal Creates source projections for independently loaded browser Routes and Programs. */
+export function routeSourcePlugin(paths: SystemPaths, system: SystemIR | (() => SystemIR)): Plugin {
   type RouteLocation = Readonly<{
     identity: string;
     program: string;
@@ -945,7 +946,15 @@ function routeSourcePlugin(paths: SystemPaths, system: SystemIR | (() => SystemI
       visit(source);
       const replacements: Array<Readonly<{ start: number; end: number; value: string }>> = [];
       const retainedPrograms =
-        projection.kind === "program" ? new Set([projection.name]) : browserMainPrograms;
+        projection.kind === "program"
+          ? new Set([projection.name])
+          : projection.name === "base"
+            ? browserMainPrograms
+            : new Set(
+                routes
+                  .filter(({ identity }) => identity === projection.name)
+                  .map(({ program }) => program),
+              );
       const retainedProgramSpans = new Set(
         programs
           .filter(({ identity }) => retainedPrograms.has(identity))
@@ -1196,6 +1205,7 @@ function presentationContractPlugin(
   webLoaders?: DevelopmentWebLoaderRegistry,
 ): Plugin {
   let prepared = state.current;
+  let observedRevision = revisions.current.revision;
   let updates = Promise.resolve();
   const responseCache = createWebResponseCache<
     Awaited<ReturnType<typeof prepareDevelopmentDocument>>
@@ -1217,6 +1227,11 @@ function presentationContractPlugin(
           ? "presentation"
           : "full";
         const compilation = revisions.compile(context.file);
+        if (compilation.revision === observedRevision) {
+          modules = [];
+          return;
+        }
+        observedRevision = compilation.revision;
         if (!compilation.change?.outputs.includes(prepared.interface)) {
           modules = [];
           return;
@@ -2502,6 +2517,9 @@ export async function activate(root, previous = {}) {
       disposeRender.capture();
       ui.captureHotState();
       return hotState;
+    },
+    resume() {
+      disposeRender.resume();
     },
     async dispose() {
       if (disposed) return;

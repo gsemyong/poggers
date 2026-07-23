@@ -324,8 +324,8 @@ export function createUIContributionInstance(
   for (const [actionName, implementation] of Object.entries(definition.actions ?? {})) {
     actions[actionName] = (...args: readonly unknown[]) => {
       if (disposed) throw new Error(`UI contribution "${name}" is disposed.`);
-      return eventLedger.invoke(actionName, args, () =>
-        scope.action(() =>
+      return scope.action(() =>
+        eventLedger.invoke(actionName, args, () =>
           implementation({ dependencies, features, state: state.mutable }, ...args),
         ),
       );

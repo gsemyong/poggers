@@ -265,7 +265,7 @@ export async function createInterfaceUI<Contract extends SystemContract>({
   const presentationGraph = createPresentationGraph({
     system: runtimeSystem,
     interface: interfacePath,
-    program,
+    logicalProgram,
     presentation: () => configuredPresentation,
     presentationRevision,
     adapter: presentationInstance,
@@ -988,8 +988,10 @@ function createComponentInstance(
   const invokeAction = (name: string, args: readonly unknown[]) => {
     const implementation = definition?.actions?.[name];
     if (typeof implementation !== "function") return;
-    return eventLedger.invoke(name, args, () =>
-      lifecycle.action(() => Reflect.apply(implementation, undefined, [actionContext, ...args])),
+    return lifecycle.action(() =>
+      eventLedger.invoke(name, args, () =>
+        Reflect.apply(implementation, undefined, [actionContext, ...args]),
+      ),
     );
   };
   for (const [name, implementation] of Object.entries(definition?.actions ?? {})) {
@@ -1314,7 +1316,7 @@ export function ownedPresentationTargets(
 export function createPresentationGraph(options: {
   system: RuntimeSystem;
   interface: string;
-  program: string;
+  logicalProgram: string;
   presentation: () => RuntimeConfiguredPresentation;
   presentationRevision: () => number;
   adapter: PresentationAdapterInstance<WebPresentationLanguage, Element>;
@@ -1410,7 +1412,7 @@ export function createPresentationGraph(options: {
           }
           collectPresentationComponents({
             features: interfaceFeature.features,
-            program: options.program,
+            logicalProgram: options.logicalProgram,
             tree,
             parent: options.interface,
             scopeIndexes,
@@ -1473,7 +1475,7 @@ export function createPresentationGraph(options: {
 
 function collectPresentationComponents(options: {
   features: Readonly<Record<string, RuntimeFeature>> | undefined;
-  program: string;
+  logicalProgram: string;
   tree: Readonly<Record<string, unknown>>;
   parent: string;
   scopeIndexes: ReadonlyMap<string, number>;
@@ -1505,7 +1507,7 @@ function collectPresentationComponents(options: {
         }) as Readonly<Record<string, unknown>>,
     );
     for (const componentName of Object.keys(
-      feature.programs?.[options.program]?.components ?? {},
+      feature.programs?.[options.logicalProgram]?.components ?? {},
     )) {
       const component = tree[componentName];
       if (typeof component === "function") {

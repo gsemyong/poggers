@@ -80,6 +80,35 @@ describe("semantic hot updates", () => {
     expect(events.at(-1)).toBe("dispose:99");
   });
 
+  test("resumes a replacement only after the previous revision is disposed", async () => {
+    const events: string[] = [];
+    const coordinator = new HotUpdateCoordinator<string, number>();
+    await coordinator.replace(candidate("first", 1, events));
+    await coordinator.replace({
+      manifest: manifest(record({ count: numberType() })),
+      async prepare(previous) {
+        return {
+          async activate() {
+            events.push(`activate:second:${previous}`);
+            return {
+              value: "second",
+              snapshot: 2,
+              resume() {
+                events.push("resume:second");
+              },
+              dispose() {
+                events.push("dispose:second");
+              },
+            };
+          },
+        };
+      },
+    });
+
+    expect(events.slice(-3)).toEqual(["activate:second:1", "dispose:first", "resume:second"]);
+    await coordinator.dispose();
+  });
+
   test("derives a stable manifest from semantic IR rather than source spans", () => {
     const first = createHotReplacementManifest(system("one.ts"));
     const second = createHotReplacementManifest(system("moved.ts"));
