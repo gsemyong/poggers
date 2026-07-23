@@ -591,32 +591,33 @@ The repository implements the target model:
 - machine-checked public declarations, change records, compatibility policy,
   and migration notes.
 
-The final acceptance gate is fresh in-app browser evidence against development
-and production. Historical browser observations are not substituted for that
-gate.
+Fresh in-app browser evidence covers development and production, including both
+authenticated CRUD interfaces, direct nested routes, state-preserving HMR, and
+the native Rust server. The complete evidence is recorded in
+[`system-implementation.md`](system-implementation.md).
 
 ## Gap ledger
 
-| ID  | Area                         | Implemented evidence                                                                                                                                     | Status   |
-| --- | ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
-| G01 | Root meaning                 | [`core/system.ts`](../src/core/system.ts) defines the only root and [`index.ts`](../src/index.ts) exports `createSystem`.                                | Complete |
-| G02 | Apps                         | `createApp` creates marked Features; compiler and realization tests prove discovery, ownership, and focused selection.                                   | Complete |
-| G03 | Multiple platform interfaces | System type fixtures and authenticated CRUD prove several isolated interfaces and reusable interface Features.                                           | Complete |
-| G04 | Presentation ownership       | Presentation source spans and declarations belong to interface IR; each authenticated CRUD interface selects its own Presentation.                       | Complete |
-| G05 | Compiler entry               | [`compiler/source.ts`](../src/compiler/source.ts) resolves one `src/system.ts` and recursively extracts its Feature graph.                               | Complete |
-| G06 | Canonical IR                 | [`compiler/ir.ts`](../src/compiler/ir.ts) defines versioned deterministic System, Feature, App, interface, Program, and ownership records.               | Complete |
-| G07 | Realization                  | [`realization.ts`](../src/realization.ts) compiles once, slices outputs, starts adapters concurrently, and disposes in reverse order.                    | Complete |
-| G08 | Shared backend               | Runtime and realization tests prove same-named contributions link once and focused Apps retain required shared Programs.                                 | Complete |
-| G09 | Web output                   | Web compiler, routing, pipeline, and adapter tests prove isolated entries, routes, manifests, caches, and service workers per interface.                 | Complete |
-| G10 | Presentation reuse           | Exact Presentation factories, parameters, recipes, collision rules, and web dynamics have type, compiler, and runtime coverage.                          | Complete |
-| G11 | Development graph            | One retained compiler graph emits exact affected outputs; stable web caches and selective server/web HMR have regression tests and measured budgets.     | Complete |
-| G12 | Starter and examples         | `examples/basic` is the CLI source, authenticated CRUD is the stable multi-App example, and `playground/` is mutable.                                    | Complete |
-| G13 | CLI                          | [`cli.ts`](../src/cli.ts) provides neutral System-wide and focused-App create, dev, build, typecheck, test, and check commands.                          | Complete |
-| G14 | Public package surface       | [`package.json`](../package.json) has deliberate subpaths; [`api.json`](api.json) records every exported symbol and reachable declaration.               | Complete |
-| G15 | External identity            | Package, command, cache, generated protocol, Rust crates, examples, and copy use one neutral identity; repository and generated-path searches are empty. | Complete |
-| G16 | Change governance            | Root changelog, change records, API drift checks, compatibility policy, Feature guidance, and migrations are present and enforced by `test`.             | Complete |
-| G17 | Target conformance tests     | Type, property, compiler, runtime, adapter, package, native, multi-App, focused-build, shared-Program, isolation, and HMR gates pass.                    | Complete |
-| G18 | Runtime evidence             | The final in-app browser development and production workflow is tracked in [`system-implementation.md`](system-implementation.md).                       | Pending  |
+| ID  | Area                         | Implemented evidence                                                                                                                                                                                                              | Status   |
+| --- | ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
+| G01 | Root meaning                 | [`core/system.ts`](../src/core/system.ts) defines the only root and [`index.ts`](../src/index.ts) exports `createSystem`.                                                                                                         | Complete |
+| G02 | Apps                         | `createApp` creates marked Features; compiler and realization tests prove discovery, ownership, and focused selection.                                                                                                            | Complete |
+| G03 | Multiple platform interfaces | System type fixtures and authenticated CRUD prove several isolated interfaces and reusable interface Features.                                                                                                                    | Complete |
+| G04 | Presentation ownership       | Presentation source spans and declarations belong to interface IR; each authenticated CRUD interface selects its own Presentation.                                                                                                | Complete |
+| G05 | Compiler entry               | [`compiler/source.ts`](../src/compiler/source.ts) resolves one `src/system.ts` and recursively extracts its Feature graph.                                                                                                        | Complete |
+| G06 | Canonical IR                 | [`compiler/ir.ts`](../src/compiler/ir.ts) defines versioned deterministic System, Feature, App, interface, Program, and ownership records.                                                                                        | Complete |
+| G07 | Realization                  | [`realization.ts`](../src/realization.ts) compiles once, slices outputs, starts adapters concurrently, and disposes in reverse order.                                                                                             | Complete |
+| G08 | Shared backend               | Runtime and realization tests prove same-named contributions link once and focused Apps retain required shared Programs.                                                                                                          | Complete |
+| G09 | Web output                   | Web compiler, routing, pipeline, and adapter tests prove isolated entries, routes, manifests, caches, and service workers per interface.                                                                                          | Complete |
+| G10 | Presentation reuse           | Exact Presentation factories, parameters, recipes, collision rules, and web dynamics have type, compiler, and runtime coverage.                                                                                                   | Complete |
+| G11 | Development graph            | One retained compiler graph emits exact affected outputs; stable web caches and selective server/web HMR have regression tests and measured budgets.                                                                              | Complete |
+| G12 | Starter and examples         | `examples/basic` is the CLI source, authenticated CRUD is the stable multi-App example, and `playground/` is mutable.                                                                                                             | Complete |
+| G13 | CLI                          | [`cli.ts`](../src/cli.ts) provides neutral System-wide and focused-App create, dev, build, typecheck, test, and check commands.                                                                                                   | Complete |
+| G14 | Public package surface       | [`package.json`](../package.json) has deliberate subpaths; [`api.json`](api.json) records every exported symbol and reachable declaration.                                                                                        | Complete |
+| G15 | External identity            | Package, command, cache, generated protocol, Rust crates, examples, and copy use one neutral identity; repository and generated-path searches are empty.                                                                          | Complete |
+| G16 | Change governance            | Root changelog, change records, API drift checks, compatibility policy, Feature guidance, and migrations are present and enforced by `test`.                                                                                      | Complete |
+| G17 | Target conformance tests     | Type, property, compiler, runtime, adapter, package, native, multi-App, focused-build, shared-Program, isolation, and HMR gates pass.                                                                                             | Complete |
+| G18 | Runtime evidence             | Final development and Rust-production browser workflows, exact URLs, HMR isolation, state/focus retention, PWA artifacts, CRUD, and empty error records are documented in [`system-implementation.md`](system-implementation.md). | Complete |
 
 ## Migration sequence
 
@@ -701,8 +702,8 @@ The order prevents adapter work from defining core semantics accidentally.
 - [x] Use one retained semantic graph and persistent caches.
 - [x] Verify shared Feature changes update all affected Apps without restarting
       unrelated Programs.
-- [ ] Run the complete verification matrix below from a clean checkout.
-- [ ] Mark gaps complete only with linked automated evidence.
+- [x] Run the complete verification matrix below from a clean checkout.
+- [x] Mark gaps complete only with linked automated evidence.
 
 ## Verification gates
 
@@ -784,15 +785,14 @@ behavior.
 - Documentation, public API manifests, changelog, and migration records match
   the shipped package.
 
-## Deliberately open API decision
+## External identity
 
-The architecture and composition syntax are settled without pretending that
-branding is settled. The final neutral package locator and CLI name remain
-open.
-
-That decision must not change semantic identifiers or introduce a second
-composition unit, global Presentation ownership, implicit dependency lookup, or
-adapter concerns in core.
+The neutral package locator is `@duction/kit`, the CLI command is `kit`, and the
+private cache namespace is `.kit`. External naming is now governed like every
+other public change: it requires an explicit change record and migration
+guidance when compatibility is affected. It does not alter semantic
+identifiers or introduce another composition unit, global Presentation
+ownership, implicit Dependency lookup, or adapter concerns in core.
 
 ## Definition of done
 

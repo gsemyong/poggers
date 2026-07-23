@@ -1,6 +1,6 @@
 # System architecture implementation
 
-Status: active execution ledger.
+Status: complete.
 
 Normative architecture:
 [Framework architecture](architecture.md).
@@ -277,7 +277,7 @@ retaining shared Programs.
 - [x] Two web interfaces run together with isolated URLs, manifests, caches,
       Presentations, and service workers.
 - [x] Shared server Programs run once.
-- [ ] Development and production pass the in-app browser workflow in
+- [x] Development and production pass the in-app browser workflow in
       `Browser verification`.
 
 ## Phase 6: establish the external Workspace
@@ -339,7 +339,7 @@ Purpose: provide a fast iteration loop without weakening semantic correctness.
 - [x] A second App does not duplicate shared compilation or backend startup.
 - [x] Warm startup reuses compiler and Vite caches.
 - [x] Shared and App-private HMR affect only their semantic dependents.
-- [ ] In-app browser verification observes no full-page reload for eligible
+- [x] In-app browser verification observes no full-page reload for eligible
       source changes.
 
 ## Phase 8: tighten external distribution
@@ -382,22 +382,22 @@ surrounded by migration debris.
       compatibility code, and dead adapter paths.
 - [x] Review every production directory and file against the ownership rules.
 - [x] Review tests for semantic value and delete duplicates.
-- [ ] Run formatting, linting, typechecking, unit, property, contract,
+- [x] Run formatting, linting, typechecking, unit, property, contract,
       differential, integration, package, and native production checks.
-- [ ] Run complete and focused development and production builds from a clean
+- [x] Run complete and focused development and production builds from a clean
       checkout.
-- [ ] Run the final in-app browser workflow.
-- [ ] Update every architecture gap with exact evidence.
+- [x] Run the final in-app browser workflow.
+- [x] Update every architecture gap with exact evidence.
 - [x] Update the README to describe only the shipped external convention.
 
 ### Blocking gate
 
-- [ ] Every `G01` through `G18` gap is complete with current evidence.
-- [ ] `nub run check` and `nub run build` pass from a clean checkout.
-- [ ] The packed package and generated Workspace pass independent verification.
-- [ ] The repository contains no old root, duplicate scaffold, generated
+- [x] Every `G01` through `G18` gap is complete with current evidence.
+- [x] `nub run check` and `nub run build` pass from a clean checkout.
+- [x] The packed package and generated Workspace pass independent verification.
+- [x] The repository contains no old root, duplicate scaffold, generated
       residue, or undocumented public API.
-- [ ] The in-app browser workflow passes against development and production
+- [x] The in-app browser workflow passes against development and production
       with an empty error record.
 
 ## Browser verification
@@ -407,60 +407,67 @@ matrix.
 
 For every stable web example and for both development and production:
 
-- [ ] Open the root URL and inspect the initial document.
-- [ ] Directly open every representative nested route.
-- [ ] Refresh nested routes and verify complete styling and correct metadata.
-- [ ] Exercise typed links, back/forward navigation, params, search, and
+- [x] Open the root URL and inspect the initial document.
+- [x] Directly open every representative nested route.
+- [x] Refresh nested routes and verify complete styling and correct metadata.
+- [x] Exercise typed links, back/forward navigation, params, search, and
       redirects.
-- [ ] Verify protected routes navigate to the auth URL.
-- [ ] Sign in, sign out, and verify URL plus rendered route after each.
-- [ ] Create, edit, complete, and delete representative entities.
-- [ ] Keep an editor focused while subscription updates arrive.
-- [ ] Verify synchronization settles without repeated remounts or reloads.
-- [ ] Verify each App interface has the intended Presentation and assets.
-- [ ] Verify each PWA manifest, service worker, offline fallback, and cache
+- [x] Verify protected routes navigate to the auth URL.
+- [x] Sign in, sign out, and verify URL plus rendered route after each.
+- [x] Create, edit, complete, and delete representative entities.
+- [x] Keep an editor focused while subscription updates arrive.
+- [x] Verify synchronization settles without repeated remounts or reloads.
+- [x] Verify each App interface has the intended Presentation and assets.
+- [x] Verify each PWA manifest, service worker, offline fallback, and cache
       namespace.
-- [ ] Make one shared Feature edit and observe every affected App update.
-- [ ] Make one App-private edit and observe unrelated Apps remain untouched.
-- [ ] Inspect visible errors, console failures, failed requests, hydration
+- [x] Make one shared Feature edit and observe every affected App update.
+- [x] Make one App-private edit and observe unrelated Apps remain untouched.
+- [x] Inspect visible errors, console failures, failed requests, hydration
       diagnostics, and unexpected document navigations.
-- [ ] Record the URLs, workflow, observations, and result in `Evidence`.
+- [x] Record the URLs, workflow, observations, and result in `Evidence`.
 
 ## Evidence
 
 Add one row when a gate completes. Link to the relevant phase, files, command
 output, or browser observation. Do not replace evidence with a summary claim.
 
-| Date       | Phase | Evidence                                                                                                                                                                                                                                                                             | Result                 |
-| ---------- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------- |
-| 2026-07-23 | 0     | `nub run check`: typecheck, Oxlint, Oxfmt, 49 Vitest files with 392 tests, package build, and the complete Rust workspace                                                                                                                                                            | Pass                   |
-| 2026-07-23 | 0     | Current package exports: root, web, server, testing, adapter authoring, concrete web/server adapters, CLI, JSX runtimes, and tsconfig                                                                                                                                                | Baseline recorded      |
-| 2026-07-23 | 0     | Static startup audit: realization calls `compileApplication`; server and web development each create another retained Application compiler                                                                                                                                           | Three semantic graphs  |
-| 2026-07-23 | 0     | Ready timing: web Presentation 3438.8 ms cold and 3147.0 ms warm; authenticated CRUD 4571.2 ms cold and 4173.8 ms warm                                                                                                                                                               | Baseline recorded      |
-| 2026-07-23 | 0     | In-app browser development: auth redirect, account creation, two optimistic creates, nested-route reload, styling, edit focus, sign-out, and HMR all completed; tasks and auth state survived HMR                                                                                    | Pass with inefficiency |
-| 2026-07-23 | 0     | Development log for a presentation-copy edit: full semantic updates of 558.7 ms, 459.4 ms, and 555.5 ms, each restarting the unrelated server `api` Program                                                                                                                          | G11 reproduced         |
-| 2026-07-23 | 0     | In-app browser Rust production: auth redirect, account creation, create, edit with stable focus, complete, delete, styling, and empty browser error log                                                                                                                              | Pass                   |
-| 2026-07-23 | 1     | `src/core/system.typecheck.ts`: inferred two-App System, web plus native interfaces, two isolated web contracts, typed Dependencies, and intentional invalid fixtures                                                                                                                | Pass                   |
-| 2026-07-23 | 1     | `nub run typecheck` plus focused System/Application/web routing tests; runtime factories preserve one unchanged Feature object tree                                                                                                                                                  | Pass                   |
-| 2026-07-23 | 2     | Root, testing, scaffold, and examples use `src/system.ts`, `createSystem`, interface-owned Presentations, and `testSystem`; exact obsolete-root symbol search is empty                                                                                                               | Pass                   |
-| 2026-07-23 | 2     | Root and both examples typecheck; 23 focused core, compiler, runtime, contract, CLI, server, and web files pass 184 tests; architecture import boundaries remain green                                                                                                               | Pass                   |
-| 2026-07-23 | 3     | System IR v17 ownership fixtures, randomized Feature/App placement, old-version rejection, extension isolation, interface Presentation ownership, and source-located route/ownership failures pass 43 focused tests                                                                  | Pass                   |
-| 2026-07-23 | 4     | Whole/focused realization, one-compile instrumentation, concurrent adapter rendezvous, reverse disposal, partial-failure cleanup, stable artifact identities, and development/production linking pass 75 focused tests                                                               | Pass                   |
-| 2026-07-23 | 5     | Web compiler, routing, document, cache, hydration, installation, pipeline, and adapter tests isolate each interface; authenticated CRUD realizes two interface URLs and one shared `program/api` in both profiles                                                                    | Automated gates pass   |
-| 2026-07-23 | 6     | `examples/basic` is the CLI source, `template/` is removed, authenticated CRUD has operations/customer Apps, `playground/` is separate, and focused App build selection is tested                                                                                                    | Pass                   |
-| 2026-07-23 | 6     | Fresh external Workspace: `nub install`, `nub run check`, and `nub run build` passed; production emitted `dist/interfaces/main.web` without framework implementation directories                                                                                                     | Pass                   |
-| 2026-07-23 | 6     | Full repository gate: typecheck, Oxlint, Oxfmt, package build, 52 Vitest files with 408 tests, and the complete Rust workspace                                                                                                                                                       | Pass                   |
-| 2026-07-23 | 7     | One retained TypeScript graph emits canonical IR and exact output ownership; no-op operations-App recompilation affects no output, an App-private semantic edit affects only operations, shared UI affects both interfaces, and shared server meaning affects only `program/api`     | Pass                   |
-| 2026-07-23 | 7     | Web development uses stable per-interface generated-source and Vite cache paths; generated modules are retained for exact diagnostics and written only when changed, so virtual modules would add indirection without removing churn                                                 | Decision verified      |
-| 2026-07-23 | 7     | Basic development after clearing its adapter cache: 1827.0 ms to ready; retained-cache runs: 1861.4 and 1869.6 ms to ready; first warm response: 45.7 ms. Current measured budgets are 2500 ms to ready and 100 ms for the first local response                                      | Within budget          |
-| 2026-07-23 | 7     | Full repository gate after incremental ownership work: typecheck, Oxlint, Oxfmt, package build, 52 Vitest files with 412 tests, and the complete Rust workspace                                                                                                                      | Pass                   |
-| 2026-07-23 | 8     | `@duction/kit`, `kit`, `.kit`, Rust crate names, generated protocol names, examples, copy, and resolver aliases were renamed together; source, generated-file-name, and cache searches contain no previous identity                                                                  | Pass                   |
-| 2026-07-23 | 8     | `docs/api.json` records 12 package subpaths, 311 exported symbols, and the 49-file reachable declaration closure; `api:check` blocks unrecorded drift and requires a valid change record                                                                                             | Pass                   |
-| 2026-07-23 | 8     | Package dry run contains the explicit runtime, source-condition, Rust host, starter, and consumer documentation artifacts; compiler/runtime internals have no export subpath, while UI, platform, testing, adapter authoring, concrete adapters, CLI, JSX, and tsconfig are explicit | Pass                   |
-| 2026-07-23 | 8     | Full repository gate after distribution work: typecheck, Oxlint, Oxfmt, API manifest, package build, 52 Vitest files with 413 tests, and the complete renamed Rust workspace                                                                                                         | Pass                   |
-| 2026-07-23 | 9     | Production reachability audit starts from every package source export, CLI binary, and generated runtime entry; every non-fixture production TypeScript module is reachable. Architectural import tests now include both root entry modules                                          | Pass                   |
-| 2026-07-23 | 9     | Removed the redundant benchmark, unused coverage ignores, stale generated identities, old root vocabulary in tests, and pre-migration architecture narrative; 52 test files have distinct contract descriptions and ownership                                                        | Pass                   |
-| 2026-07-23 | 9     | Focused post-audit gate: architecture, compiler, runtime, server, web compiler/document/pipeline/installation suites pass 109 tests                                                                                                                                                  | Pass                   |
+| Date       | Phase | Evidence                                                                                                                                                                                                                                                                                                                        | Result                 |
+| ---------- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- |
+| 2026-07-23 | 0     | `nub run check`: typecheck, Oxlint, Oxfmt, 49 Vitest files with 392 tests, package build, and the complete Rust workspace                                                                                                                                                                                                       | Pass                   |
+| 2026-07-23 | 0     | Current package exports: root, web, server, testing, adapter authoring, concrete web/server adapters, CLI, JSX runtimes, and tsconfig                                                                                                                                                                                           | Baseline recorded      |
+| 2026-07-23 | 0     | Static startup audit: realization calls `compileApplication`; server and web development each create another retained Application compiler                                                                                                                                                                                      | Three semantic graphs  |
+| 2026-07-23 | 0     | Ready timing: web Presentation 3438.8 ms cold and 3147.0 ms warm; authenticated CRUD 4571.2 ms cold and 4173.8 ms warm                                                                                                                                                                                                          | Baseline recorded      |
+| 2026-07-23 | 0     | In-app browser development: auth redirect, account creation, two optimistic creates, nested-route reload, styling, edit focus, sign-out, and HMR all completed; tasks and auth state survived HMR                                                                                                                               | Pass with inefficiency |
+| 2026-07-23 | 0     | Development log for a presentation-copy edit: full semantic updates of 558.7 ms, 459.4 ms, and 555.5 ms, each restarting the unrelated server `api` Program                                                                                                                                                                     | G11 reproduced         |
+| 2026-07-23 | 0     | In-app browser Rust production: auth redirect, account creation, create, edit with stable focus, complete, delete, styling, and empty browser error log                                                                                                                                                                         | Pass                   |
+| 2026-07-23 | 1     | `src/core/system.typecheck.ts`: inferred two-App System, web plus native interfaces, two isolated web contracts, typed Dependencies, and intentional invalid fixtures                                                                                                                                                           | Pass                   |
+| 2026-07-23 | 1     | `nub run typecheck` plus focused System/Application/web routing tests; runtime factories preserve one unchanged Feature object tree                                                                                                                                                                                             | Pass                   |
+| 2026-07-23 | 2     | Root, testing, scaffold, and examples use `src/system.ts`, `createSystem`, interface-owned Presentations, and `testSystem`; exact obsolete-root symbol search is empty                                                                                                                                                          | Pass                   |
+| 2026-07-23 | 2     | Root and both examples typecheck; 23 focused core, compiler, runtime, contract, CLI, server, and web files pass 184 tests; architecture import boundaries remain green                                                                                                                                                          | Pass                   |
+| 2026-07-23 | 3     | System IR v17 ownership fixtures, randomized Feature/App placement, old-version rejection, extension isolation, interface Presentation ownership, and source-located route/ownership failures pass 43 focused tests                                                                                                             | Pass                   |
+| 2026-07-23 | 4     | Whole/focused realization, one-compile instrumentation, concurrent adapter rendezvous, reverse disposal, partial-failure cleanup, stable artifact identities, and development/production linking pass 75 focused tests                                                                                                          | Pass                   |
+| 2026-07-23 | 5     | Web compiler, routing, document, cache, hydration, installation, pipeline, and adapter tests isolate each interface; authenticated CRUD realizes two interface URLs and one shared `program/api` in both profiles                                                                                                               | Automated gates pass   |
+| 2026-07-23 | 6     | `examples/basic` is the CLI source, `template/` is removed, authenticated CRUD has operations/customer Apps, `playground/` is separate, and focused App build selection is tested                                                                                                                                               | Pass                   |
+| 2026-07-23 | 6     | Fresh external Workspace: `nub install`, `nub run check`, and `nub run build` passed; production emitted `dist/interfaces/main.web` without framework implementation directories                                                                                                                                                | Pass                   |
+| 2026-07-23 | 6     | Full repository gate: typecheck, Oxlint, Oxfmt, package build, 52 Vitest files with 408 tests, and the complete Rust workspace                                                                                                                                                                                                  | Pass                   |
+| 2026-07-23 | 7     | One retained TypeScript graph emits canonical IR and exact output ownership; no-op operations-App recompilation affects no output, an App-private semantic edit affects only operations, shared UI affects both interfaces, and shared server meaning affects only `program/api`                                                | Pass                   |
+| 2026-07-23 | 7     | Web development uses stable per-interface generated-source and Vite cache paths; generated modules are retained for exact diagnostics and written only when changed, so virtual modules would add indirection without removing churn                                                                                            | Decision verified      |
+| 2026-07-23 | 7     | Basic development after clearing its adapter cache: 1827.0 ms to ready; retained-cache runs: 1861.4 and 1869.6 ms to ready; first warm response: 45.7 ms. Current measured budgets are 2500 ms to ready and 100 ms for the first local response                                                                                 | Within budget          |
+| 2026-07-23 | 7     | Full repository gate after incremental ownership work: typecheck, Oxlint, Oxfmt, package build, 52 Vitest files with 412 tests, and the complete Rust workspace                                                                                                                                                                 | Pass                   |
+| 2026-07-23 | 8     | `@duction/kit`, `kit`, `.kit`, Rust crate names, generated protocol names, examples, copy, and resolver aliases were renamed together; source, generated-file-name, and cache searches contain no previous identity                                                                                                             | Pass                   |
+| 2026-07-23 | 8     | `docs/api.json` records 12 package subpaths, 311 exported symbols, and the 49-file reachable declaration closure; `api:check` blocks unrecorded drift and requires a valid change record                                                                                                                                        | Pass                   |
+| 2026-07-23 | 8     | Package dry run contains the explicit runtime, source-condition, Rust host, starter, and consumer documentation artifacts; compiler/runtime internals have no export subpath, while UI, platform, testing, adapter authoring, concrete adapters, CLI, JSX, and tsconfig are explicit                                            | Pass                   |
+| 2026-07-23 | 8     | Full repository gate after distribution work: typecheck, Oxlint, Oxfmt, API manifest, package build, 52 Vitest files with 413 tests, and the complete renamed Rust workspace                                                                                                                                                    | Pass                   |
+| 2026-07-23 | 9     | Production reachability audit starts from every package source export, CLI binary, and generated runtime entry; every non-fixture production TypeScript module is reachable. Architectural import tests now include both root entry modules                                                                                     | Pass                   |
+| 2026-07-23 | 9     | Removed the redundant benchmark, unused coverage ignores, stale generated identities, old root vocabulary in tests, and pre-migration architecture narrative; 52 test files have distinct contract descriptions and ownership                                                                                                   | Pass                   |
+| 2026-07-23 | 9     | Focused post-audit gate: architecture, compiler, runtime, server, web compiler/document/pipeline/installation suites pass 109 tests                                                                                                                                                                                             | Pass                   |
+| 2026-07-23 | 5, 9  | In-app browser development at `localhost:33000` and `localhost:33001`: Customer and Operations shared one `program/api`, retained isolated copy and one Presentation stylesheet each, redirected protected routes, completed authenticated CRUD and realtime synchronization, and reported no browser warnings or errors        | Pass                   |
+| 2026-07-23 | 5, 9  | In-app browser Rust production at `customer.localhost:32779` and `operations.localhost:32779`: one native server process served both interfaces; direct nested-route reload, metadata, styling, auth redirects, CRUD, cross-App updates, missing-entity handling, manifests, and service workers passed with empty browser logs | Pass                   |
+| 2026-07-23 | 7     | App-private HMR changed only Customer while Operations and `program/api` remained live; shared Shell HMR updated both interfaces. Both updates retained the deep edit URL, unsaved Component draft, active input focus, subscriptions, and styling without document navigation                                                  | Pass                   |
+| 2026-07-23 | 9     | `nub run check` on commit `6c696d4`: typecheck, Oxlint, Oxfmt, API manifest, package build, 52 Vitest files with 416 tests, and all Rust workspace unit and documentation tests                                                                                                                                                 | Pass                   |
+| 2026-07-23 | 9     | Detached clean checkout of `6c696d4`: fresh `nub install`, `nub run check`, and `nub run build` passed, including a cold Rust dependency and workspace compile                                                                                                                                                                  | Pass                   |
+| 2026-07-23 | 9     | Package dry run contains 231 intentional files, 587,737 packed bytes, and 2,747,731 unpacked bytes. A generated Workspace installed from the `file:` package locator, passed its two tests and build, started development, rendered one stylesheet, and handled UI actions in the in-app browser                                | Pass                   |
+| 2026-07-23 | 9     | Basic example development and production both rendered the intended Presentation and handled state updates; authenticated CRUD development and production completed the representative browser workflow. Browser-engine automation was intentionally not added                                                                  | Pass                   |
 
 ### Phase 0 observations
 
@@ -488,11 +495,9 @@ output, or browser observation. Do not replace evidence with a summary claim.
 
 ## Current position
 
-- Active phase: Phase 9, remove residue and accept the architecture.
-- Completed phases: Phases 0 through 4, 6, and 8.
-- Implemented pending final browser acceptance: Phase 5.
-- Implemented pending final browser acceptance: Phase 7.
+- Active phase: none.
+- Completed phases: Phases 0 through 9.
+- Architecture gaps: `G01` through `G18` complete.
 - Blockers: none known.
-- Next action: audit production ownership and test value, verify a packed package
-  and clean external Workspace, then run final development and production
-  in-app browser acceptance.
+- Next action: evolve the framework through normal change records and
+  compatibility policy rather than architecture migration work.
