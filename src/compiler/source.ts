@@ -634,7 +634,11 @@ function extractFeatures(
   app?: string,
   interfaceOwner?: InterfaceOwner,
   contractsAreFeatureValues = false,
+  ownerStatic?: StaticValue,
 ): void {
+  const staticChildren = ownerStatic
+    ? resolveStaticMember(checker, ownerStatic, "features")
+    : undefined;
   for (const symbol of sortedSymbols(contracts.getProperties())) {
     const name = symbol.getName();
     const path = parent ? `${parent}.${name}` : name;
@@ -643,7 +647,9 @@ function extractFeatures(
     const contract = contractsAreFeatureValues
       ? retainedFeatureContract(checker, symbolType, location)
       : symbolType;
-    const inherited = owner ? resolveFeatureChild(checker, owner, name) : undefined;
+    const inherited =
+      (staticChildren ? resolveStaticMember(checker, staticChildren, name) : undefined) ??
+      (owner ? resolveFeatureChild(checker, owner, name) : undefined);
     const value = values
       ? resolveObjectMember(checker, values, name)
       : inherited && ts.isExpression(inherited.node)
@@ -756,9 +762,14 @@ function extractFeatures(
           throw diagnostic(programValues, `Program ${JSON.stringify(id)} has no implementation.`);
         }
         const programValue = implementation ? objectExpression(checker, implementation) : undefined;
-        const expandedProgram = value
-          ? resolveFeatureProgram(checker, value, programName)
+        const expandedPrograms = staticFeature
+          ? resolveStaticMember(checker, staticFeature, "programs")
           : undefined;
+        const expandedProgram =
+          (expandedPrograms
+            ? resolveStaticMember(checker, expandedPrograms, programName)
+            : undefined) ??
+          (value ? resolveFeatureProgram(checker, value, programName) : undefined);
         const expandedStart = expandedProgram
           ? resolveStaticMember(checker, expandedProgram, "start")
           : undefined;
@@ -803,6 +814,8 @@ function extractFeatures(
         value,
         ownedApp,
         ownedInterface,
+        false,
+        staticFeature,
       );
     }
 
@@ -882,12 +895,23 @@ function extractProgram(
       ? directStart
       : functionNode(expandedStart?.node);
   const root = stringMember(checker, readableValue, "root");
+  const requires = dependencyList(
+    checker,
+    propertyType(checker, contract, "Requires", location),
+    location,
+  );
+  const provides = dependencyList(
+    checker,
+    propertyType(checker, contract, "Provides", location),
+    location,
+  );
   const implementation = programImplementation(
     checker,
     start,
     Boolean(state || actions || components),
     factory && !expandedProgram,
     readableValue ?? location,
+    provides,
     expandedStart?.bindings,
     expandedStart?.types,
   );
@@ -898,16 +922,8 @@ function extractProgram(
     logicalName: name,
     environment: { name: environmentName, platform, ...(ui ? { ui } : {}) },
     ...(interfaceOwner?.platform === platform ? { interface: interfaceOwner.path } : {}),
-    requires: dependencyList(
-      checker,
-      propertyType(checker, contract, "Requires", location),
-      location,
-    ),
-    provides: dependencyList(
-      checker,
-      propertyType(checker, contract, "Provides", location),
-      location,
-    ),
+    requires,
+    provides,
     ...(state || actions || components
       ? {
           ui: {
@@ -941,6 +957,7 @@ function programImplementation(
   ui: boolean,
   factory: boolean,
   at: ts.Node,
+  provides: readonly DependencyIR[],
   bindings: ReadonlyMap<ts.Symbol, StaticValue> = new Map(),
   types: ReadonlyMap<ts.Type, ts.Type> = new Map(),
 ): ProgramContributionIR["implementation"] {
@@ -957,14 +974,23 @@ function programImplementation(
     };
   }
   if (!start) return { kind: "none" };
-  const lowering = createPortableLowering(checker, bindings, types);
+  const lowering = createPortableLowering(
+    checker,
+    bindings,
+    types,
+    provides.map(({ name }) => name),
+  );
   try {
+    const portableStart = lowerStartFunction(lowering, start);
+    const functions = [...lowering.functions.values()].sort((left, right) =>
+      left.id.localeCompare(right.id),
+    );
+    validatePortableLocals(portableStart);
+    functions.forEach(validatePortableLocals);
     return {
       kind: "portable",
-      start: lowerStartFunction(lowering, start),
-      functions: [...lowering.functions.values()].sort((left, right) =>
-        left.id.localeCompare(right.id),
-      ),
+      start: portableStart,
+      functions,
     };
   } catch (error) {
     if (
@@ -980,6 +1006,149 @@ function programImplementation(
     }
     throw error;
   }
+}
+
+function validatePortableLocals(function_: FunctionIR): void {
+  const initial = new Set([
+    ...function_.captures.map(({ name }) => name),
+    ...function_.parameters.map(({ name }) => name),
+    ...(function_.id === "start" ? ["dependencies", "@dependencies"] : []),
+  ]);
+  const expression = (value: ExpressionIR, names: ReadonlySet<string>): void => {
+    switch (value.kind) {
+      case "local":
+        if (!names.has(value.name)) {
+          throw new SystemDiagnostic(
+            `Portable function ${JSON.stringify(function_.name)} (${JSON.stringify(function_.id)}) ` +
+              `references undeclared binding ${JSON.stringify(value.name)}; captures are ` +
+              `${JSON.stringify(function_.captures.map(({ name }) => name))}.`,
+            value.span,
+          );
+        }
+        return;
+      case "array":
+        value.values.forEach((item) => expression(item, names));
+        return;
+      case "record":
+        value.fields.forEach((field) => expression(field.value, names));
+        return;
+      case "record-merge":
+        value.entries.forEach((entry) => expression(entry.value, names));
+        return;
+      case "property":
+      case "unary":
+      case "error-match":
+      case "json-parse":
+      case "json-stringify":
+      case "to-string":
+        expression(value.value, names);
+        return;
+      case "binary":
+        expression(value.left, names);
+        expression(value.right, names);
+        return;
+      case "invoke":
+        expression(value.callee, names);
+        value.arguments.forEach((argument) => expression(argument, names));
+        return;
+      case "method-call":
+        expression(value.receiver, names);
+        value.arguments.forEach((argument) => expression(argument, names));
+        return;
+      case "stream-map":
+        expression(value.source, names);
+        expression(value.transform, names);
+        return;
+      case "stream-distinct":
+        expression(value.source, names);
+        expression(value.select, names);
+        return;
+      case "conditional":
+        expression(value.condition, names);
+        expression(value.consequent, names);
+        expression(value.alternate, names);
+        return;
+      case "call":
+      case "dependency-call":
+        value.arguments.forEach((argument) => expression(argument, names));
+        return;
+      case "closure":
+        value.captures.forEach((capture) => expression(capture, names));
+        return;
+      case "error":
+        value.arguments.forEach((argument) => expression(argument, names));
+        value.fields.forEach((field) => expression(field.value, names));
+        return;
+      case "literal":
+      case "none":
+        return;
+    }
+  };
+  const statements = (body: readonly StatementIR[], inherited: ReadonlySet<string>): void => {
+    const names = new Set(inherited);
+    for (const statement of body) {
+      switch (statement.kind) {
+        case "let":
+          expression(statement.value, names);
+          names.add(statement.name);
+          break;
+        case "assign":
+          if (!names.has(statement.name)) {
+            throw new SystemDiagnostic(
+              `Portable function ${JSON.stringify(function_.name)} assigns undeclared binding ${JSON.stringify(statement.name)}.`,
+              statement.span,
+            );
+          }
+          expression(statement.value, names);
+          break;
+        case "property-assign":
+          expression(statement.target, names);
+          expression(statement.value, names);
+          break;
+        case "array-push":
+          if (!names.has(statement.array)) {
+            throw new SystemDiagnostic(
+              `Portable function ${JSON.stringify(function_.name)} mutates undeclared binding ${JSON.stringify(statement.array)}.`,
+              statement.span,
+            );
+          }
+          expression(statement.value, names);
+          break;
+        case "expression":
+          expression(statement.expression, names);
+          break;
+        case "throw":
+          expression(statement.value, names);
+          break;
+        case "if":
+          expression(statement.condition, names);
+          statements(statement.consequent, names);
+          statements(statement.alternate, names);
+          break;
+        case "for-of":
+          expression(statement.values, names);
+          statements(statement.body, new Set([...names, statement.item]));
+          break;
+        case "for-range":
+          expression(statement.from, names);
+          expression(statement.to, names);
+          statements(statement.body, new Set([...names, statement.item]));
+          break;
+        case "try":
+          statements(statement.body, names);
+          statements(
+            statement.catch,
+            statement.error ? new Set([...names, statement.error]) : names,
+          );
+          statements(statement.finally, names);
+          break;
+        case "return":
+          if (statement.value) expression(statement.value, names);
+          break;
+      }
+    }
+  };
+  statements(function_.body, initial);
 }
 
 function dependencyList(
@@ -1319,7 +1488,8 @@ type PortableLowering = Readonly<{
   typeOverrides: Map<ts.Symbol, ts.Type>;
   irTypeOverrides: Map<ts.Symbol, TypeIR>;
   typeSubstitutions: Map<ts.Type, ts.Type>;
-  staticBindings: ReadonlyMap<ts.Symbol, StaticValue>;
+  staticBindings: Map<ts.Symbol, StaticValue>;
+  providedNames: readonly string[];
 }>;
 
 function lowerPortableType(lowering: PortableLowering, type: ts.Type, at: ts.Node): TypeIR {
@@ -1330,6 +1500,7 @@ function createPortableLowering(
   checker: ts.TypeChecker,
   staticBindings: ReadonlyMap<ts.Symbol, StaticValue> = new Map(),
   typeSubstitutions: ReadonlyMap<ts.Type, ts.Type> = new Map(),
+  providedNames: readonly string[] = [],
 ): PortableLowering {
   return {
     checker,
@@ -1339,7 +1510,8 @@ function createPortableLowering(
     typeOverrides: new Map(),
     irTypeOverrides: new Map(),
     typeSubstitutions: new Map(typeSubstitutions),
-    staticBindings,
+    staticBindings: flattenStaticBindings(staticBindings),
+    providedNames,
   };
 }
 
@@ -1540,10 +1712,7 @@ function destructuredParameterBindings(
           : undefined
         : element.name.text;
       if (!property) throw diagnostic(element, "Portable object binding keys must be static.");
-      const field =
-        parameterType.kind === "record"
-          ? parameterType.fields.find(({ name }) => name === property)
-          : undefined;
+      const field = portableField(parameterType, property);
       if (!field) throw diagnostic(element, `Unknown portable parameter field ${property}.`);
       return {
         kind: "let",
@@ -1565,6 +1734,22 @@ function destructuredParameterBindings(
       };
     });
   });
+}
+
+function portableField(type: TypeIR, name: string): FieldIR | undefined {
+  if (type.kind === "record") return type.fields.find((field) => field.name === name);
+  if (type.kind !== "union") return undefined;
+  const fields = type.variants.map((variant) => portableField(variant, name));
+  if (fields.some((field) => field === undefined)) return undefined;
+  const present = fields as readonly FieldIR[];
+  const variants = [
+    ...new Map(present.map((field) => [JSON.stringify(field.type), field.type])).values(),
+  ];
+  return {
+    name,
+    optional: present.some(({ optional }) => optional),
+    type: variants.length === 1 ? variants[0]! : { kind: "union", variants },
+  };
 }
 
 function parameterDefaultBindings(
@@ -1665,19 +1850,33 @@ function lowerStatements(
         ts.isBinaryExpression(statement.expression) &&
         assignmentOperator(statement.expression.operatorToken)
       ) {
-        if (!ts.isIdentifier(statement.expression.left)) {
-          throw diagnostic(
-            statement.expression.left,
-            "Portable assignment targets must be local bindings.",
-          );
+        if (ts.isIdentifier(statement.expression.left)) {
+          return {
+            kind: "assign",
+            name: statement.expression.left.text,
+            operator: assignmentOperator(statement.expression.operatorToken)!,
+            value: lowerExpression(lowering, statement.expression.right, dependenciesName),
+            span,
+          };
         }
-        return {
-          kind: "assign",
-          name: statement.expression.left.text,
-          operator: assignmentOperator(statement.expression.operatorToken)!,
-          value: lowerExpression(lowering, statement.expression.right, dependenciesName),
-          span,
-        };
+        if (ts.isPropertyAccessExpression(statement.expression.left)) {
+          return {
+            kind: "property-assign",
+            target: lowerExpression(
+              lowering,
+              statement.expression.left.expression,
+              dependenciesName,
+            ),
+            property: statement.expression.left.name.text,
+            operator: assignmentOperator(statement.expression.operatorToken)!,
+            value: lowerExpression(lowering, statement.expression.right, dependenciesName),
+            span,
+          };
+        }
+        throw diagnostic(
+          statement.expression.left,
+          "Portable assignment targets must be local bindings or named properties.",
+        );
       }
       return {
         kind: "expression",
@@ -1861,20 +2060,22 @@ function lowerExpression(
     const symbol = valueSymbol(checker, expression);
     const binding = symbol ? staticBinding(lowering, symbol) : undefined;
     if (binding?.node && ts.isExpression(binding.node)) {
-      return lowerExpression(lowering, binding.node, dependenciesName);
+      return lowerStaticValue(lowering, symbol, binding, dependenciesName, expression);
     }
     const declaration = symbol?.declarations?.find(ts.isVariableDeclaration);
-    if (
-      symbol &&
-      declaration?.initializer &&
-      !enclosingFunction(declaration) &&
-      !lowering.activeStatic.has(symbol)
-    ) {
-      lowering.activeStatic.add(symbol);
-      try {
-        return lowerExpression(lowering, declaration.initializer, dependenciesName);
-      } finally {
-        lowering.activeStatic.delete(symbol);
+    const owner = declaration ? enclosingFunction(declaration) : undefined;
+    if (symbol && declaration?.initializer && !owner) {
+      const staticValue = resolveStaticValue(
+        checker,
+        {
+          node: declaration.initializer,
+          bindings: lowering.staticBindings,
+          types: lowering.typeSubstitutions,
+        },
+        new Set(),
+      );
+      if (staticValue?.node && ts.isExpression(staticValue.node) && !owner) {
+        return lowerStaticValue(lowering, symbol, staticValue, dependenciesName, expression);
       }
     }
     return typedExpression(lowering, expression, { kind: "local", name: expression.text });
@@ -1989,7 +2190,9 @@ function lowerExpression(
     });
   }
   if (ts.isElementAccessExpression(expression)) {
-    const name = wellKnownMemberExpression(expression.argumentExpression);
+    const name =
+      wellKnownMemberExpression(expression.argumentExpression) ??
+      portableComputedName(lowering, expression.argumentExpression);
     if (!name)
       throw diagnostic(expression, "Portable element access requires a well-known member.");
     return typedExpression(lowering, expression, {
@@ -2060,6 +2263,63 @@ function lowerExpression(
     expression,
     `Unsupported portable expression ${ts.SyntaxKind[expression.kind]}.`,
   );
+}
+
+function lowerStaticValue(
+  lowering: PortableLowering,
+  symbol: ts.Symbol | undefined,
+  binding: StaticValue,
+  dependenciesName: string,
+  at: ts.Node,
+): ExpressionIR {
+  if (!ts.isExpression(binding.node)) {
+    throw diagnostic(at, "Static portable bindings must resolve to expressions.");
+  }
+  if (symbol && lowering.activeStatic.has(symbol)) {
+    throw diagnostic(at, `Recursive static binding ${symbol.getName()}.`);
+  }
+  if (symbol) lowering.activeStatic.add(symbol);
+  const bindingChanges: Array<Readonly<{ symbol: ts.Symbol; previous?: StaticValue }>> = [];
+  const typeChanges: Array<Readonly<{ source: ts.Type; previous?: ts.Type }>> = [];
+  try {
+    for (const [nested, value] of flattenStaticBindings(binding.bindings)) {
+      bindingChanges.push({ symbol: nested, previous: lowering.staticBindings.get(nested) });
+      lowering.staticBindings.set(nested, value);
+    }
+    for (const [source, target] of binding.types ?? []) {
+      typeChanges.push({ source, previous: lowering.typeSubstitutions.get(source) });
+      lowering.typeSubstitutions.set(source, target);
+    }
+    return lowerExpression(lowering, binding.node, dependenciesName);
+  } finally {
+    for (const { source, previous } of typeChanges.reverse()) {
+      if (previous) lowering.typeSubstitutions.set(source, previous);
+      else lowering.typeSubstitutions.delete(source);
+    }
+    for (const { symbol: nested, previous } of bindingChanges.reverse()) {
+      if (previous) lowering.staticBindings.set(nested, previous);
+      else lowering.staticBindings.delete(nested);
+    }
+    if (symbol) lowering.activeStatic.delete(symbol);
+  }
+}
+
+function flattenStaticBindings(
+  bindings: ReadonlyMap<ts.Symbol, StaticValue>,
+): Map<ts.Symbol, StaticValue> {
+  const result = new Map<ts.Symbol, StaticValue>();
+  const active = new Set<StaticValue>();
+  const visit = (source: ReadonlyMap<ts.Symbol, StaticValue>): void => {
+    for (const [symbol, value] of source) {
+      if (!result.has(symbol)) result.set(symbol, value);
+      if (active.has(value)) continue;
+      active.add(value);
+      visit(value.bindings);
+      active.delete(value);
+    }
+  };
+  visit(bindings);
+  return result;
 }
 
 function staticBinding(lowering: PortableLowering, symbol: ts.Symbol): StaticValue | undefined {
@@ -2243,7 +2503,8 @@ function lowerPortableCall(
       value: lowerExpression(lowering, call.arguments[0]!, dependenciesName),
     });
   }
-  if (portableIntrinsic(lowering, call.expression) === "stream-map") {
+  const intrinsic = portableIntrinsic(lowering, call.expression);
+  if (intrinsic === "stream-map") {
     if (call.arguments.length !== 2) {
       throw diagnostic(call, "mapStream requires a source and transform.");
     }
@@ -2253,15 +2514,25 @@ function lowerPortableCall(
       transform: lowerExpression(lowering, call.arguments[1]!, dependenciesName),
     });
   }
+  if (intrinsic === "stream-distinct") {
+    if (call.arguments.length !== 2) {
+      throw diagnostic(call, "distinctStream requires a source and selector.");
+    }
+    return typedExpression(lowering, typeNode, {
+      kind: "stream-distinct",
+      source: lowerExpression(lowering, call.arguments[0]!, dependenciesName),
+      select: lowerExpression(lowering, call.arguments[1]!, dependenciesName),
+    });
+  }
   if (
     ts.isPropertyAccessExpression(call.expression) &&
-    call.expression.name.text === "find" &&
+    (call.expression.name.text === "find" || call.expression.name.text === "map") &&
     lowering.checker.isArrayLikeType(lowering.checker.getTypeAtLocation(call.expression.expression))
   ) {
     return typedExpression(lowering, typeNode, {
       kind: "method-call",
       receiver: lowerExpression(lowering, call.expression.expression, dependenciesName),
-      method: "find",
+      method: call.expression.name.text,
       arguments: call.arguments.map((argument) =>
         lowerExpression(lowering, argument, dependenciesName),
       ),
@@ -2438,11 +2709,14 @@ function portableMethod(
 function portableIntrinsic(
   lowering: PortableLowering,
   expression: ts.Expression,
-): "stream-map" | undefined {
+): "stream-distinct" | "stream-map" | undefined {
   const direct = directFunction(lowering, expression);
-  if (!direct || direct.symbol.getName() !== "mapStream") return undefined;
+  if (!direct || !["distinctStream", "mapStream"].includes(direct.symbol.getName())) {
+    return undefined;
+  }
   const file = direct.functionLike.getSourceFile().fileName.replaceAll("\\", "/");
-  return file.endsWith("/core/stream.ts") ? "stream-map" : undefined;
+  if (!file.endsWith("/core/stream.ts")) return undefined;
+  return direct.symbol.getName() === "mapStream" ? "stream-map" : "stream-distinct";
 }
 
 function directFunction(
@@ -2456,21 +2730,29 @@ function directFunction(
   if (symbol?.flags && symbol.flags & ts.SymbolFlags.Alias) {
     symbol = lowering.checker.getAliasedSymbol(symbol);
   }
-  const declaration = symbol?.declarations?.find(
-    (candidate) =>
-      ts.isFunctionDeclaration(candidate) ||
-      ts.isVariableDeclaration(candidate) ||
-      ts.isPropertyAssignment(candidate) ||
-      ts.isMethodDeclaration(candidate),
-  );
-  const functionLike = declaration ? functionFromCallableDeclaration(declaration) : undefined;
+  const functionLike = symbol?.declarations
+    ?.filter(
+      (
+        candidate,
+      ): candidate is
+        | ts.FunctionDeclaration
+        | ts.VariableDeclaration
+        | ts.PropertyAssignment
+        | ts.MethodDeclaration =>
+        ts.isFunctionDeclaration(candidate) ||
+        ts.isVariableDeclaration(candidate) ||
+        ts.isPropertyAssignment(candidate) ||
+        ts.isMethodDeclaration(candidate),
+    )
+    .map(functionFromCallableDeclaration)
+    .find((candidate): candidate is ts.FunctionLikeDeclaration => candidate !== undefined);
   return symbol && functionLike ? { symbol, functionLike } : undefined;
 }
 
 function functionFromDeclaration(
   declaration: ts.FunctionDeclaration | ts.VariableDeclaration,
 ): ts.FunctionLikeDeclaration | undefined {
-  if (ts.isFunctionDeclaration(declaration)) return declaration;
+  if (ts.isFunctionDeclaration(declaration)) return declaration.body ? declaration : undefined;
   if (!declaration.initializer) return undefined;
   const initializer = unwrapExpression(declaration.initializer);
   return ts.isArrowFunction(initializer) || ts.isFunctionExpression(initializer)
@@ -3157,6 +3439,8 @@ function resolveStaticValue(
       ts.isArrayLiteralExpression(node) ||
       ts.isPrefixUnaryExpression(node) ||
       ts.isStringLiteral(node) ||
+      ts.isNoSubstitutionTemplateLiteral(node) ||
+      ts.isTemplateExpression(node) ||
       ts.isNumericLiteral(node) ||
       node.kind === ts.SyntaxKind.TrueKeyword ||
       node.kind === ts.SyntaxKind.FalseKeyword ||
@@ -3185,6 +3469,25 @@ function staticConstant(
   active.add(node);
   try {
     if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return node.text;
+    if (ts.isTemplateExpression(node)) {
+      let result = node.head.text;
+      for (const span of node.templateSpans) {
+        const expression = staticConstant(
+          checker,
+          { node: span.expression, bindings: value.bindings, types: value.types },
+          active,
+        );
+        if (
+          typeof expression !== "string" &&
+          typeof expression !== "number" &&
+          typeof expression !== "boolean"
+        ) {
+          return undefined;
+        }
+        result += String(expression) + span.literal.text;
+      }
+      return result;
+    }
     if (ts.isNumericLiteral(node)) return Number(node.text);
     if (node.kind === ts.SyntaxKind.TrueKeyword) return true;
     if (node.kind === ts.SyntaxKind.FalseKeyword) return false;
@@ -3409,22 +3712,48 @@ function portableMemberName(lowering: PortableLowering, member: ts.NamedDeclarat
   if (!member.name || !ts.isComputedPropertyName(member.name)) {
     throw diagnostic(member, "Portable record properties require a named key.");
   }
-  const resolved = resolveStaticValue(
+  const computed = portableComputedName(lowering, member.name.expression);
+  if (computed) return computed;
+  if (
+    lowering.providedNames.length === 1 &&
+    ts.isObjectLiteralExpression(member.parent) &&
+    member.parent.properties.filter(({ name }) => name && ts.isComputedPropertyName(name))
+      .length === 1
+  ) {
+    return lowering.providedNames[0]!;
+  }
+  throw diagnostic(
+    member.name,
+    "Portable computed record keys must resolve to a compile-time string or number. " +
+      `Received ${lowering.checker.typeToString(
+        lowering.checker.getTypeAtLocation(member.name.expression),
+      )}.`,
+  );
+}
+
+function portableComputedName(
+  lowering: PortableLowering,
+  expression: ts.Expression,
+): string | undefined {
+  const value = staticConstant(
     lowering.checker,
     {
-      node: member.name.expression,
+      node: expression,
       bindings: lowering.staticBindings,
       types: lowering.typeSubstitutions,
     },
     new Set(),
   );
-  const value =
-    resolved?.node && ts.isExpression(resolved.node) ? unwrapExpression(resolved.node) : undefined;
-  if (value && (ts.isStringLiteral(value) || ts.isNumericLiteral(value))) return value.text;
-  throw diagnostic(
-    member.name,
-    "Portable computed record keys must resolve to a compile-time string or number.",
+  if (typeof value === "string" || typeof value === "number") return String(value);
+  const type = lowerPortableType(
+    lowering,
+    lowering.checker.getTypeAtLocation(expression),
+    expression,
   );
+  return type.kind === "literal" &&
+    (typeof type.value === "string" || typeof type.value === "number")
+    ? String(type.value)
+    : undefined;
 }
 
 function semanticSymbolName(symbol: ts.Symbol): string {
@@ -3572,6 +3901,13 @@ function normalizeSourceFiles(ir: SystemIR, root: string): SystemIR {
           transform: normalizeExpression(expression.transform),
           span,
         };
+      case "stream-distinct":
+        return {
+          ...expression,
+          source: normalizeExpression(expression.source),
+          select: normalizeExpression(expression.select),
+          span,
+        };
       case "closure":
         return {
           ...expression,
@@ -3631,6 +3967,14 @@ function normalizeSourceFiles(ir: SystemIR, root: string): SystemIR {
       if (statement.kind === "let" || statement.kind === "assign") {
         return {
           ...statement,
+          value: normalizeExpression(statement.value),
+          span: normalizeSpan(statement.span),
+        };
+      }
+      if (statement.kind === "property-assign") {
+        return {
+          ...statement,
+          target: normalizeExpression(statement.target),
           value: normalizeExpression(statement.value),
           span: normalizeSpan(statement.span),
         };

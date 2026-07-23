@@ -356,6 +356,18 @@ async function executeStatements(
         current.value = assign(statement.operator, current.value, value);
         break;
       }
+      case "property-assign": {
+        const target = await evaluate(statement.target, locals, dependencies, calls, functions);
+        if (!target || (typeof target !== "object" && typeof target !== "function")) {
+          throw new TypeError(`Cannot assign property ${JSON.stringify(statement.property)}.`);
+        }
+        const value = await evaluate(statement.value, locals, dependencies, calls, functions);
+        const current = Reflect.get(target, statement.property);
+        if (!Reflect.set(target, statement.property, assign(statement.operator, current, value))) {
+          throw new TypeError(`Cannot assign property ${JSON.stringify(statement.property)}.`);
+        }
+        break;
+      }
       case "expression":
         await evaluate(statement.expression, locals, dependencies, calls, functions);
         break;
@@ -680,6 +692,29 @@ async function evaluate(
         }
         return undefined;
       }
+      if (expression.method === "map") {
+        if (!Array.isArray(receiver)) throw new Error("map requires an array.");
+        const transform = arguments_[0];
+        if (typeof transform === "function") {
+          return Promise.all(receiver.map((value) => Reflect.apply(transform, undefined, [value])));
+        }
+        if (!isPortableClosure(transform))
+          throw new Error("Array.map requires a portable closure.");
+        const function_ = functions.get(transform.function);
+        if (!function_) throw new Error(`Unknown portable function ${transform.function}.`);
+        return Promise.all(
+          receiver.map((value) =>
+            executePortableFunction(
+              function_,
+              transform.captures,
+              [value],
+              dependencies,
+              calls,
+              functions,
+            ),
+          ),
+        );
+      }
       if (isRecord(receiver)) {
         const member = receiver[expression.method];
         if (typeof member === "function") return Reflect.apply(member, receiver, arguments_);
@@ -759,6 +794,39 @@ async function evaluate(
               return { done: true as const, value: undefined };
             },
           };
+        },
+      };
+    }
+    case "stream-distinct": {
+      const source = await evaluate(expression.source, locals, dependencies, calls, functions);
+      const select = await evaluate(expression.select, locals, dependencies, calls, functions);
+      if (!isAsyncIterable(source))
+        throw new Error("distinctStream requires an asynchronous stream.");
+      const run = async (value: unknown) => {
+        if (typeof select === "function") return Reflect.apply(select, undefined, [value]);
+        if (!isPortableClosure(select)) {
+          throw new Error("distinctStream requires a portable selector.");
+        }
+        const function_ = functions.get(select.function);
+        if (!function_) throw new Error(`Unknown portable function ${select.function}.`);
+        return executePortableFunction(
+          function_,
+          select.captures,
+          [value],
+          dependencies,
+          calls,
+          functions,
+        );
+      };
+      return {
+        async *[Symbol.asyncIterator]() {
+          let previous: string | undefined;
+          for await (const value of source) {
+            const selected = JSON.stringify(await run(value));
+            if (selected === previous) continue;
+            previous = selected;
+            yield value;
+          }
         },
       };
     }

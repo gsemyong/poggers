@@ -198,6 +198,7 @@ Adapter implementations organize by Platform, then by lifecycle:
 
 ```text
 adapters/
+  data/
   server/
     development/
     production/
@@ -206,6 +207,11 @@ adapters/
     production/
     ui/
 ```
+
+`adapters/data/` is the one shared Dependency-adapter boundary: its Turso
+implementation is mounted by both the web and server Platform adapters. Shared
+Dependency adapters are introduced only when the same implementation truly runs
+on several Platforms; otherwise code remains under its owning Platform.
 
 Adapter-root modules contain only coordination shared by concrete adapters:
 registry wiring, public-package source resolution, and the explicit web/server

@@ -1379,6 +1379,9 @@ function collectExpressions(statements: readonly StatementIR[]): ExpressionIR[] 
       statement.kind === "array-push"
     ) {
       visit(statement.value);
+    } else if (statement.kind === "property-assign") {
+      visit(statement.target);
+      visit(statement.value);
     } else if (statement.kind === "throw") visit(statement.value);
     else if (statement.kind === "expression") visit(statement.expression);
     else if (statement.kind === "if") {

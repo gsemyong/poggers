@@ -93,6 +93,12 @@ describe("web Platform Adapter", () => {
     ]);
     await Promise.all(result.entries.map(({ path }) => access(path)));
     const interfaceRoot = result.entries.find(({ kind }) => kind === "interface")!.path;
+    expect(
+      JSON.parse(await readFile(resolve(interfaceRoot, "assets.ir.json"), "utf8")),
+    ).toMatchObject({
+      version: 2,
+      crossOriginIsolated: true,
+    });
     const browserAssets = (await readdir(resolve(interfaceRoot, "assets")))
       .filter((path) => path.startsWith("app-") && path.endsWith(".js"))
       .map((path) => resolve(interfaceRoot, "assets", path));
@@ -126,6 +132,7 @@ type Browser = { Name: "browser-main"; Platform: Platform; UI: UI };
 type Worker = { Name: "browser-worker"; Platform: Platform };
 type ServiceWorker = { Name: "browser-service-worker"; Platform: Platform };
 type HttpClient = { request(input: { path: string }): Promise<Response> };
+type DataStore = { query(input: { collection: string }): Promise<string> };
 type Program<Environment, Contract extends object = {}> = Contract & { Environment: Environment };
 declare const featureContract: unique symbol;
 type Feature<Contract> = Readonly<{ readonly [featureContract]?: Contract }>;
@@ -138,7 +145,10 @@ function createSystem(definition: object): object {
 type Web = {
   Interface: { Platform: Platform };
   Programs: {
-    browser: Program<Browser, { Components: { Root: { Elements: { Root: "div" } } } }>;
+    browser: Program<Browser, {
+      Requires: { dataStore: DataStore };
+      Components: { Root: { Elements: { Root: "div" } } };
+    }>;
     telemetry: Program<Browser>;
     background: Program<Worker, { Requires: { http: HttpClient } }>;
     offline: Program<ServiceWorker>;

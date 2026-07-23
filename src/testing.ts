@@ -8,6 +8,7 @@ import { extname, resolve, sep } from "node:path";
 import { describe, test } from "vitest";
 
 import { createPlatformAdapters, platformAdapters } from "@/adapters/registry";
+import type { WebAssetManifest } from "@/adapters/web/pipeline";
 import { linkProgram } from "@/compiler/linker";
 import type { PlatformAdapterImplementation } from "@/contracts/platform";
 import {
@@ -19,6 +20,13 @@ import {
 } from "@/realization";
 
 export { createEntityFixture, createMemoryEventStore } from "@/features/entity.testing";
+export {
+  createDataBrowserFixture,
+  createDataFixture,
+  createMemoryDataStore,
+} from "@/features/data.testing";
+export { createWorkflowFixture, createWorkflowTestClock } from "@/features/workflow.testing";
+export type { WorkflowTestClock } from "@/features/workflow.testing";
 export { createUIContributionInstance } from "@/runtime/process";
 export { createPresentationFrame } from "@/runtime/presentation";
 
@@ -390,8 +398,15 @@ async function disposeProcesses(processes: readonly RunningProcess[]): Promise<v
 async function startStaticWebArtifact(directory: string, port: number): Promise<ProductionSystem> {
   const root = resolve(directory);
   const index = await readFile(resolve(root, "index.html"));
+  const manifest = JSON.parse(
+    await readFile(resolve(root, "assets.ir.json"), "utf8"),
+  ) as WebAssetManifest;
   const server = createHttpServer(async (request, response) => {
     try {
+      if (manifest.crossOriginIsolated) {
+        response.setHeader("cross-origin-embedder-policy", "require-corp");
+        response.setHeader("cross-origin-opener-policy", "same-origin");
+      }
       const pathname = decodeURIComponent(new URL(request.url ?? "/", "http://localhost").pathname);
       const candidate = resolve(root, `.${pathname}`);
       const inside = candidate === root || candidate.startsWith(`${root}${sep}`);

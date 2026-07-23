@@ -1,6 +1,6 @@
 import type { PresentationSourceIR } from "@/compiler/presentation";
 
-export const SYSTEM_IR_VERSION = 17 as const;
+export const SYSTEM_IR_VERSION = 19 as const;
 
 /** Serializable meaning owned and versioned by a compiler extension. */
 export type ExtensionIR =
@@ -109,6 +109,11 @@ export type ExpressionValueIR =
       transform: ExpressionIR;
     }>
   | Readonly<{
+      kind: "stream-distinct";
+      source: ExpressionIR;
+      select: ExpressionIR;
+    }>
+  | Readonly<{
       kind: "closure";
       function: string;
       captures: readonly ExpressionIR[];
@@ -145,6 +150,14 @@ export type StatementIR =
   | Readonly<{
       kind: "assign";
       name: string;
+      operator: "=" | "+=" | "-=" | "*=" | "/=" | "??=";
+      value: ExpressionIR;
+      span: SourceSpan;
+    }>
+  | Readonly<{
+      kind: "property-assign";
+      target: ExpressionIR;
+      property: string;
       operator: "=" | "+=" | "-=" | "*=" | "/=" | "??=";
       value: ExpressionIR;
       span: SourceSpan;

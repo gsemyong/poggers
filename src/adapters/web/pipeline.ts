@@ -83,6 +83,7 @@ type PreparedInterface = Readonly<{
   ir: SystemIR;
   presentationSources: ReadonlySet<string>;
   revision: number;
+  crossOriginIsolated: boolean;
   updateKind: "full" | "presentation";
   routeEntries: readonly WebRouteEntry[];
   workers: readonly WebWorkerEntry[];
@@ -129,10 +130,11 @@ type PreparedRouteDocument = Readonly<{
   request: false | Readonly<{ loader: boolean; view: WebRenderNodeIR }>;
 }>;
 
-export const WEB_ASSET_MANIFEST_VERSION = 1 as const;
+export const WEB_ASSET_MANIFEST_VERSION = 2 as const;
 
 export type WebAssetManifest = Readonly<{
   version: typeof WEB_ASSET_MANIFEST_VERSION;
+  crossOriginIsolated: boolean;
   assets: readonly Readonly<{
     path: string;
     etag: string;
@@ -216,6 +218,19 @@ function webInterfaceContract(
   };
 }
 
+function webInterfaceRequiresCrossOriginIsolation(ir: SystemIR, interfaceId: string): boolean {
+  const interface_ = ir.interfaces.find(({ id }) => id === interfaceId);
+  if (!interface_ || interface_.platform !== "web") {
+    throw new Error(`Unknown web interface ${JSON.stringify(interfaceId)}.`);
+  }
+  return ir.programs
+    .filter(
+      ({ interface: owner, environment }) =>
+        owner === interface_.feature && environment.platform === "web",
+    )
+    .some((program) => linkProgram(program).external.some(({ name }) => name === "dataStore"));
+}
+
 function collectCompiledWebComponents(
   ir: SystemIR,
   program: string,
@@ -280,6 +295,10 @@ export async function buildWebInterface(options: {
       { revision: 0, ir: options.ir, presentationSources: new Set(), outputSources: {} },
     );
     const contract = webInterfaceContract(prepared.ir, prepared.interface);
+    const crossOriginIsolated = webInterfaceRequiresCrossOriginIsolation(
+      prepared.ir,
+      prepared.interface,
+    );
     const compiledComponents = collectCompiledWebComponents(prepared.ir, contract.uiProgram);
     let routeDocuments = await prepareProductionDocuments(
       paths,
@@ -338,7 +357,7 @@ export async function buildWebInterface(options: {
       );
     }
     if (contract.installation || serviceWorkerModules.length) {
-      const assets = await createWebAssetManifest(outdir);
+      const assets = await createWebAssetManifest(outdir, crossOriginIsolated);
       const plan = createWebServiceWorkerPlan({
         installation: contract.installation,
         assets: assets.assets.filter(({ immutable }) => immutable).map(({ path }) => path),
@@ -360,7 +379,7 @@ export async function buildWebInterface(options: {
     await rm(resolve(outdir, "manifest.json"), { force: true });
     await writeFile(
       resolve(outdir, "assets.ir.json"),
-      `${JSON.stringify(await createWebAssetManifest(outdir))}\n`,
+      `${JSON.stringify(await createWebAssetManifest(outdir, crossOriginIsolated))}\n`,
     );
     return {
       directory: outdir,
@@ -385,7 +404,10 @@ export async function buildWebInterface(options: {
 }
 
 /** @internal Seals every public production file into one exact serving allowlist. */
-export async function createWebAssetManifest(directory: string): Promise<WebAssetManifest> {
+export async function createWebAssetManifest(
+  directory: string,
+  crossOriginIsolated = false,
+): Promise<WebAssetManifest> {
   const root = resolve(directory);
   const internal = new Set([
     "assets.ir.json",
@@ -430,7 +452,11 @@ export async function createWebAssetManifest(directory: string): Promise<WebAsse
         });
       }),
   );
-  return Object.freeze({ version: WEB_ASSET_MANIFEST_VERSION, assets: Object.freeze(assets) });
+  return Object.freeze({
+    version: WEB_ASSET_MANIFEST_VERSION,
+    crossOriginIsolated,
+    assets: Object.freeze(assets),
+  });
 }
 
 type ClientManifestChunk = Readonly<{
@@ -631,6 +657,7 @@ async function prepareInterface(
   await mkdir(work, { recursive: true });
   const { ir } = compilation;
   const contract = webInterfaceContract(ir, interfaceId);
+  const crossOriginIsolated = webInterfaceRequiresCrossOriginIsolation(ir, interfaceId);
   const revision = (previous?.revision ?? -1) + 1;
 
   const candidate = resolve(work, "interface.generated.ts");
@@ -782,6 +809,7 @@ async function prepareInterface(
     interface: interfaceId,
     presentationSources: compilation.presentationSources,
     revision,
+    crossOriginIsolated,
     updateKind,
     routeEntries,
     workers,
@@ -1264,6 +1292,10 @@ function presentationContractPlugin(
     name: "kit-presentation-contract",
     configureServer(server) {
       server.middlewares.use((request, response, next) => {
+        if (state.current.crossOriginIsolated) {
+          response.setHeader("cross-origin-embedder-policy", "require-corp");
+          response.setHeader("cross-origin-opener-policy", "same-origin");
+        }
         const location = new URL(request.url ?? "/", "http://kit.local");
         if (location.pathname.endsWith("/service-worker.generated.ts")) {
           response.setHeader("service-worker-allowed", "/");

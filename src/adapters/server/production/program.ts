@@ -229,6 +229,13 @@ ${this.#statements(contribution, function_.body, "completion", 3)}${canFallThrou
 ${indent}let ${left} = read_cell(&${binding(statement.name)});
 ${indent}write_cell(&${binding(statement.name)}, assign(${rustString(statement.operator)}, ${left}, ${right})?);\n`;
             }
+            case "property-assign": {
+              const target = this.#temporaryName("target");
+              const right = this.#temporaryName("right");
+              return `${indent}let ${target} = ${this.#expression(contribution, statement.target)};
+${indent}let ${right} = ${this.#expression(contribution, statement.value)};
+${indent}engine.assign_property(${target}, ${rustString(statement.property)}, ${rustString(statement.operator)}, ${right})?;\n`;
+            }
             case "expression":
               return `${indent}${this.#expression(contribution, statement.expression)};\n`;
             case "array-push": {
@@ -404,6 +411,8 @@ ${expression.entries
         return `Value::String(${this.#expression(contribution, expression.value)}.to_text())`;
       case "stream-map":
         return `engine.map_stream(${this.#expression(contribution, expression.source)}, ${this.#expression(contribution, expression.transform)}).await?`;
+      case "stream-distinct":
+        return `engine.distinct_stream(${this.#expression(contribution, expression.source)}, ${this.#expression(contribution, expression.select)}).await?`;
       case "closure": {
         const captures = expression.captures.map((capture, index) => {
           const name = this.#temporaryName(`capture_${index}`);

@@ -33,6 +33,11 @@ export type HttpServer = Readonly<{
   route(input: { path: string; handle(request: HttpRequest): Promise<HttpResponse> }): Disposable;
 }>;
 
+/** Host time suspension used by server Programs without owning a runtime timer. */
+export type Timer = Readonly<{
+  sleep(input: { until: number }): Promise<void>;
+}>;
+
 /** The default long-running server environment. */
 export type ServerProcess = Readonly<{
   Name: "server";

@@ -25,6 +25,13 @@ collects every Program contribution for a target and resolves each required
 Dependency once per Program instance. A Feature never imports another
 Feature's implementation.
 
+## Shipped Factories
+
+- [`Data`](./data.md) packages authorized event-sourced mutations, optimistic
+  browser behavior, typed live queries, and replaceable Turso projections.
+- [`Workflow`](./workflows.md) packages procedural durable execution, recorded
+  Dependency results, timers, signals, queries, replay, and lease recovery.
+
 Use [`examples/authenticated-crud`](../examples/authenticated-crud) for a
 multi-Feature pressure test and [`examples/basic`](../examples/basic) as the
 canonical workspace created by the CLI.

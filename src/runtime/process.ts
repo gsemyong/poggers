@@ -454,6 +454,17 @@ export class ResourceScope {
     );
   }
 
+  observeResult(value: unknown): void {
+    if (!isPromiseLike(value)) {
+      this.adopt(value);
+      return;
+    }
+    void Promise.resolve(value).then(
+      (resolved) => this.adopt(resolved),
+      () => undefined,
+    );
+  }
+
   action<Value>(run: () => Value): Value {
     if (!this.#active) throw new Error("Resource scope is disposed.");
     startBatch();
@@ -486,7 +497,6 @@ export class ResourceScope {
 
   dispose(): Promise<void> {
     if (this.#disposal) return this.#disposal;
-    this.#active = false;
     this.#disposal = this.#finishDisposal();
     return this.#disposal;
   }
@@ -500,6 +510,7 @@ export class ResourceScope {
       }
     }
     this.resources.length = 0;
+    this.#active = false;
 
     const iteratorResults = await Promise.allSettled(
       [...this.iterators].map((iterator) => iterator.return?.()),
@@ -964,7 +975,7 @@ export function bindDependenciesToScope(
         ? (...args: readonly unknown[]) => {
             if (!scope.active) throw new Error("Program contribution is disposed.");
             const result = Reflect.apply(value, undefined, args);
-            scope.adoptResult(result);
+            scope.observeResult(result);
             return wrap(result);
           }
         : (Object.create(null) as object);
@@ -975,7 +986,7 @@ export function bindDependenciesToScope(
           return (...args: readonly unknown[]) => {
             if (!scope.active) throw new Error("Program contribution is disposed.");
             const result = Reflect.apply(next, value, args);
-            if (!isAsyncIterableValue(result)) scope.adoptResult(result);
+            if (!isAsyncIterableValue(result)) scope.observeResult(result);
             return wrap(result);
           };
         }

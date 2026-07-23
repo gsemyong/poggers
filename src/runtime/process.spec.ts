@@ -1,6 +1,6 @@
 import { effect } from "alien-signals";
 import fc from "fast-check";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 
 import type { ProgramManifest } from "@/compiler/ir";
 import type { Feature } from "@/core/feature";
@@ -235,6 +235,33 @@ describe("Program runtime", () => {
     await instance.dispose();
     await instance.dispose();
     expect(events).toEqual(["start:store", "dispose:api", "dispose:second", "dispose:first"]);
+  });
+
+  test("keeps Dependencies active while an owned resource is being disposed", async () => {
+    const close = vi.fn(async () => undefined);
+    const instance = createProgramContributionInstance(
+      {
+        start({ dependencies }) {
+          return {
+            api: {
+              async [Symbol.asyncDispose]() {
+                await (dependencies.connection as { close(input: {}): Promise<void> }).close({});
+              },
+            },
+          };
+        },
+      },
+      {
+        address: { program: "server", feature: "database" },
+        provides: ["api"],
+        dependencies: { connection: { close } },
+      },
+    );
+
+    await instance.start();
+    await instance.dispose();
+
+    expect(close).toHaveBeenCalledOnce();
   });
 
   test("binds immutable Dependency objects without violating Proxy invariants", async () => {

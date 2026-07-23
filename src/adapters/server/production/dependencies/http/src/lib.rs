@@ -63,6 +63,7 @@ struct WebArtifact {
     origin: Arc<str>,
     root: Arc<PathBuf>,
     document: Arc<WebDocument>,
+    cross_origin_isolated: bool,
     assets: Arc<BTreeMap<String, WebAsset>>,
 }
 
@@ -93,6 +94,8 @@ struct WebAsset {
 #[serde(deny_unknown_fields)]
 struct WebAssetManifest {
     version: u64,
+    #[serde(rename = "crossOriginIsolated")]
+    cross_origin_isolated: bool,
     assets: Vec<WebAssetEntry>,
 }
 
@@ -413,13 +416,14 @@ fn load_web_artifact(identity: &str, origin: &str, directory: &str) -> NativeRes
     let root = PathBuf::from(directory);
     let document = WebDocument::load(&root)
         .map_err(|error| NativeError::new("InvalidWebArtifact", format!("{directory}: {error}")))?;
-    let assets = load_assets(&root)
+    let (cross_origin_isolated, assets) = load_assets(&root)
         .map_err(|error| NativeError::new("InvalidWebArtifact", format!("{directory}: {error}")))?;
     Ok(WebArtifact {
         identity: Arc::from(identity),
         origin: Arc::from(origin),
         root: Arc::new(root),
         document: Arc::new(document),
+        cross_origin_isolated,
         assets: Arc::new(assets),
     })
 }
@@ -625,10 +629,37 @@ async fn dispatch(State(state): State<Arc<HttpState>>, request: Request<Body>) -
 }
 
 async fn web_response(state: Arc<HttpState>, request: Request<Body>) -> Response<Body> {
-    let deadline = Instant::now() + state.request_timeout;
     let Some(web) = select_web_artifact(&state.web, request.headers()) else {
         return response(404, "Not found.");
     };
+    let cross_origin_isolated = web.cross_origin_isolated;
+    let response = web_artifact_response(state, request, web).await;
+    web_runtime_headers(cross_origin_isolated, response)
+}
+
+fn web_runtime_headers(
+    cross_origin_isolated: bool,
+    mut response: Response<Body>,
+) -> Response<Body> {
+    if cross_origin_isolated {
+        response.headers_mut().insert(
+            "cross-origin-embedder-policy",
+            HeaderValue::from_static("require-corp"),
+        );
+        response.headers_mut().insert(
+            "cross-origin-opener-policy",
+            HeaderValue::from_static("same-origin"),
+        );
+    }
+    response
+}
+
+async fn web_artifact_response(
+    state: Arc<HttpState>,
+    request: Request<Body>,
+    web: WebArtifact,
+) -> Response<Body> {
+    let deadline = Instant::now() + state.request_timeout;
     if request.method() != axum::http::Method::GET && request.method() != axum::http::Method::HEAD {
         return Response::builder()
             .status(StatusCode::METHOD_NOT_ALLOWED)
@@ -1289,12 +1320,12 @@ fn deferred_web_response(
         .expect("deferred web response")
 }
 
-fn load_assets(root: &Path) -> Result<BTreeMap<String, WebAsset>, String> {
+fn load_assets(root: &Path) -> Result<(bool, BTreeMap<String, WebAsset>), String> {
     let source = std::fs::read_to_string(root.join("assets.ir.json"))
         .map_err(|error| format!("read web assets: {error}"))?;
     let manifest: WebAssetManifest =
         serde_json::from_str(&source).map_err(|error| format!("decode web assets: {error}"))?;
-    if manifest.version != 1 {
+    if manifest.version != 2 {
         return Err("unsupported web asset manifest version".to_owned());
     }
     let canonical_root =
@@ -1335,7 +1366,7 @@ fn load_assets(root: &Path) -> Result<BTreeMap<String, WebAsset>, String> {
             return Err(format!("duplicate web asset {}", entry.path));
         }
     }
-    Ok(assets)
+    Ok((manifest.cross_origin_isolated, assets))
 }
 
 fn manifest_asset_path(value: &str) -> Result<PathBuf, String> {
@@ -1708,5 +1739,29 @@ mod tests {
             cache.lookup("a", policy()),
             WebCacheLookup::Stale { refresh: true, .. }
         ));
+    }
+
+    #[test]
+    fn isolated_web_artifacts_preserve_their_required_response_policy() {
+        let isolated = web_runtime_headers(true, response(200, "ok"));
+        assert_eq!(
+            isolated.headers()["cross-origin-embedder-policy"],
+            "require-corp"
+        );
+        assert_eq!(
+            isolated.headers()["cross-origin-opener-policy"],
+            "same-origin"
+        );
+        let ordinary = web_runtime_headers(false, response(200, "ok"));
+        assert!(
+            !ordinary
+                .headers()
+                .contains_key("cross-origin-embedder-policy")
+        );
+        assert!(
+            !ordinary
+                .headers()
+                .contains_key("cross-origin-opener-policy")
+        );
     }
 }

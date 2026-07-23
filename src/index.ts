@@ -31,6 +31,24 @@ export type {
   EntitySynchronization,
   EntityValue,
 } from "@/features/entity";
+export { bindDataPrincipal, createData } from "@/features/data";
+export type {
+  DataApi,
+  DataAuthorization,
+  DataBrowserFeature,
+  DataCondition,
+  DataImplementation,
+  DataMatch,
+  DataModel,
+  DataModelDefinition,
+  DataQuery,
+  DataSearch,
+  DataSearchSnapshot,
+  DataServerFeature,
+  DataService,
+  DataSnapshot,
+  DefinedData,
+} from "@/features/data";
 export { createIdentity } from "@/features/identity";
 export type {
   AuthenticatedUser,
@@ -44,3 +62,18 @@ export type {
   IdentityServerFeature,
   IdentityService,
 } from "@/features/identity";
+export { createWorkflow, WorkflowExecutionFailure } from "@/features/workflow";
+export type {
+  DefinedWorkflow,
+  WorkflowApi,
+  WorkflowError,
+  WorkflowFeature,
+  WorkflowImplementation,
+  WorkflowJournalEvent,
+  WorkflowModel,
+  WorkflowModelDefinition,
+  WorkflowRetry,
+  WorkflowRunContext,
+  WorkflowSnapshot,
+  WorkflowStatus,
+} from "@/features/workflow";

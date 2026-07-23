@@ -273,7 +273,8 @@ describe("web asset manifest", () => {
       const manifest = await createWebAssetManifest(directory);
 
       expect(manifest).toEqual({
-        version: 1,
+        version: 2,
+        crossOriginIsolated: false,
         assets: [
           {
             path: "/assets/app-abcdefgh.js",
@@ -290,6 +291,7 @@ describe("web asset manifest", () => {
           },
         ],
       });
+      expect((await createWebAssetManifest(directory, true)).crossOriginIsolated).toBe(true);
     } finally {
       await rm(directory, { force: true, recursive: true });
     }

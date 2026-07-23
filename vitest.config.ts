@@ -36,6 +36,7 @@ export default defineConfig({
   test: {
     clearMocks: true,
     include: ["src/**/*.spec.ts", "examples/**/*.spec.ts", "playground/**/*.spec.ts"],
+    maxWorkers: 4,
     restoreMocks: true,
   },
 });

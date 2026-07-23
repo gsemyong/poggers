@@ -1,3 +1,4 @@
+import { createTursoDataStore, type DataStore, type TursoDatabase } from "@/adapters/data/turso";
 import { resolveWebDestination, type WebRouteIR } from "@/adapters/web/routing";
 import type { DependencyContractIR } from "@/compiler/ir";
 import type {
@@ -5,7 +6,6 @@ import type {
   LocalStore,
   Navigation,
   WebHost,
-  WebHostDependency,
   WebServiceWorkerRuntime,
 } from "@/platforms/web/platform";
 import type { WebDestination } from "@/platforms/web/routing";
@@ -18,14 +18,17 @@ export type WebHostOptions<Dependencies extends readonly DependencyContractIR[]>
   routes?: readonly WebRouteIR[];
 }>;
 
+type WebAdapterHost = WebHost & Readonly<{ dataStore: DataStore }>;
+type WebAdapterHostDependency = keyof WebAdapterHost;
+
 /** Creates exactly the browser-owned Dependencies required by one Program. */
 export function createWebHost<const Dependencies extends readonly DependencyContractIR[]>(
   input: WebHostOptions<Dependencies>,
-): Pick<WebHost, Extract<Dependencies[number]["name"], keyof WebHost>>;
+): Pick<WebAdapterHost, Extract<Dependencies[number]["name"], keyof WebAdapterHost>>;
 export function createWebHost(
   input: WebHostOptions<readonly DependencyContractIR[]>,
 ): Readonly<Record<string, unknown>> {
-  const requested = new Set<WebHostDependency>();
+  const requested = new Set<WebAdapterHostDependency>();
   for (const dependency of input.dependencies) {
     if (!isWebHostDependency(dependency.name)) {
       throw new Error(`The web adapter cannot implement Dependency ${dependency.name}.`);
@@ -33,7 +36,7 @@ export function createWebHost(
     requested.add(dependency.name);
   }
   const host: {
-    -readonly [Dependency in keyof WebHost]?: WebHost[Dependency];
+    -readonly [Dependency in keyof WebAdapterHost]?: WebAdapterHost[Dependency];
   } = {};
 
   if (requested.has("http")) {
@@ -43,6 +46,22 @@ export function createWebHost(
         return fetch(new URL(path, origin), { ...init, credentials: "include" });
       },
     });
+  }
+  if (requested.has("dataStore")) {
+    if (!globalThis.crossOriginIsolated || typeof SharedArrayBuffer !== "function") {
+      throw new Error(
+        'The web "dataStore" Dependency requires cross-origin isolation. ' +
+          "The serving adapter must preserve its COOP and COEP response headers.",
+      );
+    }
+    host.dataStore = createTursoDataStore(
+      import("@tursodatabase/database-wasm/vite").then(
+        async ({ connect }) =>
+          (await connect("kit-data.db", {
+            experimental: ["index_method"],
+          })) as unknown as TursoDatabase,
+      ),
+    );
   }
   if (requested.has("storage")) host.storage = createLocalStore();
   if (requested.has("identifiers")) {
@@ -118,10 +137,16 @@ export function createWebHost(
   return conformExternalDependencies(input.dependencies, host);
 }
 
-function isWebHostDependency(value: string): value is WebHostDependency {
-  return ["http", "identifiers", "navigation", "scheduler", "serviceWorker", "storage"].includes(
-    value,
-  );
+function isWebHostDependency(value: string): value is WebAdapterHostDependency {
+  return [
+    "dataStore",
+    "http",
+    "identifiers",
+    "navigation",
+    "scheduler",
+    "serviceWorker",
+    "storage",
+  ].includes(value);
 }
 
 type ExtendableEventLike = Readonly<{

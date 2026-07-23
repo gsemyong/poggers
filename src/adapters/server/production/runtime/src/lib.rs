@@ -22,8 +22,10 @@ pub enum Value {
     String(String),
     Array(Arc<Mutex<Vec<Value>>>),
     Record(Arc<BTreeMap<String, Value>>),
+    MutableRecord(Arc<Mutex<BTreeMap<String, Value>>>),
     Function(NativeFunction),
     Dependency(String),
+    InterceptedDependency(NativeFunction),
     Stream(Arc<tokio::sync::Mutex<NativeStream>>),
     Error(Arc<NativeError>),
 }
@@ -53,8 +55,10 @@ impl fmt::Debug for Value {
             Self::String(value) => value.fmt(formatter),
             Self::Array(value) => lock(value).fmt(formatter),
             Self::Record(value) => value.fmt(formatter),
+            Self::MutableRecord(value) => lock(value).fmt(formatter),
             Self::Function(_) => formatter.write_str("NativeFunction"),
             Self::Dependency(value) => write!(formatter, "Dependency({value})"),
+            Self::InterceptedDependency(_) => formatter.write_str("InterceptedDependency"),
             Self::Stream(_) => formatter.write_str("Stream"),
             Self::Error(value) => value.fmt(formatter),
         }
@@ -244,6 +248,25 @@ fn validate_value(value: &Value, contract: &TypeContract, path: &str) -> NativeR
             .any(|variant| validate_value(value, variant, path).is_ok()),
         TypeContract::Record(fields) => match value {
             Value::Record(values) => {
+                for field in fields {
+                    match values.get(field.name) {
+                        Some(Value::Undefined) if field.optional => {}
+                        Some(value) => {
+                            validate_value(value, &field.value, &format!("{path}.{}", field.name))?
+                        }
+                        None if field.optional => {}
+                        None => {
+                            return Err(NativeError::new(
+                                "DependencyContractViolation",
+                                format!("{path} is missing field {:?}.", field.name),
+                            ));
+                        }
+                    }
+                }
+                true
+            }
+            Value::MutableRecord(values) => {
+                let values = lock(values);
                 for field in fields {
                     match values.get(field.name) {
                         Some(Value::Undefined) if field.optional => {}
@@ -468,6 +491,23 @@ impl Engine {
         })))
     }
 
+    pub async fn distinct_stream(&self, source: Value, select: Value) -> NativeResult<Value> {
+        let iterator = self.method(source, "iterator", Vec::new()).await?;
+        let engine = self.clone();
+        Ok(Value::stream(Box::pin(async_stream::try_stream! {
+            let mut previous: Option<serde_json::Value> = None;
+            while let Some(value) = engine.next(iterator.clone()).await? {
+                let selected = engine.invoke(select.clone(), vec![value.clone()]).await?;
+                let selected = selected.to_json()?;
+                if previous.as_ref() == Some(&selected) {
+                    continue;
+                }
+                previous = Some(selected);
+                yield value;
+            }
+        })))
+    }
+
     pub async fn call_dependency(
         &self,
         name: &str,
@@ -485,6 +525,25 @@ impl Engine {
             )
         })?;
         dependency.call(self.clone(), operation, input).await
+    }
+
+    pub fn assign_property(
+        &self,
+        target: Value,
+        property: &str,
+        operator: &str,
+        right: Value,
+    ) -> NativeResult<()> {
+        let Value::MutableRecord(record) = target else {
+            return Err(NativeError::new(
+                "TypeError",
+                format!("Cannot assign property {property:?} on {target:?}."),
+            ));
+        };
+        let mut record = lock(&record);
+        let left = record.get(property).cloned().unwrap_or(Value::Undefined);
+        record.insert(property.to_owned(), assign(operator, left, right)?);
+        Ok(())
     }
 
     pub fn method(
@@ -505,6 +564,15 @@ impl Engine {
                     )
                     .await;
             }
+            if let Value::InterceptedDependency(function) = &receiver {
+                let input = arguments.into_iter().next().unwrap_or(Value::Undefined);
+                return engine
+                    .invoke(
+                        Value::Function(function.clone()),
+                        vec![Value::String(method), input],
+                    )
+                    .await;
+            }
             if method == "find" {
                 let values = receiver.as_array()?.lock().expect("array lock").clone();
                 let predicate = arguments
@@ -521,6 +589,18 @@ impl Engine {
                     }
                 }
                 return Ok(Value::Undefined);
+            }
+            if method == "map" {
+                let values = receiver.as_array()?.lock().expect("array lock").clone();
+                let transform = arguments
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| NativeError::new("TypeError", "map requires a transform."))?;
+                let mut mapped = Vec::with_capacity(values.len());
+                for value in values {
+                    mapped.push(engine.invoke(transform.clone(), vec![value]).await?);
+                }
+                return Ok(Value::array(mapped));
             }
             if method == "startsWith" {
                 let prefix = arguments
@@ -549,6 +629,16 @@ impl Engine {
                         })?;
                         engine.invoke(function, Vec::new()).await
                     }
+                    Value::MutableRecord(record) => {
+                        let function =
+                            lock(&record)
+                                .get("@asyncIterator")
+                                .cloned()
+                                .ok_or_else(|| {
+                                    NativeError::new("TypeError", "Value has no async iterator.")
+                                })?;
+                        engine.invoke(function, Vec::new()).await
+                    }
                     _ => Err(NativeError::new(
                         "TypeError",
                         "Value has no async iterator.",
@@ -559,6 +649,13 @@ impl Engine {
                 && let Some(function) = record.get(&method)
             {
                 return engine.invoke(function.clone(), arguments).await;
+            }
+            let mutable_method = match &receiver {
+                Value::MutableRecord(record) => lock(record).get(&method).cloned(),
+                _ => None,
+            };
+            if let Some(function) = mutable_method {
+                return engine.invoke(function, arguments).await;
             }
             if method == "next" {
                 return Ok(match engine.next(receiver).await? {
@@ -587,14 +684,22 @@ impl Engine {
     }
 
     async fn dispose(&self, value: Value) -> NativeResult<()> {
-        let Value::Record(record) = value else {
-            return Ok(());
+        let dispose = match value {
+            Value::Record(record) => record
+                .get("@asyncDispose")
+                .or_else(|| record.get("@dispose"))
+                .cloned(),
+            Value::MutableRecord(record) => {
+                let record = lock(&record);
+                record
+                    .get("@asyncDispose")
+                    .or_else(|| record.get("@dispose"))
+                    .cloned()
+            }
+            _ => None,
         };
-        if let Some(dispose) = record
-            .get("@asyncDispose")
-            .or_else(|| record.get("@dispose"))
-        {
-            self.invoke(dispose.clone(), Vec::new()).await?;
+        if let Some(dispose) = dispose {
+            self.invoke(dispose, Vec::new()).await?;
         }
         Ok(())
     }
@@ -611,12 +716,31 @@ impl Value {
         Self::Record(Arc::new(values))
     }
 
+    pub fn mutable_record(values: BTreeMap<String, Value>) -> Self {
+        Self::MutableRecord(Arc::new(Mutex::new(values)))
+    }
+
+    pub fn into_mutable_record(self) -> NativeResult<Self> {
+        match self {
+            Self::Record(values) => Ok(Self::mutable_record((*values).clone())),
+            Self::MutableRecord(_) => Ok(self),
+            value => Err(NativeError::new(
+                "TypeError",
+                format!("Expected record, received {value:?}."),
+            )),
+        }
+    }
+
     pub fn array(values: Vec<Value>) -> Self {
         Self::Array(Arc::new(Mutex::new(values)))
     }
 
     pub fn stream(stream: NativeStream) -> Self {
         Self::Stream(Arc::new(tokio::sync::Mutex::new(stream)))
+    }
+
+    pub fn intercepted_dependency(function: NativeFunction) -> Self {
+        Self::InterceptedDependency(function)
     }
 
     pub fn is_undefined(&self) -> bool {
@@ -693,6 +817,15 @@ impl Value {
                 }
                 Ok(JsonValue::Object(result))
             }
+            Self::MutableRecord(values) => {
+                let mut result = JsonMap::new();
+                for (name, value) in lock(values).iter() {
+                    if !matches!(value, Self::Undefined) {
+                        result.insert(name.clone(), value.canonical_json()?);
+                    }
+                }
+                Ok(JsonValue::Object(result))
+            }
             _ => self.to_json(),
         }
     }
@@ -728,6 +861,15 @@ impl Value {
                 }
                 Ok(JsonValue::Object(result))
             }
+            Self::MutableRecord(values) => {
+                let mut result = JsonMap::new();
+                for (name, value) in lock(values).iter() {
+                    if !matches!(value, Self::Undefined) {
+                        result.insert(name.clone(), value.to_json()?);
+                    }
+                }
+                Ok(JsonValue::Object(result))
+            }
             Self::Error(value) => Ok(JsonValue::String(value.message.clone())),
             _ => Err(NativeError::new("TypeError", "Value is not serializable.")),
         }
@@ -736,6 +878,7 @@ impl Value {
     pub fn as_record(&self) -> NativeResult<Arc<BTreeMap<String, Value>>> {
         match self {
             Self::Record(value) => Ok(value.clone()),
+            Self::MutableRecord(value) => Ok(Arc::new(lock(value).clone())),
             _ => Err(NativeError::new(
                 "TypeError",
                 format!("Expected record, received {self:?}."),
@@ -799,9 +942,12 @@ impl Value {
                 .map(Value::to_text)
                 .collect::<Vec<_>>()
                 .join(","),
-            Self::Record(_) => "[object Object]".to_owned(),
+            Self::Record(_) | Self::MutableRecord(_) => "[object Object]".to_owned(),
             Self::Error(value) => format!("{}: {}", value.name, value.message),
-            Self::Function(_) | Self::Dependency(_) | Self::Stream(_) => format!("{self:?}"),
+            Self::Function(_)
+            | Self::Dependency(_)
+            | Self::InterceptedDependency(_)
+            | Self::Stream(_) => format!("{self:?}"),
         }
     }
 
@@ -811,6 +957,9 @@ impl Value {
         }
         match self {
             Self::Record(value) => Ok(value.get(name).cloned().unwrap_or(Self::Undefined)),
+            Self::MutableRecord(value) => {
+                Ok(lock(value).get(name).cloned().unwrap_or(Self::Undefined))
+            }
             Self::Error(value) => Ok(match name {
                 "name" => Self::String(value.name.clone()),
                 "message" => Self::String(value.message.clone()),

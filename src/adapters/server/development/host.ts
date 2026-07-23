@@ -18,18 +18,30 @@ import {
   type StoredMsg,
 } from "@nats-io/jetstream";
 import { connect } from "@nats-io/transport-node";
+import { connect as connectTurso } from "@tursodatabase/database";
 import { betterAuth } from "better-auth";
 import { getMigrations } from "better-auth/db/migration";
 
+import { createTursoDataStore, type TursoDatabase } from "@/adapters/data/turso";
+import { createDevelopmentWorkflowRuntime } from "@/adapters/server/development/workflow";
 import type { DependencyContractIR } from "@/compiler/ir";
+import type { DataStore } from "@/features/data";
 import type { Clock, EventStore, Identifiers, StoredEvent } from "@/features/entity";
 import type { AuthenticationBackend } from "@/features/identity";
-import type { HttpField, HttpRequest, HttpResponse, HttpServer } from "@/platforms/server/platform";
+import type { WorkflowRuntime } from "@/features/workflow";
+import type {
+  HttpField,
+  HttpRequest,
+  HttpResponse,
+  HttpServer,
+  Timer,
+} from "@/platforms/server/platform";
 import { conformExternalDependencies } from "@/runtime/process";
 
 export type NodeHostOptions = Readonly<{
   directory?: string;
   database?: string;
+  dataDatabase?: string;
   host?: string;
   port?: number;
   shutdownTimeout?: number;
@@ -53,9 +65,12 @@ type ReloadableHttpServer = HttpServer &
 
 export type NodeHost<Event> = Readonly<{
   authentication: AuthenticationBackend;
+  dataStore: DataStore & AsyncDisposable;
   events: HostedEventStore<Event>;
   identifiers: Identifiers;
   clock: Clock;
+  timer: Timer;
+  workflowRuntime: WorkflowRuntime;
   http: HttpServer & AsyncDisposable & Readonly<{ locations: readonly string[] }>;
 }>;
 export type NodeHostDependency = keyof NodeHost<unknown>;
@@ -88,9 +103,12 @@ export async function createNodeHost<Event = unknown>(
   const available: readonly NodeHostDependency[] = [
     "authentication",
     "clock",
+    "dataStore",
     "events",
     "http",
     "identifiers",
+    "timer",
+    "workflowRuntime",
   ];
   const requested = new Set(input.dependencies.map(({ name }) => name));
   for (const dependency of requested) {
@@ -125,9 +143,12 @@ export async function createNodeHost<Event = unknown>(
   }
   const result: {
     authentication?: AuthenticationBackend;
+    dataStore?: DataStore & AsyncDisposable;
     events?: HostedEventStore<Event>;
     identifiers?: Identifiers;
     clock?: Clock;
+    timer?: Timer;
+    workflowRuntime?: WorkflowRuntime;
     http?: HttpServer & AsyncDisposable & Readonly<{ locations: readonly string[] }>;
   } = {};
   try {
@@ -171,6 +192,18 @@ export async function createNodeHost<Event = unknown>(
         [Symbol.dispose]: closeDatabase,
       });
     }
+    if (requested.has("dataStore")) {
+      const path =
+        input.dataDatabase ??
+        process.env.KIT_DATA_DATABASE ??
+        resolve(input.directory ?? process.cwd(), ".data/data.turso");
+      if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
+      result.dataStore = createTursoDataStore(
+        connectTurso(path, {
+          experimental: ["index_method"],
+        }) as unknown as Promise<TursoDatabase>,
+      );
+    }
     if (requested.has("events")) {
       result.events =
         eventStore.kind === "jetstream"
@@ -179,6 +212,17 @@ export async function createNodeHost<Event = unknown>(
     }
     if (requested.has("identifiers")) result.identifiers = { create: () => randomUUID() };
     if (requested.has("clock")) result.clock = { now: () => Date.now() };
+    if (requested.has("timer")) {
+      result.timer = {
+        async sleep({ until }) {
+          const delay = Math.max(0, until - Date.now());
+          await new Promise<void>((resolve) => setTimeout(resolve, delay));
+        },
+      };
+    }
+    if (requested.has("workflowRuntime")) {
+      result.workflowRuntime = createDevelopmentWorkflowRuntime();
+    }
     if (requested.has("http")) {
       result.http = await createNodeHttpServer({
         host,
@@ -192,6 +236,7 @@ export async function createNodeHost<Event = unknown>(
     return conformExternalDependencies(input.dependencies, result);
   } catch (error) {
     await result.http?.[Symbol.asyncDispose]();
+    await result.dataStore?.[Symbol.asyncDispose]();
     await disposeHostedEventStore(result.events);
     closeDatabase();
     throw error;

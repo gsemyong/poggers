@@ -17,6 +17,12 @@ importers:
       '@tanstack/virtual-core':
         specifier: ^3.17.6
         version: 3.17.6
+      '@tursodatabase/database':
+        specifier: 0.7.1
+        version: 0.7.1
+      '@tursodatabase/database-wasm':
+        specifier: 0.7.1
+        version: 0.7.1
       '@typescript/typescript6':
         specifier: ^6.0.2
         version: 6.0.2
@@ -133,14 +139,26 @@ packages:
   '@emnapi/core@1.11.1':
     resolution: {integrity: sha512-RSvbQmHzdKzNsLYa/wHrbc3KN4sYLKAdPZxqiM2HATqv/SBk2/ENSHpvXGaLOMcsAyz0poEGqkmmKYG3OWiJEQ==}
 
+  '@emnapi/core@1.8.1':
+    resolution: {integrity: sha512-AvT9QFpxK0Zd8J0jopedNm+w/2fIzvtPKPjqyw9jwvBaReTTqPBk9Hixaz7KbjimP+QNz605/XnjFcDAL2pqBg==}
+
   '@emnapi/runtime@1.11.1':
     resolution: {integrity: sha512-vgj7R3y3Wgx24IQaGPA/R6YFXLHVMOZ0uVEyIQPaWs+rd1AzfEMXlAC22FYwO1XkKR6NPsq7mUandH8oIRdZFw==}
+
+  '@emnapi/runtime@1.8.1':
+    resolution: {integrity: sha512-mehfKSMWjjNol8659Z8KxEMrdSJDDot5SXMq00dM8BN4o+CLNXQ0xH2V7EchNHV4RmbZLmmPdEaXZc5H2FXmDg==}
+
+  '@emnapi/wasi-threads@1.1.0':
+    resolution: {integrity: sha512-WI0DdZ8xFSbgMjR1sFsKABJ/C5OnRrjT06JXbZKexJGrDuPTzZdDYfFlsgcCXCyf+suG5QU2e/y1Wo2V/OapLQ==}
 
   '@emnapi/wasi-threads@1.2.2':
     resolution: {integrity: sha512-c95qOXkHdydNKhscBTebqEC1CVAZpyqOfVfBzQ1qgzyl3gfeldUjIggDbIZgDKsHLgnsM+igH7TJ/eAasaVuMA==}
 
   '@jridgewell/sourcemap-codec@1.5.5':
     resolution: {integrity: sha512-cYQ9310grqxueWbl+WuIUIaiUaDcj7WOq5fVhEljNVgRfOUhY9fy2zTvfoqWsnebh8Sl70VScFbICvJnLKB0Og==}
+
+  '@napi-rs/wasm-runtime@1.0.7':
+    resolution: {integrity: sha512-SeDnOO0Tk7Okiq6DbXmmBODgOAb9dp9gjlphokTUxmt8U3liIP1ZsozBahH69j/RJv+Rfs6IwUKHTgQYJ/HBAw==}
 
   '@napi-rs/wasm-runtime@1.1.6':
     resolution: {integrity: sha512-ZLv/JdUfkvOy9eCnnBaGfiO+XimbjebAeO+MRQqD/B+FR1tnRN0tpKSJHRbE8sFfS6aqsXZ67TQjfwfsxULVbg==}
@@ -528,6 +546,40 @@ packages:
 
   '@tanstack/virtual-core@3.17.6':
     resolution: {integrity: sha512-h0/Ebo18CkOrChlQIhNtQkM5ySUnh/GumQ/D1st3hG2HWUPEF+ILUc2k29UtivCi/9G7w7G3/f7Xyd5cCFbKBw==}
+
+  '@tursodatabase/database-common@0.7.1':
+    resolution: {integrity: sha512-tyEKiRJDZSqLTbJQYhvY9Q2pGbBMwhKb8YS5T9TNOaDy1HvZMDbiypYqvtBw04f02QladUIsmpVBlsmFDb+RFA==}
+
+  '@tursodatabase/database-darwin-arm64@0.7.1':
+    resolution: {integrity: sha512-lTki3P+yH5GawkBL2zmc0hU7nJQ92WCiKlb3XDfRpkX6UukwmnuAZAYM0oWK5rbOzBd0plZUGdItZGjwM+lPPw==}
+    cpu: [arm64]
+    os: [darwin]
+
+  '@tursodatabase/database-linux-arm64-gnu@0.7.1':
+    resolution: {integrity: sha512-28dQmMUm1Nzvc2B6lRz6sbIRt5bJBVrnRdy2LpEUnYbU1aTvgLsUgfl4NQONbaaKTGzeKdxe8wONjfwkPbgsaA==}
+    cpu: [arm64]
+    os: [linux]
+    libc: [glibc]
+
+  '@tursodatabase/database-linux-x64-gnu@0.7.1':
+    resolution: {integrity: sha512-8gENsVswYpwNeuRv/MQJ+aqqT0cwRaDxoaPCeST4IDfzLihl8C5qOrzqJ315pEOCquMKQNVsH8EGPmdjJd7l4g==}
+    cpu: [x64]
+    os: [linux]
+    libc: [glibc]
+
+  '@tursodatabase/database-wasm-common@0.7.1':
+    resolution: {integrity: sha512-+T1ftIyh/isPeM5FmNFCaW/7aExS1N/PLl9BdlBtEeCTYJX7LEck9FYN8lh7rr753bYv/QwQ4wzGCAZPSS+y5w==}
+
+  '@tursodatabase/database-wasm@0.7.1':
+    resolution: {integrity: sha512-KyoHKDzOgo+xgvXLQyqxmuCHSY3C4UraycyVNodl+Qa0tl0TcF0/6z0FzkofAKI2Ja0fuJWX+dnDy0kBxdzvbA==}
+
+  '@tursodatabase/database-win32-x64-msvc@0.7.1':
+    resolution: {integrity: sha512-+O3k4VPTlgOvzcRfogep8Tsf6MjwZ9BAzC7QD2QAIYZUvraqcXvv+dZTgZnkRJ6XI5Fu/3ePr8a6SkqbXjhoMA==}
+    cpu: [x64]
+    os: [win32]
+
+  '@tursodatabase/database@0.7.1':
+    resolution: {integrity: sha512-RPEkpAoxKk0aY8spsUpT0MID7AUq7CHnqHOkA0zTG546XPkP/mkkQr1ZwpUer69z4BItSaDq+OQ3XrxVOFfsHg==}
 
   '@tybys/wasm-util@0.10.3':
     resolution: {integrity: sha512-F3fo1MYrRJYL3zER0OUOmkutjr1Vp23m7OsSgp7nq4SP6OqX6C/56XFIPAl5bt3zaBRjmW7SGz3u/6LwFpYcOg==}
@@ -1170,10 +1222,23 @@ snapshots:
       tslib: 2.8.1
     optional: true
 
+  '@emnapi/core@1.8.1':
+    dependencies:
+      '@emnapi/wasi-threads': 1.1.0
+      tslib: 2.8.1
+
   '@emnapi/runtime@1.11.1':
     dependencies:
       tslib: 2.8.1
     optional: true
+
+  '@emnapi/runtime@1.8.1':
+    dependencies:
+      tslib: 2.8.1
+
+  '@emnapi/wasi-threads@1.1.0':
+    dependencies:
+      tslib: 2.8.1
 
   '@emnapi/wasi-threads@1.2.2':
     dependencies:
@@ -1181,6 +1246,12 @@ snapshots:
     optional: true
 
   '@jridgewell/sourcemap-codec@1.5.5': {}
+
+  '@napi-rs/wasm-runtime@1.0.7':
+    dependencies:
+      '@emnapi/core': 1.8.1
+      '@emnapi/runtime': 1.8.1
+      '@tybys/wasm-util': 0.10.3
 
   '@napi-rs/wasm-runtime@1.1.6(@emnapi/core@1.11.1)(@emnapi/runtime@1.11.1)':
     dependencies:
@@ -1387,10 +1458,43 @@ snapshots:
 
   '@tanstack/virtual-core@3.17.6': {}
 
+  '@tursodatabase/database-common@0.7.1': {}
+
+  '@tursodatabase/database-darwin-arm64@0.7.1':
+    optional: true
+
+  '@tursodatabase/database-linux-arm64-gnu@0.7.1':
+    optional: true
+
+  '@tursodatabase/database-linux-x64-gnu@0.7.1':
+    optional: true
+
+  '@tursodatabase/database-wasm-common@0.7.1':
+    dependencies:
+      '@emnapi/core': 1.8.1
+      '@emnapi/runtime': 1.8.1
+      '@napi-rs/wasm-runtime': 1.0.7
+
+  '@tursodatabase/database-wasm@0.7.1':
+    dependencies:
+      '@tursodatabase/database-common': 0.7.1
+      '@tursodatabase/database-wasm-common': 0.7.1
+
+  '@tursodatabase/database-win32-x64-msvc@0.7.1':
+    optional: true
+
+  '@tursodatabase/database@0.7.1':
+    dependencies:
+      '@tursodatabase/database-common': 0.7.1
+    optionalDependencies:
+      '@tursodatabase/database-darwin-arm64': 0.7.1
+      '@tursodatabase/database-linux-arm64-gnu': 0.7.1
+      '@tursodatabase/database-linux-x64-gnu': 0.7.1
+      '@tursodatabase/database-win32-x64-msvc': 0.7.1
+
   '@tybys/wasm-util@0.10.3':
     dependencies:
       tslib: 2.8.1
-    optional: true
 
   '@types/chai@5.2.3':
     dependencies:
@@ -1747,8 +1851,7 @@ snapshots:
 
   tinyrainbow@3.1.0: {}
 
-  tslib@2.8.1:
-    optional: true
+  tslib@2.8.1: {}
 
   tweetnacl@1.0.3: {}
 

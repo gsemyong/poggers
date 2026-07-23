@@ -24,8 +24,13 @@ const boundaries: readonly Boundary[] = [
   { directory: "platforms", imports: ["platforms", "core", "jsx"] },
   { directory: "features", imports: ["features", "platforms", "core"] },
   {
+    directory: "adapters/data",
+    imports: ["adapters/data", "features"],
+  },
+  {
     directory: "adapters/server",
     imports: [
+      "adapters/data",
       "adapters/server",
       "adapters/source",
       "adapters/web-server",
@@ -41,6 +46,7 @@ const boundaries: readonly Boundary[] = [
   {
     directory: "adapters/web",
     imports: [
+      "adapters/data",
       "adapters/web",
       "adapters/source",
       "adapters/web-server",
