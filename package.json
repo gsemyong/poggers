@@ -82,7 +82,7 @@
     "build": "nub scripts/build.ts",
     "dev:crud": "nub src/cli.ts dev --dir examples/authenticated-crud",
     "dev:example": "nub src/cli.ts dev --dir playground",
-    "typecheck": "tsc --noEmit && tsc -p src/adapters/web/fixtures/request-render/tsconfig.json && tsc -p examples/basic/tsconfig.json && tsc -p examples/authenticated-crud/tsconfig.json && tsc -p playground/tsconfig.json",
+    "typecheck": "nub run build && tsc --noEmit && tsc -p src/adapters/web/fixtures/request-render/tsconfig.json && tsc -p examples/basic/tsconfig.json && tsc -p examples/authenticated-crud/tsconfig.json && tsc -p playground/tsconfig.json",
     "fmt": "oxfmt",
     "fmt:check": "oxfmt --check",
     "lint": "oxlint --disable-nested-config src scripts examples playground vitest.config.ts",

@@ -2,7 +2,13 @@
   "extends": "../../../../../tsconfig.json",
   "compilerOptions": {
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "@duction/kit": ["../../../../../dist/source/index.ts"],
+      "@duction/kit/jsx-dev-runtime": ["../../../../../dist/source/jsx/development.ts"],
+      "@duction/kit/jsx-runtime": ["../../../../../dist/source/jsx/runtime.ts"],
+      "@duction/kit/server": ["../../../../../dist/source/platforms/server/platform.ts"],
+      "@duction/kit/testing": ["../../../../../dist/source/testing.ts"],
+      "@duction/kit/web": ["../../../../../dist/source/platforms/web/platform.ts"]
     },
     "types": ["node"]
   },
