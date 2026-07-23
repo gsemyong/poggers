@@ -52,7 +52,7 @@ type BrowserProvision<Model extends IdentityModelDefinition> = Readonly<{
   [Name in Model["Name"]]: IdentityClient<Model>;
 }>;
 
-export type IdentityFeature<Model extends IdentityModelDefinition> = Readonly<{
+export type IdentityServerFeature<Model extends IdentityModelDefinition> = Readonly<{
   Programs: {
     server: Program<
       ServerProcess,
@@ -61,6 +61,11 @@ export type IdentityFeature<Model extends IdentityModelDefinition> = Readonly<{
         Provides: ServerProvision<Model>;
       }
     >;
+  };
+}>;
+
+export type IdentityBrowserFeature<Model extends IdentityModelDefinition> = Readonly<{
+  Programs: {
     browser: Program<
       BrowserMainThread,
       { Requires: { http: HttpClient }; Provides: BrowserProvision<Model> }
@@ -68,17 +73,22 @@ export type IdentityFeature<Model extends IdentityModelDefinition> = Readonly<{
   };
 }>;
 
+export type DefinedIdentity<Model extends IdentityModelDefinition> = Readonly<{
+  server: Feature<IdentityServerFeature<Model>>;
+  browser: Feature<IdentityBrowserFeature<Model>>;
+}>;
+
 export type IdentityImplementation<Model extends IdentityModelDefinition> = Readonly<{
   name: Model["Name"];
   principal(user: AuthenticatedUser): PrincipalOf<Model>;
 }>;
 
-/** Creates the complete server and browser identity slice from one semantic model. */
+/** Creates independently composable server and browser identity Features from one model. */
 export function createIdentity<Model extends IdentityModelDefinition>(
   implementation: IdentityImplementation<Model>,
-): Feature<IdentityFeature<Model>> {
+): DefinedIdentity<Model> {
   const path = `/api/${implementation.name}`;
-  return {
+  const server = {
     programs: {
       server: {
         start({
@@ -104,6 +114,10 @@ export function createIdentity<Model extends IdentityModelDefinition>(
           return { [implementation.name]: service } as unknown as ServerProvision<Model>;
         },
       },
+    },
+  } as Feature<IdentityServerFeature<Model>>;
+  const browser = {
+    programs: {
       browser: {
         start({ dependencies }: { dependencies: { http: HttpClient } }) {
           return {
@@ -116,7 +130,8 @@ export function createIdentity<Model extends IdentityModelDefinition>(
         },
       },
     },
-  } as Feature<IdentityFeature<Model>>;
+  } as Feature<IdentityBrowserFeature<Model>>;
+  return { server, browser };
 }
 
 function createIdentityClient<Model extends IdentityModelDefinition>(

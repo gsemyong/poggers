@@ -1,6 +1,6 @@
 import {
   bindEntityPrincipal,
-  type DefinedEntityFeature,
+  type DefinedEntity,
   type EntityApi,
   type EntityEvent,
   type EntityModelDefinition,
@@ -43,7 +43,7 @@ export function createMemoryEventStore<Event>(): EventStore<Event> {
 
 /** Creates the specialized semantic fixture shipped with the entity factory. */
 export async function createEntityFixture<Model extends EntityModelDefinition>(
-  feature: DefinedEntityFeature<Model>,
+  entity: DefinedEntity<Model>,
   input: Readonly<{ principal: Model["Principal"] }>,
 ): Promise<
   AsyncDisposable &
@@ -57,9 +57,9 @@ export async function createEntityFixture<Model extends EntityModelDefinition>(
   const events = createMemoryEventStore<EntityEvent<Model["Value"]>>();
   let identifier = 0;
   let time = 0;
-  const instance = createProgramContributionInstance(feature.programs.server as never, {
-    address: { program: "server", feature: feature.dependency },
-    provides: [feature.dependency],
+  const instance = createProgramContributionInstance(entity.server.programs.server as never, {
+    address: { program: "server", feature: entity.dependency },
+    provides: [entity.dependency],
     dependencies: {
       identity: { authenticate: async () => input.principal },
       events,
@@ -68,7 +68,7 @@ export async function createEntityFixture<Model extends EntityModelDefinition>(
       http: { route: () => ({ [Symbol.dispose]: () => undefined }) },
     },
   });
-  const service = (await instance.start())[feature.dependency] as EntityService<Model>;
+  const service = (await instance.start())[entity.dependency] as EntityService<Model>;
   return {
     api: bindEntityPrincipal(service, input.principal),
     service,

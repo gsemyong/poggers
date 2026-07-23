@@ -252,31 +252,31 @@ retaining shared Programs.
 
 ### Work
 
-- [ ] Create the web interface Feature factory in the public web Platform.
-- [ ] Move typed routes, params, search, navigation, redirects, metadata,
+- [x] Create the web interface Feature factory in the public web Platform.
+- [x] Move typed routes, params, search, navigation, redirects, metadata,
       rendering policy, Presentation selection, installation, and service
       worker meaning into that Feature.
-- [ ] Compile one isolated route namespace per web interface.
-- [ ] Generate one browser entry, document pipeline, manifest, cache namespace,
+- [x] Compile one isolated route namespace per web interface.
+- [x] Generate one browser entry, document pipeline, manifest, cache namespace,
       and service worker per installable interface.
-- [ ] Share server Programs, immutable assets, and generated declarations when
+- [x] Share server Programs, immutable assets, and generated declarations when
       their semantic ownership is shared.
-- [ ] Preserve direct requests, client navigation, server rendering, caching,
+- [x] Preserve direct requests, client navigation, server rendering, caching,
       hydration, code splitting, and client-only rendering.
-- [ ] Ensure auth redirects change the URL and route rather than rendering an
+- [x] Ensure auth redirects change the URL and route rather than rendering an
       auth Component under a protected URL.
-- [ ] Ensure direct nested-route loads always include the intended
+- [x] Ensure direct nested-route loads always include the intended
       Presentation artifacts.
-- [ ] Ensure subscription updates do not remount editable Components or steal
+- [x] Ensure subscription updates do not remount editable Components or steal
       focus.
-- [ ] Add focused routing, document, cache, hydration, and artifact tests for
+- [x] Add focused routing, document, cache, hydration, and artifact tests for
       framework logic without adding a browser-engine matrix.
 
 ### Blocking gate
 
-- [ ] Two web interfaces run together with isolated URLs, manifests, caches,
+- [x] Two web interfaces run together with isolated URLs, manifests, caches,
       Presentations, and service workers.
-- [ ] Shared server Programs run once.
+- [x] Shared server Programs run once.
 - [ ] Development and production pass the in-app browser workflow in
       `Browser verification`.
 
@@ -286,29 +286,29 @@ Purpose: make the generated project and examples demonstrate the actual model.
 
 ### Work
 
-- [ ] Move the canonical starter to `examples/basic`.
-- [ ] Delete the separate `template/` after the CLI reads the basic example.
-- [ ] Give the basic example `src/system.ts`, shared `features/`, shared
+- [x] Move the canonical starter to `examples/basic`.
+- [x] Delete the separate `template/` after the CLI reads the basic example.
+- [x] Give the basic example `src/system.ts`, shared `features/`, shared
       `presentations/`, and `apps/`.
-- [ ] Migrate authenticated CRUD into the realistic multi-App proof with shared
+- [x] Migrate authenticated CRUD into the realistic multi-App proof with shared
       identity and entity Features.
-- [ ] Keep App-private Features and Presentations inside their App directories.
-- [ ] Add one mutable `playground/` for Feature and adapter development.
-- [ ] Implement `kit dev` for the complete System.
-- [ ] Implement `kit dev <app>` for focused App development.
-- [ ] Implement equivalent complete and focused production builds.
-- [ ] Ensure create rewrites only Workspace identity and package location.
+- [x] Keep App-private Features and Presentations inside their App directories.
+- [x] Add one mutable `playground/` for Feature and adapter development.
+- [x] Implement `kit dev` for the complete System.
+- [x] Implement `kit dev <app>` for focused App development.
+- [x] Implement equivalent complete and focused production builds.
+- [x] Ensure create rewrites only Workspace identity and package location.
 - [ ] Ensure a shared Feature edit reaches every affected App while an
       App-private edit leaves unrelated Apps untouched.
 
 ### Blocking gate
 
-- [ ] A generated Workspace installs, checks, develops, builds, and runs
+- [x] A generated Workspace installs, checks, develops, builds, and runs
       independently.
-- [ ] The basic example and generated Workspace are the same source convention.
-- [ ] Authenticated CRUD proves shared backend behavior and independent App
+- [x] The basic example and generated Workspace are the same source convention.
+- [x] Authenticated CRUD proves shared backend behavior and independent App
       interfaces.
-- [ ] No product Workspace contains compiler, adapter, host, or manual
+- [x] No product Workspace contains compiler, adapter, host, or manual
       Dependency-wiring directories.
 
 ## Phase 7: make development incremental
@@ -446,6 +446,10 @@ output, or browser observation. Do not replace evidence with a summary claim.
 | 2026-07-23 | 2     | Root and both examples typecheck; 23 focused core, compiler, runtime, contract, CLI, server, and web files pass 184 tests; architecture import boundaries remain green                                                 | Pass                   |
 | 2026-07-23 | 3     | System IR v17 ownership fixtures, randomized Feature/App placement, old-version rejection, extension isolation, interface Presentation ownership, and source-located route/ownership failures pass 43 focused tests    | Pass                   |
 | 2026-07-23 | 4     | Whole/focused realization, one-compile instrumentation, concurrent adapter rendezvous, reverse disposal, partial-failure cleanup, stable artifact identities, and development/production linking pass 75 focused tests | Pass                   |
+| 2026-07-23 | 5     | Web compiler, routing, document, cache, hydration, installation, pipeline, and adapter tests isolate each interface; authenticated CRUD realizes two interface URLs and one shared `program/api` in both profiles       | Automated gates pass   |
+| 2026-07-23 | 6     | `examples/basic` is the CLI source, `template/` is removed, authenticated CRUD has operations/customer Apps, `playground/` is separate, and focused App build selection is tested                              | Pass                   |
+| 2026-07-23 | 6     | Fresh external Workspace: `nub install`, `nub run check`, and `nub run build` passed; production emitted `dist/interfaces/main.web` without framework implementation directories                            | Pass                   |
+| 2026-07-23 | 6     | Full repository gate: typecheck, Oxlint, Oxfmt, package build, 52 Vitest files with 408 tests, and the complete Rust workspace                                                                               | Pass                   |
 
 ### Phase 0 observations
 
@@ -473,9 +477,11 @@ output, or browser observation. Do not replace evidence with a summary claim.
 
 ## Current position
 
-- Active phase: Phase 5, make the web Platform multi-interface.
+- Active phase: Phase 7, make development incremental.
 - Completed phases: Phases 0 through 4.
+- Implemented pending final browser acceptance: Phase 5.
+- Completed except for the Phase 7 shared/private HMR gate: Phase 6.
 - Blockers: none known.
-- Next action: prove two independently routed and installable web interfaces
-  share server Programs without sharing routes, Presentations, manifests,
-  caches, service workers, or browser output.
+- Next action: retain the compiler graph on edits, add exact affected-output
+  ownership, move web development to stable Workspace caches, and prove
+  shared/private HMR selection before final browser acceptance.

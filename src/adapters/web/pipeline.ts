@@ -893,7 +893,14 @@ function routeSourcePlugin(paths: SystemPaths, system: SystemIR | (() => SystemI
         id.endsWith("x") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
       );
       const objects = new Map<string, ts.ObjectLiteralExpression>();
+      const expressions = new Map<string, ts.Expression>();
       const visit = (node: ts.Node): void => {
+        if (ts.isExpression(node)) {
+          const position = source.getLineAndCharacterOfPosition(node.getStart(source));
+          const location = `${position.line + 1}:${position.character + 1}`;
+          const current = expressions.get(location);
+          if (!current || node.end > current.end) expressions.set(location, node);
+        }
         if (ts.isObjectLiteralExpression(node)) {
           const position = source.getLineAndCharacterOfPosition(node.getStart(source));
           objects.set(`${position.line + 1}:${position.character + 1}`, node);
@@ -928,7 +935,7 @@ function routeSourcePlugin(paths: SystemPaths, system: SystemIR | (() => SystemI
         if (retainedPrograms.has(program.identity)) continue;
         const location = `${program.span.line}:${program.span.column}`;
         if (retainedProgramSpans.has(location)) continue;
-        const node = objects.get(location);
+        const node = expressions.get(location);
         if (!node) {
           throw new Error(
             `${program.span.file}:${program.span.line}:${program.span.column}: ` +

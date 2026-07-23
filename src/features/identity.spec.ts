@@ -21,7 +21,9 @@ const identity = createIdentity<Users>({
   principal: ({ id }) => ({ id, role: "member" }),
 });
 
-const system = createSystem({ features: { identity } });
+const system = createSystem({
+  features: { identity: identity.server, identityBrowser: identity.browser },
+});
 
 describe("semantic identity Feature", () => {
   test("provides server identity through the host authentication boundary", async () => {
@@ -64,7 +66,7 @@ describe("semantic identity Feature", () => {
           },
         },
       },
-      manifest("browser", ["http"]),
+      manifest("browser", ["http"], "identityBrowser"),
     );
     const client = process.dependencies.identity as IdentityClient<Users>;
     const sessions: Array<Readonly<{ user: Users["Principal"] }> | undefined> = [];
@@ -95,7 +97,7 @@ describe("semantic identity Feature", () => {
           },
         },
       },
-      manifest("browser", ["http"]),
+      manifest("browser", ["http"], "identityBrowser"),
     );
     const client = process.dependencies.identity as IdentityClient<Users>;
 
@@ -108,9 +110,13 @@ describe("semantic identity Feature", () => {
   });
 });
 
-function manifest(name: string, requires: readonly string[]): ProgramManifest {
+function manifest(
+  name: string,
+  requires: readonly string[],
+  feature = "identity",
+): ProgramManifest {
   return {
     name,
-    contributions: [{ feature: "identity", requires, provides: ["identity"] }],
+    contributions: [{ feature, requires, provides: ["identity"] }],
   };
 }

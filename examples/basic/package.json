@@ -1,5 +1,5 @@
 {
-  "name": "{{name}}",
+  "name": "basic",
   "private": true,
   "type": "module",
   "scripts": {
@@ -13,7 +13,7 @@
     "check": "poggers check"
   },
   "dependencies": {
-    "@poggers/kit": "{{kitVersion}}"
+    "@poggers/kit": "file:../.."
   },
   "devDependencies": {
     "@types/node": "^26.1.1",

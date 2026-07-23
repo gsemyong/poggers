@@ -20,7 +20,7 @@ import type {
   SourceCompilerAPI,
   SourceCompilerExtension,
 } from "@/compiler/extension";
-import type { DependencyIR, ExtensionIR, SourceSpan } from "@/compiler/ir";
+import type { DependencyIR, SourceSpan } from "@/compiler/ir";
 import { SystemDiagnostic } from "@/compiler/source";
 
 /** Extracts web-only address and rendering meaning without teaching generic core about Routes. */
@@ -90,7 +90,7 @@ function compileWebInstallation(
   context: Parameters<NonNullable<SourceCompilerExtension["feature"]>>[0],
   expression: ts.Expression,
 ): NonNullable<WebFeatureCompilerIR["installation"]> {
-  const value = staticExtensionValue(context.checker, expression, new Set());
+  const value = context.source.constant(expression);
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return context.source.fail(expression, "The web installation must be compiler-readable data.");
   }
@@ -132,89 +132,6 @@ function compileWebInstallation(
           >["shortcuts"]),
     offline: installation.offline as NonNullable<WebFeatureCompilerIR["installation"]>["offline"],
   };
-}
-
-function staticExtensionValue(
-  checker: ts.TypeChecker,
-  expression: ts.Expression,
-  active: Set<ts.Node>,
-): ExtensionIR | undefined {
-  const value = unwrapStaticExpression(checker, expression);
-  if (active.has(value)) return undefined;
-  active.add(value);
-  try {
-    if (ts.isStringLiteral(value) || ts.isNoSubstitutionTemplateLiteral(value)) return value.text;
-    if (ts.isNumericLiteral(value)) return Number(value.text);
-    if (value.kind === ts.SyntaxKind.TrueKeyword) return true;
-    if (value.kind === ts.SyntaxKind.FalseKeyword) return false;
-    if (value.kind === ts.SyntaxKind.NullKeyword) return null;
-    if (ts.isPrefixUnaryExpression(value) && value.operator === ts.SyntaxKind.MinusToken) {
-      const operand = staticExtensionValue(checker, value.operand, active);
-      return typeof operand === "number" ? -operand : undefined;
-    }
-    if (ts.isArrayLiteralExpression(value)) {
-      const result: ExtensionIR[] = [];
-      for (const item of value.elements) {
-        if (ts.isSpreadElement(item)) return undefined;
-        const child = staticExtensionValue(checker, item, active);
-        if (child === undefined) return undefined;
-        result.push(child);
-      }
-      return result;
-    }
-    if (!ts.isObjectLiteralExpression(value)) return undefined;
-    const result: Record<string, ExtensionIR> = Object.create(null);
-    for (const property of value.properties) {
-      if (ts.isSpreadAssignment(property)) {
-        const spread = staticExtensionValue(checker, property.expression, active);
-        if (!spread || typeof spread !== "object" || Array.isArray(spread)) return undefined;
-        Object.assign(result, spread);
-        continue;
-      }
-      if (!ts.isPropertyAssignment(property) && !ts.isShorthandPropertyAssignment(property)) {
-        return undefined;
-      }
-      const name = ts.isComputedPropertyName(property.name)
-        ? undefined
-        : ts.isIdentifier(property.name) ||
-            ts.isStringLiteral(property.name) ||
-            ts.isNumericLiteral(property.name)
-          ? property.name.text
-          : undefined;
-      if (!name) return undefined;
-      const child = staticExtensionValue(
-        checker,
-        ts.isPropertyAssignment(property) ? property.initializer : property.name,
-        active,
-      );
-      if (child === undefined) return undefined;
-      result[name] = child;
-    }
-    return result;
-  } finally {
-    active.delete(value);
-  }
-}
-
-function unwrapStaticExpression(checker: ts.TypeChecker, expression: ts.Expression): ts.Expression {
-  let value = expression;
-  while (
-    ts.isParenthesizedExpression(value) ||
-    ts.isAsExpression(value) ||
-    ts.isSatisfiesExpression(value)
-  ) {
-    value = value.expression;
-  }
-  if (!ts.isIdentifier(value)) return value;
-  let symbol = ts.isShorthandPropertyAssignment(value.parent)
-    ? checker.getShorthandAssignmentValueSymbol(value.parent)
-    : checker.getSymbolAtLocation(value);
-  if (symbol?.flags && symbol.flags & ts.SymbolFlags.Alias)
-    symbol = checker.getAliasedSymbol(symbol);
-  const declaration = symbol?.declarations?.find(ts.isVariableDeclaration);
-  return declaration?.initializer
-    ? unwrapStaticExpression(checker, declaration.initializer)
-    : value;
 }
 
 function platformName(context: ProgramSourceContext): string | undefined {

@@ -230,12 +230,17 @@ type BrowserRequirements<Model extends EntityModelDefinition> = Readonly<{
   scheduler: Scheduler;
 }>;
 
-export type EntityFeature<Model extends EntityModelDefinition> = Readonly<{
+export type EntityServerFeature<Model extends EntityModelDefinition> = Readonly<{
   Programs: {
     server: Program<
       ServerProcess,
       { Requires: Requirements<Model>; Provides: ServerProvision<Model> }
     >;
+  };
+}>;
+
+export type EntityBrowserFeature<Model extends EntityModelDefinition> = Readonly<{
+  Programs: {
     browser: Program<
       BrowserMainThread,
       {
@@ -248,18 +253,19 @@ export type EntityFeature<Model extends EntityModelDefinition> = Readonly<{
   };
 }>;
 
-export type DefinedEntityFeature<Model extends EntityModelDefinition> = Feature<
-  EntityFeature<Model>
-> &
-  Readonly<{ dependency: Model["Name"] }>;
+export type DefinedEntity<Model extends EntityModelDefinition> = Readonly<{
+  dependency: Model["Name"];
+  server: Feature<EntityServerFeature<Model>>;
+  browser: Feature<EntityBrowserFeature<Model>>;
+}>;
 
-/** Creates the complete server and browser entity slice from one semantic model. */
+/** Creates independently composable server and browser entity Features from one model. */
 export function createEntity<Model extends EntityModelDefinition>(
   implementation: EntityImplementation<Model>,
-): DefinedEntityFeature<Model> {
+): DefinedEntity<Model> {
   const path = `/api/${implementation.name}`;
   const replicas = new WeakMap<object, EntityReplica<Model>>();
-  return {
+  const server = {
     programs: {
       server: {
         start({ dependencies }: { dependencies: Requirements<Model> }) {
@@ -277,6 +283,10 @@ export function createEntity<Model extends EntityModelDefinition>(
           } as unknown as ServerProvision<Model>;
         },
       },
+    },
+  } as Feature<EntityServerFeature<Model>>;
+  const browser = {
+    programs: {
       browser: {
         state: {
           revision: 0,
@@ -324,8 +334,8 @@ export function createEntity<Model extends EntityModelDefinition>(
         },
       },
     },
-    dependency: implementation.name,
-  } as DefinedEntityFeature<Model>;
+  } as Feature<EntityBrowserFeature<Model>>;
+  return { dependency: implementation.name, server, browser };
 }
 
 /** Binds one established principal to the server authority's semantic API. */

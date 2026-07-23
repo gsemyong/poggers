@@ -106,13 +106,13 @@ export { animate, settled, velocity } from "@/core/ui/presentation";
 export { bindEntityPrincipal, createEntity, EntityFailure } from "@/features/entity";
 export type {
   Clock,
-  DefinedEntityFeature,
+  DefinedEntity,
   EntityApi,
   EntityActions,
   EntityAuthorization,
+  EntityBrowserFeature,
   EntityEvent,
   EntityFailureCode,
-  EntityFeature,
   EntityImplementation,
   EntityModel,
   EntityModelDefinition,
@@ -120,6 +120,7 @@ export type {
   EntityService,
   EntitySnapshot,
   EntityState,
+  EntityServerFeature,
   EntityMutation,
   EntitySynchronization,
   EntityValue,
@@ -131,11 +132,13 @@ export { createIdentity } from "@/features/identity";
 export type {
   AuthenticatedUser,
   AuthenticationBackend,
+  DefinedIdentity,
+  IdentityBrowserFeature,
   IdentityClient,
-  IdentityFeature,
   IdentityImplementation,
   IdentityModel,
   IdentityModelDefinition,
   IdentitySession,
+  IdentityServerFeature,
   IdentityService,
 } from "@/features/identity";

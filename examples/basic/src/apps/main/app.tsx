@@ -1,4 +1,4 @@
-import { createApp, createSystem, type PlatformInterfaceContract } from "@poggers/kit";
+import { createApp, type PlatformInterfaceContract } from "@poggers/kit";
 import { createWebInterface, type WebPlatform } from "@poggers/kit/web";
 
 import { shell, type ShellFeature } from "@/features/shell";
@@ -15,11 +15,6 @@ const web = createWebInterface<WebContract>({
   presentation: clean,
 });
 
-const app = createApp<{ Features: { web: Web } }>({
+export const main = createApp<{ Features: { web: Web } }>({
   features: { web },
-});
-
-export default createSystem({
-  metadata: { name: "{{name}}" },
-  features: { app },
 });

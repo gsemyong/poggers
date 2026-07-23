@@ -44,11 +44,14 @@ describe("project template", () => {
       "vitest.config.ts",
     ]);
     expect((await readdir(resolve(target, "src"))).sort()).toEqual([
+      "apps",
       "features",
       "presentations",
       "system.spec.ts",
       "system.ts",
     ]);
+    expect(await readdir(resolve(target, "src/apps"))).toEqual(["main"]);
+    expect(await readdir(resolve(target, "src/apps/main"))).toEqual(["app.tsx"]);
     expect(await readdir(resolve(target, "src/features"))).toEqual(["shell.tsx"]);
     expect(await readdir(resolve(target, "src/presentations"))).toEqual(["clean.ts"]);
     expect(await readFile(resolve(target, "src/system.ts"), "utf8")).toContain(
@@ -132,17 +135,17 @@ describe("project template", () => {
     expect(manifest.version).toBe(SYSTEM_IR_VERSION);
     expect(manifest.platforms).toEqual(["web"]);
     expect(manifest.features.map(({ id }) => id)).toEqual([
-      "feature/app",
-      "feature/app.web",
-      "feature/app.web.shell",
+      "feature/main",
+      "feature/main.web",
+      "feature/main.web.shell",
     ]);
     expect(manifest.programs).toHaveLength(1);
     expect(manifest.programs[0]).toMatchObject({
-      id: "program/app.web.browser",
+      id: "program/main.web.browser",
       environment: { name: "browser-main", platform: "web" },
-      ui: { root: { feature: "app.web.shell", component: "Root" } },
+      ui: { root: { feature: "main.web.shell", component: "Root" } },
     });
-    const webOutput = resolve(target, "dist/interfaces/app.web");
+    const webOutput = resolve(target, "dist/interfaces/main.web");
     const html = await readFile(resolve(webOutput, "index.html"), "utf8");
     expect(html).toContain("@layer poggers.reset{");
     expect(html).toContain(":where(dialog)::backdrop{background:transparent}");
@@ -222,6 +225,47 @@ describe("project template", () => {
     );
   });
 
+  test("builds one focused App with its shared Program and isolated interface", async () => {
+    const output = await mkdtemp(resolve(tmpdir(), "poggers-focused-cli-"));
+    directories.push(output);
+    const observed = new Map<string, readonly string[]>();
+    const adapter = (name: string) => ({
+      name,
+      async develop() {
+        throw new Error("The focused build fixture must not start development.");
+      },
+      async build(input: {
+        output: string;
+        programs: readonly Readonly<{ id: string }>[];
+        interfaces: readonly Readonly<{ id: string }>[];
+      }) {
+        observed.set(name, [
+          ...input.programs.map(({ id }) => id),
+          ...input.interfaces.map(({ id }) => id),
+        ]);
+        return { directory: input.output, entries: [] };
+      },
+    });
+
+    await runCli(
+      [
+        "build",
+        "operations",
+        "--dir",
+        resolve(import.meta.dirname, "../examples/authenticated-crud"),
+        "--outdir",
+        output,
+      ],
+      { server: adapter("server"), web: adapter("web") },
+    );
+
+    expect(observed.get("server")).toEqual(["program/api"]);
+    expect(observed.get("web")).toEqual([
+      "program/operations.web.browser",
+      "interface/operations.web",
+    ]);
+  });
+
   test("builds a portable server Program through the normal production path", async () => {
     const directory = await mkdtemp(resolve(tmpdir(), "poggers-production-cli-"));
     directories.push(directory);
@@ -244,8 +288,21 @@ async function expectCanonicalSourceRoot(source: string): Promise<void> {
 
   const unexpected = entries
     .map(({ name }) => name)
-    .filter((name) => !["system.spec.ts", "system.ts", "features", "presentations"].includes(name));
+    .filter(
+      (name) =>
+        !["system.spec.ts", "system.ts", "apps", "features", "presentations"].includes(name),
+    );
   expect(unexpected, `${source} has files outside the canonical source convention`).toEqual([]);
+
+  const apps = await readdir(resolve(source, "apps"), { withFileTypes: true });
+  expect(apps.every((entry) => entry.isDirectory() || entry.isFile())).toBe(true);
+  for (const app of apps.filter((entry) => entry.isDirectory())) {
+    const entries = await readdir(resolve(source, "apps", app.name));
+    expect(entries).toContain("app.tsx");
+    expect(entries.every((entry) => ["app.tsx", "features", "presentations"].includes(entry))).toBe(
+      true,
+    );
+  }
 
   const features = await readdir(resolve(source, "features"), { withFileTypes: true });
   expect(features.every((entry) => entry.isFile())).toBe(true);

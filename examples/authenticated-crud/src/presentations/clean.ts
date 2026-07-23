@@ -1,6 +1,6 @@
 import type { ConfiguredWebPresentation, WebPresentation, WebStyle } from "@poggers/kit/web";
 
-import type { OperationsWeb } from "../system";
+import type { WorkspaceWeb } from "../apps/web";
 
 const parameters = {
   color: {
@@ -316,9 +316,9 @@ const createClean = (({ parameters: values }) => {
       }),
     }),
   };
-}) satisfies WebPresentation<OperationsWeb, typeof parameters>;
+}) satisfies WebPresentation<WorkspaceWeb, typeof parameters>;
 
 export const clean = { parameters, create: createClean } satisfies ConfiguredWebPresentation<
-  OperationsWeb,
+  WorkspaceWeb,
   typeof parameters
 >;

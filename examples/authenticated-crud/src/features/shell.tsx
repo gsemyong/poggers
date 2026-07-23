@@ -1,7 +1,7 @@
 import type { Program } from "@poggers/kit";
 import type { BrowserMainThread, Child, Navigation, WebFeature, WebRoute } from "@poggers/kit/web";
 
-import type { OperationsWeb } from "../system";
+import type { WorkspaceWeb } from "../apps/web";
 import type { IdentityClient, Session } from "./identity";
 
 type AuthMode = "sign-in" | "sign-up";
@@ -20,7 +20,7 @@ export type ShellFeature = Readonly<{
       {
         Requires: {
           identity: IdentityClient;
-          navigation: Navigation<ShellRoutes, OperationsWeb>;
+          navigation: Navigation<ShellRoutes, WorkspaceWeb>;
         };
         State: {
           phase: AuthPhase;
@@ -75,7 +75,7 @@ export type ShellFeature = Readonly<{
   };
 }>;
 
-export const shell: WebFeature<ShellFeature, OperationsWeb> = {
+export const shell: WebFeature<ShellFeature, WorkspaceWeb> = {
   programs: {
     browser: {
       state: {
@@ -309,7 +309,7 @@ export const shell: WebFeature<ShellFeature, OperationsWeb> = {
 };
 
 function redirectForSession(
-  navigation: Navigation<ShellRoutes, OperationsWeb>,
+  navigation: Navigation<ShellRoutes, WorkspaceWeb>,
   authenticated: boolean,
 ) {
   const current = navigation.current();

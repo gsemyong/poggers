@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "paths": {
+      "@/*": ["${configDir}/src/*"],
+      "@poggers/kit": ["${configDir}/../../dist/source/index.ts"],
+      "@poggers/kit/jsx-dev-runtime": ["${configDir}/../../dist/source/jsx/development.ts"],
+      "@poggers/kit/jsx-runtime": ["${configDir}/../../dist/source/jsx/runtime.ts"],
+      "@poggers/kit/testing": ["${configDir}/../../dist/source/testing.ts"],
+      "@poggers/kit/web": ["${configDir}/../../dist/source/platforms/web/platform.ts"]
+    },
+    "types": ["node"]
+  }
+}

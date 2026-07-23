@@ -12,6 +12,7 @@ export type SourceCompilerAPI = Readonly<{
     object: ts.ObjectLiteralExpression,
     name: string,
   ): ts.ObjectLiteralElementLike | undefined;
+  constant(value: ts.Expression): ExtensionIR | undefined;
   literal(type: ts.Type, name: string, at: ts.Node): string;
   optionalLiteral(type: ts.Type, name: string, at: ts.Node): string | undefined;
   lower(type: ts.Type, at: ts.Node): TypeIR;

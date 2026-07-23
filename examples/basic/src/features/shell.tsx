@@ -30,7 +30,7 @@ export const shell = {
           view({ feature, elements: { Root, Title, Increment } }) {
             return (
               <Root>
-                <Title>{"{{name}}"}</Title>
+                <Title>Basic</Title>
                 <Increment type="button" onPointerDown={() => feature.increment()}>
                   {() => `Count ${feature.count}`}
                 </Increment>

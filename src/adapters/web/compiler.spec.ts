@@ -113,6 +113,17 @@ describe("web compiler extension", () => {
     expect(() => compileSystem(entry, [webCompilerExtension])).not.toThrow();
   });
 
+  test("reads adapter-owned constants through Feature factory parameters", async () => {
+    const ir = compileSystem(await fixture(parameterizedInterfaceSource()), [webCompilerExtension]);
+    const interface_ = ir.features.find(({ path }) => path === "operations.web");
+
+    expect(webFeatureCompilerIR(interface_?.extensions?.web).installation).toMatchObject({
+      shortName: "Operations",
+      start: { to: "home" },
+      offline: { fallback: { to: "home" } },
+    });
+  });
+
   test("lowers deferred Route data and its sole reveal boundary", async () => {
     const entry = await fixture(deferredRouteApplicationSource(), "system.tsx");
     const ir = compileSystem(entry, [webCompilerExtension]);
@@ -343,6 +354,31 @@ const product = createFeature<Product>({ features: { web } });
 export default createSystem({
   features: { product },
 });
+`;
+}
+
+function parameterizedInterfaceSource(): string {
+  return `
+${compositionSource()}
+type Web = { Interface: { Platform: { Name: "web" } } };
+type Operations = { App: true; Features: { web: Web } };
+function createWeb(input: { shortName: string }): Feature<Web> {
+  return createFeature<Web>({
+    presentation: { parameters: {}, create() { return {}; } },
+    installation: {
+      shortName: input.shortName,
+      start: { to: "home" },
+      icons: [
+        { src: "/icon-192.svg", sizes: "192x192" },
+        { src: "/icon-512.svg", sizes: "512x512" },
+      ],
+      offline: { fallback: { to: "home" } },
+    },
+  });
+}
+const web = createWeb({ shortName: "Operations" });
+const operations = createFeature<Operations>({ features: { web } });
+export default createSystem({ features: { operations } });
 `;
 }
 

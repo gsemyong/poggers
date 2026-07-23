@@ -105,7 +105,7 @@ function validateCompilerExtensions(extensions: readonly SourceCompilerExtension
   }
 }
 
-function sourceCompilerAPI(checker: ts.TypeChecker): SourceCompilerAPI {
+function sourceCompilerAPI(checker: ts.TypeChecker, scope?: StaticValue): SourceCompilerAPI {
   return Object.freeze({
     properties: (type) => sortedSymbols(type?.getProperties() ?? []),
     property: (type, name, at) => propertyType(checker, type, name, at),
@@ -113,6 +113,16 @@ function sourceCompilerAPI(checker: ts.TypeChecker): SourceCompilerAPI {
     member: (object, name) => objectMember(checker, object, name),
     resolveMember: (object, name) => resolveObjectMember(checker, object, name),
     memberDeclaration: objectMemberDeclaration,
+    constant: (value) =>
+      staticConstant(
+        checker,
+        {
+          node: value,
+          bindings: scope?.bindings ?? new Map(),
+          types: scope?.types ?? new Map(),
+        },
+        new Set(),
+      ),
     literal: (type, name, at) => literalProperty(checker, type, name, at),
     optionalLiteral: (type, name, at) => literalPropertyOptional(checker, type, name, at),
     lower: (type, at) => lowerType(checker, type, at),
@@ -532,7 +542,23 @@ function extractFeatures(
         values ?? owner ?? at,
         `Feature ${JSON.stringify(path)} has no implementation.`,
       );
-    const featureValue = value ? objectExpression(checker, value) : undefined;
+    const staticFeature = value
+      ? resolveStaticValue(
+          checker,
+          {
+            node: value,
+            bindings: inherited?.bindings ?? new Map(),
+            types: inherited?.types ?? new Map(),
+          },
+          new Set(),
+        )
+      : inherited;
+    const featureValue =
+      staticFeature?.node && ts.isObjectLiteralExpression(staticFeature.node)
+        ? staticFeature.node
+        : value
+          ? objectExpression(checker, value)
+          : undefined;
     const featureLocation = value ?? location;
     const isApp = booleanLiteralProperty(checker, contract, "App", location) === true;
     const interfaceMarker = propertyType(checker, contract, "Interface", location);
@@ -669,7 +695,7 @@ function extractFeatures(
       programs: [...new Set(programIds)].sort(),
       ...extensionField(extensions, "feature", {
         checker,
-        source: sourceCompilerAPI(checker),
+        source: sourceCompilerAPI(checker, staticFeature),
         contract,
         implementation: featureValue,
         location: featureLocation,
@@ -773,7 +799,7 @@ function extractProgram(
     implementation,
     ...extensionField(extensions, "program", {
       checker,
-      source: sourceCompilerAPI(checker),
+      source: sourceCompilerAPI(checker, expandedProgram),
       contract,
       implementation: readableValue,
       location,
@@ -2808,7 +2834,9 @@ function resolveFeatureProgram(
   active.add(node);
   try {
     if (ts.isIdentifier(node)) {
-      let symbol = checker.getSymbolAtLocation(node);
+      let symbol = ts.isShorthandPropertyAssignment(node.parent)
+        ? checker.getShorthandAssignmentValueSymbol(node.parent)
+        : checker.getSymbolAtLocation(node);
       if (symbol?.flags && symbol.flags & ts.SymbolFlags.Alias) {
         symbol = checker.getAliasedSymbol(symbol);
       }
@@ -2856,7 +2884,9 @@ function resolveFeatureChild(
   active.add(node);
   try {
     if (ts.isIdentifier(node)) {
-      let symbol = checker.getSymbolAtLocation(node);
+      let symbol = ts.isShorthandPropertyAssignment(node.parent)
+        ? checker.getShorthandAssignmentValueSymbol(node.parent)
+        : checker.getSymbolAtLocation(node);
       if (symbol?.flags && symbol.flags & ts.SymbolFlags.Alias) {
         symbol = checker.getAliasedSymbol(symbol);
       }
@@ -2951,7 +2981,9 @@ function resolveStaticValue(
   active.add(node);
   try {
     if (ts.isIdentifier(node)) {
-      let symbol = checker.getSymbolAtLocation(node);
+      let symbol = ts.isShorthandPropertyAssignment(node.parent)
+        ? checker.getShorthandAssignmentValueSymbol(node.parent)
+        : checker.getSymbolAtLocation(node);
       if (symbol?.flags && symbol.flags & ts.SymbolFlags.Alias) {
         symbol = checker.getAliasedSymbol(symbol);
       }
@@ -2991,6 +3023,8 @@ function resolveStaticValue(
     }
     if (
       ts.isObjectLiteralExpression(node) ||
+      ts.isArrayLiteralExpression(node) ||
+      ts.isPrefixUnaryExpression(node) ||
       ts.isStringLiteral(node) ||
       ts.isNumericLiteral(node) ||
       node.kind === ts.SyntaxKind.TrueKeyword ||
@@ -3004,6 +3038,85 @@ function resolveStaticValue(
       return { node, bindings: source.bindings, types: source.types };
     }
     return undefined;
+  } finally {
+    active.delete(node);
+  }
+}
+
+function staticConstant(
+  checker: ts.TypeChecker,
+  source: StaticValue,
+  active: Set<ts.Node>,
+): ExtensionIR | undefined {
+  const value = resolveStaticValue(checker, source, new Set()) ?? source;
+  const node = value.node;
+  if (active.has(node)) return undefined;
+  active.add(node);
+  try {
+    if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return node.text;
+    if (ts.isNumericLiteral(node)) return Number(node.text);
+    if (node.kind === ts.SyntaxKind.TrueKeyword) return true;
+    if (node.kind === ts.SyntaxKind.FalseKeyword) return false;
+    if (node.kind === ts.SyntaxKind.NullKeyword) return null;
+    if (ts.isPrefixUnaryExpression(node) && node.operator === ts.SyntaxKind.MinusToken) {
+      const operand = staticConstant(
+        checker,
+        { node: node.operand, bindings: value.bindings, types: value.types },
+        active,
+      );
+      return typeof operand === "number" ? -operand : undefined;
+    }
+    if (ts.isArrayLiteralExpression(node)) {
+      const result: ExtensionIR[] = [];
+      for (const element of node.elements) {
+        if (ts.isSpreadElement(element)) return undefined;
+        const item = staticConstant(
+          checker,
+          { node: element, bindings: value.bindings, types: value.types },
+          active,
+        );
+        if (item === undefined) return undefined;
+        result.push(item);
+      }
+      return result;
+    }
+    if (!ts.isObjectLiteralExpression(node)) return undefined;
+    const result: Record<string, ExtensionIR> = Object.create(null);
+    for (const property of node.properties) {
+      if (ts.isSpreadAssignment(property)) {
+        const spread = staticConstant(
+          checker,
+          { node: property.expression, bindings: value.bindings, types: value.types },
+          active,
+        );
+        if (!spread || typeof spread !== "object" || Array.isArray(spread)) return undefined;
+        Object.assign(result, spread);
+        continue;
+      }
+      if (!ts.isPropertyAssignment(property) && !ts.isShorthandPropertyAssignment(property)) {
+        return undefined;
+      }
+      const name = ts.isComputedPropertyName(property.name)
+        ? undefined
+        : ts.isIdentifier(property.name) ||
+            ts.isStringLiteral(property.name) ||
+            ts.isNumericLiteral(property.name)
+          ? property.name.text
+          : undefined;
+      if (!name) return undefined;
+      const child = staticConstant(
+        checker,
+        {
+          node: ts.isPropertyAssignment(property) ? property.initializer : property.name,
+          bindings: value.bindings,
+          types: value.types,
+        },
+        active,
+      );
+      if (child === undefined) return undefined;
+      result[name] = child;
+    }
+    return result;
   } finally {
     active.delete(node);
   }

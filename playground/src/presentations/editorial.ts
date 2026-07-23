@@ -11,8 +11,8 @@ import {
   type WebStyle,
 } from "@poggers/kit/web";
 
+import type { Web } from "../apps/main/app";
 import type { SheetState } from "../features/dashboard";
-import type { Web } from "../system";
 
 const parameters = {
   color: {

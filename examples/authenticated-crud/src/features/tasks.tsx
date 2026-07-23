@@ -17,7 +17,7 @@ import {
   mountFeature,
 } from "@poggers/kit/web";
 
-import type { OperationsWeb } from "../system";
+import type { WorkspaceWeb } from "../apps/web";
 import type { User } from "./identity";
 
 export type Task = Readonly<{
@@ -61,7 +61,7 @@ export type TaskDestination = WebDestination<TaskRoutes>;
 type TasksBrowser = Program<
   BrowserMainThread,
   {
-    Requires: { navigation: Navigation<TaskRoutes, OperationsWeb> };
+    Requires: { navigation: Navigation<TaskRoutes, WorkspaceWeb> };
     State: {
       error: string | undefined;
     };
@@ -115,7 +115,7 @@ type TasksBrowser = Program<
 >;
 
 type TasksFeatureDefinition = Readonly<{
-  Features: { tasks: FeatureContractOf<typeof placedTaskEntity> };
+  Features: { tasks: FeatureContractOf<typeof taskBrowser> };
   Programs: { browser: TasksBrowser };
 }>;
 
@@ -138,10 +138,11 @@ export const taskEntity = createEntity<Tasks>({
   authorize: (value) => value.principal.id === value.entity.ownerId,
 });
 
-const placedTaskEntity = placePrograms(taskEntity, { server: "api", browser: "browser" });
+export const taskServer = placePrograms(taskEntity.server, { server: "api" });
+const taskBrowser = placePrograms(taskEntity.browser, { browser: "browser" });
 
-const taskFeature: WebFeature<TasksFeatureDefinition, OperationsWeb> = {
-  features: { tasks: placedTaskEntity },
+const taskFeature: WebFeature<TasksFeatureDefinition, WorkspaceWeb> = {
+  features: { tasks: taskBrowser },
   programs: {
     browser: {
       state: { error: undefined },

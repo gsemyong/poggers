@@ -200,7 +200,7 @@ async function startReplica(
       port,
     }),
   ]);
-  const process = createProgramContributionInstance(notes.programs.server as never, {
+  const process = createProgramContributionInstance(notes.server.programs.server as never, {
     address: { program: "api", feature: "notes" },
     provides: ["notes"],
     dependencies: {

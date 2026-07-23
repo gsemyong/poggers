@@ -12,6 +12,10 @@ testSystem({
   directory: resolve(import.meta.dirname, ".."),
   timeout: 240_000,
   async verify({ realization, location, locations, restart }) {
+    expect(locations["interface/customer.web"]).toHaveLength(1);
+    expect(locations["interface/operations.web"]).toHaveLength(1);
+    expect(locations["interface/customer.web"]).not.toEqual(locations["interface/operations.web"]);
+    expect(locations["program/api"]).toHaveLength(1);
     const invalidRoute = await checkedFetch(new URL("/tasks/not-a-uuid", location), {
       headers: { accept: "text/html" },
       signal: AbortSignal.timeout(10_000),

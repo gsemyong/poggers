@@ -11,7 +11,12 @@ export default defineConfig({
       enforce: "pre",
       transform(source, id) {
         const file = id.split("?", 1)[0]!;
-        if (!file.includes("/examples/") || !file.includes("/presentations/")) return;
+        if (
+          (!file.includes("/examples/") && !file.includes("/playground/")) ||
+          !file.includes("/presentations/")
+        ) {
+          return;
+        }
         if (!file.endsWith(".ts") || file.endsWith(".spec.ts")) return;
         return { code: transformPresentationSource(source, file), map: null };
       },
@@ -64,7 +69,7 @@ export default defineConfig({
   },
   test: {
     clearMocks: true,
-    include: ["src/**/*.spec.ts", "examples/**/*.spec.ts"],
+    include: ["src/**/*.spec.ts", "examples/**/*.spec.ts", "playground/**/*.spec.ts"],
     restoreMocks: true,
   },
 });

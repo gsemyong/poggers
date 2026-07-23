@@ -137,7 +137,7 @@ describe("semantic entity Feature", () => {
   test("derives authenticated server and browser APIs from the same model", async () => {
     const events = createMemoryEventStore<EntityEvent<Note>>();
     let handler: ((request: HttpRequest) => Promise<HttpResponse>) | undefined;
-    const server = createProgramContributionInstance(notes.programs.server as never, {
+    const server = createProgramContributionInstance(notes.server.programs.server as never, {
       address: { program: "server", feature: "notes" },
       provides: ["notes"],
       dependencies: {
@@ -156,7 +156,7 @@ describe("semantic entity Feature", () => {
       },
     });
     await server.start();
-    const browser = createProgramContributionInstance(notes.programs.browser as never, {
+    const browser = createProgramContributionInstance(notes.browser.programs.browser as never, {
       address: { program: "browser", feature: "notes" },
       provides: ["notes"],
       dependencies: {
@@ -206,7 +206,7 @@ describe("semantic entity Feature", () => {
     let handler: ((request: HttpRequest) => Promise<HttpResponse>) | undefined;
     let online = true;
     let loseNextResponse = false;
-    const server = createProgramContributionInstance(notes.programs.server as never, {
+    const server = createProgramContributionInstance(notes.server.programs.server as never, {
       address: { program: "server", feature: "notes" },
       provides: ["notes"],
       dependencies: {
@@ -225,7 +225,7 @@ describe("semantic entity Feature", () => {
     await server.start();
 
     const createBrowser = () =>
-      createProgramContributionInstance(notes.programs.browser as never, {
+      createProgramContributionInstance(notes.browser.programs.browser as never, {
         address: { program: "browser", feature: "notes" },
         provides: ["notes"],
         dependencies: {

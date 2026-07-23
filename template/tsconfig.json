@@ -1,9 +1,0 @@
-{
-  "extends": "@poggers/kit/tsconfig",
-  "compilerOptions": {
-    "paths": {
-      "@/*": ["${configDir}/src/*"]
-    },
-    "types": ["node"]
-  }
-}
