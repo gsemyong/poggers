@@ -1,6 +1,6 @@
 # Data And Workflow Feature Factories
 
-Status: core complete; optional Presentation research pending
+Status: complete
 
 ## North Star
 
@@ -227,24 +227,24 @@ These are not hidden acceptance failures:
 - [x] Run TypeScript, formatting, lint, all Vitest, all Rust, API, and package
       gates from a clean working tree.
 - [x] Review the final diff for leaked adapter vocabulary and redundant files.
-- [ ] Commit the core Data and Workflow work.
+- [x] Commit the core Data and Workflow work.
 
 ## Optional Presentation Research
 
 This phase begins only after the core commit. It must not silently turn into a
 presentation rewrite.
 
-- [ ] Catalog current web CSS by semantic category: layout, typography, paint,
+- [x] Catalog current web CSS by semantic category: layout, typography, paint,
       effects, media, interaction, accessibility, containment, queries, and
       progressive enhancement.
-- [ ] Falsify CSS feature completeness, one-way semantics, container-responsive
+- [x] Falsify CSS feature completeness, one-way semantics, container-responsive
       authoring, and optimal compilation in the current Presentation language.
-- [ ] Separate universally required Presentation meaning from declarations that
+- [x] Separate universally required Presentation meaning from declarations that
       belong only to one Platform adapter.
-- [ ] Audit whether routing, Component state/JSX, Presentation declarations,
+- [x] Audit whether routing, Component state/JSX, Presentation declarations,
       compilation, and runtime realization are replaceable contracts rather
       than one accidental web runtime.
-- [ ] Implement only gaps demonstrated by a concrete counterexample; otherwise
+- [x] Implement only gaps demonstrated by a concrete counterexample; otherwise
       record the surviving boundary and defer code churn.
 
 Gate: either a concrete counterexample produces a focused adapter-contract
@@ -272,3 +272,11 @@ CSS parity must never be claimed without property-by-property evidence.
   drift. Vitest uses four workers so concurrent Vite and Cargo integration
   builds do not invalidate lifecycle and latency assertions through resource
   starvation.
+- 2026-07-23: Committed the complete Data and Workflow implementation as
+  `d1979a3`.
+- 2026-07-23: Completed the optional Presentation falsification. The generic
+  adapter boundary survives and already rejects crossed UI languages and
+  targets. The current web vocabulary does not have full CSS parity; concrete
+  counterexamples and the standards-derived completeness path are recorded in
+  [Presentation Boundary And Web Coverage](./presentation.md). No partial
+  runtime fields or second authoring API were added.
