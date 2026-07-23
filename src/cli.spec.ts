@@ -89,7 +89,9 @@ describe("project template", () => {
     expect(await readFile(resolve(target, "mise.toml"), "utf8")).toContain(
       '"github:nubjs/nub" = "0.4.13"',
     );
-    expect(await readFile(resolve(target, "mise.toml"), "utf8")).toContain('rust = "1.97.1"');
+    expect(await readFile(resolve(target, "mise.toml"), "utf8")).toContain(
+      'rust = { version = "1.97.1", components = ["rustfmt"] }',
+    );
     expect(await readFile(resolve(target, ".gitignore"), "utf8")).not.toContain("app.d.ts");
     expect(
       await run(
