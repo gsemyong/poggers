@@ -1,10 +1,10 @@
 # Poggers
 
 Poggers is a TypeScript product language for portable Programs, typed
-Dependencies, platform Components, and complete Presentations. Applications
-compose reusable Features; Platform Adapters own realization.
+Dependencies, platform Components, and complete Presentations. A System
+composes reusable Features; Platform Adapters own realization.
 
-## Current Application Workflow
+## Current System Workflow
 
 ```sh
 nub x @poggers/kit create my-app
@@ -14,22 +14,22 @@ nub install
 nub run dev
 ```
 
-The currently shipped CLI creates the existing single-Application project:
+The CLI creates one System workspace:
 
 ```text
 src/
-  app.spec.ts
-  app.tsx
   features/
     shell.tsx
   presentations/
     clean.ts
+  system.spec.ts
+  system.ts
 ```
 
-`app.tsx` is the current composition root. A Feature owns product structure and
-behavior, while a Presentation owns adapter-defined user-facing decisions. This
-workflow remains functional while the repository migrates to the documented
-System and multi-App model; it is not the final external Workspace convention.
+`system.ts` is the compilation root. The System composes App Features, each App
+composes platform-interface Features, and an interface owns its Presentation
+and installation meaning. Ordinary Features own product behavior and can
+contribute to Programs in several Environments.
 
 ## Develop The Kit
 

@@ -128,6 +128,7 @@ function generateVerificationSource(contribution: ProgramContributionIR): RustVe
   const program: ProgramIR = {
     id: "program/verification",
     name: "verification",
+    logicalName: "verification",
     environment: { name: "server", platform: "server" },
     contributions: [contribution],
   };

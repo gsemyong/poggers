@@ -14,7 +14,7 @@ import {
 } from "@/adapters/server/production/dependencies";
 import type { ProgramIR, SourceSpan } from "@/compiler/ir";
 import { linkProgram } from "@/compiler/linker";
-import { compileApplication } from "@/compiler/source";
+import { compileSystem } from "@/compiler/source";
 import { executeLinkedProgramIR } from "@/runtime/interpreter";
 
 const directories: string[] = [];
@@ -31,14 +31,14 @@ test("caches production artifacts by semantic output rather than source spans", 
   const directory = await temporaryDirectory();
   const cache = resolve(directory, "cache");
   const first = await buildServerProgram({
-    application: "cache-fixture",
+    system: "cache-fixture",
     cache,
     directory,
     output: resolve(directory, "first"),
     program: emptyProgram({ file: "first.ts", line: 1, column: 1 }),
   });
   const second = await buildServerProgram({
-    application: "cache-fixture",
+    system: "cache-fixture",
     cache,
     directory,
     output: resolve(directory, "second"),
@@ -57,7 +57,7 @@ test("rejects unknown external Dependencies and host source before Cargo", async
   const program = emptyProgram({ file: "program.ts", line: 1, column: 1 });
   await expect(
     buildServerProgram({
-      application: "invalid",
+      system: "invalid",
       cache: resolve(directory, "cache"),
       directory,
       output: resolve(directory, "unknown"),
@@ -75,7 +75,7 @@ test("rejects unknown external Dependencies and host source before Cargo", async
 
   await expect(
     buildServerProgram({
-      application: "invalid",
+      system: "invalid",
       cache: resolve(directory, "cache"),
       directory,
       output: resolve(directory, "incompatible"),
@@ -93,7 +93,7 @@ test("rejects unknown external Dependencies and host source before Cargo", async
 
   await expect(
     buildServerProgram({
-      application: "invalid",
+      system: "invalid",
       cache: resolve(directory, "cache"),
       directory,
       output: resolve(directory, "source"),
@@ -139,15 +139,15 @@ test("keeps shipped Feature and infrastructure policy out of production compiler
 
 test("injects an unrelated production Dependency into an expanded generic Feature", async () => {
   const directory = await temporaryDirectory();
-  const source = resolve(directory, "src/app.ts");
+  const source = resolve(directory, "src/system.ts");
   await mkdir(resolve(directory, "src"), { recursive: true });
   await writeFile(source, genericFeatureSource());
-  const ir = compileApplication(source);
+  const ir = compileSystem(source);
   const program = ir.programs.find(({ name }) => name === "worker");
   if (!program) throw new Error("Fixture has no worker Program.");
   const executable = resolve(directory, "worker");
   const build = await buildServerProgram({
-    application: ir.application.name,
+    system: ir.system.name,
     dependencies: [recorderDependency()],
     cache: resolve(directory, "cache"),
     directory,
@@ -199,15 +199,15 @@ test.skipIf(spawnSync("nats-server", ["--version"], { stdio: "ignore" }).status 
     const natsPort = await availablePort();
     const nats = await startNatsServer(resolve(directory, "nats"), natsPort);
     processes.push(nats);
-    const source = resolve(directory, "src/app.ts");
+    const source = resolve(directory, "src/system.ts");
     await mkdir(resolve(directory, "src"), { recursive: true });
     await writeFile(source, networkFeatureSource());
-    const ir = compileApplication(source);
+    const ir = compileSystem(source);
     const program = ir.programs.find(({ name }) => name === "worker");
     if (!program) throw new Error("Network fixture has no worker Program.");
     const executable = resolve(directory, "worker");
     await buildServerProgram({
-      application: ir.application.name,
+      system: ir.system.name,
       dependencies: [jetStreamEventsDependency, networkRecorderDependency()],
       cache: resolve(directory, "cache"),
       directory,
@@ -277,6 +277,7 @@ function emptyProgram(span: SourceSpan): ProgramIR {
   return {
     id: "program/worker",
     name: "worker",
+    logicalName: "worker",
     environment: { name: "server", platform: "server" },
     contributions: [
       {
@@ -323,13 +324,25 @@ function networkRecorderDependency() {
   });
 }
 
+function compositionSource(): string {
+  return `
+declare const featureContract: unique symbol;
+type Feature<Contract> = Readonly<{ readonly [featureContract]?: Contract }>;
+function createFeature<Contract>(definition: object): Feature<Contract> {
+  return definition as Feature<Contract>;
+}
+function createSystem(definition: object): object {
+  return definition;
+}
+`;
+}
+
 function genericFeatureSource(): string {
   return `
 type Platform = { readonly Name: "server" };
 type Environment = { readonly Name: "server"; readonly Platform: Platform };
 type Program<E extends Environment, C extends object = {}> = Readonly<C & { Environment: E }>;
-type Feature<C> = unknown;
-type Application<C> = unknown;
+${compositionSource()}
 type Formatter = { format(input: { value: string }): Promise<string> };
 type Recorder = {
   read(input: {}): Promise<{ left: number; right: number }>;
@@ -361,7 +374,7 @@ function createFormatting<const Prefix extends string>(prefix: Prefix): Feature<
 }
 
 const formatting = createFormatting("native:");
-const consumer = {
+const consumer = createFeature<Consumer>({
   programs: {
     worker: {
       async start({ dependencies }: { dependencies: { formatter: Formatter; recorder: Recorder } }) {
@@ -371,12 +384,12 @@ const consumer = {
       },
     },
   },
-} satisfies Feature<Consumer>;
+});
 
-export default {
+export default createSystem({
   metadata: { name: "Generic production fixture" },
   features: { formatting, consumer },
-} satisfies Application<App>;
+});
 `;
 }
 
@@ -385,8 +398,7 @@ function networkFeatureSource(): string {
 type Platform = { readonly Name: "server" };
 type Environment = { readonly Name: "server"; readonly Platform: Platform };
 type Program<E extends Environment, C extends object = {}> = Readonly<C & { Environment: E }>;
-type Feature<C> = unknown;
-type Application<C> = unknown;
+${compositionSource()}
 type StoredEvent = { stream: string; revision: number; event: { value: string } };
 type Events = {
   read(input: { stream: string; after?: number }): Promise<readonly StoredEvent[]>;
@@ -401,7 +413,7 @@ type Recorder = {
 type Worker = { Programs: { worker: Program<Environment, { Requires: { events: Events; recorder: Recorder } }> } };
 type App = { Features: { worker: Worker } };
 
-const worker = {
+const worker = createFeature<Worker>({
   programs: {
     worker: {
       async start({ dependencies }: { dependencies: { events: Events; recorder: Recorder } }) {
@@ -427,12 +439,12 @@ const worker = {
       },
     },
   },
-} satisfies Feature<Worker>;
+});
 
-export default {
+export default createSystem({
   metadata: { name: "Native network fixture" },
   features: { worker },
-} satisfies Application<App>;
+});
 `;
 }
 

@@ -1,12 +1,11 @@
 import { describe, expect, test } from "vitest";
 
 import type { ProgramManifest } from "@/compiler/ir";
-import type { Application } from "@/core/application";
+import { createSystem } from "@/core/system";
 import {
   createIdentity,
   type AuthenticationBackend,
   type IdentityClient,
-  type IdentityFeature,
   type IdentityModel,
   type IdentityService,
 } from "@/features/identity";
@@ -22,9 +21,7 @@ const identity = createIdentity<Users>({
   principal: ({ id }) => ({ id, role: "member" }),
 });
 
-type Identity = IdentityFeature<Users>;
-type TestApplication = Readonly<{ Features: { identity: Identity } }>;
-const application: Application<TestApplication> = { features: { identity } };
+const system = createSystem({ features: { identity } });
 
 describe("semantic identity Feature", () => {
   test("provides server identity through the host authentication boundary", async () => {
@@ -34,7 +31,7 @@ describe("semantic identity Feature", () => {
       handle: async () => ({ status: 204, headers: [], body: undefined, stream: undefined }),
     };
     const process = await startProcess(
-      application,
+      system,
       "server",
       {
         authentication,
@@ -55,7 +52,7 @@ describe("semantic identity Feature", () => {
   test("derives the browser identity API and protocol from the same model", async () => {
     const requests: string[] = [];
     const process = await startProcess(
-      application,
+      system,
       "browser",
       {
         http: {
@@ -85,7 +82,7 @@ describe("semantic identity Feature", () => {
   test("coalesces concurrent initial session reads across composed Features", async () => {
     let requests = 0;
     const process = await startProcess(
-      application,
+      system,
       "browser",
       {
         http: {

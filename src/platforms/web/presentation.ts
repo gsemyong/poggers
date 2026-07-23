@@ -452,13 +452,13 @@ export type WebPresentationLanguage = {
   }>;
 };
 
-/** A web Presentation definition with typed Application-selected parameters. */
+/** A web Presentation definition with typed interface-selected parameters. */
 export type WebPresentation<
   Root extends ComponentOwner,
   Parameters extends object = Empty,
 > = CorePresentation<Root, WebPresentationLanguage, Parameters>;
 
-/** A web Presentation paired with its Application-selected parameters. */
+/** A web Presentation paired with its interface-selected parameters. */
 export type ConfiguredWebPresentation<
   Root extends ComponentOwner,
   Parameters extends object = Empty,

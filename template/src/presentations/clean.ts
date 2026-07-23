@@ -1,6 +1,6 @@
 import type { ConfiguredWebPresentation, WebPresentation, WebStyle } from "@poggers/kit/web";
 
-import type { App } from "@/app";
+import type { Web } from "@/system";
 
 const parameters = {
   color: {
@@ -22,7 +22,7 @@ const createClean = (({ parameters: values }) => {
 
   return {
     Shell: () => ({
-      Application: () => ({
+      Root: () => ({
         Root: {
           layout: {
             model: { kind: "flow", direction: "block", align: "center", distribute: "center" },
@@ -47,9 +47,9 @@ const createClean = (({ parameters: values }) => {
       }),
     }),
   };
-}) satisfies WebPresentation<App, typeof parameters>;
+}) satisfies WebPresentation<Web, typeof parameters>;
 
 export const clean = {
   parameters,
   create: createClean,
-} satisfies ConfiguredWebPresentation<App, typeof parameters>;
+} satisfies ConfiguredWebPresentation<Web, typeof parameters>;

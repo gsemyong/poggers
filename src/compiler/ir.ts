@@ -1,6 +1,6 @@
 import type { PresentationSourceIR } from "@/compiler/presentation";
 
-export const POGGERS_IR_VERSION = 16 as const;
+export const SYSTEM_IR_VERSION = 17 as const;
 
 /** Serializable meaning owned and versioned by a compiler extension. */
 export type ExtensionIR =
@@ -262,7 +262,9 @@ export type ProgramContributionIR = Readonly<{
 export type ProgramIR = Readonly<{
   id: string;
   name: string;
+  logicalName: string;
   environment: Readonly<{ name: string; platform: string; ui?: string }>;
+  interface?: string;
   contributions: readonly ProgramContributionIR[];
   ui?: Readonly<{ root: Readonly<{ feature: string; component: string }> }>;
 }>;
@@ -303,34 +305,118 @@ export type ProgramManifest = Readonly<{
 export type FeatureIR = Readonly<{
   id: string;
   path: string;
+  kind: "app" | "feature" | "interface";
+  app?: string;
+  interface?: string;
+  platform?: string;
   children: readonly string[];
   programs: readonly string[];
   extensions?: CompilerExtensionsIR;
 }>;
 
-export type ApplicationIR = Readonly<{
-  version: typeof POGGERS_IR_VERSION;
-  application: Readonly<{
-    id: string;
+export type AppIR = Readonly<{
+  id: string;
+  feature: string;
+  interfaces: readonly string[];
+}>;
+
+export type PlatformInterfaceIR = Readonly<{
+  id: string;
+  feature: string;
+  app: string;
+  platform: string;
+  programs: readonly string[];
+  presentationSources: readonly string[];
+}>;
+
+export type InterfacePresentationIR = PresentationSourceIR &
+  Readonly<{
+    interface: string;
+  }>;
+
+export type SystemIR = Readonly<{
+  version: typeof SYSTEM_IR_VERSION;
+  system: Readonly<{
+    id: "system";
     name: string;
-    presentations: readonly string[];
     extensions?: CompilerExtensionsIR;
   }>;
   platforms: readonly string[];
+  apps: readonly AppIR[];
+  interfaces: readonly PlatformInterfaceIR[];
   features: readonly FeatureIR[];
   programs: readonly ProgramIR[];
-  presentations: readonly PresentationSourceIR[];
+  presentations: readonly InterfacePresentationIR[];
 }>;
 
-export function serializeApplicationIR(ir: ApplicationIR): string {
-  assertApplicationIRVersion(ir);
+export type SystemOutputSelection = Readonly<{
+  app?: string;
+  platforms: readonly string[];
+  programs: readonly ProgramIR[];
+  interfaces: readonly PlatformInterfaceIR[];
+}>;
+
+/** Selects whole-System outputs or one App plus every System-shared contribution. */
+export function selectSystemOutputs(ir: SystemIR, app?: string): SystemOutputSelection {
+  assertSystemIRVersion(ir);
+  const selectedApp = app ? ir.apps.find(({ feature }) => feature === app) : undefined;
+  if (app && !selectedApp) throw new Error(`Unknown App ${JSON.stringify(app)}.`);
+  if (!selectedApp) {
+    return {
+      platforms: ir.platforms,
+      programs: ir.programs,
+      interfaces: ir.interfaces,
+    };
+  }
+
+  const interfaces = ir.interfaces.filter(({ app: owner }) => owner === selectedApp.feature);
+  const interfaceFeatures = new Set(interfaces.map(({ feature }) => feature));
+  const features = new Map(ir.features.map((feature) => [feature.path, feature]));
+  const programs = ir.programs.flatMap((program): ProgramIR[] => {
+    if (program.interface && !interfaceFeatures.has(program.interface)) return [];
+    const contributions = program.contributions.filter((contribution) => {
+      const feature = features.get(contribution.feature);
+      if (!feature) {
+        throw new Error(
+          `Program ${JSON.stringify(program.id)} references unknown Feature ${JSON.stringify(contribution.feature)}.`,
+        );
+      }
+      return feature.app === undefined || feature.app === selectedApp.feature;
+    });
+    if (!contributions.length) return [];
+    const roots = contributions.flatMap(({ feature, ui }) =>
+      ui?.root ? [{ feature, component: ui.root }] : [],
+    );
+    const { ui: _ui, ...meaning } = program;
+    return [
+      {
+        ...meaning,
+        contributions,
+        ...(roots[0] ? { ui: { root: roots[0] } } : {}),
+      },
+    ];
+  });
+  const platforms = [
+    ...new Set([
+      ...programs.map(({ environment }) => environment.platform),
+      ...interfaces.map(({ platform }) => platform),
+    ]),
+  ].sort();
+  return {
+    app: selectedApp.feature,
+    platforms,
+    programs,
+    interfaces,
+  };
+}
+
+export function serializeSystemIR(ir: SystemIR): string {
+  assertSystemIRVersion(ir);
   return `${JSON.stringify(ir, undefined, 2)}\n`;
 }
 
-export function assertApplicationIRVersion(
-  ir: Pick<ApplicationIR, "version">,
-): asserts ir is ApplicationIR {
-  if (ir.version !== POGGERS_IR_VERSION) {
-    throw new Error(`Unsupported Poggers IR version ${String(ir.version)}.`);
+export function assertSystemIRVersion(ir: Readonly<{ version: number }>): asserts ir is SystemIR {
+  if (ir.version !== SYSTEM_IR_VERSION) {
+    throw new Error(`Unsupported System IR version ${String(ir.version)}.`);
   }
 }

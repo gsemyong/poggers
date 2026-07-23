@@ -1,7 +1,7 @@
 import type { Program } from "@poggers/kit";
 import type { BrowserMainThread, Child, Navigation, WebFeature, WebRoute } from "@poggers/kit/web";
 
-import type { App } from "../app";
+import type { OperationsWeb } from "../system";
 import type { IdentityClient, Session } from "./identity";
 
 type AuthMode = "sign-in" | "sign-up";
@@ -18,7 +18,10 @@ export type ShellFeature = Readonly<{
     browser: Program<
       BrowserMainThread,
       {
-        Requires: { identity: IdentityClient; navigation: Navigation<ShellRoutes, App> };
+        Requires: {
+          identity: IdentityClient;
+          navigation: Navigation<ShellRoutes, OperationsWeb>;
+        };
         State: {
           phase: AuthPhase;
           mode: AuthMode;
@@ -39,7 +42,7 @@ export type ShellFeature = Readonly<{
           signOut(): Promise<void>;
         };
         Components: {
-          Application: {
+          Layout: {
             Slots: { Content: Child };
             Elements: {
               Root: "main";
@@ -72,7 +75,7 @@ export type ShellFeature = Readonly<{
   };
 }>;
 
-export const shell: WebFeature<ShellFeature, App> = {
+export const shell: WebFeature<ShellFeature, OperationsWeb> = {
   programs: {
     browser: {
       state: {
@@ -151,7 +154,7 @@ export const shell: WebFeature<ShellFeature, App> = {
         },
       },
       components: {
-        Application: {
+        Layout: {
           mount({ feature }) {
             void feature.refresh();
           },
@@ -297,7 +300,7 @@ export const shell: WebFeature<ShellFeature, App> = {
       routes: {
         auth: {
           view({ components: { Shell } }) {
-            return <Shell.Application Content={null} />;
+            return <Shell.Layout Content={null} />;
           },
         },
       },
@@ -305,7 +308,10 @@ export const shell: WebFeature<ShellFeature, App> = {
   },
 };
 
-function redirectForSession(navigation: Navigation<ShellRoutes, App>, authenticated: boolean) {
+function redirectForSession(
+  navigation: Navigation<ShellRoutes, OperationsWeb>,
+  authenticated: boolean,
+) {
   const current = navigation.current();
   const auth = navigation.href({ to: "auth" });
   const onAuthRoute = `${current.pathname}${current.search}` === auth;

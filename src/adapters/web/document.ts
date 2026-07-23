@@ -1,4 +1,6 @@
 import {
+  compiledWebComponentIdentity,
+  createCompiledWebComponentResolver,
   validateWebRouteMetadata,
   type CompiledWebComponentIR,
   type WebRenderNodeIR,
@@ -206,10 +208,9 @@ type RuntimeFeature = Readonly<{
   features?: Readonly<Record<string, RuntimeFeature>>;
 }>;
 
-type RuntimeApplication = Readonly<{
+type RuntimeSystem = Readonly<{
   metadata?: Readonly<{ name?: string }>;
   features?: Readonly<Record<string, RuntimeFeature>>;
-  presentations?: Readonly<Record<string, RuntimeConfiguredPresentation>>;
 }>;
 
 type RuntimeConfiguredPresentation = Readonly<{
@@ -291,8 +292,11 @@ const voidElements = new Set([
  * listeners, observations, feedback, and Dependencies remain inert in this profile.
  */
 export async function prepareWebDocument(input: {
-  application: object;
+  system: object;
+  interface: string;
   program: string;
+  logicalProgram?: string;
+  presentation: RuntimeConfiguredPresentation;
   manifest: ProgramManifest;
   components: Readonly<Record<string, WebDocumentComponentContract>>;
   presentationDependencies?: Readonly<Record<string, readonly unknown[]>>;
@@ -306,8 +310,9 @@ export async function prepareWebDocument(input: {
     metadata?: WebRouteMetadataResult;
   }>;
 }): Promise<WebDocumentIR> {
-  const application = input.application as RuntimeApplication;
-  const contributions = collectContributions(application, input.program, input.manifest);
+  const system = input.system as RuntimeSystem;
+  const logicalProgram = input.logicalProgram ?? input.program;
+  const contributions = collectContributions(system, logicalProgram, input.manifest);
   const instances: UIContributionInstance[] = [];
   const apis: Record<string, Readonly<Record<string, unknown>>> = Object.create(null);
   let document: WebDocumentIR | undefined;
@@ -333,11 +338,18 @@ export async function prepareWebDocument(input: {
     }
 
     const styles = new Set<string>();
-    const presentation = createPreparedPresentation(application, input.program, apis);
+    const presentation = createPreparedPresentation(
+      system,
+      input.interface,
+      logicalProgram,
+      input.presentation,
+      apis,
+    );
     try {
       const composition = createComponentComposition({
-        application,
-        program: input.program,
+        system,
+        interface: input.interface,
+        program: logicalProgram,
         contracts: input.components,
         apis,
         presentation,
@@ -361,7 +373,7 @@ export async function prepareWebDocument(input: {
           version: WEB_DOCUMENT_IR_VERSION,
           rendering: "hydrate",
           language: input.route?.metadata?.language ?? "en",
-          title: input.route?.metadata?.title ?? application.metadata?.name ?? "Poggers",
+          title: input.route?.metadata?.title ?? system.metadata?.name ?? "Poggers",
           metadata: documentMetadata(input.route?.metadata),
           entry: input.entry ?? "/app.js",
           preloads: Object.freeze([]),
@@ -443,7 +455,7 @@ type CompiledDeferredBoundary = Readonly<{
 }>;
 
 type CompiledRenderContext = Readonly<{
-  components: ReadonlyMap<string, CompiledWebComponentIR>;
+  component: ReturnType<typeof createCompiledWebComponentResolver>;
   boundaries: Map<string, CompiledDeferredBoundary>;
 }>;
 
@@ -470,14 +482,14 @@ export function prepareCompiledWebDocument(input: PrepareCompiledWebDocumentInpu
 export function prepareCompiledWebDocumentStream(
   input: PrepareCompiledWebDocumentInput,
 ): PreparedCompiledWebDocument {
-  const components = new Map(
-    input.components.map((component) => [componentIdentity(component), component]),
-  );
   const deferred = prepareCompiledDeferredData(
     input.loader === false ? undefined : input.loader.data,
     input.deferred ?? [],
   );
-  const context: CompiledRenderContext = { components, boundaries: new Map() };
+  const context: CompiledRenderContext = {
+    component: createCompiledWebComponentResolver(input.components),
+    boundaries: new Map(),
+  };
   const pending = evaluateRenderNode(
     input.view,
     {
@@ -731,15 +743,16 @@ function evaluateRenderNode(
       ];
     }
     case "component": {
-      if (stack.length >= 100 || stack.includes(node.target)) {
-        throw new TypeError(`Recursive server Component ${JSON.stringify(node.target)}.`);
-      }
-      const component = context.components.get(node.target);
+      const component = context.component(node.target);
       if (!component?.view) {
         const reason = component?.diagnostic?.message ?? "Component meaning is missing";
         throw new TypeError(
           `Cannot server-render Component ${JSON.stringify(node.target)}: ${reason}.`,
         );
+      }
+      const componentIdentity = compiledWebComponentIdentity(component);
+      if (stack.length >= 100 || stack.includes(componentIdentity)) {
+        throw new TypeError(`Recursive server Component ${JSON.stringify(node.target)}.`);
       }
       const props = Object.fromEntries(
         node.props.map((property) => [
@@ -763,7 +776,7 @@ function evaluateRenderNode(
           locals: {},
         },
         context,
-        [...stack, node.target],
+        [...stack, componentIdentity],
       );
     }
     case "each": {
@@ -926,10 +939,6 @@ function isRenderSlot(value: unknown): value is RenderSlot {
   return Boolean(
     value && typeof value === "object" && (value as Partial<RenderSlot>).kind === "slot",
   );
-}
-
-function componentIdentity(component: CompiledWebComponentIR): string {
-  return component.feature ? `${component.feature}.${component.name}` : component.name;
 }
 
 function compiledComponentRuntimeName(component: string | undefined): string {
@@ -1581,40 +1590,20 @@ function assertKeys(value: object, expected: readonly string[], subject: string)
 }
 
 function collectContributions(
-  application: RuntimeApplication,
+  system: RuntimeSystem,
   program: string,
   manifest: ProgramManifest,
 ): PreparedContribution[] {
-  const byPath = new Map<string, PreparedContribution>();
-  const visit = (
-    features: Readonly<Record<string, RuntimeFeature>> | undefined,
-    parent: string,
-  ) => {
-    for (const [name, feature] of Object.entries(features ?? {}).sort(([left], [right]) =>
-      left.localeCompare(right),
-    )) {
-      const path = parent ? `${parent}.${name}` : name;
-      const definition = feature.programs?.[program];
-      if (definition) {
-        byPath.set(path, { path, definition, children: Object.create(null) });
-      }
-      visit(feature.features, path);
-    }
-  };
-  visit(application.features, "");
-  const expected = new Set(manifest.contributions.map(({ feature }) => feature));
-  for (const path of byPath.keys()) {
-    if (!expected.has(path))
-      throw new TypeError(`Unexpected UI contribution ${JSON.stringify(path)}.`);
-  }
-  for (const path of expected) {
-    if (!byPath.has(path)) throw new TypeError(`Missing UI contribution ${JSON.stringify(path)}.`);
-  }
-  return [...byPath.values()];
+  return manifest.contributions.map(({ feature: path }) => {
+    const definition = resolveRuntimeFeature(system, path)?.programs?.[program];
+    if (!definition) throw new TypeError(`Missing UI contribution ${JSON.stringify(path)}.`);
+    return { path, definition, children: Object.create(null) };
+  });
 }
 
 function createComponentComposition(input: {
-  application: RuntimeApplication;
+  system: RuntimeSystem;
+  interface: string;
   program: string;
   contracts: Readonly<Record<string, WebDocumentComponentContract>>;
   apis: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
@@ -1627,21 +1616,34 @@ function createComponentComposition(input: {
     Object.create(null);
   const localGroups: Record<string, Record<string, unknown>> = { "": Object.create(null) };
   const namespaces: Record<string, Record<string, unknown>> = { "": Object.create(null) };
+  const interfaceFeature = requireRuntimeFeature(input.system, input.interface);
 
-  for (const name of collectComponentNames(input.application, input.program, input.contracts)) {
+  for (const name of Object.keys(input.contracts).sort()) {
     renderers[name] = (props = {}) =>
       renderComponent({ ...input, name, props, renderers, localGroups, namespaces });
-    const owner = componentOwner(name);
-    if (owner === undefined) localGroups[""]![name] = renderers[name];
   }
-  namespaces[""] = collectNamespaces(
-    input.application.features,
+  const local: Record<string, unknown> = Object.create(null);
+  for (const component of Object.keys(
+    interfaceFeature.programs?.[input.program]?.components ?? {},
+  ).sort()) {
+    const name = featureComponentName(input.interface, component);
+    const renderer = renderers[name];
+    if (!renderer)
+      throw new TypeError(`Missing Component renderer ${input.interface}.${component}.`);
+    local[component] = renderer;
+  }
+  localGroups[input.interface] = local;
+  const children = collectNamespaces(
+    interfaceFeature.features,
     input.program,
     renderers,
     localGroups,
     namespaces,
+    input.interface,
   );
-  const roots = collectRoots(input.application.features, input.program);
+  namespaces[""] = Object.assign(Object.create(null), local, children);
+  namespaces[input.interface] = children;
+  const roots = collectRoots(interfaceFeature, input.program, input.interface);
   if ((input.routed && roots.length !== 0) || (!input.routed && roots.length !== 1)) {
     throw new TypeError(
       input.routed
@@ -1656,38 +1658,34 @@ function createComponentComposition(input: {
       return root();
     },
     renderRoute(route: NonNullable<Parameters<typeof prepareWebDocument>[0]["route"]>) {
-      const definition = resolveRoute(input.application, input.program, route.feature, route.name);
+      const definition = resolveRoute(input.system, input.program, route.feature, route.name);
       return definition.view({
         data: route.data,
         params: route.params,
         search: route.search,
         feature: input.apis[route.feature] ?? {},
         features: childFeatureApis(route.feature, input.apis),
-        components: namespaces[""] ?? {},
+        components: componentsForOwner(route.feature, localGroups, namespaces),
       });
     },
   };
 }
 
 function resolveRoute(
-  application: RuntimeApplication,
+  system: RuntimeSystem,
   program: string,
   path: string,
   name: string,
 ): RuntimeRouteDefinition {
-  let feature: RuntimeFeature | undefined;
-  let features = application.features;
-  for (const segment of path.split(".")) {
-    feature = features?.[segment];
-    features = feature?.features;
-  }
+  const feature = resolveRuntimeFeature(system, path);
   const route = feature?.programs?.[program]?.routes?.[name];
   if (!route) throw new TypeError(`Missing implementation for web Route ${path}.${name}.`);
   return route;
 }
 
 function renderComponent(input: {
-  application: RuntimeApplication;
+  system: RuntimeSystem;
+  interface: string;
   program: string;
   contracts: Readonly<Record<string, WebDocumentComponentContract>>;
   apis: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
@@ -1700,7 +1698,7 @@ function renderComponent(input: {
   presentationDependencies: Readonly<Record<string, readonly unknown[]>>;
   styles: Set<string>;
 }): unknown {
-  const definition = resolveComponent(input.application, input.program, input.name);
+  const definition = resolveComponent(input.system, input.program, input.name);
   if (!definition?.view)
     throw new TypeError(`Component ${JSON.stringify(input.name)} has no view.`);
   const owner = componentOwner(input.name) ?? "";
@@ -1778,9 +1776,7 @@ function renderComponent(input: {
   );
   const components = Object.assign(
     Object.create(null),
-    input.namespaces[""] ?? {},
-    input.localGroups[owner] ?? {},
-    input.namespaces[owner] ?? {},
+    componentsForOwner(owner, input.localGroups, input.namespaces),
   );
   return definition.view({
     props,
@@ -1880,28 +1876,6 @@ function renderNode(node: WebDocumentNodeIR): string {
   return `<${node.tag}${attributes}>${node.children.map(renderNode).join("")}</${node.tag}>`;
 }
 
-function collectComponentNames(
-  application: RuntimeApplication,
-  program: string,
-  contracts: Readonly<Record<string, WebDocumentComponentContract>>,
-): string[] {
-  const names = new Set(Object.keys(contracts).filter((name) => !name.startsWith("@feature/")));
-  const visit = (
-    features: Readonly<Record<string, RuntimeFeature>> | undefined,
-    parent: string,
-  ) => {
-    for (const [name, feature] of Object.entries(features ?? {})) {
-      const path = parent ? `${parent}.${name}` : name;
-      for (const component of Object.keys(feature.programs?.[program]?.components ?? {})) {
-        names.add(featureComponentName(path, component));
-      }
-      visit(feature.features, path);
-    }
-  };
-  visit(application.features, "");
-  return [...names].sort();
-}
-
 function collectNamespaces(
   features: Readonly<Record<string, RuntimeFeature>> | undefined,
   program: string,
@@ -1937,37 +1911,26 @@ function collectNamespaces(
   return result;
 }
 
-function collectRoots(
-  features: Readonly<Record<string, RuntimeFeature>> | undefined,
-  program: string,
-  parent = "",
-): string[] {
+function collectRoots(feature: RuntimeFeature, program: string, path: string): string[] {
   const roots: string[] = [];
-  for (const [name, feature] of Object.entries(features ?? {}).sort(([left], [right]) =>
+  const root = feature.programs?.[program]?.root;
+  if (root) roots.push(featureComponentName(path, root));
+  for (const [name, child] of Object.entries(feature.features ?? {}).sort(([left], [right]) =>
     left.localeCompare(right),
   )) {
-    const path = parent ? `${parent}.${name}` : name;
-    const root = feature.programs?.[program]?.root;
-    if (root) roots.push(featureComponentName(path, root));
-    roots.push(...collectRoots(feature.features, program, path));
+    roots.push(...collectRoots(child, program, `${path}.${name}`));
   }
   return roots;
 }
 
 function resolveComponent(
-  application: RuntimeApplication,
+  system: RuntimeSystem,
   program: string,
   component: string,
 ): RuntimeComponentDefinition | undefined {
   const owner = componentOwner(component);
   if (owner === undefined) return;
-  let feature: RuntimeFeature | undefined;
-  let features = application.features;
-  for (const name of owner.split(".")) {
-    feature = features?.[name];
-    if (!feature) return;
-    features = feature.features;
-  }
+  const feature = resolveRuntimeFeature(system, owner);
   const marker = "/component/";
   return feature?.programs?.[program]?.components?.[
     component.slice(component.indexOf(marker) + marker.length)
@@ -1989,12 +1952,13 @@ function childFeatureApis(
 }
 
 function createPreparedPresentation(
-  application: RuntimeApplication,
+  system: RuntimeSystem,
+  interfacePath: string,
   program: string,
+  configured: RuntimeConfiguredPresentation,
   apis: Readonly<Record<string, Readonly<Record<string, unknown>>>>,
 ): PreparedPresentation {
-  const configured = Object.values(application.presentations ?? {})[0];
-  if (!configured) return { components: new Map(), dispose() {} };
+  const interfaceFeature = requireRuntimeFeature(system, interfacePath);
   const hosts: WebAnimationHost[] = [];
   const createScope = (parent?: WebAnimationHost) => {
     const host = createWebAnimationHost({
@@ -2011,7 +1975,7 @@ function createPreparedPresentation(
     configured.create({
       parameters: configured.parameters,
       environment: initialEnvironment,
-      state: presentationState(apis[""] ?? {}, {}),
+      state: presentationState(apis[interfacePath] ?? {}, {}),
       events: {},
     }),
   );
@@ -2019,9 +1983,13 @@ function createPreparedPresentation(
     string,
     Readonly<{ render: RuntimePresentationComponent; parent: WebAnimationHost }>
   >();
-  for (const [name, value] of Object.entries(root)) {
+  for (const component of Object.keys(interfaceFeature.programs?.[program]?.components ?? {})) {
+    const value = root[component];
     if (typeof value === "function") {
-      components.set(name, { render: value as RuntimePresentationComponent, parent: rootHost });
+      components.set(featureComponentName(interfacePath, component), {
+        render: value as RuntimePresentationComponent,
+        parent: rootHost,
+      });
     }
   }
   const visit = (
@@ -2061,7 +2029,7 @@ function createPreparedPresentation(
       visit(feature.features, next, path, featureHost);
     }
   };
-  visit(application.features, root, "", rootHost);
+  visit(interfaceFeature.features, root, interfacePath, rootHost);
   return {
     components,
     dispose() {
@@ -2071,6 +2039,36 @@ function createPreparedPresentation(
       }
     },
   };
+}
+
+function resolveRuntimeFeature(system: RuntimeSystem, path: string): RuntimeFeature | undefined {
+  let feature: RuntimeFeature | undefined;
+  let features = system.features;
+  for (const name of path.split(".").filter(Boolean)) {
+    feature = features?.[name];
+    if (!feature) return undefined;
+    features = feature.features;
+  }
+  return feature;
+}
+
+function requireRuntimeFeature(system: RuntimeSystem, path: string): RuntimeFeature {
+  const feature = resolveRuntimeFeature(system, path);
+  if (!feature) throw new TypeError(`Missing interface Feature ${JSON.stringify(path)}.`);
+  return feature;
+}
+
+function componentsForOwner(
+  owner: string,
+  localGroups: Readonly<Record<string, Readonly<Record<string, unknown>>>>,
+  namespaces: Readonly<Record<string, Readonly<Record<string, unknown>>>>,
+): Record<string, unknown> {
+  return Object.assign(
+    Object.create(null),
+    namespaces[""] ?? {},
+    localGroups[owner] ?? {},
+    namespaces[owner] ?? {},
+  );
 }
 
 function evaluatePreparedPresentation(

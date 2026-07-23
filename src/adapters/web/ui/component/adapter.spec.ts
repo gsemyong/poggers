@@ -9,14 +9,42 @@ import {
 import { readScoped } from "@/adapters/web/ui/component/runtime";
 import { createWebPresentationAdapter } from "@/adapters/web/ui/presentation/adapter";
 import type { PresentationAdapterInstance } from "@/contracts/platform";
-import type { Application, Feature } from "@/core/application";
+import type { Feature } from "@/core/feature";
 import type { Program } from "@/core/program";
+import type { System } from "@/core/system";
 import type { BrowserMainThread } from "@/platforms/web/platform";
 import type { WebPresentationLanguage } from "@/platforms/web/presentation";
 
-const createApplicationUI = createWebUIAdapter(createWebPresentationAdapter()).component
-  .createApplicationUI;
+const createInterfaceUI = createWebUIAdapter(createWebPresentationAdapter()).component
+  .createInterfaceUI;
 const boundary = {} as Element;
+const emptyPresentation = Object.freeze({
+  parameters: Object.freeze({}),
+  create: () => Object.freeze({}),
+});
+
+function testSystem(features: Readonly<Record<string, unknown>>): System {
+  return {
+    features: {
+      web: {
+        features,
+        presentation: emptyPresentation,
+      },
+    },
+  } as unknown as System;
+}
+
+function componentMetadata(...components: readonly string[]) {
+  return Object.fromEntries(
+    components.map((component) => {
+      const separator = component.lastIndexOf(".");
+      return [
+        `@feature/${component.slice(0, separator)}/component/${component.slice(separator + 1)}`,
+        { elements: {} },
+      ];
+    }),
+  );
+}
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -47,8 +75,6 @@ type Shell = {
     >;
   };
 };
-
-type Contract = { Features: { shell: Shell } };
 
 const counter = (count: number): Feature<Counter> => ({
   programs: {
@@ -90,50 +116,50 @@ describe("Program UI composition", () => {
     const slowSignals: AbortSignal[] = [];
     let resolveSlow: (() => void) | undefined;
     let finishViews = 0;
-    const application = {
-      features: {
-        routes: {
-          programs: {
-            browser: {
-              routes: {
-                start: {
-                  load: () => ({ redirect: { to: "finish" } }),
-                  view: () => "start",
+    const system = testSystem({
+      routes: {
+        programs: {
+          browser: {
+            routes: {
+              start: {
+                load: () => ({ redirect: { to: "finish" } }),
+                view: () => "start",
+              },
+              finish: {
+                view: () => {
+                  finishViews += 1;
+                  return "finish";
                 },
-                finish: {
-                  view: () => {
-                    finishViews += 1;
-                    return "finish";
-                  },
+              },
+              slow: {
+                load: ({ signal }: { signal: AbortSignal }) => {
+                  slowSignals.push(signal);
+                  return new Promise((resolve) => {
+                    resolveSlow = () => resolve({ data: "late" });
+                  });
                 },
-                slow: {
-                  load: ({ signal }: { signal: AbortSignal }) => {
-                    slowSignals.push(signal);
-                    return new Promise((resolve) => {
-                      resolveSlow = () => resolve({ data: "late" });
-                    });
-                  },
-                  view: ({ data }: { data: unknown }) => String(data),
-                },
+                view: ({ data }: { data: unknown }) => String(data),
               },
             },
           },
         },
       },
-    } as unknown as Application<Contract>;
+    });
     const routes: WebRouteIR[] = [
       route("start", "/start", "Start"),
       route("finish", "/finish", "Finish"),
       route("slow", "/slow", "Slow"),
     ];
-    const ui = await createApplicationUI({
-      application,
-      program: "browser",
-      presentations: { presentations: {} },
+    const ui = await createInterfaceUI({
+      system,
+      interface: "web",
+      program: "web.browser",
+      logicalProgram: "browser",
+      presentation: emptyPresentation,
       dependencies: { navigation },
       programManifest: {
-        name: "browser",
-        contributions: [{ feature: "routes", requires: ["navigation"], provides: [] }],
+        name: "web.browser",
+        contributions: [{ feature: "web.routes", requires: ["navigation"], provides: [] }],
       },
       routes,
       boundary,
@@ -176,7 +202,7 @@ describe("Program UI composition", () => {
           ? {
               textContent: JSON.stringify({
                 version: 1,
-                route: { feature: "routes", name: "start" },
+                route: { feature: "web.routes", name: "start" },
                 location: "/start",
                 params: {},
                 search: {},
@@ -216,35 +242,35 @@ describe("Program UI composition", () => {
     }>;
     let resolveStart: ((value: RouteDefinition) => void) | undefined;
     let resolveFinish: ((value: RouteDefinition) => void) | undefined;
-    const application = {
-      features: {
-        routes: {
-          programs: {
-            browser: {
-              routes: {
-                start: {
-                  view: ({ data }: { data: unknown }) => String(data),
-                },
-                finish: {
-                  view: ({ data }: { data: unknown }) => String(data),
-                },
+    const system = testSystem({
+      routes: {
+        programs: {
+          browser: {
+            routes: {
+              start: {
+                view: ({ data }: { data: unknown }) => String(data),
+              },
+              finish: {
+                view: ({ data }: { data: unknown }) => String(data),
               },
             },
           },
         },
       },
-    } as unknown as Application<Contract>;
-    const creating = createApplicationUI({
-      application,
-      program: "browser",
-      presentations: { presentations: {} },
+    });
+    const creating = createInterfaceUI({
+      system,
+      interface: "web",
+      program: "web.browser",
+      logicalProgram: "browser",
+      presentation: emptyPresentation,
       dependencies: { navigation },
       programManifest: {
-        name: "browser",
-        contributions: [{ feature: "routes", requires: ["navigation"], provides: [] }],
+        name: "web.browser",
+        contributions: [{ feature: "web.routes", requires: ["navigation"], provides: [] }],
       },
       routes: [route("start", "/start", "Start"), route("finish", "/finish", "Finish")],
-      loadRoute: (current) =>
+      loadRoute: (current: WebRouteIR) =>
         new Promise<RouteDefinition>((resolve) => {
           if (current.name === "start") resolveStart = resolve;
           else resolveFinish = resolve;
@@ -307,11 +333,14 @@ describe("Program UI composition", () => {
         },
       },
     };
-    const application: Application<Contract> = { features: { shell } };
-    const ui = await createApplicationUI({
-      application,
-      program: "browser",
-      presentations: { presentations: {} },
+    const system = testSystem({ shell });
+    const ui = await createInterfaceUI({
+      system,
+      interface: "web",
+      program: "web.browser",
+      logicalProgram: "browser",
+      presentation: emptyPresentation,
+      components: componentMetadata("web.shell.Root"),
       boundary,
     });
     const increment = ui.api.increment as (input: {
@@ -331,25 +360,25 @@ describe("Program UI composition", () => {
   });
 
   test("requires exactly one root for a UI Program", async () => {
-    const application = {
-      features: {
-        empty: {
-          programs: { browser: { components: {} } },
-        },
+    const system = testSystem({
+      empty: {
+        programs: { browser: { components: {} } },
       },
-    } as unknown as Application<Contract>;
+    });
 
     await expect(
-      createApplicationUI({
-        application,
-        program: "browser",
-        presentations: { presentations: {} },
+      createInterfaceUI({
+        system,
+        interface: "web",
+        program: "web.browser",
+        logicalProgram: "browser",
+        presentation: emptyPresentation,
         boundary,
       }),
     ).rejects.toThrow("exactly one root");
   });
 
-  test("updates authored Presentations in place when their public names are stable", async () => {
+  test("updates the interface Presentation without rebuilding Program state", async () => {
     const shell: Feature<Shell> = {
       features: { first: counter(1), second: counter(10) },
       programs: {
@@ -367,25 +396,21 @@ describe("Program UI composition", () => {
       },
     };
     const family = { parameters: {}, create: () => ({}) };
-    type AppearanceContract = Contract & { Presentations: "family" };
-    const application = {
-      features: { shell },
-      presentations: { family },
-    } satisfies Application<AppearanceContract>;
-    const ui = await createApplicationUI<AppearanceContract>({
-      application,
-      program: "browser",
-      presentations: { presentations: { family } },
+    const studio = { parameters: {}, create: () => ({}) };
+    const system = testSystem({ shell });
+    const ui = await createInterfaceUI({
+      system,
+      interface: "web",
+      program: "web.browser",
+      logicalProgram: "browser",
+      presentation: family,
+      components: componentMetadata("web.shell.Root"),
       boundary,
     });
 
     expect(ui.api.total).toBe(0);
-    expect(ui.updatePresentations({ family })).toBe(true);
-    expect(
-      ui.updatePresentations({
-        studio: family,
-      }),
-    ).toBe(false);
+    ui.updatePresentation(studio);
+    expect(ui.api.total).toBe(0);
 
     await ui.dispose();
   });
@@ -415,51 +440,50 @@ describe("Program UI composition", () => {
         return {};
       },
     };
-    type AppearanceContract = Contract & { Presentations: "family" };
-    const application = {
-      features: { shell },
-      presentations: { family },
-    } satisfies Application<AppearanceContract>;
-    const ui = await createApplicationUI<AppearanceContract>({
-      application,
-      program: "browser",
-      presentations: { presentations: { family } },
+    const system = testSystem({ shell });
+    const ui = await createInterfaceUI({
+      system,
+      interface: "web",
+      program: "web.browser",
+      logicalProgram: "browser",
+      presentation: family,
+      components: componentMetadata("web.shell.Root"),
       boundary,
     });
 
     expect(environments).toHaveLength(0);
-    expect(ui.updatePresentations({ family })).toBe(true);
+    ui.updatePresentation(family);
     expect(environments).toHaveLength(0);
     await ui.dispose();
   });
 
   test("rejects multiple roots for a composed UI Program", async () => {
-    const application = {
-      features: {
-        first: {
-          programs: {
-            browser: {
-              components: { Root: { view: () => null } },
-              root: "Root",
-            },
-          },
-        },
-        second: {
-          programs: {
-            browser: {
-              components: { Root: { view: () => null } },
-              root: "Root",
-            },
+    const system = testSystem({
+      first: {
+        programs: {
+          browser: {
+            components: { Root: { view: () => null } },
+            root: "Root",
           },
         },
       },
-    } as unknown as Application<Contract>;
+      second: {
+        programs: {
+          browser: {
+            components: { Root: { view: () => null } },
+            root: "Root",
+          },
+        },
+      },
+    });
 
     await expect(
-      createApplicationUI({
-        application,
-        program: "browser",
-        presentations: { presentations: {} },
+      createInterfaceUI({
+        system,
+        interface: "web",
+        program: "web.browser",
+        logicalProgram: "browser",
+        presentation: emptyPresentation,
         boundary,
       }),
     ).rejects.toThrow("found 2");
@@ -485,7 +509,6 @@ describe("Program UI composition", () => {
         >;
       };
     };
-    type App = { Features: { consumer: Consumer } };
     const provider: Feature<Provider> = {
       programs: {
         browser: {
@@ -511,18 +534,21 @@ describe("Program UI composition", () => {
         },
       },
     };
-    const application: Application<App> = { features: { consumer } };
-    const ui = await createApplicationUI({
-      application,
-      program: "browser",
+    const system = testSystem({ consumer });
+    const ui = await createInterfaceUI({
+      system,
+      interface: "web",
+      program: "web.browser",
+      logicalProgram: "browser",
       programManifest: {
-        name: "browser",
+        name: "web.browser",
         contributions: [
-          { feature: "consumer", requires: ["reader"], provides: [] },
-          { feature: "consumer.provider", requires: [], provides: ["reader"] },
+          { feature: "web.consumer", requires: ["reader"], provides: [] },
+          { feature: "web.consumer.provider", requires: [], provides: ["reader"] },
         ],
       },
-      presentations: { presentations: {} },
+      presentation: emptyPresentation,
+      components: componentMetadata("web.consumer.Root"),
       boundary,
     });
 
@@ -548,12 +574,15 @@ describe("Program UI composition", () => {
         },
       },
     };
-    const application: Application<Contract> = { features: { shell } };
+    const system = testSystem({ shell });
     const hotState = {};
-    const first = await createApplicationUI({
-      application,
-      program: "browser",
-      presentations: { presentations: {} },
+    const first = await createInterfaceUI({
+      system,
+      interface: "web",
+      program: "web.browser",
+      logicalProgram: "browser",
+      presentation: emptyPresentation,
+      components: componentMetadata("web.shell.Root"),
       hotState,
       boundary,
     });
@@ -564,10 +593,13 @@ describe("Program UI composition", () => {
     first.captureHotState();
     await first.dispose();
 
-    const second = await createApplicationUI({
-      application,
-      program: "browser",
-      presentations: { presentations: {} },
+    const second = await createInterfaceUI({
+      system,
+      interface: "web",
+      program: "web.browser",
+      logicalProgram: "browser",
+      presentation: emptyPresentation,
+      components: componentMetadata("web.shell.Root"),
       hotState,
       boundary,
     });
@@ -585,7 +617,7 @@ describe("Program UI composition", () => {
 
 function route(name: string, path: string, title?: string): WebRouteIR {
   return {
-    feature: "routes",
+    feature: "web.routes",
     name,
     path,
     document: "shell",
@@ -597,8 +629,8 @@ function route(name: string, path: string, title?: string): WebRouteIR {
   };
 }
 
-test("evaluates each Application and Feature Presentation scope once per root frame", () => {
-  let applicationEvaluations = 0;
+test("evaluates each interface and child Feature Presentation scope once per root frame", () => {
+  let interfaceEvaluations = 0;
   let featureEvaluations = 0;
   const adapter = {
     environment: {} as WebPresentationLanguage["Environment"],
@@ -623,54 +655,51 @@ test("evaluates each Application and Feature Presentation scope once per root fr
     },
     dispose() {},
   } as unknown as PresentationAdapterInstance<WebPresentationLanguage, Element>;
-  const graph = createPresentationGraph({
-    application: {
-      features: {
-        dashboard: {
-          programs: {
-            browser: { components: { First: {}, Second: {} } },
-          },
-        },
-      },
-    },
-    program: "browser",
-    presentations: {
-      clean: {
-        parameters: {},
-        create: () => {
-          applicationEvaluations += 1;
+  const presentation = {
+    parameters: {},
+    create: () => {
+      interfaceEvaluations += 1;
+      return {
+        Dashboard: () => {
+          featureEvaluations += 1;
           return {
-            Dashboard: () => {
-              featureEvaluations += 1;
-              return {
-                First: () => ({ Root: { paint: { opacity: 0.4 } } }),
-                Second: () => ({ Root: { paint: { opacity: 0.4 } } }),
-              };
-            },
+            First: () => ({ Root: { paint: { opacity: 0.4 } } }),
+            Second: () => ({ Root: { paint: { opacity: 0.4 } } }),
           };
         },
-      },
+      };
     },
+  };
+  const graph = createPresentationGraph({
+    system: testSystem({
+      dashboard: {
+        programs: {
+          browser: { components: { First: {}, Second: {} } },
+        },
+      },
+    }),
+    interface: "web",
+    program: "browser",
     presentationRevision: () => 0,
-    presentation: () => "clean",
+    presentation: () => presentation,
     adapter,
     boundary,
-    featureAPIs: { dashboard: {} },
-    featureEvents: { dashboard: {} },
+    featureAPIs: { "web.dashboard": {} },
+    featureEvents: { "web.dashboard": {} },
     eventRevision: () => 0,
     rootComponents: [],
   });
 
   graph.mount();
-  expect(applicationEvaluations).toBe(1);
+  expect(interfaceEvaluations).toBe(1);
   expect(featureEvaluations).toBe(1);
-  expect(graph.component("@feature/dashboard/component/First")?.({} as never)).toEqual({
+  expect(graph.component("@feature/web.dashboard/component/First")?.({} as never)).toEqual({
     Root: { paint: { opacity: 0.4 } },
   });
-  expect(graph.component("@feature/dashboard/component/Second")?.({} as never)).toEqual({
+  expect(graph.component("@feature/web.dashboard/component/Second")?.({} as never)).toEqual({
     Root: { paint: { opacity: 0.4 } },
   });
-  expect(graph.scopes("@feature/dashboard/component/First")).toHaveLength(2);
+  expect(graph.scopes("@feature/web.dashboard/component/First")).toHaveLength(2);
   expect(featureEvaluations).toBe(1);
   graph.dispose();
 });
@@ -699,29 +728,26 @@ test("invalidates only compiler-identified consumers of shared Presentation moti
     },
     dispose() {},
   } as unknown as PresentationAdapterInstance<WebPresentationLanguage, Element>;
-  const first = "@feature/dashboard/component/First";
-  const second = "@feature/dashboard/component/Second";
+  const first = "@feature/web.dashboard/component/First";
+  const second = "@feature/web.dashboard/component/Second";
+  const presentation = {
+    parameters: {},
+    create: () => ({ Dashboard: () => ({ First: () => ({}), Second: () => ({}) }) }),
+  };
   const graph = createPresentationGraph({
-    application: {
-      features: {
-        dashboard: {
-          programs: { browser: { components: { First: {}, Second: {} } } },
-        },
+    system: testSystem({
+      dashboard: {
+        programs: { browser: { components: { First: {}, Second: {} } } },
       },
-    },
+    }),
+    interface: "web",
     program: "browser",
-    presentations: {
-      clean: {
-        parameters: {},
-        create: () => ({ Dashboard: () => ({ First: () => ({}), Second: () => ({}) }) }),
-      },
-    },
     presentationRevision: () => 0,
-    presentation: () => "clean",
+    presentation: () => presentation,
     adapter,
     boundary,
-    featureAPIs: { dashboard: {} },
-    featureEvents: { dashboard: {} },
+    featureAPIs: { "web.dashboard": {} },
+    featureEvents: { "web.dashboard": {} },
     eventRevision: () => 0,
     rootComponents: [],
     dependencies: {
@@ -773,23 +799,23 @@ test("coalesces shared-scope invalidation when the consumer already rendered tha
     },
     dispose() {},
   } as unknown as PresentationAdapterInstance<WebPresentationLanguage, Element>;
-  const component = "@feature/dashboard/component/Panel";
+  const component = "@feature/web.dashboard/component/Panel";
+  const presentation = {
+    parameters: {},
+    create: () => ({ Dashboard: () => ({ Panel: () => ({}) }) }),
+  };
   const graph = createPresentationGraph({
-    application: {
-      features: {
-        dashboard: { programs: { browser: { components: { Panel: {} } } } },
-      },
-    },
+    system: testSystem({
+      dashboard: { programs: { browser: { components: { Panel: {} } } } },
+    }),
+    interface: "web",
     program: "browser",
-    presentations: {
-      clean: { parameters: {}, create: () => ({ Dashboard: () => ({ Panel: () => ({}) }) }) },
-    },
     presentationRevision: () => 0,
-    presentation: () => "clean",
+    presentation: () => presentation,
     adapter,
     boundary,
-    featureAPIs: { dashboard: {} },
-    featureEvents: { dashboard: {} },
+    featureAPIs: { "web.dashboard": {} },
+    featureEvents: { "web.dashboard": {} },
     eventRevision: () => 0,
     rootComponents: [],
     dependencies: {
@@ -849,38 +875,35 @@ test("does not reevaluate unrelated Feature Presentation scopes on adapter-owned
     },
     dispose() {},
   } as unknown as PresentationAdapterInstance<WebPresentationLanguage, Element>;
-  const dashboard = "@feature/dashboard/component/First";
+  const dashboard = "@feature/web.dashboard/component/First";
   let dashboardEvaluations = 0;
   let analyticsEvaluations = 0;
+  const presentation = {
+    parameters: {},
+    create: () => ({
+      Dashboard: () => {
+        dashboardEvaluations += 1;
+        return { First: () => ({}) };
+      },
+      Analytics: () => {
+        analyticsEvaluations += 1;
+        return { Report: () => ({}) };
+      },
+    }),
+  };
   const graph = createPresentationGraph({
-    application: {
-      features: {
-        dashboard: { programs: { browser: { components: { First: {} } } } },
-        analytics: { programs: { browser: { components: { Report: {} } } } },
-      },
-    },
+    system: testSystem({
+      dashboard: { programs: { browser: { components: { First: {} } } } },
+      analytics: { programs: { browser: { components: { Report: {} } } } },
+    }),
+    interface: "web",
     program: "browser",
-    presentations: {
-      clean: {
-        parameters: {},
-        create: () => ({
-          Dashboard: () => {
-            dashboardEvaluations += 1;
-            return { First: () => ({}) };
-          },
-          Analytics: () => {
-            analyticsEvaluations += 1;
-            return { Report: () => ({}) };
-          },
-        }),
-      },
-    },
     presentationRevision: () => 0,
-    presentation: () => "clean",
+    presentation: () => presentation,
     adapter,
     boundary,
-    featureAPIs: { dashboard: {}, analytics: {} },
-    featureEvents: { dashboard: {}, analytics: {} },
+    featureAPIs: { "web.dashboard": {}, "web.analytics": {} },
+    featureEvents: { "web.dashboard": {}, "web.analytics": {} },
     eventRevision: () => 0,
     rootComponents: [],
     dependencies: {

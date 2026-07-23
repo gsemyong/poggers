@@ -1,4 +1,4 @@
-import type { Feature } from "@/core/application";
+import type { Feature } from "@/core/feature";
 import type { Program } from "@/core/program";
 import {
   Await,
@@ -8,13 +8,13 @@ import {
   type WebServiceWorkerRuntime,
 } from "@/platforms/web/platform";
 import type {
-  ApplicationWebRoutes,
   Deferred,
   Validate,
   ValidationInput,
   ValidationOutput,
   WebFeature,
   WebRoute,
+  WebRoutes,
 } from "@/platforms/web/routing";
 
 type Equal<Left, Right> =
@@ -163,7 +163,7 @@ type IdentityFeature = {
 
 type RoutedApplication = { Features: { identity: IdentityFeature; tasks: RoutedFeature } };
 type GlobalRouteNamesProof = Expect<
-  Equal<keyof ApplicationWebRoutes<RoutedApplication>, "identity.signIn" | "tasks.edit">
+  Equal<keyof WebRoutes<RoutedApplication>, "identity.signIn" | "tasks.edit">
 >;
 
 declare const navigation: Navigation<

@@ -9,7 +9,7 @@ export type ShellFeature = {
         State: { count: number };
         Actions: { increment(): void };
         Components: {
-          Application: { Elements: { Root: "main"; Title: "h1"; Increment: "button" } };
+          Root: { Elements: { Root: "main"; Title: "h1"; Increment: "button" } };
         };
       }
     >;
@@ -26,7 +26,7 @@ export const shell = {
         },
       },
       components: {
-        Application: {
+        Root: {
           view({ feature, elements: { Root, Title, Increment } }) {
             return (
               <Root>
@@ -39,7 +39,7 @@ export const shell = {
           },
         },
       },
-      root: "Application",
+      root: "Root",
     },
   },
 } satisfies Feature<ShellFeature>;

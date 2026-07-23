@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 
 import { webProgramCompilerIR, type WebPortableFunctionIR } from "@/adapters/web/routing";
 import {
-  type ApplicationIR,
+  type SystemIR,
   type FunctionIR,
   type ProgramContributionIR,
   type ProgramIR,
@@ -39,17 +39,17 @@ export type WebRouteLoaderPlan = Readonly<{
  */
 export function planWebRouteLoaders(
   program: ProgramIR,
-  application: ApplicationIR | undefined,
+  system: SystemIR | undefined,
 ): WebRouteLoaderPlan {
   const ownsHttp = program.contributions.some((contribution) =>
     [...contribution.requires, ...contribution.provides].some(({ name }) => name === "http"),
   );
-  if (!application || !ownsHttp) return { contributions: [], loaders: [] };
+  if (!system || !ownsHttp) return { contributions: [], loaders: [] };
 
   const contributions: ProgramContributionIR[] = [];
   const loaders: PlannedWebRouteLoader[] = [];
   let index = 0;
-  for (const webProgram of application.programs) {
+  for (const webProgram of system.programs) {
     if (webProgram.environment.platform !== "web") continue;
     for (const contribution of webProgram.contributions) {
       if (!contribution.extensions?.web) continue;
@@ -97,12 +97,12 @@ export function planWebRouteLoaders(
 
 export type DevelopmentWebLoaderRegistry = Readonly<{
   register(input: {
-    application: string;
+    system: string;
     owner: string;
     plan: WebRouteLoaderPlan;
     dependencies: Readonly<Record<string, unknown>>;
   }): Disposable;
-  load(application: string, input: WebRouteLoaderInput): Promise<unknown>;
+  load(system: string, input: WebRouteLoaderInput): Promise<unknown>;
 }>;
 
 /** Creates the private in-process bridge between development server and web adapters. */
@@ -111,13 +111,13 @@ export function createDevelopmentWebLoaderRegistry(): DevelopmentWebLoaderRegist
     owner: string;
     load(input: WebRouteLoaderInput): Promise<unknown>;
   }>;
-  const applications = new Map<string, Map<string, Registration[]>>();
+  const systems = new Map<string, Map<string, Registration[]>>();
 
   return {
-    register({ application, owner, plan, dependencies }) {
-      application = resolve(application);
-      const routes = applications.get(application) ?? new Map<string, Registration[]>();
-      applications.set(application, routes);
+    register({ system, owner, plan, dependencies }) {
+      system = resolve(system);
+      const routes = systems.get(system) ?? new Map<string, Registration[]>();
+      systems.set(system, routes);
       const registered: Array<Readonly<{ route: string; registration: Registration }>> = [];
       try {
         for (const loader of plan.loaders) {
@@ -158,7 +158,7 @@ export function createDevelopmentWebLoaderRegistry(): DevelopmentWebLoaderRegist
           registered.push({ route: loader.route, registration });
         }
       } catch (error) {
-        removeRegistrations(applications, application, registered);
+        removeRegistrations(systems, system, registered);
         throw error;
       }
 
@@ -167,13 +167,13 @@ export function createDevelopmentWebLoaderRegistry(): DevelopmentWebLoaderRegist
         [Symbol.dispose]() {
           if (disposed) return;
           disposed = true;
-          removeRegistrations(applications, application, registered);
+          removeRegistrations(systems, system, registered);
         },
       };
     },
-    async load(application, input) {
-      application = resolve(application);
-      const registration = applications.get(application)?.get(input.route)?.at(-1);
+    async load(system, input) {
+      system = resolve(system);
+      const registration = systems.get(system)?.get(input.route)?.at(-1);
       if (!registration) {
         throw new Error(
           `No server Program provides the loader for web Route ${JSON.stringify(input.route)}.`,
@@ -185,14 +185,14 @@ export function createDevelopmentWebLoaderRegistry(): DevelopmentWebLoaderRegist
 }
 
 function removeRegistrations(
-  applications: Map<
+  systems: Map<
     string,
     Map<
       string,
       Array<Readonly<{ owner: string; load(input: WebRouteLoaderInput): Promise<unknown> }>>
     >
   >,
-  application: string,
+  system: string,
   registered: readonly Readonly<{
     route: string;
     registration: Readonly<{
@@ -201,7 +201,7 @@ function removeRegistrations(
     }>;
   }>[],
 ): void {
-  const routes = applications.get(application);
+  const routes = systems.get(system);
   if (!routes) return;
   for (const { route, registration } of registered) {
     const values = routes.get(route);
@@ -210,7 +210,7 @@ function removeRegistrations(
     if (index >= 0) values.splice(index, 1);
     if (!values.length) routes.delete(route);
   }
-  if (!routes.size) applications.delete(application);
+  if (!routes.size) systems.delete(system);
 }
 
 function emptyFunction(span: SourceSpan): FunctionIR {

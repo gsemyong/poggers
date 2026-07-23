@@ -1,6 +1,6 @@
 import type { JSXElement, JSXPlatformRegistration } from "@poggers/kit/jsx-runtime";
 
-import type { Feature } from "@/core/application";
+import type { Feature } from "@/core/feature";
 import type { Program } from "@/core/program";
 import type { UIElement } from "@/core/ui/language";
 import type { BrowserMainThread } from "@/platforms/web/platform";

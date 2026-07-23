@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     path::{Component, Path, PathBuf},
     sync::{
         Arc, Mutex, RwLock,
@@ -46,8 +46,8 @@ struct HttpState {
     routes: RwLock<BTreeMap<u64, Route>>,
     web_loader: RwLock<Option<(u64, Engine, Value)>>,
     next_route: AtomicU64,
-    web_origin: String,
-    web: Option<WebArtifact>,
+    web_origins: BTreeSet<String>,
+    web: WebArtifacts,
     web_cache: Mutex<WebResponseCache>,
     web_cache_refreshes: Arc<Semaphore>,
     request_timeout: Duration,
@@ -59,9 +59,25 @@ struct HttpState {
 
 #[derive(Clone)]
 struct WebArtifact {
+    identity: Arc<str>,
+    origin: Arc<str>,
     root: Arc<PathBuf>,
     document: Arc<WebDocument>,
     assets: Arc<BTreeMap<String, WebAsset>>,
+}
+
+#[derive(Clone, Default)]
+struct WebArtifacts {
+    default: Option<WebArtifact>,
+    authorities: BTreeMap<String, WebArtifact>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WebInterfaceConfiguration {
+    identity: String,
+    origin: String,
+    root: String,
 }
 
 #[derive(Clone)]
@@ -319,28 +335,49 @@ pub async fn create(context: DependencyContext) -> NativeResult<Http> {
         .map_err(|error| NativeError::new("HttpFailure", error.to_string()))?;
     let (shutdown, stopped) = oneshot::channel();
     let (stream_shutdown, _) = watch::channel(false);
+    let web_origin = context.configuration("webOrigin")?.trim_end_matches('/');
     let web_root = context.configuration("webRoot")?;
-    let web = if web_root.is_empty() {
+    let default_web = if web_root.is_empty() {
         None
     } else {
-        let root = PathBuf::from(web_root);
-        let document = WebDocument::load(&root).map_err(|error| {
-            NativeError::new("InvalidWebArtifact", format!("{web_root}: {error}"))
-        })?;
-        let assets = load_assets(&root).map_err(|error| {
-            NativeError::new("InvalidWebArtifact", format!("{web_root}: {error}"))
-        })?;
-        Some(WebArtifact {
-            root: Arc::new(root),
-            document: Arc::new(document),
-            assets: Arc::new(assets),
-        })
+        Some(load_web_artifact("default", web_origin, web_root)?)
+    };
+    let web_interfaces = context.configuration("webInterfaces")?;
+    let mut authorities = BTreeMap::new();
+    let mut web_origins = BTreeSet::new();
+    if !web_origin.is_empty() {
+        web_origins.insert(web_origin.to_owned());
+    }
+    if !web_interfaces.is_empty() {
+        let interfaces = serde_json::from_str::<Vec<WebInterfaceConfiguration>>(web_interfaces)
+            .map_err(|error| {
+                NativeError::new(
+                    "InvalidConfiguration",
+                    format!("POGGERS_WEB_INTERFACES: {error}"),
+                )
+            })?;
+        for interface in interfaces {
+            let origin = interface.origin.trim_end_matches('/');
+            let authority = web_authority(origin)?;
+            let artifact = load_web_artifact(&interface.identity, origin, &interface.root)?;
+            if authorities.insert(authority.clone(), artifact).is_some() {
+                return Err(NativeError::new(
+                    "InvalidConfiguration",
+                    format!("duplicate web interface authority {authority:?}"),
+                ));
+            }
+            web_origins.insert(origin.to_owned());
+        }
+    }
+    let web = WebArtifacts {
+        default: default_web,
+        authorities,
     };
     let state = Arc::new(HttpState {
         routes: RwLock::new(BTreeMap::new()),
         web_loader: RwLock::new(None),
         next_route: AtomicU64::new(0),
-        web_origin: context.configuration("webOrigin")?.to_owned(),
+        web_origins,
         web,
         web_cache: Mutex::new(WebResponseCache::new(web_cache_capacity, web_cache_bytes)),
         web_cache_refreshes: Arc::new(Semaphore::new(web_cache_refreshes)),
@@ -376,13 +413,63 @@ pub async fn create(context: DependencyContext) -> NativeResult<Http> {
     Ok(Http { state })
 }
 
+fn load_web_artifact(identity: &str, origin: &str, directory: &str) -> NativeResult<WebArtifact> {
+    let root = PathBuf::from(directory);
+    let document = WebDocument::load(&root)
+        .map_err(|error| NativeError::new("InvalidWebArtifact", format!("{directory}: {error}")))?;
+    let assets = load_assets(&root)
+        .map_err(|error| NativeError::new("InvalidWebArtifact", format!("{directory}: {error}")))?;
+    Ok(WebArtifact {
+        identity: Arc::from(identity),
+        origin: Arc::from(origin),
+        root: Arc::new(root),
+        document: Arc::new(document),
+        assets: Arc::new(assets),
+    })
+}
+
+fn web_authority(origin: &str) -> NativeResult<String> {
+    let url = url::Url::parse(origin).map_err(|error| {
+        NativeError::new(
+            "InvalidConfiguration",
+            format!("invalid web interface origin {origin:?}: {error}"),
+        )
+    })?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(NativeError::new(
+            "InvalidConfiguration",
+            format!("web interface origin must be an HTTP origin: {origin:?}"),
+        ));
+    }
+    Ok(url[url::Position::BeforeHost..url::Position::AfterPort].to_ascii_lowercase())
+}
+
+fn select_web_artifact(web: &WebArtifacts, headers: &HeaderMap) -> Option<WebArtifact> {
+    let authority = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_ascii_lowercase);
+    authority
+        .as_ref()
+        .and_then(|authority| web.authorities.get(authority))
+        .cloned()
+        .or_else(|| web.default.clone())
+}
+
 impl Dependency for Http {
     fn call(&self, engine: Engine, operation: &str, input: Value) -> NativeFuture<Value> {
         let state = self.state.clone();
         let operation = operation.to_owned();
         Box::pin(async move {
             if operation == "@web-loader" {
-                if state.web.is_none() {
+                if state.web.default.is_none() && state.web.authorities.is_empty() {
                     return Err(NativeError::new(
                         "InvalidWebArtifact",
                         "A web loader requires a configured web artifact.",
@@ -543,7 +630,7 @@ async fn dispatch(State(state): State<Arc<HttpState>>, request: Request<Body>) -
 
 async fn web_response(state: Arc<HttpState>, request: Request<Body>) -> Response<Body> {
     let deadline = Instant::now() + state.request_timeout;
-    let Some(web) = state.web.clone() else {
+    let Some(web) = select_web_artifact(&state.web, request.headers()) else {
         return response(404, "Not found.");
     };
     if request.method() != axum::http::Method::GET && request.method() != axum::http::Method::HEAD {
@@ -696,14 +783,10 @@ async fn render_dynamic_web(
             ("search".to_owned(), render.search.clone()),
         ]);
         if !render.shared {
-            let url = if state.web_origin.is_empty() {
+            let url = if web.origin.is_empty() {
                 render.location.clone()
             } else {
-                format!(
-                    "{}{}",
-                    state.web_origin.trim_end_matches('/'),
-                    render.location
-                )
+                format!("{}{}", web.origin.trim_end_matches('/'), render.location)
             };
             input.insert(
                 "request".to_owned(),
@@ -803,7 +886,7 @@ async fn resolve_dynamic_web(
             .await
             .map(|outcome| (outcome, "bypass"));
     };
-    let key = format!("{}\0{}", render.route, render.location);
+    let key = format!("{}\0{}\0{}", web.identity, render.route, render.location);
     loop {
         let lookup = lock(&state.web_cache).lookup(&key, policy);
         match lookup {
@@ -1484,7 +1567,10 @@ fn cors(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),
     );
-    if origin.and_then(|value| value.to_str().ok()) != Some(state.web_origin.as_str()) {
+    if !origin
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| state.web_origins.contains(value.trim_end_matches('/')))
+    {
         return response;
     }
     headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin.unwrap().clone());

@@ -17,7 +17,7 @@ import {
   mountFeature,
 } from "@poggers/kit/web";
 
-import type { App } from "../app";
+import type { OperationsWeb } from "../system";
 import type { User } from "./identity";
 
 export type Task = Readonly<{
@@ -61,7 +61,7 @@ export type TaskDestination = WebDestination<TaskRoutes>;
 type TasksBrowser = Program<
   BrowserMainThread,
   {
-    Requires: { navigation: Navigation<TaskRoutes, App> };
+    Requires: { navigation: Navigation<TaskRoutes, OperationsWeb> };
     State: {
       error: string | undefined;
     };
@@ -140,7 +140,7 @@ export const taskEntity = createEntity<Tasks>({
 
 const placedTaskEntity = placePrograms(taskEntity, { server: "api", browser: "browser" });
 
-const taskFeature: WebFeature<TasksFeatureDefinition, App> = {
+const taskFeature: WebFeature<TasksFeatureDefinition, OperationsWeb> = {
   features: { tasks: placedTaskEntity },
   programs: {
     browser: {
@@ -347,18 +347,18 @@ const taskFeature: WebFeature<TasksFeatureDefinition, App> = {
       routes: {
         list: {
           view({ components: { Shell, Tasks } }) {
-            return <Shell.Application Content={<Tasks.Admin destination={{ to: "list" }} />} />;
+            return <Shell.Layout Content={<Tasks.Admin destination={{ to: "list" }} />} />;
           },
         },
         create: {
           view({ components: { Shell, Tasks } }) {
-            return <Shell.Application Content={<Tasks.Admin destination={{ to: "create" }} />} />;
+            return <Shell.Layout Content={<Tasks.Admin destination={{ to: "create" }} />} />;
           },
         },
         edit: {
           view({ components: { Shell, Tasks }, params }) {
             return (
-              <Shell.Application
+              <Shell.Layout
                 Content={<Tasks.Admin destination={{ to: "edit", params: { id: params.id } }} />}
               />
             );

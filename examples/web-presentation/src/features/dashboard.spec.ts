@@ -72,7 +72,7 @@ describe("canonical sheet behavior state", () => {
     shared.end();
     local.begin(0);
     const declarations = evaluatePresentationFrame(local, () =>
-      feature.Application({
+      feature.Overview({
         props: {},
         state: state as never,
         events: events as never,
@@ -126,20 +126,20 @@ describe("canonical sheet behavior state", () => {
     const compilation = compilePresentationSource(source, "presentations/editorial.ts");
     expect(() => validateWebPresentationSource(compilation.ir)).not.toThrow();
     const declarations = compilation.ir.declarations;
-    const position = "createEditorial/Dashboard/Application::position";
+    const position = "createEditorial/Dashboard/Overview::position";
     const destinations = declarations
       .filter(({ animations }) => animations.includes(position))
       .map(({ destination }) => destination);
 
     expect(destinations).toEqual(
       expect.arrayContaining([
-        "Dashboard/Application/Sheet/presence/value",
-        "Dashboard/Application/Sheet/presence/velocity",
-        "Dashboard/Application/Sheet/presence/settled",
-        "Dashboard/Application/SheetBackdrop/paint/opacity",
-        "Dashboard/Application/SheetPanel/paint/opacity",
-        "Dashboard/Application/SheetPanel/transform/scale",
-        "Dashboard/Application/SheetPanel/transform/translate/y",
+        "Dashboard/Overview/Sheet/presence/value",
+        "Dashboard/Overview/Sheet/presence/velocity",
+        "Dashboard/Overview/Sheet/presence/settled",
+        "Dashboard/Overview/SheetBackdrop/paint/opacity",
+        "Dashboard/Overview/SheetPanel/paint/opacity",
+        "Dashboard/Overview/SheetPanel/transform/scale",
+        "Dashboard/Overview/SheetPanel/transform/translate/y",
       ]),
     );
     expect(declarations.some(({ destination }) => destination.toLowerCase().includes("blur"))).toBe(

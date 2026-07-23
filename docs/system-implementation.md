@@ -159,26 +159,26 @@ Purpose: install the correct root meaning without a compatibility layer.
 
 ### Work
 
-- [ ] Rename `ApplicationContract`, `Application`, metadata, feature helpers,
+- [x] Rename `ApplicationContract`, `Application`, metadata, feature helpers,
       and related public names to their System equivalents.
-- [ ] Rename realization and testing APIs from Application to System.
-- [ ] Change the canonical source entry from `src/app.ts(x)` to
+- [x] Rename realization and testing APIs from Application to System.
+- [x] Change the canonical source entry from `src/app.ts(x)` to
       `src/system.ts`.
-- [ ] Remove Presentations from the System contract and value.
-- [ ] Move complete Presentation ownership to UI platform-interface Features.
-- [ ] Update compiler diagnostics, generated identifiers, tests, examples, and
+- [x] Remove Presentations from the System contract and value.
+- [x] Move complete Presentation ownership to UI platform-interface Features.
+- [x] Update compiler diagnostics, generated identifiers, tests, examples, and
       documentation to use System terminology.
-- [ ] Delete the old Application names rather than retaining aliases.
-- [ ] Verify import boundaries remain unchanged and core gains no Platform or
+- [x] Delete the old Application names rather than retaining aliases.
+- [x] Verify import boundaries remain unchanged and core gains no Platform or
       adapter dependency.
 
 ### Blocking gate
 
-- [ ] No production source, public declaration, example, or generated artifact
+- [x] No production source, public declaration, example, or generated artifact
       contains the old Application root concept.
-- [ ] System composition and existing Feature, Program, and Dependency
+- [x] System composition and existing Feature, Program, and Dependency
       semantics pass all focused tests.
-- [ ] The source tree has one root resolver and one root contract.
+- [x] The source tree has one root resolver and one root contract.
 
 ## Phase 3: lower the complete System
 
@@ -187,30 +187,30 @@ incremental development.
 
 ### Work
 
-- [ ] Replace `ApplicationIR` with versioned, backend-independent `SystemIR`.
-- [ ] Preserve System metadata, recursive Feature identity, App identity,
+- [x] Replace `ApplicationIR` with versioned, backend-independent `SystemIR`.
+- [x] Preserve System metadata, recursive Feature identity, App identity,
       platform-interface identity, Program ownership, Presentation ownership,
       and output identity.
-- [ ] Compile the complete Feature tree from `src/system.ts`.
-- [ ] Link same-named compatible Program contributions once across all Apps.
-- [ ] Emit the relationship from source Features to affected Programs,
+- [x] Compile the complete Feature tree from `src/system.ts`.
+- [x] Link same-named compatible Program contributions once across all Apps.
+- [x] Emit the relationship from source Features to affected Programs,
       interfaces, Presentations, and artifacts.
-- [ ] Reject duplicate identities, incompatible Program Environments, invalid
+- [x] Reject duplicate identities, incompatible Program Environments, invalid
       interface ownership, and route collisions inside one interface.
-- [ ] Permit equivalent route names in different interface namespaces.
-- [ ] Update compiler extension contracts to consume System ownership without
+- [x] Permit equivalent route names in different interface namespaces.
+- [x] Update compiler extension contracts to consume System ownership without
       importing concrete adapters.
-- [ ] Add deterministic serialization and property tests for Feature ordering,
+- [x] Add deterministic serialization and property tests for Feature ordering,
       App ordering, placement, and ownership.
-- [ ] Bump the IR version and reject the old shape explicitly.
+- [x] Bump the IR version and reject the old shape explicitly.
 
 ### Blocking gate
 
-- [ ] Repeated compilation of unchanged source emits byte-identical System IR.
-- [ ] Permuting source object order cannot change linked semantic output.
-- [ ] The two-App fixture produces one shared server Program and independent
+- [x] Repeated compilation of unchanged source emits byte-identical System IR.
+- [x] Permuting source object order cannot change linked semantic output.
+- [x] The two-App fixture produces one shared server Program and independent
       interface records.
-- [ ] Every compiler error is source-located and names the violated product
+- [x] Every compiler error is source-located and names the violated product
       concept.
 
 ## Phase 4: correct realization and adapter contracts
@@ -219,30 +219,30 @@ Purpose: realize one compiled System without duplicated work.
 
 ### Work
 
-- [ ] Change Platform adapter inputs from Application paths and IR to System
+- [x] Change Platform adapter inputs from Application paths and IR to System
       paths, System IR, selected Programs, and selected interfaces.
-- [ ] Key development locations and production artifacts by stable Program or
+- [x] Key development locations and production artifacts by stable Program or
       interface identity.
-- [ ] Implement whole-System realization.
-- [ ] Implement focused-App realization that retains required shared Programs.
-- [ ] Start independent adapter sessions concurrently.
-- [ ] Preserve deterministic startup failure and reverse-order disposal.
-- [ ] Remove compiler construction from server and web adapter sessions.
-- [ ] Give adapters incremental revisions or affected semantic slices without
+- [x] Implement whole-System realization.
+- [x] Implement focused-App realization that retains required shared Programs.
+- [x] Start independent adapter sessions concurrently.
+- [x] Preserve deterministic startup failure and reverse-order disposal.
+- [x] Remove compiler construction from server and web adapter sessions.
+- [x] Give adapters incremental revisions or affected semantic slices without
       exposing the TypeScript compiler graph.
-- [ ] Add tests proving one initial semantic compile and no adapter
+- [x] Add tests proving one initial semantic compile and no adapter
       recompilation.
-- [ ] Add tests proving shared backend Programs start once regardless of App
+- [x] Add tests proving shared backend Programs start once regardless of App
       count.
 
 ### Blocking gate
 
-- [ ] Instrumentation reports one semantic compilation for initial development
+- [x] Instrumentation reports one semantic compilation for initial development
       startup.
-- [ ] Whole-System and focused-App development select the exact intended
+- [x] Whole-System and focused-App development select the exact intended
       Programs and interfaces.
-- [ ] Partial startup failure disposes every successfully started owner once.
-- [ ] Development and production adapters consume the same linked Program and
+- [x] Partial startup failure disposes every successfully started owner once.
+- [x] Development and production adapters consume the same linked Program and
       Dependency IR.
 
 ## Phase 5: make the web Platform multi-interface
@@ -431,17 +431,21 @@ For every stable web example and for both development and production:
 Add one row when a gate completes. Link to the relevant phase, files, command
 output, or browser observation. Do not replace evidence with a summary claim.
 
-| Date       | Phase | Evidence                                                                                                                                                                                          | Result                 |
-| ---------- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- |
-| 2026-07-23 | 0     | `nub run check`: typecheck, Oxlint, Oxfmt, 49 Vitest files with 392 tests, package build, and the complete Rust workspace                                                                         | Pass                   |
-| 2026-07-23 | 0     | Current package exports: root, web, server, testing, adapter authoring, concrete web/server adapters, CLI, JSX runtimes, and tsconfig                                                             | Baseline recorded      |
-| 2026-07-23 | 0     | Static startup audit: realization calls `compileApplication`; server and web development each create another retained Application compiler                                                        | Three semantic graphs  |
-| 2026-07-23 | 0     | Ready timing: web Presentation 3438.8 ms cold and 3147.0 ms warm; authenticated CRUD 4571.2 ms cold and 4173.8 ms warm                                                                            | Baseline recorded      |
-| 2026-07-23 | 0     | In-app browser development: auth redirect, account creation, two optimistic creates, nested-route reload, styling, edit focus, sign-out, and HMR all completed; tasks and auth state survived HMR | Pass with inefficiency |
-| 2026-07-23 | 0     | Development log for a presentation-copy edit: full semantic updates of 558.7 ms, 459.4 ms, and 555.5 ms, each restarting the unrelated server `api` Program                                       | G11 reproduced         |
-| 2026-07-23 | 0     | In-app browser Rust production: auth redirect, account creation, create, edit with stable focus, complete, delete, styling, and empty browser error log                                           | Pass                   |
-| 2026-07-23 | 1     | `src/core/system.typecheck.ts`: inferred two-App System, web plus native interfaces, two isolated web contracts, typed Dependencies, and intentional invalid fixtures                             | Pass                   |
-| 2026-07-23 | 1     | `nub run typecheck` plus focused System/Application/web routing tests; runtime factories preserve one unchanged Feature object tree                                                               | Pass                   |
+| Date       | Phase | Evidence                                                                                                                                                                                                               | Result                 |
+| ---------- | ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- |
+| 2026-07-23 | 0     | `nub run check`: typecheck, Oxlint, Oxfmt, 49 Vitest files with 392 tests, package build, and the complete Rust workspace                                                                                              | Pass                   |
+| 2026-07-23 | 0     | Current package exports: root, web, server, testing, adapter authoring, concrete web/server adapters, CLI, JSX runtimes, and tsconfig                                                                                  | Baseline recorded      |
+| 2026-07-23 | 0     | Static startup audit: realization calls `compileApplication`; server and web development each create another retained Application compiler                                                                             | Three semantic graphs  |
+| 2026-07-23 | 0     | Ready timing: web Presentation 3438.8 ms cold and 3147.0 ms warm; authenticated CRUD 4571.2 ms cold and 4173.8 ms warm                                                                                                 | Baseline recorded      |
+| 2026-07-23 | 0     | In-app browser development: auth redirect, account creation, two optimistic creates, nested-route reload, styling, edit focus, sign-out, and HMR all completed; tasks and auth state survived HMR                      | Pass with inefficiency |
+| 2026-07-23 | 0     | Development log for a presentation-copy edit: full semantic updates of 558.7 ms, 459.4 ms, and 555.5 ms, each restarting the unrelated server `api` Program                                                            | G11 reproduced         |
+| 2026-07-23 | 0     | In-app browser Rust production: auth redirect, account creation, create, edit with stable focus, complete, delete, styling, and empty browser error log                                                                | Pass                   |
+| 2026-07-23 | 1     | `src/core/system.typecheck.ts`: inferred two-App System, web plus native interfaces, two isolated web contracts, typed Dependencies, and intentional invalid fixtures                                                  | Pass                   |
+| 2026-07-23 | 1     | `nub run typecheck` plus focused System/Application/web routing tests; runtime factories preserve one unchanged Feature object tree                                                                                    | Pass                   |
+| 2026-07-23 | 2     | Root, testing, scaffold, and examples use `src/system.ts`, `createSystem`, interface-owned Presentations, and `testSystem`; exact obsolete-root symbol search is empty                                                 | Pass                   |
+| 2026-07-23 | 2     | Root and both examples typecheck; 23 focused core, compiler, runtime, contract, CLI, server, and web files pass 184 tests; architecture import boundaries remain green                                                 | Pass                   |
+| 2026-07-23 | 3     | System IR v17 ownership fixtures, randomized Feature/App placement, old-version rejection, extension isolation, interface Presentation ownership, and source-located route/ownership failures pass 43 focused tests    | Pass                   |
+| 2026-07-23 | 4     | Whole/focused realization, one-compile instrumentation, concurrent adapter rendezvous, reverse disposal, partial-failure cleanup, stable artifact identities, and development/production linking pass 75 focused tests | Pass                   |
 
 ### Phase 0 observations
 
@@ -469,9 +473,9 @@ output, or browser observation. Do not replace evidence with a summary claim.
 
 ## Current position
 
-- Active phase: Phase 2, cut over Application to System.
-- Completed phases: Phases 0 and 1.
+- Active phase: Phase 5, make the web Platform multi-interface.
+- Completed phases: Phases 0 through 4.
 - Blockers: none known.
-- Next action: rename the root responsibility and compiler entry to System,
-  remove root Presentation ownership, and migrate every current consumer
-  without retaining Application aliases.
+- Next action: prove two independently routed and installable web interfaces
+  share server Programs without sharing routes, Presentations, manifests,
+  caches, service workers, or browser output.

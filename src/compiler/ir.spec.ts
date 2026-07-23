@@ -2,9 +2,10 @@ import fc from "fast-check";
 import { expect, test } from "vitest";
 
 import {
-  POGGERS_IR_VERSION,
-  serializeApplicationIR,
-  type ApplicationIR,
+  SYSTEM_IR_VERSION,
+  assertSystemIRVersion,
+  serializeSystemIR,
+  type SystemIR,
   type DependencyIR,
   type ProgramContributionIR,
   type ProgramIR,
@@ -12,31 +13,48 @@ import {
 } from "@/compiler/ir";
 import { linkProgram, ProgramLinkError } from "@/compiler/linker";
 
-test("serializes arbitrary valid Application IR deterministically", () => {
+test("serializes arbitrary valid System IR deterministically", () => {
   fc.assert(
     fc.property(
       fc.string({ minLength: 1, maxLength: 40 }),
       fc.uniqueArray(fc.string({ minLength: 1, maxLength: 24 }), { maxLength: 20 }),
       (name, paths) => {
         const features = paths
-          .map((path) => ({ id: `feature/${path}`, path, children: [], programs: [] }))
+          .map((path) => ({
+            id: `feature/${path}`,
+            path,
+            kind: "feature" as const,
+            children: [],
+            programs: [],
+          }))
           .sort(({ id: left }, { id: right }) => left.localeCompare(right));
-        const ir: ApplicationIR = {
-          version: POGGERS_IR_VERSION,
-          application: { id: `application/${name}`, name, presentations: [] },
+        const ir: SystemIR = {
+          version: SYSTEM_IR_VERSION,
+          system: { id: "system", name },
           platforms: [],
+          apps: [],
+          interfaces: [],
           features,
           programs: [],
           presentations: [],
         };
 
-        const first = serializeApplicationIR(ir);
-        const restored = JSON.parse(first) as ApplicationIR;
-        expect(serializeApplicationIR(restored)).toBe(first);
+        const first = serializeSystemIR(ir);
+        const restored = JSON.parse(first) as SystemIR;
+        expect(serializeSystemIR(restored)).toBe(first);
         expect(first.endsWith("\n")).toBe(true);
       },
     ),
     { numRuns: 100 },
+  );
+});
+
+test("rejects System IR from every other schema version", () => {
+  expect(() => assertSystemIRVersion({ version: SYSTEM_IR_VERSION - 1 })).toThrow(
+    `Unsupported System IR version ${SYSTEM_IR_VERSION - 1}.`,
+  );
+  expect(() => assertSystemIRVersion({ version: SYSTEM_IR_VERSION + 1 })).toThrow(
+    `Unsupported System IR version ${SYSTEM_IR_VERSION + 1}.`,
   );
 });
 
@@ -187,6 +205,7 @@ function fixtureProgram(contributions: readonly ProgramContributionIR[]): Progra
   return {
     id: "program/api",
     name: "api",
+    logicalName: "api",
     environment: { name: "server", platform: "server" },
     contributions,
   };

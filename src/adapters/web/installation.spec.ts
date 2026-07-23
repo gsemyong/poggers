@@ -7,16 +7,17 @@ import {
   renderWebServiceWorker,
 } from "@/adapters/web/installation";
 import type { WebRouteIR } from "@/adapters/web/routing";
-import { POGGERS_IR_VERSION, type ApplicationIR } from "@/compiler/ir";
+import { SYSTEM_IR_VERSION, type SystemIR } from "@/compiler/ir";
 
 const routes: readonly WebRouteIR[] = [
   route("tasks.list", "/tasks", { scope: "public", maxAge: "1h" }),
   route("shell.auth", "/auth", false, "shell"),
 ];
+const interfaceId = "interface/app.web";
 
 describe("web installation planning", () => {
   it("resolves one typed application declaration into a conventional manifest", () => {
-    const plan = planWebInstallation(application(), routes);
+    const plan = planWebInstallation(system(), interfaceId, routes);
     expect(plan).toMatchObject({
       name: "Tasks",
       shortName: "Tasks",
@@ -35,7 +36,7 @@ describe("web installation planning", () => {
   });
 
   it("emits one versioned worker without forcing activation", () => {
-    const installation = planWebInstallation(application(), routes)!;
+    const installation = planWebInstallation(system(), interfaceId, routes)!;
     const plan = createWebServiceWorkerPlan({
       installation,
       assets: ["/assets/app-a1b2c3d4.js", "/assets/app-a1b2c3d4.js"],
@@ -67,7 +68,7 @@ describe("web installation planning", () => {
   it("refuses to persist a private content document as the offline fallback", () => {
     expect(() =>
       createWebServiceWorkerPlan({
-        installation: planWebInstallation(application(), routes)!,
+        installation: planWebInstallation(system(), interfaceId, routes)!,
         assets: [],
         routes: routes.map((value) =>
           value.name === "auth" ? { ...value, document: "content" as const } : value,
@@ -77,32 +78,50 @@ describe("web installation planning", () => {
   });
 });
 
-function application(): ApplicationIR {
+function system(): SystemIR {
   return {
-    version: POGGERS_IR_VERSION,
-    application: {
-      id: "application/Tasks",
-      name: "Tasks",
-      presentations: [],
-      extensions: {
-        web: {
-          version: 7,
-          installation: {
-            shortName: "Tasks",
-            start: { to: "tasks.list" },
-            display: "standalone",
-            icons: [
-              { src: "/icon-192.png", sizes: "192x192", type: "image/png" },
-              { src: "/icon-512.png", sizes: "512x512", type: "image/png" },
-            ],
-            shortcuts: [{ name: "New task", destination: { to: "tasks.list" }, icons: [] }],
-            offline: { fallback: { to: "shell.auth" } },
+    version: SYSTEM_IR_VERSION,
+    system: { id: "system", name: "Tasks" },
+    platforms: ["web"],
+    apps: [{ id: "app/app", feature: "app", interfaces: [interfaceId] }],
+    interfaces: [
+      {
+        id: interfaceId,
+        feature: "app.web",
+        app: "app",
+        platform: "web",
+        programs: [],
+        presentationSources: [],
+      },
+    ],
+    features: [
+      {
+        id: "feature/app.web",
+        path: "app.web",
+        kind: "interface",
+        app: "app",
+        interface: "app.web",
+        platform: "web",
+        children: [],
+        programs: [],
+        extensions: {
+          web: {
+            version: 8,
+            installation: {
+              shortName: "Tasks",
+              start: { to: "tasks.list" },
+              display: "standalone",
+              icons: [
+                { src: "/icon-192.png", sizes: "192x192", type: "image/png" },
+                { src: "/icon-512.png", sizes: "512x512", type: "image/png" },
+              ],
+              shortcuts: [{ name: "New task", destination: { to: "tasks.list" }, icons: [] }],
+              offline: { fallback: { to: "shell.auth" } },
+            },
           },
         },
       },
-    },
-    platforms: ["web"],
-    features: [],
+    ],
     programs: [],
     presentations: [],
   };

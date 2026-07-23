@@ -154,7 +154,7 @@ async function sourceFiles(directory: string): Promise<string[]> {
   const files: string[] = [];
   for (const entry of await readdir(directory, { withFileTypes: true })) {
     const path = resolve(directory, entry.name);
-    if (entry.isDirectory()) files.push(...(await sourceFiles(path)));
+    if (entry.isDirectory() && entry.name !== "fixtures") files.push(...(await sourceFiles(path)));
     else if (entry.isFile() && /\.tsx?$/.test(entry.name)) files.push(path);
   }
   return files.sort();

@@ -7,7 +7,7 @@ import { resolve } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 
 import { createServerPlatformAdapter } from "@/adapters/server/adapter";
-import { compileApplication } from "@/compiler/source";
+import { createSystemCompiler, compileSystem } from "@/compiler/source";
 
 const temporaryDirectories: string[] = [];
 
@@ -22,18 +22,22 @@ afterEach(async () => {
 describe("server Platform adapter", () => {
   test("emits and launches one independent artifact per named Program", async () => {
     const fixture = await createFixture(twoProgramSource());
-    const ir = compileApplication(fixture.application);
+    const ir = compileSystem(fixture.system);
     const output = resolve(fixture.directory, "dist");
     const result = await createServerPlatformAdapter().build({
       directory: fixture.directory,
-      application: fixture.application,
+      system: fixture.system,
       ir,
       programs: ir.programs,
+      interfaces: [],
       platform: "server",
       output,
     });
 
-    expect(result.entries.map(({ program }) => program)).toEqual(["api", "worker"]);
+    expect(result.entries.map(({ identity }) => identity)).toEqual([
+      "program/api",
+      "program/worker",
+    ]);
     for (const artifact of result.entries) {
       await access(artifact.path);
       await expect(run(artifact.path)).resolves.toBe(0);
@@ -43,12 +47,15 @@ describe("server Platform adapter", () => {
   test("restarts development Processes after a source update", async () => {
     const fixture = await createFixture(httpProgramSource("first"));
     const port = await availablePort();
-    const ir = compileApplication(fixture.application);
+    const revisions = revisionSource(fixture.system);
+    const ir = revisions.current.ir;
     const session = await createServerPlatformAdapter({ developmentPort: port }).develop({
       directory: fixture.directory,
-      application: fixture.application,
+      system: fixture.system,
       ir,
+      revisions,
       programs: ir.programs,
+      interfaces: [],
       platform: "server",
     });
 
@@ -65,7 +72,7 @@ describe("server Platform adapter", () => {
           }
         }
       })();
-      await writeFile(fixture.application, httpProgramSource("second"));
+      await writeFile(fixture.system, httpProgramSource("second"));
       await expect
         .poll(() => fetchText(`http://localhost:${port}/probe`), { timeout: 5_000 })
         .toBe("second");
@@ -84,13 +91,16 @@ describe("server Platform adapter", () => {
   test("preserves a server Process across browser-only source updates", async () => {
     const fixture = await createSplitFixture();
     const port = await availablePort();
-    const ir = compileApplication(fixture.application);
+    const revisions = revisionSource(fixture.system);
+    const ir = revisions.current.ir;
     const programs = ir.programs.filter(({ environment }) => environment.platform === "server");
     const session = await createServerPlatformAdapter({ developmentPort: port }).develop({
       directory: fixture.directory,
-      application: fixture.application,
+      system: fixture.system,
       ir,
+      revisions,
       programs,
+      interfaces: [],
       platform: "server",
     });
 
@@ -107,18 +117,21 @@ describe("server Platform adapter", () => {
   test("restarts server Processes when application metadata changes", async () => {
     const fixture = await createFixture(metadataProgramSource("first"));
     const port = await availablePort();
-    const ir = compileApplication(fixture.application);
+    const revisions = revisionSource(fixture.system);
+    const ir = revisions.current.ir;
     const session = await createServerPlatformAdapter({ developmentPort: port }).develop({
       directory: fixture.directory,
-      application: fixture.application,
+      system: fixture.system,
       ir,
+      revisions,
       programs: ir.programs,
+      interfaces: [],
       platform: "server",
     });
 
     try {
       const identity = await fetchText(`http://localhost:${port}/probe`);
-      await writeFile(fixture.application, metadataProgramSource("second"));
+      await writeFile(fixture.system, metadataProgramSource("second"));
       await expect
         .poll(() => fetchText(`http://localhost:${port}/probe`), { timeout: 5_000 })
         .not.toBe(identity);
@@ -132,92 +145,103 @@ async function createFixture(source: string) {
   const directory = await mkdtemp(resolve(tmpdir(), "poggers-server-adapter-"));
   temporaryDirectories.push(directory);
   const sourceDirectory = resolve(directory, "src");
-  const application = resolve(sourceDirectory, "app.ts");
+  const system = resolve(sourceDirectory, "system.ts");
   await mkdir(sourceDirectory, { recursive: true });
-  await writeFile(application, source);
-  return { directory, application };
+  await writeFile(system, source);
+  return { directory, system };
 }
 
 async function createSplitFixture() {
   const directory = await mkdtemp(resolve(tmpdir(), "poggers-server-selective-reload-"));
   temporaryDirectories.push(directory);
   const sourceDirectory = resolve(directory, "src");
-  const application = resolve(sourceDirectory, "app.ts");
+  const system = resolve(sourceDirectory, "system.ts");
   const server = resolve(sourceDirectory, "server.ts");
   const browser = resolve(sourceDirectory, "browser.ts");
   await mkdir(sourceDirectory, { recursive: true });
   await Promise.all([
-    writeFile(application, splitApplicationSource()),
+    writeFile(system, splitApplicationSource()),
     writeFile(server, splitServerSource()),
     writeFile(browser, browserProgramSource("first")),
   ]);
-  return { directory, application, browser };
+  return { directory, system, browser };
+}
+
+function revisionSource(system: string) {
+  const compiler = createSystemCompiler(system);
+  let current = compiler.compile();
+  return {
+    get current() {
+      return current;
+    },
+    compile(changedFile: string) {
+      current = compiler.compile(changedFile);
+      return current;
+    },
+  };
 }
 
 function twoProgramSource(): string {
   return `${types()}
-type App = { Features: {
+type Root = { Features: {
   api: { Programs: { api: Program<Server> } };
   worker: { Programs: { worker: Program<Server> } };
 } };
-export default {
+const api = createFeature<Root["Features"]["api"]>({ programs: { api: {} } });
+const worker = createFeature<Root["Features"]["worker"]>({ programs: { worker: {} } });
+export default createSystem({
   metadata: { name: "server-artifacts" },
-  features: {
-    api: { programs: { api: {} } },
-    worker: { programs: { worker: {} } },
-  },
-} satisfies Application<App>;
+  features: { api, worker },
+});
 `;
 }
 
 function httpProgramSource(value: string): string {
   return `${types()}
-type App = { Features: {
+type Root = { Features: {
   probe: { Programs: { api: Program<Server, { Requires: { http: Http } }> } };
 } };
-export default {
-  metadata: { name: "server-reload" },
-  features: {
-    probe: {
-      programs: {
-        api: {
-          start({ dependencies }: { dependencies: { http: Http } }) {
-            return dependencies.http.route({
-              path: "/probe",
-              handle: async () => ({ status: 200, headers: [], body: ${JSON.stringify(value)}, stream: undefined }),
-            });
-          },
-        },
+const probe = createFeature<Root["Features"]["probe"]>({
+  programs: {
+    api: {
+      start({ dependencies }: { dependencies: { http: Http } }) {
+        return dependencies.http.route({
+          path: "/probe",
+          handle: async () => ({ status: 200, headers: [], body: ${JSON.stringify(value)}, stream: undefined }),
+        });
       },
     },
   },
-} satisfies Application<App>;
+});
+export default createSystem({
+  metadata: { name: "server-reload" },
+  features: { probe },
+});
 `;
 }
 
 function metadataProgramSource(name: string): string {
   return `${types()}
-type App = { Features: {
+type Root = { Features: {
   probe: { Programs: { api: Program<Server, { Requires: { http: Http } }> } };
 } };
 const identity = ${JSON.stringify(name)};
-export default {
-  metadata: { name: ${JSON.stringify(name)} },
-  features: {
-    probe: {
-      programs: {
-        api: {
-          start({ dependencies }: { dependencies: { http: Http } }) {
-            return dependencies.http.route({
-              path: "/probe",
-              handle: async () => ({ status: 200, headers: [], body: identity, stream: undefined }),
-            });
-          },
-        },
+const probe = createFeature<Root["Features"]["probe"]>({
+  programs: {
+    api: {
+      start({ dependencies }: { dependencies: { http: Http } }) {
+        return dependencies.http.route({
+          path: "/probe",
+          handle: async () => ({ status: 200, headers: [], body: identity, stream: undefined }),
+        });
       },
     },
   },
-} satisfies Application<App>;
+});
+export default createSystem({
+  metadata: { name: ${JSON.stringify(name)} },
+  features: { probe },
+});
 `;
 }
 
@@ -227,14 +251,17 @@ import { browser } from "./browser";
 import { server } from "./server";
 type BrowserPlatform = { Name: "web" };
 type Browser = { Name: "browser-main"; Platform: BrowserPlatform };
-type App = { Features: {
+type Root = { Features: {
   browser: { Programs: { browser: Program<Browser> } };
   server: { Programs: { api: Program<Server, { Requires: { http: Http } }> } };
 } };
-export default {
+export default createSystem({
   metadata: { name: "selective-reload" },
-  features: { browser, server },
-} satisfies Application<App>;
+  features: {
+    browser: createFeature<Root["Features"]["browser"]>(browser),
+    server: createFeature<Root["Features"]["server"]>(server),
+  },
+});
 `;
 }
 
@@ -267,7 +294,14 @@ function types(): string {
 type Platform = { Name: "server" };
 type Server = { Name: "server"; Platform: Platform };
 type Program<Environment, Contract extends object = {}> = Contract & { Environment: Environment };
-type Application<Contract> = unknown;
+declare const featureContract: unique symbol;
+type Feature<Contract> = Readonly<{ readonly [featureContract]?: Contract }>;
+function createFeature<Contract>(definition: object): Feature<Contract> {
+  return definition as Feature<Contract>;
+}
+function createSystem(definition: object): object {
+  return definition;
+}
 type HttpResponse = { status: number; headers: readonly { name: string; value: string }[]; body: string | undefined; stream: AsyncIterable<string> | undefined };
 type Http = { route(input: { path: string; handle(request: { method: string; path: string; query: readonly { name: string; value: string }[]; headers: readonly { name: string; value: string }[]; body: string }): Promise<HttpResponse> }): Disposable };
 `;

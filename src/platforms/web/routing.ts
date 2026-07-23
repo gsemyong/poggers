@@ -1,6 +1,4 @@
 import type {
-  Application,
-  ApplicationContract,
   Feature,
   FeatureContract,
   FeatureContractOf,
@@ -8,7 +6,7 @@ import type {
   ProgramDefinition,
   ProgramOwner,
   UIContributionAPI,
-} from "@/core/application";
+} from "@/core/feature";
 import type { ProgramContract } from "@/core/program";
 import type { PlatformInterfaceContract, PlatformInterfaceFeature } from "@/core/system";
 import type { ComponentComposition, ComponentUI } from "@/core/ui/component";
@@ -97,18 +95,18 @@ export type WebInstallationIcon = Readonly<{
   purpose?: readonly ("any" | "maskable" | "monochrome")[];
 }>;
 
-export type WebInstallation<Contract extends ApplicationContract> = Readonly<{
+export type WebInstallation<Contract extends FeatureContract> = Readonly<{
   shortName?: string;
-  start: WebDestination<ApplicationWebRoutes<Contract>>;
+  start: WebDestination<WebRoutes<Contract>>;
   display?: "browser" | "fullscreen" | "minimal-ui" | "standalone";
   icons: readonly WebInstallationIcon[];
   shortcuts?: readonly Readonly<{
     name: string;
-    destination: WebDestination<ApplicationWebRoutes<Contract>>;
+    destination: WebDestination<WebRoutes<Contract>>;
     icons?: readonly WebInstallationIcon[];
   }>[];
   offline: Readonly<{
-    fallback: WebDestination<ApplicationWebRoutes<Contract>>;
+    fallback: WebDestination<WebRoutes<Contract>>;
   }>;
 }>;
 
@@ -136,12 +134,6 @@ export function createWebInterface<Contract extends FeatureContract>(
 ): PlatformInterfaceFeature<Contract, WebPlatform> & WebInterfaceFeature<Contract> {
   return feature as PlatformInterfaceFeature<Contract, WebPlatform> & WebInterfaceFeature<Contract>;
 }
-
-/** The ordinary Application refined only by web-adapter-owned product meaning. */
-export type WebApplication<Contract extends ApplicationContract> = Application<Contract> &
-  Readonly<{
-    web?: Readonly<{ installation: WebInstallation<Contract> }>;
-  }>;
 
 type ProgramsOf<Owner> = Owner extends {
   Programs: infer Programs extends Record<string, ProgramContract>;
@@ -203,8 +195,8 @@ type ValidWebRoutes<Routes> = {
   >;
 };
 
-/** Every qualified web Route contributed by an Application contract. */
-export type ApplicationWebRoutes<Owner extends FeatureContract> = Readonly<
+/** Every qualified web Route contributed by one web-interface Feature contract. */
+export type WebRoutes<Owner extends FeatureContract> = Readonly<
   ValidWebRoutes<WebRoutesIn<Owner, "">>
 >;
 
@@ -495,7 +487,7 @@ type ResolveRouteOutcome<Outcome, Root extends FeatureContract> = Outcome extend
 }
   ? Readonly<
       Omit<Outcome, "redirect"> & {
-        redirect: WebDestination<ApplicationWebRoutes<Root>>;
+        redirect: WebDestination<WebRoutes<Root>>;
       }
     >
   : Outcome;

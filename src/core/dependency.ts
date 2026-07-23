@@ -1,4 +1,4 @@
-import type { FeatureContract } from "@/core/application";
+import type { FeatureContract } from "@/core/feature";
 import type { ProgramContract } from "@/core/program";
 
 type Empty = Record<never, never>;
@@ -79,7 +79,7 @@ export type ProgramProvidedDependencies<
   Name extends PropertyKey,
 > = Simplify<ProvidedIn<Owner, Name>>;
 
-/** Dependencies the Application must implement once for one running Program. */
+/** Dependencies the System host must implement once for one running Program. */
 export type ProgramExternalDependencies<
   Owner extends FeatureContract,
   Name extends PropertyKey,

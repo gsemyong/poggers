@@ -1,5 +1,5 @@
 import type { SourceCompilerExtension } from "@/compiler/extension";
-import type { ApplicationIR, ProgramIR } from "@/compiler/ir";
+import type { PlatformInterfaceIR, ProgramIR, SystemIR } from "@/compiler/ir";
 import type { PlatformContract } from "@/core/program";
 import type { UIChild, UIContract, UIDefinition, UITarget } from "@/core/ui/language";
 import type {
@@ -10,14 +10,27 @@ import type {
 
 export type PlatformInput<Platform extends PlatformContract = PlatformContract> = Readonly<{
   directory: string;
-  application: string;
-  ir: ApplicationIR;
+  system: string;
+  ir: SystemIR;
+  app?: string;
   programs: readonly ProgramIR[];
+  interfaces: readonly PlatformInterfaceIR[];
   platform: Platform["Name"];
 }>;
 
+export type SystemCompilationRevision = Readonly<{
+  ir: SystemIR;
+  presentationSources: ReadonlySet<string>;
+}>;
+
+/** The one incremental semantic compiler shared by every development adapter. */
+export type SystemRevisionSource = Readonly<{
+  readonly current: SystemCompilationRevision;
+  compile(changedFile: string): SystemCompilationRevision;
+}>;
+
 export type PlatformDevelopmentInput<Platform extends PlatformContract = PlatformContract> =
-  PlatformInput<Platform>;
+  PlatformInput<Platform> & Readonly<{ revisions: SystemRevisionSource }>;
 
 export type PlatformProductionInput<Platform extends PlatformContract = PlatformContract> =
   PlatformInput<Platform> & Readonly<{ output: string }>;
@@ -25,11 +38,12 @@ export type PlatformProductionInput<Platform extends PlatformContract = Platform
 /** A live development realization with one framework-owned cleanup path. */
 export type DevelopmentSession = AsyncDisposable &
   Readonly<{
-    locations: readonly string[];
+    locations: Readonly<Record<string, readonly string[]>>;
   }>;
 
 export type ProductionArtifact = Readonly<{
-  program: string;
+  identity: string;
+  kind: "interface" | "program";
   environment: string;
   path: string;
 }>;
@@ -109,7 +123,7 @@ export type ComponentAdapter<
   Input = unknown,
   Session extends ComponentAdapterSession<UI> = ComponentAdapterSession<UI>,
 > = Readonly<{
-  createApplicationUI(input: Input): Session | PromiseLike<Session>;
+  createInterfaceUI(input: Input): Session | PromiseLike<Session>;
 }>;
 
 type ComponentBinding<UI extends UIContract, Implementation> = unknown extends Implementation
@@ -197,14 +211,14 @@ export type PlatformAdapterImplementation = Readonly<{
   build(input: PlatformProductionInput): Promise<ProductionArtifacts>;
 }>;
 
-/** Selects every required adapter exactly once from deterministic Application meaning. */
+/** Selects every required adapter exactly once from deterministic System meaning. */
 export function selectPlatformAdapters<Adapter extends PlatformAdapterImplementation>(
-  ir: ApplicationIR,
+  platforms: readonly string[],
   adapters: Readonly<Record<string, Adapter>>,
 ): readonly Adapter[] {
-  const names = [...new Set(ir.platforms)].sort();
-  if (names.length !== ir.platforms.length) {
-    throw new Error("Application IR contains duplicate Platforms.");
+  const names = [...new Set(platforms)].sort();
+  if (names.length !== platforms.length) {
+    throw new Error("System output selection contains duplicate Platforms.");
   }
   return names.map((name) => {
     const adapter = adapters[name];

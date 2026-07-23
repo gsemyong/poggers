@@ -93,7 +93,7 @@ void headlessUIProgram;
 const session = {} as DevelopmentSession;
 const artifacts = {} as ProductionArtifacts;
 const iosComponentAdapter = {
-  createApplicationUI() {
+  createInterfaceUI() {
     return {
       renderRoot() {
         return "ios";
@@ -110,7 +110,7 @@ const iosUIAdapter = {
 } satisfies UIAdapter<IOSUI, typeof iosComponentAdapter, typeof iosPresentationAdapter>;
 
 const wrongComponentAdapter = {
-  createApplicationUI() {
+  createInterfaceUI() {
     return { renderRoot: () => 1, dispose() {} };
   },
 };
@@ -189,7 +189,7 @@ const wrongAdapter = {
 void wrongAdapter;
 
 const otherComponentAdapter = {
-  createApplicationUI() {
+  createInterfaceUI() {
     return { renderRoot: () => 1, dispose() {} };
   },
 };

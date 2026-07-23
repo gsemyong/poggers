@@ -2,8 +2,9 @@ import { describe, expect, test } from "vitest";
 
 import { startServerPrograms } from "@/adapters/server/development/runtime";
 import type { ProgramIR } from "@/compiler/ir";
-import type { Application, Feature } from "@/core/application";
+import type { Feature } from "@/core/feature";
 import type { Program } from "@/core/program";
+import type { System } from "@/core/system";
 
 type Server = Readonly<{ Name: "server"; Platform: { Name: "server" } }>;
 type Reader = Readonly<{ read(): string }>;
@@ -20,7 +21,7 @@ describe("server Platform runtime", () => {
   test("executes a fully portable Program from IR and owns its host scope", async () => {
     const calls: string[] = [];
     const running = await startServerPrograms(
-      { features: {} } as unknown as Application<App>,
+      { features: {} } as unknown as System<App>,
       [portableProgram()],
       () => ({
         clock: {
@@ -43,7 +44,7 @@ describe("server Platform runtime", () => {
 
   test("creates and owns one host scope for each Process instance", async () => {
     const calls: string[] = [];
-    const application: Application<App> = {
+    const application: System<App> = {
       features: {
         provider: {
           programs: {
@@ -103,7 +104,7 @@ describe("server Platform runtime", () => {
     let host = 0;
     const observed: number[] = [];
     const disposed: number[] = [];
-    const application: Application<App> = {
+    const application: System<App> = {
       features: {
         provider: {
           programs: {
@@ -146,7 +147,7 @@ describe("server Platform runtime", () => {
 });
 
 function programs(): readonly ProgramIR[] {
-  const span = { file: "src/app.ts", line: 1, column: 1 } as const;
+  const span = { file: "src/system.ts", line: 1, column: 1 } as const;
   const dependency = (name: string) => ({
     name,
     type: { kind: "record", fields: [] } as const,
@@ -155,6 +156,7 @@ function programs(): readonly ProgramIR[] {
     {
       id: "program/server",
       name: "server",
+      logicalName: "server",
       environment: { name: "server", platform: "server" },
       contributions: [
         {
@@ -179,7 +181,7 @@ function programs(): readonly ProgramIR[] {
 }
 
 function portableProgram(): ProgramIR {
-  const span = { file: "src/app.ts", line: 1, column: 1 } as const;
+  const span = { file: "src/system.ts", line: 1, column: 1 } as const;
   const number = { kind: "primitive", name: "number" } as const;
   const input = {
     kind: "record",
@@ -188,6 +190,7 @@ function portableProgram(): ProgramIR {
   return {
     id: "program/portable",
     name: "portable",
+    logicalName: "portable",
     environment: { name: "server", platform: "server" },
     contributions: [
       {

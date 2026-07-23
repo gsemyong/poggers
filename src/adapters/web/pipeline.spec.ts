@@ -7,8 +7,9 @@ import { resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import { webCompilerExtension } from "@/adapters/web/compiler";
 import {
-  buildApplication,
+  buildWebInterface,
   collectPresentationDependencies,
   createWebAssetManifest,
   inspectClientManifest,
@@ -17,7 +18,8 @@ import {
   writeDevelopmentWebStream,
 } from "@/adapters/web/pipeline";
 import type { WebRouteIR } from "@/adapters/web/routing";
-import { POGGERS_IR_VERSION, type ApplicationIR } from "@/compiler/ir";
+import { SYSTEM_IR_VERSION, type SystemIR } from "@/compiler/ir";
+import { compileSystem } from "@/compiler/source";
 
 describe("web representation negotiation", () => {
   it("keeps HTML canonical and selects alternates only when named", () => {
@@ -78,7 +80,7 @@ describe("web client build manifest", () => {
   it("collects every transitive preload once and preserves named entries", () => {
     expect(
       inspectClientManifest({
-        "src/app.ts": {
+        "src/system.ts": {
           file: "assets/app-content.js",
           imports: ["_shared.js", "_vendor.js"],
           isEntry: true,
@@ -128,7 +130,7 @@ describe("web client build manifest", () => {
   it("rejects incomplete manifests instead of emitting broken preload links", () => {
     expect(() =>
       inspectClientManifest({
-        "src/app.ts": {
+        "src/system.ts": {
           file: "assets/app-content.js",
           imports: ["_missing.js"],
           isEntry: true,
@@ -261,13 +263,20 @@ describe("web asset manifest", () => {
     const directory = await mkdtemp(resolve(tmpdir(), "poggers-web-determinism-"));
     try {
       const application = resolve(import.meta.dirname, "fixtures/request-render");
-      const first = await buildApplication({
+      const ir = compileSystem(resolve(application, "src/system.ts"), [webCompilerExtension]);
+      const interfaceId = ir.interfaces.find(({ id }) => id === "interface/product.web")?.id;
+      if (!interfaceId) throw new Error("The request-render fixture has no product web interface.");
+      const first = await buildWebInterface({
         directory: application,
         outdir: resolve(directory, "first"),
+        interface: interfaceId,
+        ir,
       });
-      const second = await buildApplication({
+      const second = await buildWebInterface({
         directory: application,
         outdir: resolve(directory, "second"),
+        interface: interfaceId,
+        ir,
       });
       const firstFiles = await snapshotFiles(first.directory);
       expect(await snapshotFiles(second.directory)).toEqual(firstFiles);
@@ -280,7 +289,7 @@ describe("web asset manifest", () => {
         javascript
           .filter(([, source]) => source.includes("Rendered in the browser"))
           .map(([name]) => name),
-      ).toEqual([expect.stringContaining("route-greeting-client-")]);
+      ).toEqual([expect.stringContaining("route-product-web-greeting-client-")]);
       expect(javascript.every(([, source]) => !source.includes("sensitive fixture failure"))).toBe(
         true,
       );
@@ -289,44 +298,82 @@ describe("web asset manifest", () => {
       await mkdir(resolve(variant, "src"), { recursive: true });
       const marker = "Rendered in the browser";
       const payload = `${marker}:${"x".repeat(160_000)}`;
-      const authored = await readFile(resolve(application, "src/app.tsx"), "utf8");
+      const authored = await readFile(resolve(application, "src/product.tsx"), "utf8");
       expect(authored).toContain(marker);
-      await writeFile(resolve(variant, "src/app.tsx"), authored.replace(marker, payload));
+      await writeFile(resolve(variant, "src/product.tsx"), authored.replace(marker, payload));
+      await writeFile(
+        resolve(variant, "src/system.ts"),
+        await readFile(resolve(application, "src/system.ts"), "utf8"),
+      );
       await writeFile(
         resolve(variant, "tsconfig.json"),
         `${JSON.stringify({
           extends: resolve(import.meta.dirname, "../../..", "tsconfig.json"),
           compilerOptions: {
+            paths: {
+              "@/*": ["./src/*"],
+              "@poggers/kit": [resolve(import.meta.dirname, "../../..", "dist/source/index.ts")],
+              "@poggers/kit/jsx-runtime": [
+                resolve(import.meta.dirname, "../../..", "dist/source/jsx/runtime.ts"),
+              ],
+              "@poggers/kit/server": [
+                resolve(
+                  import.meta.dirname,
+                  "../../..",
+                  "dist/source/platforms/server/platform.ts",
+                ),
+              ],
+              "@poggers/kit/web": [
+                resolve(import.meta.dirname, "../../..", "dist/source/platforms/web/platform.ts"),
+              ],
+            },
             typeRoots: [resolve(import.meta.dirname, "../../../node_modules/@types")],
             types: ["node"],
           },
           include: ["src/**/*.ts", "src/**/*.tsx"],
         })}\n`,
       );
-      const variantBuild = await buildApplication({
+      const variantIR = compileSystem(resolve(variant, "src/system.ts"), [webCompilerExtension]);
+      const variantInterfaceId = variantIR.interfaces.find(
+        ({ id }) => id === "interface/product.web",
+      )?.id;
+      if (!variantInterfaceId) {
+        throw new Error("The request-render variant has no product web interface.");
+      }
+      const variantBuild = await buildWebInterface({
         directory: variant,
         outdir: resolve(directory, "variant-output"),
+        interface: variantInterfaceId,
+        ir: variantIR,
       });
       const variantFiles = await snapshotFiles(variantBuild.directory);
       const variantJavascript = Object.entries(variantFiles)
         .filter(([name]) => name.endsWith(".js"))
         .map(([name, value]) => [name, Buffer.from(value, "base64").toString("utf8")] as const);
-      const baselineClient = javascript.find(([name]) => name.includes("route-greeting-client-"));
+      const baselineClient = javascript.find(([name]) =>
+        name.includes("route-product-web-greeting-client-"),
+      );
       const variantClient = variantJavascript.find(([name]) =>
-        name.includes("route-greeting-client-"),
+        name.includes("route-product-web-greeting-client-"),
       );
-      expect(baselineClient?.[0]).toContain("route-greeting-client-");
-      expect(variantClient?.[0]).toContain("route-greeting-client-");
-      expect(Buffer.byteLength(variantClient?.[1] ?? "")).toBeGreaterThan(
-        Buffer.byteLength(baselineClient?.[1] ?? "") + 150_000,
+      expect(baselineClient?.[0]).toContain("route-product-web-greeting-client-");
+      expect(variantClient?.[0]).toContain("route-product-web-greeting-client-");
+      const baselineClientBytes = await initialRouteClosureBytes(
+        first.directory,
+        "product.web.greeting.client",
       );
+      const variantClientBytes = await initialRouteClosureBytes(
+        variantBuild.directory,
+        "product.web.greeting.client",
+      );
+      expect(variantClientBytes).toBeGreaterThan(baselineClientBytes + 150_000);
       const baselineInitialBytes = await initialRouteClosureBytes(
         first.directory,
-        "greeting.greeting",
+        "product.web.greeting.greeting",
       );
       const variantInitialBytes = await initialRouteClosureBytes(
         variantBuild.directory,
-        "greeting.greeting",
+        "product.web.greeting.greeting",
       );
       expect(Math.abs(variantInitialBytes - baselineInitialBytes)).toBeLessThan(1_024);
     } finally {
@@ -448,17 +495,41 @@ async function initialRouteClosureBytes(directory: string, identity: string): Pr
   return sizes.reduce((total, size) => total + size, 0);
 }
 
-function applicationIR(): ApplicationIR {
+function applicationIR(): SystemIR {
   const span = { file: "src/presentation.ts", line: 1, column: 1 } as const;
   return {
-    version: POGGERS_IR_VERSION,
-    application: { id: "application/test", name: "test", presentations: ["clean"] },
+    version: SYSTEM_IR_VERSION,
+    system: { id: "system", name: "test" },
     platforms: ["web"],
-    features: [],
+    apps: [{ id: "app/product", feature: "product", interfaces: ["interface/dashboard"] }],
+    interfaces: [
+      {
+        id: "interface/dashboard",
+        feature: "dashboard",
+        app: "product",
+        platform: "web",
+        programs: ["program/browser"],
+        presentationSources: ["src/presentation.ts"],
+      },
+    ],
+    features: [
+      {
+        id: "feature/dashboard",
+        path: "dashboard",
+        kind: "interface",
+        app: "product",
+        interface: "dashboard",
+        platform: "web",
+        children: [],
+        programs: ["program/browser"],
+      },
+    ],
     programs: [
       {
         id: "program/browser",
         name: "browser",
+        logicalName: "browser",
+        interface: "dashboard",
         environment: { name: "browser-main", platform: "web", ui: "web" },
         ui: { root: { feature: "dashboard", component: "Animated" } },
         contributions: [
@@ -498,6 +569,7 @@ function applicationIR(): ApplicationIR {
     ],
     presentations: [
       {
+        interface: "dashboard",
         file: "src/presentation.ts",
         animations: [
           {

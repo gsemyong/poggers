@@ -43,13 +43,18 @@ export function createServerPlatformAdapter(
         const path = resolve(input.output, artifactName(program.name));
         const result = await buildServerProgram({
           dependencies: options.productionDependencies,
-          application: input.ir.application.name,
+          system: input.ir.system.name,
           ir: input.ir,
           directory: input.directory,
           output: path,
           program,
         });
-        entries.push({ program: program.name, environment: program.environment.name, path });
+        entries.push({
+          identity: program.id,
+          kind: "program" as const,
+          environment: program.environment.name,
+          path,
+        });
         console.log(`[poggers] production ${program.name}: cache ${result.cache}`);
       }
       return { directory: input.output, entries };

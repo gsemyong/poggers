@@ -5,12 +5,8 @@ import { resolve } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 
 import { webCompilerExtension } from "@/adapters/web/compiler";
-import {
-  webApplicationCompilerIR,
-  webFeatureCompilerIR,
-  webProgramCompilerIR,
-} from "@/adapters/web/routing";
-import { compileApplication } from "@/compiler/source";
+import { webFeatureCompilerIR, webProgramCompilerIR } from "@/adapters/web/routing";
+import { compileSystem, SystemDiagnostic } from "@/compiler/source";
 
 const directories: string[] = [];
 
@@ -21,13 +17,15 @@ afterEach(async () => {
 describe("web compiler extension", () => {
   test("owns mounted paths, rendering, cache, metadata, and validation meaning", async () => {
     const entry = await fixture(routeApplicationSource());
-    const generic = compileApplication(entry);
+    const generic = compileSystem(entry);
     expect(generic.features[0]?.extensions).toBeUndefined();
     expect(generic.programs[0]?.contributions[0]?.extensions).toBeUndefined();
 
-    const ir = compileApplication(entry, [webCompilerExtension]);
-    expect(webApplicationCompilerIR(ir.application.extensions?.web)).toEqual({
-      version: 7,
+    const ir = compileSystem(entry, [webCompilerExtension]);
+    const webInterface = ir.features.find(({ path }) => path === "product.web");
+    const tasks = ir.features.find(({ path }) => path === "product.web.tasks");
+    expect(webFeatureCompilerIR(webInterface?.extensions?.web)).toEqual({
+      version: 8,
       installation: {
         display: "standalone",
         icons: [
@@ -39,14 +37,14 @@ describe("web compiler extension", () => {
         start: { to: "tasks.edit", params: { id: "start" } },
       },
     });
-    expect(webFeatureCompilerIR(ir.features[0]?.extensions?.web)).toEqual({
-      version: 7,
+    expect(webFeatureCompilerIR(tasks?.extensions?.web)).toEqual({
+      version: 8,
       routePath: "admin",
     });
     const web = webProgramCompilerIR(ir.programs[0]?.contributions[0]?.extensions?.web);
     expect(web.routes).toEqual([
       expect.objectContaining({
-        feature: "tasks",
+        feature: "product.web.tasks",
         name: "edit",
         path: ":id",
         document: "content",
@@ -104,20 +102,20 @@ describe("web compiler extension", () => {
         "",
       ),
     );
-    expect(() => compileApplication(entry)).not.toThrow();
-    expect(() => compileApplication(entry, [webCompilerExtension])).toThrow(/must implement view/);
+    expect(() => compileSystem(entry)).not.toThrow();
+    expect(() => compileSystem(entry, [webCompilerExtension])).toThrow(/must implement view/);
   });
 
   test("allows a public loader whose type omits request authority", async () => {
     const entry = await fixture(
       routeApplicationSource().replace('Scope: "private"', 'Scope: "public"'),
     );
-    expect(() => compileApplication(entry, [webCompilerExtension])).not.toThrow();
+    expect(() => compileSystem(entry, [webCompilerExtension])).not.toThrow();
   });
 
   test("lowers deferred Route data and its sole reveal boundary", async () => {
-    const entry = await fixture(deferredRouteApplicationSource(), "app.tsx");
-    const ir = compileApplication(entry, [webCompilerExtension]);
+    const entry = await fixture(deferredRouteApplicationSource(), "system.tsx");
+    const ir = compileSystem(entry, [webCompilerExtension]);
     const route = webProgramCompilerIR(ir.programs[0]?.contributions[0]?.extensions?.web)
       .routes[0]!;
 
@@ -138,14 +136,48 @@ describe("web compiler extension", () => {
     });
     expect(JSON.stringify(route.implementation.load)).toContain('"kind":"closure"');
   });
+
+  test("isolates equivalent Routes by interface and locates collisions within one interface", async () => {
+    const isolated = compileSystem(await fixture(multiInterfaceRouteSource(false)), [
+      webCompilerExtension,
+    ]);
+
+    expect(isolated.interfaces.map(({ id, programs }) => [id, programs])).toEqual([
+      ["interface/customer.web", ["program/customer.web.browser"]],
+      ["interface/operations.web", ["program/operations.web.browser"]],
+    ]);
+
+    const entry = await fixture(multiInterfaceRouteSource(true));
+    let failure: unknown;
+    try {
+      compileSystem(entry, [webCompilerExtension]);
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(SystemDiagnostic);
+    expect(String(failure)).toMatch(/system\.ts:\d+:\d+: Web Routes .* are ambiguous/);
+  });
 });
 
-async function fixture(source: string, name = "app.ts"): Promise<string> {
+async function fixture(source: string, name = "system.ts"): Promise<string> {
   const directory = await mkdtemp(resolve(tmpdir(), "poggers-web-compiler-"));
   directories.push(directory);
   const entry = resolve(directory, name);
   await writeFile(entry, source);
   return entry;
+}
+
+function compositionSource(): string {
+  return `
+declare const featureContract: unique symbol;
+type Feature<Contract> = Readonly<{ readonly [featureContract]?: Contract }>;
+function createFeature<Contract>(definition: object): Feature<Contract> {
+  return definition as Feature<Contract>;
+}
+function createSystem(definition: object): object {
+  return definition;
+}
+`;
 }
 
 function deferredRouteApplicationSource(): string {
@@ -169,8 +201,7 @@ type Environment = {
   readonly UI: UI;
 };
 type Program<E, C extends object> = Readonly<C & { Environment: E }>;
-type Feature<C> = unknown;
-type Application<C> = unknown;
+${compositionSource()}
 type Route = {
   Path: "activity";
   Cache: false;
@@ -184,8 +215,12 @@ type Route = {
 type Activity = {
   Programs: { browser: Program<Environment, { Routes: { activity: Route } }> };
 };
-type App = { Features: { activity: Activity } };
-const activity = {
+type Web = {
+  Interface: { Platform: { Name: "web" } };
+  Features: { activity: Activity };
+};
+type Product = { App: true; Features: { web: Web } };
+const activity = createFeature<Activity>({
   programs: {
     browser: {
       routes: {
@@ -210,8 +245,13 @@ const activity = {
       },
     },
   },
-} satisfies Feature<Activity>;
-export default { features: { activity } } satisfies Application<App>;
+});
+const web = createFeature<Web>({
+  features: { activity },
+  presentation: { parameters: {}, create() { return {}; } },
+});
+const product = createFeature<Product>({ features: { web } });
+export default createSystem({ features: { product } });
 `;
 }
 
@@ -226,8 +266,7 @@ type Environment = {
   readonly UI: UI;
 };
 type Program<E, C extends object> = Readonly<C & { Environment: E }>;
-type Feature<C> = unknown;
-type Application<C> = unknown;
+${compositionSource()}
 type Route = {
   Path: ":id";
   Cache: { Scope: "private"; MaxAge: "5m" };
@@ -262,8 +301,13 @@ type Tasks = {
     >;
   };
 };
-type App = { Features: { tasks: Tasks } };
-const tasks = {
+type Web = {
+  Interface: { Platform: { Name: "web" } };
+  Features: { tasks: Tasks };
+};
+type Product = { App: true; Features: { web: Web } };
+type Root = { Features: { product: Product } };
+const tasks = createFeature<Tasks>({
   routePath: "admin",
   programs: {
     browser: {
@@ -281,20 +325,77 @@ const tasks = {
       },
     },
   },
-} satisfies Feature<Tasks>;
+});
 const icons = [
   { src: "/icon-192.svg", sizes: "192x192", type: "image/svg+xml" },
   { src: "/icon-512.svg", sizes: "512x512", type: "image/svg+xml" },
 ];
-export default {
+const web = createFeature<Web>({
   features: { tasks },
-  web: {
-    installation: {
-      start: { to: "tasks.edit", params: { id: "start" } },
-      icons,
-      offline: { fallback: { to: "tasks.edit", params: { id: "offline" } } },
-    },
+  presentation: { parameters: {}, create() { return {}; } },
+  installation: {
+    start: { to: "tasks.edit", params: { id: "start" } },
+    icons,
+    offline: { fallback: { to: "tasks.edit", params: { id: "offline" } } },
   },
-} satisfies Application<App>;
+});
+const product = createFeature<Product>({ features: { web } });
+export default createSystem({
+  features: { product },
+});
+`;
+}
+
+function multiInterfaceRouteSource(collide: boolean): string {
+  const extraContract = collide ? "; duplicate: Area" : "";
+  const extraValue = collide ? ", duplicate" : "";
+  return `
+type UI = { readonly Name: "web" };
+type Environment = {
+  readonly Name: "browser-main";
+  readonly Platform: { readonly Name: "web"; readonly UI: UI };
+  readonly UI: UI;
+};
+type Program<E, C extends object> = Readonly<C & { Environment: E }>;
+${compositionSource()}
+type Route = {
+  Path: "";
+  Cache: false;
+  Metadata: {};
+  ParamSchema: {};
+  SearchSchema: {};
+  Data: {};
+  Dependencies: {};
+};
+type Area = {
+  Programs: { browser: Program<Environment, { Routes: { home: Route } }> };
+};
+type OperationsWeb = {
+  Interface: { Platform: { Name: "web" } };
+  Features: { primary: Area${extraContract} };
+};
+type CustomerWeb = {
+  Interface: { Platform: { Name: "web" } };
+  Features: { primary: Area };
+};
+type Operations = { App: true; Features: { web: OperationsWeb } };
+type Customer = { App: true; Features: { web: CustomerWeb } };
+const primary = createFeature<Area>({
+  programs: { browser: { routes: { home: { view() { return "Home"; } } } } },
+});
+const duplicate = createFeature<Area>({
+  programs: { browser: { routes: { home: { view() { return "Duplicate"; } } } } },
+});
+const operationsWeb = createFeature<OperationsWeb>({
+  features: { primary${extraValue} },
+  presentation: { parameters: {}, create() { return {}; } },
+});
+const customerWeb = createFeature<CustomerWeb>({
+  features: { primary },
+  presentation: { parameters: {}, create() { return {}; } },
+});
+const operations = createFeature<Operations>({ features: { web: operationsWeb } });
+const customer = createFeature<Customer>({ features: { web: customerWeb } });
+export default createSystem({ features: { operations, customer } });
 `;
 }

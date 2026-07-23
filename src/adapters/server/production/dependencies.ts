@@ -63,7 +63,7 @@ export const eventsDependency = defineServerProductionDependency({
     {
       name: "database",
       environment: "POGGERS_DATABASE",
-      default: ".data/application.sqlite",
+      default: ".data/system.sqlite",
     },
   ],
   crate: {
@@ -97,7 +97,7 @@ export const authenticationDependency = defineServerProductionDependency({
     {
       name: "database",
       environment: "POGGERS_DATABASE",
-      default: ".data/application.sqlite",
+      default: ".data/system.sqlite",
     },
   ],
   crate: {
@@ -152,6 +152,7 @@ export const httpDependency = defineServerProductionDependency({
       default: "http://localhost:3000",
     },
     { name: "webRoot", environment: "POGGERS_WEB_ROOT" },
+    { name: "webInterfaces", environment: "POGGERS_WEB_INTERFACES" },
   ],
   crate: { package: "poggers-server-http", directory: dependencyDirectory("http") },
   rust: { type: "poggers_server_http::Http", constructor: "poggers_server_http::create" },

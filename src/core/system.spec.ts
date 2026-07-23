@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { createFeature } from "@/core/application";
+import { createFeature } from "@/core/feature";
 import { createApp, createSystem } from "@/core/system";
 
 describe("System authoring", () => {

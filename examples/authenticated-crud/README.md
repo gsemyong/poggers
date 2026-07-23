@@ -1,20 +1,20 @@
 # Authenticated, event-sourced CRUD
 
-This example composes three vertical slices without application dependency plumbing:
+This example composes three vertical slices without System-level dependency plumbing:
 
 - `identity.tsx` instantiates the reusable identity factory;
 - `tasks.tsx` instantiates the reusable entity factory and adds its browser UI;
 - `shell.tsx` composes the feature Components;
-- `app.tsx` only names the product and composes Features and Presentations.
+- `system.ts` composes the operations App and its web interface.
 
 The selected web and server adapters create their host Dependency scopes automatically. Identity
-owns its authentication protocol, entity owns its CRUD protocol, and the application contains no
+owns its authentication protocol, entity owns its CRUD protocol, and the System contains no
 HTTP client, route handler, credentials, database, or profile module.
 
 Run it with `nub run dev:crud`, then open `http://localhost:3000`. Development data is retained in
-`.data/application.sqlite` and the server listens at `http://localhost:3010`.
+`.data/system.sqlite` and the server listens at `http://localhost:3010`.
 
-Build and run the complete production application with:
+Build and run the complete production System with:
 
 ```sh
 nub src/cli.ts build --dir examples/authenticated-crud
@@ -27,7 +27,7 @@ POGGERS_WEB_ROOT="$PWD/dist/web" \
 
 Open `http://localhost:3000`. `dist/server/api` is the standalone optimized server artifact. When
 `POGGERS_WEB_ROOT` is set it serves the compiled web plan and browser assets; otherwise it exposes
-only the API. The authenticated Routes deliberately return private application shells, then the
+only the API. The authenticated Routes deliberately return private interface shells, then the
 browser owns session-aware content. Critical CSS is inline, the content-hashed module graph is
 preloaded, and immutable assets can be cached indefinitely. Route loaders receive validated address
 data and declared semantic Dependencies. The adapter derives document delivery from indexing,
@@ -91,27 +91,36 @@ await tasks.create({ title: "Ship it" });
 ```
 
 The factory owns optimistic replay, an IndexedDB outbox, command identity, retries, reconciliation,
-and the live server stream. Application UI neither subscribes nor copies entity data into another
+and the live server stream. Interface UI neither subscribes nor copies entity data into another
 state. The server remains authoritative, and transport and persistence stay behind factory and
 adapter boundaries.
 
-## Application
+## System
 
 ```ts
-export type App = Readonly<{
+type WebContract = Readonly<{
   Features: {
     identity: IdentityFeature;
     shell: ShellFeature;
     tasks: TasksFeature;
   };
-  Presentations: "clean";
 }>;
 
-export default {
-  metadata: { name: "Poggers Operations" },
+export type OperationsWeb = PlatformInterfaceContract<WebContract, WebPlatform>;
+
+const web = createWebInterface<WebContract>({
   features: { identity, shell, tasks },
-  presentations: { clean },
-} satisfies Application<App>;
+  presentation: clean,
+});
+
+const operations = createApp<{ Features: { web: OperationsWeb } }>({
+  features: { web },
+});
+
+export default createSystem({
+  metadata: { name: "Poggers Operations" },
+  features: { operations },
+});
 ```
 
 The task Feature owns navigation beneath `/tasks`, including deep links and history changes. The
@@ -121,7 +130,7 @@ shell only mounts `<Tasks.Admin />`.
 
 - factory tests use the semantic entity fixture without HTTP or credential setup;
 - type tests prove exact API inference and reject invalid models and calls;
-- one application test runs Better Auth, HTTP, SQLite persistence, live updates, authorization
+- one System test runs Better Auth, HTTP, SQLite persistence, live updates, authorization
   isolation, malformed credentials, restart recovery, and sign-out unchanged through development
   and optimized production;
 - the factory test loses a response after a successful commit, restores the pending command from

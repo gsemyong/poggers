@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 
-import { placePrograms, type Feature } from "@/core/application";
+import { placePrograms, type Feature } from "@/core/feature";
 import type { Program } from "@/core/program";
 
 type Server = Readonly<{ Name: "server"; Platform: { Name: "server" } }>;

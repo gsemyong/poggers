@@ -1,6 +1,6 @@
 import type * as ts from "@typescript/typescript6";
 
-import type { ExtensionIR, FunctionIR, SourceSpan, TypeIR } from "@/compiler/ir";
+import type { ExtensionIR, FunctionIR, SourceSpan, SystemIR, TypeIR } from "@/compiler/ir";
 
 export type SourceCompilerAPI = Readonly<{
   properties(type: ts.Type | undefined): readonly ts.Symbol[];
@@ -37,10 +37,11 @@ export type FeatureSourceContext = Readonly<{
 export type ProgramSourceContext = FeatureSourceContext &
   Readonly<{
     feature: string;
+    interface?: string;
     name: string;
   }>;
 
-export type ApplicationSourceContext = Readonly<{
+export type SystemSourceContext = Readonly<{
   checker: ts.TypeChecker;
   source: SourceCompilerAPI;
   contract: ts.Type;
@@ -52,7 +53,8 @@ export type ApplicationSourceContext = Readonly<{
 /** Lets a Platform compiler own meaning carried by generic core as versioned extension IR. */
 export type SourceCompilerExtension = Readonly<{
   name: string;
-  application?(context: ApplicationSourceContext): ExtensionIR | undefined;
+  system?(context: SystemSourceContext): ExtensionIR | undefined;
   feature?(context: FeatureSourceContext): ExtensionIR | undefined;
   program?(context: ProgramSourceContext): ExtensionIR | undefined;
+  validate?(ir: SystemIR): void;
 }>;

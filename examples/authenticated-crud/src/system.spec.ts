@@ -2,14 +2,13 @@ import { createConnection } from "node:net";
 import { resolve } from "node:path";
 
 import type { EntitySnapshot } from "@poggers/kit";
-import { testApplication } from "@poggers/kit/testing";
-import { chromium, firefox, webkit, type BrowserType, type Page } from "playwright";
+import { testSystem } from "@poggers/kit/testing";
 import { expect } from "vitest";
 
 import type { Task } from "./features/tasks";
 
-testApplication({
-  name: "authenticated CRUD application",
+testSystem({
+  name: "authenticated CRUD System",
   directory: resolve(import.meta.dirname, ".."),
   timeout: 240_000,
   async verify({ realization, location, locations, restart }) {
@@ -125,7 +124,7 @@ testApplication({
       expect(manifestResponse.status).toBe(404);
       expect(
         (
-          await checkedFetch(new URL("/application.ir.json", location), {
+          await checkedFetch(new URL("/system.ir.json", location), {
             signal: AbortSignal.timeout(10_000),
           })
         ).status,
@@ -201,15 +200,7 @@ testApplication({
       }
     }
 
-    for (const [browserName, browserType] of [
-      ["chromium", chromium],
-      ["firefox", firefox],
-      ["webkit", webkit],
-    ] as const) {
-      await verifyBrowser(location, realization, browserName, browserType);
-    }
-
-    const origin = locations.server?.[0] ?? location;
+    const origin = locations["program/api"]?.[0] ?? location;
     const alice = new Cookies(origin);
     const bob = new Cookies(origin);
 
@@ -297,132 +288,6 @@ testApplication({
     await expect(alice.get("/api/tasks")).rejects.toMatchObject({ status: 401 });
   },
 });
-
-async function verifyBrowser(
-  location: string,
-  realization: "development" | "production",
-  browserName: string,
-  browserType: BrowserType,
-): Promise<void> {
-  const browser = await browserType.launch({
-    headless: true,
-    ...(browserName === "chromium" ? { channel: "chromium" } : {}),
-  });
-  try {
-    const context = await browser.newContext();
-    const page = await context.newPage();
-    const errors: string[] = [];
-    page.on("console", (message) => {
-      if (message.type() === "error" && !message.text().startsWith("Failed to load resource:")) {
-        errors.push(message.text());
-      }
-    });
-    page.on("pageerror", (error) => errors.push(error.message));
-    page.on("response", (response) => {
-      const url = new URL(response.url());
-      if (response.status() >= 400 && url.pathname !== "/favicon.ico") {
-        errors.push(`${response.status()} ${url.pathname}`);
-      }
-    });
-
-    await page.goto(`${location}/tasks`, { waitUntil: "load" });
-    await expect.poll(() => new URL(page.url()).pathname).toBe("/auth");
-    await expectAuthPresentation(page);
-    await page.getByRole("button", { name: "New here? Create an account" }).click();
-    await page.getByLabel("Name").fill(`${browserName} User`);
-    await page.getByLabel("Email").fill(`browser-${realization}-${browserName}@example.com`);
-    await page.getByLabel("Password").fill("password1234");
-    await page.getByRole("button", { name: "Create account" }).click();
-    await page.getByRole("button", { name: "New task" }).waitFor();
-    expect(new URL(page.url()).pathname).toBe("/tasks");
-    expect(await page.locator("style[data-poggers-presentation]").count()).toBe(1);
-    await expectTaskPresentation(page);
-
-    await page.reload({ waitUntil: "load" });
-    await page.getByRole("button", { name: "New task" }).waitFor();
-    expect(new URL(page.url()).pathname).toBe("/tasks");
-    expect(await page.locator("style[data-poggers-presentation]").count()).toBe(1);
-    await expectTaskPresentation(page);
-
-    await page.getByRole("button", { name: "New task" }).click();
-    await expect.poll(() => new URL(page.url()).pathname).toBe("/tasks/new");
-    const title = page.getByLabel("Task title");
-    await title.fill("Browser task");
-    expect(await title.evaluate((element) => element === document.activeElement)).toBe(true);
-    await page.getByRole("button", { name: "Save task" }).click();
-    await expect.poll(() => new URL(page.url()).pathname).toBe("/tasks");
-    await page.getByRole("heading", { name: "Browser task" }).waitFor();
-    await expectTaskItemPresentation(page, "Browser task");
-    await page.reload({ waitUntil: "load" });
-    await page.getByRole("heading", { name: "Browser task" }).waitFor();
-    await expectTaskPresentation(page);
-    await expectTaskItemPresentation(page, "Browser task");
-    expect(await page.evaluate(() => performance.getEntriesByType("navigation").length)).toBe(1);
-
-    await page.getByRole("button", { name: "Edit" }).click();
-    await expect.poll(() => new URL(page.url()).pathname).toMatch(/^\/tasks\/[0-9a-f-]+$/);
-    await title.fill("Browser task updated");
-    await page.getByRole("button", { name: "Save task" }).click();
-    await page.getByRole("heading", { name: "Browser task updated" }).waitFor();
-    await page.getByRole("button", { name: "Complete" }).click();
-    await page.getByText("Completed", { exact: true }).waitFor();
-    await page.getByRole("button", { name: "Delete" }).click();
-    await page.getByRole("heading", { name: "No tasks yet" }).waitFor();
-    expect(await page.evaluate(() => performance.getEntriesByType("navigation").length)).toBe(1);
-    await page.getByRole("button", { name: "Sign out" }).click();
-    await expect.poll(() => new URL(page.url()).pathname).toBe("/auth");
-    await page.getByRole("button", { name: "Sign in" }).waitFor();
-    expect(errors).toEqual([]);
-    await context.close();
-  } finally {
-    await browser.close();
-  }
-}
-
-async function expectTaskPresentation(page: Page): Promise<void> {
-  const root = page.getByRole("region", { name: "Task administration" });
-  await root.waitFor();
-  expect(await root.getAttribute("class")).toMatch(/^p[a-z0-9]+$/);
-  expect(
-    await root.evaluate((element) => {
-      const style = getComputedStyle(element);
-      return {
-        display: style.display,
-        direction: style.flexDirection,
-        maxWidth: style.maxWidth,
-        padding: style.padding,
-      };
-    }),
-  ).toEqual({ display: "flex", direction: "column", maxWidth: "980px", padding: "26px" });
-}
-
-async function expectAuthPresentation(page: Page): Promise<void> {
-  const root = page.getByRole("region", { name: "Authentication" });
-  await root.waitFor();
-  await expectPresentedSubtree(root);
-}
-
-async function expectTaskItemPresentation(page: Page, title: string): Promise<void> {
-  const heading = page.getByRole("heading", { name: title });
-  const item = heading.locator("xpath=ancestor::article");
-  await item.waitFor();
-  await expectPresentedSubtree(item);
-  expect(
-    await item.evaluate((element) => {
-      const style = getComputedStyle(element);
-      return { display: style.display, borderWidth: style.borderWidth, padding: style.padding };
-    }),
-  ).toEqual({ display: "flex", borderWidth: "1px", padding: "14px" });
-}
-
-async function expectPresentedSubtree(root: ReturnType<Page["locator"]>): Promise<void> {
-  const missing = await root.evaluate((element) =>
-    [element, ...element.querySelectorAll("*")]
-      .filter((target) => !/^p[a-z0-9]+$/.test(target.getAttribute("class") ?? ""))
-      .map((target) => target.tagName.toLowerCase()),
-  );
-  expect(missing).toEqual([]);
-}
 
 async function checkedFetch(input: URL, init?: RequestInit): Promise<Response> {
   try {

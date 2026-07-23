@@ -18,11 +18,15 @@ import {
   startServerProgramInstance,
   type RunningServerProgram,
 } from "@/adapters/server/development/runtime";
-import type { ApplicationIR, DependencyIR, ProgramIR } from "@/compiler/ir";
+import {
+  selectSystemOutputs,
+  type DependencyIR,
+  type ProgramIR,
+  type SystemIR,
+} from "@/compiler/ir";
 import { linkProgram, projectDependencyContracts } from "@/compiler/linker";
-import { createApplicationCompiler } from "@/compiler/source";
 import type { DevelopmentSession, PlatformDevelopmentInput } from "@/contracts/platform";
-import type { Application, ApplicationContract } from "@/core/application";
+import type { System, SystemContract } from "@/core/system";
 import type { ServerPlatform } from "@/platforms/server/platform";
 
 export type ServerDevelopmentOptions = Readonly<{
@@ -41,7 +45,7 @@ export async function developServerPrograms(
   const vite = await createServer({
     appType: "custom",
     configFile: false,
-    plugins: [applicationAliasPlugin(source)],
+    plugins: [systemAliasPlugin(source)],
     root: input.directory,
     resolve: {
       alias: kitAliases(),
@@ -49,11 +53,7 @@ export async function developServerPrograms(
     },
     server: { middlewareMode: true, ws: false },
   });
-  const application = moduleDefault<Application<ApplicationContract>>(
-    await vite.ssrLoadModule(input.application),
-  );
-  const compiler = createApplicationCompiler(input.application);
-  compiler.compile();
+  const system = moduleDefault<System<SystemContract>>(await vite.ssrLoadModule(input.system));
   let activePrograms = new Map<string, ActiveServerProgram>();
   const initialNames = programNames(input.programs);
   try {
@@ -61,11 +61,11 @@ export async function developServerPrograms(
       activePrograms.set(
         program.name,
         await startDevelopmentProgram(
-          application,
+          system,
           program,
           initialNames,
           input.directory,
-          input.ir.application.name,
+          input.ir.system.name,
           input.ir,
           options,
         ),
@@ -89,10 +89,10 @@ export async function developServerPrograms(
     reload = reload.then(async () => {
       const affectedFiles = affectedModuleFiles(vite, file);
       let nextPrograms: readonly ProgramIR[];
-      let candidate: Application<ApplicationContract>;
+      let candidate: System<SystemContract>;
       try {
-        const nextIR = compiler.compile(file).ir;
-        nextPrograms = nextIR.programs.filter(
+        const nextIR = input.revisions.compile(file).ir;
+        nextPrograms = selectSystemOutputs(nextIR, input.app).programs.filter(
           ({ environment }) => environment.platform === "server",
         );
         const affected = affectedProgramNames(
@@ -100,8 +100,8 @@ export async function developServerPrograms(
           nextPrograms,
           affectedFiles,
           input.directory,
-          input.application,
-          nextIR.application.name,
+          input.system,
+          nextIR.system.name,
           nextIR,
         );
         if (!affected.size) return;
@@ -110,15 +110,15 @@ export async function developServerPrograms(
           { timestamp: true },
         );
         candidate = moduleDefault(
-          await vite.ssrLoadModule(`${input.application}?poggers-revision=${++revision}`),
+          await vite.ssrLoadModule(`${input.system}?poggers-revision=${++revision}`),
         );
 
         activePrograms = await replaceDevelopmentPrograms({
           active: activePrograms,
           affected,
-          application: candidate,
+          system: candidate,
           programs: nextPrograms,
-          appName: nextIR.application.name,
+          appName: nextIR.system.name,
           ir: nextIR,
           options,
         });
@@ -142,7 +142,7 @@ export async function developServerPrograms(
 }
 
 type ActiveServerProgram = Readonly<{
-  application: Application<ApplicationContract>;
+  system: System<SystemContract>;
   directory: string;
   appName: string;
   dependencies: Readonly<Record<string, unknown>>;
@@ -154,12 +154,12 @@ type ActiveServerProgram = Readonly<{
 }>;
 
 async function startDevelopmentProgram(
-  application: Application<ApplicationContract>,
+  system: System<SystemContract>,
   program: ProgramIR,
   names: readonly string[],
   directory: string,
   appName: string,
-  ir: ApplicationIR,
+  ir: SystemIR,
   options: ServerDevelopmentOptions,
 ): Promise<ActiveServerProgram> {
   const loaderPlan = planWebRouteLoaders(program, ir);
@@ -175,7 +175,7 @@ async function startDevelopmentProgram(
   });
   try {
     return await activateDevelopmentProgram({
-      application,
+      system,
       appName,
       dependencies,
       directory,
@@ -191,7 +191,7 @@ async function startDevelopmentProgram(
 }
 
 async function activateDevelopmentProgram(input: {
-  application: Application<ApplicationContract>;
+  system: System<SystemContract>;
   appName: string;
   dependencies: Readonly<Record<string, unknown>>;
   directory: string;
@@ -200,11 +200,7 @@ async function activateDevelopmentProgram(input: {
   loaderRegistry?: DevelopmentWebLoaderRegistry;
   program: ProgramIR;
 }): Promise<ActiveServerProgram> {
-  const running = await startServerProgramInstance(
-    input.application,
-    input.program,
-    input.dependencies,
-  );
+  const running = await startServerProgramInstance(input.system, input.program, input.dependencies);
   let loaderRegistration: Disposable | undefined;
   try {
     if (input.loaderPlan.loaders.length) {
@@ -215,14 +211,14 @@ async function activateDevelopmentProgram(input: {
         );
       }
       loaderRegistration = input.loaderRegistry.register({
-        application: canonicalPath(input.directory),
+        system: canonicalPath(input.directory),
         owner: input.program.name,
         plan: input.loaderPlan,
         dependencies: running.dependencies,
       });
     }
     return {
-      application: input.application,
+      system: input.system,
       directory: canonicalPath(input.directory),
       appName: input.appName,
       dependencies: input.dependencies,
@@ -242,10 +238,10 @@ async function activateDevelopmentProgram(input: {
 async function replaceDevelopmentPrograms(input: {
   active: ReadonlyMap<string, ActiveServerProgram>;
   affected: ReadonlySet<string>;
-  application: Application<ApplicationContract>;
+  system: System<SystemContract>;
   programs: readonly ProgramIR[];
   appName: string;
-  ir: ApplicationIR;
+  ir: SystemIR;
   options: ServerDevelopmentOptions;
 }): Promise<Map<string, ActiveServerProgram>> {
   const next = new Map(input.active);
@@ -277,7 +273,7 @@ async function replaceDevelopmentPrograms(input: {
       using _replacement = beginNodeHostReplacement(previous.dependencies);
       staged.push(
         await activateDevelopmentProgram({
-          application: input.application,
+          system: input.system,
           appName: input.appName,
           dependencies: previous.dependencies,
           directory: previous.directory,
@@ -303,9 +299,9 @@ function affectedProgramNames(
   programs: readonly ProgramIR[],
   affectedFiles: ReadonlySet<string>,
   directory: string,
-  application: string,
+  system: string,
   appName: string,
-  ir: ApplicationIR,
+  ir: SystemIR,
 ): ReadonlySet<string> {
   const previousNames = programNames([...active.values()].map(({ program }) => program));
   const nextNames = programNames(programs);
@@ -332,9 +328,7 @@ function affectedProgramNames(
     }
     if (
       after.contributions.some(({ span }) =>
-        spanFileCandidates(directory, application, span.file).some((file) =>
-          affectedFiles.has(file),
-        ),
+        spanFileCandidates(directory, system, span.file).some((file) => affectedFiles.has(file)),
       )
     ) {
       affected.add(name);
@@ -343,14 +337,10 @@ function affectedProgramNames(
   return affected;
 }
 
-function spanFileCandidates(
-  directory: string,
-  application: string,
-  file: string,
-): readonly string[] {
+function spanFileCandidates(directory: string, system: string, file: string): readonly string[] {
   return unique([
     canonicalPath(resolve(directory, file)),
-    canonicalPath(resolve(dirname(application), file)),
+    canonicalPath(resolve(dirname(system), file)),
   ]);
 }
 
@@ -391,8 +381,16 @@ function programNames(programs: readonly ProgramIR[]): readonly string[] {
   return unique(programs.map(({ name }) => name));
 }
 
-function activeLocations(programs: Iterable<ActiveServerProgram>): readonly string[] {
-  return [...new Set([...programs].flatMap(({ running }) => running.locations))].sort();
+function activeLocations(
+  programs: Iterable<ActiveServerProgram>,
+): Readonly<Record<string, readonly string[]>> {
+  return Object.freeze(
+    Object.fromEntries(
+      [...programs]
+        .sort(({ program: left }, { program: right }) => left.id.localeCompare(right.id))
+        .map(({ program, running }) => [program.id, [...new Set(running.locations)].sort()]),
+    ),
+  );
 }
 
 async function disposeActivePrograms(programs: Iterable<ActiveServerProgram>): Promise<void> {
@@ -487,10 +485,10 @@ function kitAliases() {
   ];
 }
 
-function applicationAliasPlugin(source: string): Plugin {
+function systemAliasPlugin(source: string): Plugin {
   const kit = resolve(import.meta.dirname, "../../..");
   return {
-    name: "poggers-application-alias",
+    name: "poggers-system-alias",
     enforce: "pre",
     resolveId(id, importer) {
       if (!id.startsWith("@/")) return;

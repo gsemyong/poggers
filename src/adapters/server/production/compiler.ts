@@ -25,7 +25,7 @@ import {
   generateRustProgram,
   type RustProgramFunctionExport,
 } from "@/adapters/server/production/program";
-import type { ApplicationIR, LinkedProgramIR, ProgramIR, TypeIR } from "@/compiler/ir";
+import type { SystemIR, LinkedProgramIR, ProgramIR, TypeIR } from "@/compiler/ir";
 import { linkProgram } from "@/compiler/linker";
 
 const SERVER_PRODUCTION_VERSION = 7;
@@ -41,8 +41,8 @@ export type ServerProductionBuild = Readonly<{
 
 /** Builds one linked server Program as a standalone Rust executable. */
 export async function buildServerProgram(input: {
-  application: string;
-  ir?: ApplicationIR;
+  system: string;
+  ir?: SystemIR;
   dependencies?: readonly ServerProductionDependency[];
   cache?: string;
   directory: string;
@@ -83,7 +83,7 @@ export async function buildServerProgram(input: {
   );
   const project = digest(
     JSON.stringify({
-      application: input.application,
+      system: input.system,
       program: semanticProgram(linked),
       dependencies: dependencies.map(({ implementation }) => ({
         name: implementation.name,

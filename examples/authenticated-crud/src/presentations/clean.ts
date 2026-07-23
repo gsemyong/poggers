@@ -1,6 +1,6 @@
 import type { ConfiguredWebPresentation, WebPresentation, WebStyle } from "@poggers/kit/web";
 
-import type { App } from "../app";
+import type { OperationsWeb } from "../system";
 
 const parameters = {
   color: {
@@ -62,12 +62,12 @@ const createClean = (({ parameters: values }) => {
 
   return {
     Shell: () => ({
-      Application: () => ({
+      Layout: () => ({
         Root: {
           layout: {
             model: { kind: "flow", direction: "block" },
             minBlockSize: { viewport: { axis: "block", percent: 100, mode: "dynamic" } },
-            container: { name: "application", axis: "inline" },
+            container: { name: "interface", axis: "inline" },
           },
           paint: { fill: values.color.canvas },
           text: { family: ["system", "sans"], color: values.color.ink },
@@ -80,7 +80,7 @@ const createClean = (({ parameters: values }) => {
           paint: { fill: values.color.surface, stroke: { width: 1, color: values.color.line } },
           rules: [
             {
-              when: { container: { name: "application", maxInlineSize: 560 } },
+              when: { container: { name: "interface", maxInlineSize: 560 } },
               use: {
                 layout: {
                   model: { kind: "flow", direction: "block", gap: 12, align: "stretch" },
@@ -103,7 +103,7 @@ const createClean = (({ parameters: values }) => {
           layout: { model: { kind: "flow", direction: "inline", gap: 14, align: "center" } },
           rules: [
             {
-              when: { container: { name: "application", maxInlineSize: 560 } },
+              when: { container: { name: "interface", maxInlineSize: 560 } },
               use: {
                 layout: {
                   model: {
@@ -129,7 +129,7 @@ const createClean = (({ parameters: values }) => {
           layout: { inlineSize: "fill", padding: 24 },
           rules: [
             {
-              when: { container: { name: "application", maxInlineSize: 560 } },
+              when: { container: { name: "interface", maxInlineSize: 560 } },
               use: { layout: { padding: 12 } },
             },
           ],
@@ -201,7 +201,7 @@ const createClean = (({ parameters: values }) => {
           },
           rules: [
             {
-              when: { container: { name: "application", maxInlineSize: 560 } },
+              when: { container: { name: "interface", maxInlineSize: 560 } },
               use: {
                 layout: { model: { kind: "flow", direction: "block", gap: 14 }, padding: 16 },
               },
@@ -316,9 +316,9 @@ const createClean = (({ parameters: values }) => {
       }),
     }),
   };
-}) satisfies WebPresentation<App, typeof parameters>;
+}) satisfies WebPresentation<OperationsWeb, typeof parameters>;
 
 export const clean = { parameters, create: createClean } satisfies ConfiguredWebPresentation<
-  App,
+  OperationsWeb,
   typeof parameters
 >;

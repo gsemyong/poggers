@@ -333,7 +333,7 @@ export type PresentationScopeInput<Owner extends ComponentOwner> = Readonly<{
   events: ActionEvents<FeatureActions<Owner>>;
 }>;
 
-/** Mirrors the Component and Feature names exposed by one Application contract. */
+/** Mirrors the Component and Feature names exposed by one UI interface contract. */
 export type PresentationComponentTree<
   Owner extends ComponentOwner,
   Language extends PresentationLanguage,
@@ -357,7 +357,7 @@ export type Presentation<
   readonly events: ActionEvents<FeatureActions<Root>>;
 }) => PresentationDefinition<Root, Language>;
 
-/** A Presentation paired with Application-selected parameters. */
+/** A Presentation paired with interface-selected parameters. */
 export type ConfiguredPresentation<
   Root extends ComponentOwner,
   Language extends PresentationLanguage,

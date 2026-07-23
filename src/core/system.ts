@@ -4,7 +4,7 @@ import type {
   FeatureContractOf,
   FeatureDefinitions,
   FeatureEnvironmentConflict,
-} from "@/core/application";
+} from "@/core/feature";
 import type { PlatformContract } from "@/core/program";
 
 type Empty = Record<never, never>;
@@ -41,16 +41,22 @@ type SystemDefinition<Contract extends SystemContract> = Readonly<{
 /**
  * The one compilation and development root.
  *
- * The private marker keeps `createSystem` as the sole authoring syntax while
- * preserving the exact inferred contract for tooling.
+ * The private marker preserves the exact inferred contract for tooling.
  */
-export type System<Contract extends SystemContract = SystemContract> = SystemDefinition<Contract> &
-  Readonly<{ [systemContract]: Contract }>;
+export type System<Contract extends SystemContract = SystemContract> = Contract extends {
+  Programs: Record<string, unknown>;
+}
+  ? never
+  : [FeatureEnvironmentConflict<Contract>] extends [never]
+    ? SystemDefinition<Contract> & Readonly<{ [systemContract]?: Contract }>
+    : never;
 
 export type SystemContractOf<Value> =
-  Value extends Readonly<{ [systemContract]: infer Contract extends SystemContract }>
+  Value extends Readonly<{ [systemContract]?: infer Contract extends SystemContract }>
     ? Contract
     : never;
+
+export type SystemFeatures<Contract extends SystemContract> = FeaturesOf<Contract>;
 
 /** Infers one System contract from its already typed Feature instances. */
 export function createSystem<const Features extends FeatureValues>(

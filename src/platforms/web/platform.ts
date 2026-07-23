@@ -1,10 +1,6 @@
-import type { FeatureContract } from "@/core/application";
+import type { FeatureContract } from "@/core/feature";
 import type { UIDefinition, UIElement } from "@/core/ui/language";
-import type {
-  ApplicationWebRoutes,
-  WebNavigation,
-  WebRouteContract,
-} from "@/platforms/web/routing";
+import type { WebNavigation, WebRouteContract, WebRoutes } from "@/platforms/web/routing";
 import type { Child, IntrinsicElements } from "@/platforms/web/ui";
 
 type WebPrimitiveName = Extract<keyof IntrinsicElements, string>;
@@ -61,10 +57,8 @@ export type Navigation<
   Routes extends Readonly<Record<string, WebRouteContract>> = Readonly<
     Record<string, WebRouteContract>
   >,
-  Application extends FeatureContract | undefined = undefined,
-> = WebNavigation<
-  Routes & (Application extends FeatureContract ? ApplicationWebRoutes<Application> : {})
->;
+  Owner extends FeatureContract | undefined = undefined,
+> = WebNavigation<Routes & (Owner extends FeatureContract ? WebRoutes<Owner> : {})>;
 
 /** Durable origin-local values supplied by the browser host. */
 export type LocalStore = Readonly<{
@@ -145,7 +139,6 @@ export type {
 } from "@/platforms/web/ui";
 export { createWebInterface, mountFeature } from "@/platforms/web/routing";
 export type {
-  ApplicationWebRoutes,
   Deferred,
   DeferredValue,
   MountedWebFeature,
@@ -154,7 +147,6 @@ export type {
   ValidationInput,
   ValidationOutput,
   ValidationRules,
-  WebApplication,
   WebDestination,
   WebFeature,
   WebInstallation,
@@ -169,6 +161,7 @@ export type {
   WebRouteMetadataResult,
   WebRouteOutcome,
   WebRouteSpecification,
+  WebRoutes,
   WebServerRouteRequest,
   WebStructuredData,
 } from "@/platforms/web/routing";

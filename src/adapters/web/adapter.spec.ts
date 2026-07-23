@@ -5,8 +5,9 @@ import { resolve } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 
 import { createWebPlatformAdapter } from "@/adapters/web/adapter";
-import { POGGERS_IR_VERSION, type ProgramIR } from "@/compiler/ir";
-import { compileApplication } from "@/compiler/source";
+import { webCompilerExtension } from "@/adapters/web/compiler";
+import { SYSTEM_IR_VERSION, type ProgramIR } from "@/compiler/ir";
+import { compileSystem } from "@/compiler/source";
 
 const temporaryDirectories: string[] = [];
 
@@ -24,7 +25,7 @@ describe("web Platform Adapter", () => {
 
     expect(adapter.name).toBe("web");
     expect(adapter.ui.name).toBe("web");
-    expect(adapter.ui.component.createApplicationUI).toBeTypeOf("function");
+    expect(adapter.ui.component.createInterfaceUI).toBeTypeOf("function");
     expect(adapter.ui.presentation.mount).toBeTypeOf("function");
   });
 
@@ -32,9 +33,11 @@ describe("web Platform Adapter", () => {
     const adapter = createWebPlatformAdapter();
     const program = programIR("browser-audio-worklet");
     const ir = {
-      version: POGGERS_IR_VERSION,
-      application: { id: "application/test", name: "test", presentations: [] },
+      version: SYSTEM_IR_VERSION,
+      system: { id: "system", name: "test" },
       platforms: ["web"],
+      apps: [],
+      interfaces: [],
       features: [],
       programs: [program],
       presentations: [],
@@ -43,9 +46,14 @@ describe("web Platform Adapter", () => {
     await expect(
       adapter.develop({
         directory: "/tmp/test",
-        application: "/tmp/test/src/app.ts",
+        system: "/tmp/test/src/system.ts",
         ir,
+        revisions: {
+          current: { ir, presentationSources: new Set() },
+          compile: () => ({ ir, presentationSources: new Set() }),
+        },
         programs: [program],
+        interfaces: [],
         platform: "web",
       }),
     ).rejects.toThrow('does not yet realize "program/worker"');
@@ -55,32 +63,36 @@ describe("web Platform Adapter", () => {
     const directory = await mkdtemp(resolve(tmpdir(), "poggers-web-adapter-"));
     temporaryDirectories.push(directory);
     const source = resolve(directory, "src");
-    const application = resolve(source, "app.ts");
+    const system = resolve(source, "system.ts");
     const output = resolve(directory, "dist");
     await mkdir(source, { recursive: true });
-    await writeFile(application, webProgramsSource());
-    const ir = compileApplication(application);
+    await writeFile(system, webProgramsSource());
+    const ir = compileSystem(system, [webCompilerExtension]);
 
     const result = await createWebPlatformAdapter().build({
       directory,
-      application,
+      system,
       ir,
       programs: ir.programs,
+      interfaces: ir.interfaces,
       platform: "web",
       output,
     });
 
-    expect(result.entries.map(({ program, environment }) => [program, environment])).toEqual([
-      ["browser", "browser-main"],
-      ["telemetry", "browser-main"],
-      ["background", "browser-worker"],
-      ["offline", "browser-service-worker"],
+    expect(
+      result.entries.map(({ identity, kind, environment }) => [identity, kind, environment]),
+    ).toEqual([
+      ["interface/product.web", "interface", "browser-main"],
+      ["program/product.web.background", "program", "browser-worker"],
+      ["program/product.web.offline", "program", "browser-service-worker"],
     ]);
     await Promise.all(result.entries.map(({ path }) => access(path)));
-    const document = await readFile(
-      result.entries.find(({ environment }) => environment === "browser-main")!.path,
-      "utf8",
-    );
+    const interfaceRoot = result.entries.find(({ kind }) => kind === "interface")!.path;
+    const browserAssets = (await readdir(resolve(interfaceRoot, "assets")))
+      .filter((path) => path.startsWith("app-") && path.endsWith(".js"))
+      .map((path) => resolve(interfaceRoot, "assets", path));
+    expect(browserAssets).toHaveLength(1);
+    const document = await readFile(browserAssets[0]!, "utf8");
     const worker = await readFile(
       result.entries.find(({ environment }) => environment === "browser-worker")!.path,
       "utf8",
@@ -110,30 +122,48 @@ type Worker = { Name: "browser-worker"; Platform: Platform };
 type ServiceWorker = { Name: "browser-service-worker"; Platform: Platform };
 type HttpClient = { request(input: { path: string }): Promise<Response> };
 type Program<Environment, Contract extends object = {}> = Contract & { Environment: Environment };
-type Application<Contract> = unknown;
-type App = { Features: {
-  shell: { Programs: { browser: Program<Browser, { Components: { Root: { Elements: { Root: "div" } } } }> } };
-  telemetry: { Programs: { telemetry: Program<Browser> } };
-  background: { Programs: { background: Program<Worker, { Requires: { http: HttpClient } }> } };
-  offline: { Programs: { offline: Program<ServiceWorker> } };
-} };
-export default {
-  metadata: { name: "web-programs" },
-  features: {
-    shell: { programs: { browser: { components: { Root: { view: () => null } }, root: "Root" } } },
-    telemetry: { programs: { telemetry: {} } },
+declare const featureContract: unique symbol;
+type Feature<Contract> = Readonly<{ readonly [featureContract]?: Contract }>;
+function createFeature<Contract>(definition: object): Feature<Contract> {
+  return definition as Feature<Contract>;
+}
+function createSystem(definition: object): object {
+  return definition;
+}
+type Web = {
+  Interface: { Platform: Platform };
+  Programs: {
+    browser: Program<Browser, { Components: { Root: { Elements: { Root: "div" } } } }>;
+    telemetry: Program<Browser>;
+    background: Program<Worker, { Requires: { http: HttpClient } }>;
+    offline: Program<ServiceWorker>;
+  };
+};
+type Product = { App: true; Features: { web: Web } };
+type Root = { Features: { product: Product } };
+const web = createFeature<Web>({
+  programs: {
+    browser: { components: { Root: { view: () => null } }, root: "Root" },
+    telemetry: {},
     background: {
-      programs: {
-        background: {
-          start({ dependencies }: { dependencies: { http: HttpClient } }) {
-            void dependencies.http.request({ path: "/api/telemetry" });
-          },
-        },
+      start({ dependencies }: { dependencies: { http: HttpClient } }) {
+        void dependencies.http.request({ path: "/api/telemetry" });
       },
     },
-    offline: { programs: { offline: {} } },
+    offline: {},
   },
-} satisfies Application<App>;
+  presentation: {
+    parameters: {},
+    create() {
+      return { Root: () => ({}) };
+    },
+  },
+});
+const product = createFeature<Product>({ features: { web } });
+export default createSystem({
+  metadata: { name: "web-programs" },
+  features: { product },
+});
 `;
 }
 
@@ -141,6 +171,7 @@ function programIR(environment: string): ProgramIR {
   return {
     id: "program/worker",
     name: "worker",
+    logicalName: "worker",
     environment: { name: environment, platform: "web" },
     contributions: [
       {
@@ -158,11 +189,11 @@ function programIR(environment: string): ProgramIR {
             parameters: [],
             result: { kind: "primitive", name: "void" },
             body: [],
-            span: { file: "app.ts", line: 1, column: 1 },
+            span: { file: "system.ts", line: 1, column: 1 },
           },
           functions: [],
         },
-        span: { file: "app.ts", line: 1, column: 1 },
+        span: { file: "system.ts", line: 1, column: 1 },
       },
     ],
   };

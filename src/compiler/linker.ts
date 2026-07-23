@@ -1,6 +1,6 @@
 import {
-  assertApplicationIRVersion,
-  type ApplicationIR,
+  assertSystemIRVersion,
+  type SystemIR,
   type DependencyContractIR,
   type DependencyIR,
   type DependencyOperationIR,
@@ -136,8 +136,8 @@ export function linkProgram(program: ProgramIR): LinkedProgramIR {
   };
 }
 
-export function linkApplicationPrograms(ir: ApplicationIR): readonly LinkedProgramIR[] {
-  assertApplicationIRVersion(ir);
+export function linkSystemPrograms(ir: SystemIR): readonly LinkedProgramIR[] {
+  assertSystemIRVersion(ir);
   return [...ir.programs]
     .sort((left, right) => left.name.localeCompare(right.name))
     .map(linkProgram);

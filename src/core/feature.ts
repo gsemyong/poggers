@@ -20,10 +20,6 @@ export type FeatureContract = {
   Features?: Record<string, FeatureContract>;
 };
 
-export type ApplicationContract = FeatureContract & {
-  Presentations?: string | Record<string, unknown>;
-};
-
 type StateOf<Contract> = ProgramState<Contract>;
 type ActionsOf<Contract> = ProgramActions<Contract>;
 type ComponentsOf<Contract> = ProgramComponents<Contract>;
@@ -244,26 +240,6 @@ export function createFeature<Contract extends FeatureContract>(
   return definition;
 }
 
-export type PresentationName<Contract extends ApplicationContract> = Contract extends {
-  Presentations: infer Presentations;
-}
-  ? Presentations extends string
-    ? Presentations
-    : Presentations extends Record<string, unknown>
-      ? Extract<keyof Presentations, string>
-      : never
-  : "default";
-
-export type ApplicationMetadata = Readonly<{ name: string }>;
-
-type ApplicationPresentations<Contract extends ApplicationContract> = Contract extends {
-  Presentations: unknown;
-}
-  ? {
-      readonly presentations: Readonly<Record<PresentationName<Contract>, object>>;
-    }
-  : { readonly presentations?: never };
-
 export type ProgramNamesIn<
   Owner extends FeatureContract,
   Depth extends readonly unknown[] = [],
@@ -286,7 +262,7 @@ type PlacedPrograms<Programs, Placement> = {
     : Name]: Programs[Name];
 };
 
-/** The Feature contract produced by assigning logical Program roles to Application Program names. */
+/** The Feature contract produced by assigning logical Program roles to concrete Program names. */
 export type PlacedFeature<Owner extends FeatureContract, Placement extends object> = Readonly<
   Omit<Owner, "Programs" | "Features"> &
     (Owner extends { Programs: infer Programs extends Record<string, ProgramContract> }
@@ -301,7 +277,7 @@ export type PlacedFeature<Owner extends FeatureContract, Placement extends objec
       : Empty)
 >;
 
-/** Assigns reusable logical Program roles throughout one Feature tree to Application names. */
+/** Assigns reusable logical Program roles throughout one Feature tree to concrete names. */
 export function placePrograms<
   Value extends Readonly<{ [featureContract]?: FeatureContract }>,
   const Placement extends Partial<Record<ProgramNamesIn<FeatureContractOf<Value>>, string>>,
@@ -413,21 +389,3 @@ export type FeatureEnvironmentConflict<Owner extends FeatureContract> =
           ? Name
           : never;
       }[ProgramNamesIn<Owner>];
-
-type ApplicationDefinition<Contract extends ApplicationContract> = Readonly<
-  {
-    metadata?: ApplicationMetadata;
-    features: FeatureDefinitions<FeaturesOf<Contract>, Contract>;
-  } & ApplicationPresentations<Contract>
->;
-
-/** The complete Application definition. Programs are derived from its Feature tree. */
-export type Application<Contract extends ApplicationContract> = Contract extends {
-  Programs: Record<string, ProgramContract>;
-}
-  ? never
-  : [FeatureEnvironmentConflict<Contract>] extends [never]
-    ? ApplicationDefinition<Contract>
-    : never;
-
-export type ApplicationFeatures<Contract extends ApplicationContract> = FeaturesOf<Contract>;

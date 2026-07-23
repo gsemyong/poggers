@@ -439,16 +439,22 @@ impl WebDocument {
             .rsplit_once('.')
             .map(|(feature, _)| feature)
             .unwrap_or("");
-        let qualified = if to.contains('.') || source_feature.is_empty() {
-            to.to_owned()
-        } else {
-            format!("{source_feature}.{to}")
-        };
-        let route = self
-            .routes
-            .iter()
-            .find(|route| route_identity(&route.route) == qualified)
-            .ok_or_else(|| format!("unknown redirect web Route {qualified:?}"))?;
+        let local = (!source_feature.is_empty()).then(|| format!("{source_feature}.{to}"));
+        let suffix = format!(".{to}");
+        let mut matches = self.routes.iter().filter(|route| {
+            let identity = route_identity(&route.route);
+            identity == to
+                || local
+                    .as_ref()
+                    .is_some_and(|candidate| identity == *candidate)
+                || identity.ends_with(&suffix)
+        });
+        let route = matches
+            .next()
+            .ok_or_else(|| format!("unknown redirect web Route {to:?}"))?;
+        if matches.next().is_some() {
+            return Err(format!("ambiguous redirect web Route {to:?}"));
+        }
         format_route_destination(&route.route, destination)
     }
 }

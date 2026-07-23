@@ -45,7 +45,7 @@ export type DashboardFeature = {
           cancelSheetDrag(): void;
         };
         Components: {
-          Application: {
+          Overview: {
             Elements: {
               Root: "main";
               Header: "header";
@@ -170,7 +170,7 @@ export const dashboard: Feature<DashboardFeature> = {
         },
       },
       components: {
-        Application: {
+        Overview: {
           view({ feature, components: { Metric }, elements }) {
             const {
               Root,
@@ -319,7 +319,7 @@ export const dashboard: Feature<DashboardFeature> = {
           },
         },
       },
-      root: "Application",
+      root: "Overview",
     },
   },
 };

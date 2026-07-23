@@ -1,9 +1,9 @@
 import {
-  assertApplicationIRVersion,
+  assertSystemIRVersion,
   type ComponentIR,
   type ExpressionIR,
   type FunctionIR,
-  type ApplicationIR,
+  type SystemIR,
   type LinkedProgramIR,
   type ProgramContributionIR,
   type ProgramIR,
@@ -52,11 +52,11 @@ export type ExecutionScenario = Readonly<{
 
 /** Executes the portable process body represented by the typed IR. */
 export async function executeProgramIR(
-  ir: ApplicationIR,
+  ir: SystemIR,
   programId: string,
   dependencies: DependencyImplementations,
 ): Promise<ExecutionTrace> {
-  assertApplicationIRVersion(ir);
+  assertSystemIRVersion(ir);
   const program = ir.programs
     .flatMap(({ contributions }) => contributions)
     .find(({ id }) => id === programId);
@@ -210,7 +210,7 @@ export async function executeLinkedProgramIR(
 
 /** Runs one deterministic fixture through the reference backend using generated Dependency doubles. */
 export async function executeProgramFixtureIR(
-  ir: ApplicationIR,
+  ir: SystemIR,
   programId: string,
   scenario: ExecutionScenario,
 ): Promise<Readonly<{ calls: readonly DependencyCallTrace[]; result: unknown }>> {
@@ -1051,7 +1051,7 @@ export type HotUpdateResult<Value> =
   | Readonly<{ status: "activated"; value: Value }>
   | Readonly<{ status: "rejected"; reason: string; cause?: unknown }>;
 
-export function createHotReplacementManifest(ir: ApplicationIR): HotReplacementManifest {
+export function createHotReplacementManifest(ir: SystemIR): HotReplacementManifest {
   const programs = ir.programs.flatMap((program) =>
     program.contributions.map((contribution) => ({
       id: contribution.id,

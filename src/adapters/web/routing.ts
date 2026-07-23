@@ -1,5 +1,5 @@
 import type {
-  ApplicationIR,
+  SystemIR,
   DependencyIR,
   ExtensionIR,
   FunctionIR,
@@ -48,7 +48,7 @@ export type WebRouteIR = Readonly<{
   deferred: readonly string[];
 }>;
 
-export const WEB_COMPILER_IR_VERSION = 7 as const;
+export const WEB_COMPILER_IR_VERSION = 8 as const;
 
 export type WebDestinationIR = Readonly<{
   to: string;
@@ -64,7 +64,7 @@ export type WebInstallationIconIR = Readonly<{
   purpose?: readonly ("any" | "maskable" | "monochrome")[];
 }>;
 
-export type WebApplicationCompilerIR = Readonly<{
+export type WebInterfaceCompilerIR = Readonly<{
   version: typeof WEB_COMPILER_IR_VERSION;
   installation?: Readonly<{
     shortName?: string;
@@ -163,6 +163,40 @@ export type CompiledWebComponentIR = Readonly<{
   span: SourceSpan;
 }>;
 
+export type CompiledWebComponentResolver = (target: string) => CompiledWebComponentIR | undefined;
+
+/** Resolves full or uniquely interface-relative Component identities. */
+export function createCompiledWebComponentResolver(
+  components: readonly CompiledWebComponentIR[],
+): CompiledWebComponentResolver {
+  const definitions = new Map(
+    components.map((component) => [compiledWebComponentIdentity(component), component] as const),
+  );
+  const relative = new Map<string, CompiledWebComponentIR | false>();
+  for (const [identity, component] of definitions) {
+    let separator = identity.indexOf(".");
+    while (separator >= 0) {
+      const target = identity.slice(separator + 1);
+      const existing = relative.get(target);
+      relative.set(target, existing === undefined || existing === component ? component : false);
+      separator = identity.indexOf(".", separator + 1);
+    }
+  }
+  return (target) => {
+    const exact = definitions.get(target);
+    if (exact) return exact;
+    const component = relative.get(target);
+    if (component === false) {
+      throw new TypeError(`Ambiguous compiled web Component ${JSON.stringify(target)}.`);
+    }
+    return component;
+  };
+}
+
+export function compiledWebComponentIdentity(component: CompiledWebComponentIR): string {
+  return component.feature ? `${component.feature}.${component.name}` : component.name;
+}
+
 export type CompiledWebRouteIR = WebRouteIR &
   Readonly<{
     data: TypeIR;
@@ -178,7 +212,8 @@ export type CompiledWebRouteIR = WebRouteIR &
 export type WebFeatureCompilerIR = Readonly<{
   version: typeof WEB_COMPILER_IR_VERSION;
   routePath?: string;
-}>;
+}> &
+  Omit<WebInterfaceCompilerIR, "version">;
 
 export type WebProgramCompilerIR = Readonly<{
   version: typeof WEB_COMPILER_IR_VERSION;
@@ -186,25 +221,21 @@ export type WebProgramCompilerIR = Readonly<{
   routes: readonly CompiledWebRouteIR[];
 }>;
 
-export function webApplicationCompilerIR(value: ExtensionIR | undefined): WebApplicationCompilerIR {
-  const record = extensionRecord(value, "Application");
-  assertExtensionKeys(record, ["version"], ["installation"], "web Application compiler meaning");
-  if (record.version !== WEB_COMPILER_IR_VERSION) {
-    throw new Error("Unsupported web Application compiler meaning.");
-  }
-  if (record.installation !== undefined) validateInstallationIR(record.installation);
-  return record as WebApplicationCompilerIR;
-}
-
 export function webFeatureCompilerIR(value: ExtensionIR | undefined): WebFeatureCompilerIR {
   const record = extensionRecord(value, "Feature");
-  assertExtensionKeys(record, ["version"], ["routePath"], "web Feature compiler meaning");
+  assertExtensionKeys(
+    record,
+    ["version"],
+    ["installation", "routePath"],
+    "web Feature compiler meaning",
+  );
   if (
     record.version !== WEB_COMPILER_IR_VERSION ||
     (record.routePath !== undefined && typeof record.routePath !== "string")
   ) {
     throw new Error("Unsupported web Feature compiler meaning.");
   }
+  if (record.installation !== undefined) validateInstallationIR(record.installation);
   return record as WebFeatureCompilerIR;
 }
 
@@ -235,41 +266,43 @@ export type WebRouteMatch = Readonly<{
 }>;
 
 /** Composes compiler Route entries into the deterministic manifest owned by the web adapter. */
-export function collectWebRoutes(ir: ApplicationIR, program: string): readonly WebRouteIR[] {
+export function collectWebRoutes(ir: SystemIR, program: string): readonly WebRouteIR[] {
   const features = new Map(ir.features.map((feature) => [feature.path, feature]));
-  const manifest = ir.application.extensions?.web
-    ? Boolean(webApplicationCompilerIR(ir.application.extensions.web).installation)
+  const selected = ir.programs.find(
+    ({ name, environment }) => name === program && environment.platform === "web",
+  );
+  const interfaceFeature = selected?.interface ? features.get(selected.interface) : undefined;
+  const manifest = interfaceFeature?.extensions?.web
+    ? Boolean(webFeatureCompilerIR(interfaceFeature.extensions.web).installation)
     : false;
-  const routes = ir.programs
-    .filter(({ name, environment }) => name === program && environment.platform === "web")
-    .flatMap(({ contributions }) =>
-      contributions.flatMap((contribution) =>
-        (contribution.extensions?.web
-          ? webProgramCompilerIR(contribution.extensions.web).routes
-          : []
-        ).map((route): WebRouteIR => {
-          return {
-            feature: contribution.feature,
-            name: route.name,
-            path: composeWebRoutePath(featureRouteBase(features, contribution.feature), route.path),
-            document: route.document,
-            cache: route.cache,
-            metadata: manifest
-              ? Object.freeze({ ...route.metadata, manifest: WEB_MANIFEST_PATH })
-              : route.metadata,
-            params: route.params,
-            search: route.search,
-            deferred: route.deferred,
-          };
-        }),
-      ),
-    );
+  const routes = (selected ? [selected] : []).flatMap(({ contributions }) =>
+    contributions.flatMap((contribution) =>
+      (contribution.extensions?.web
+        ? webProgramCompilerIR(contribution.extensions.web).routes
+        : []
+      ).map((route): WebRouteIR => {
+        return {
+          feature: contribution.feature,
+          name: route.name,
+          path: composeWebRoutePath(featureRouteBase(features, contribution.feature), route.path),
+          document: route.document,
+          cache: route.cache,
+          metadata: manifest
+            ? Object.freeze({ ...route.metadata, manifest: WEB_MANIFEST_PATH })
+            : route.metadata,
+          params: route.params,
+          search: route.search,
+          deferred: route.deferred,
+        };
+      }),
+    ),
+  );
   validateWebRoutes(routes);
   return Object.freeze(routes);
 }
 
 export function compiledWebRoute(
-  ir: ApplicationIR,
+  ir: SystemIR,
   program: string,
   route: Pick<WebRouteIR, "feature" | "name">,
 ): CompiledWebRouteIR | undefined {
@@ -294,10 +327,16 @@ export function resolveWebDestination(
 ): string {
   const name = String(destination.to);
   const qualified = name.includes(".") ? name : feature ? `${feature}.${name}` : name;
-  const route = routes.find(
-    (candidate) =>
-      `${candidate.feature ? `${candidate.feature}.` : ""}${candidate.name}` === qualified,
-  );
+  const matches = routes.filter((candidate) => {
+    const identity = `${candidate.feature ? `${candidate.feature}.` : ""}${candidate.name}`;
+    return identity === qualified || identity.endsWith(`.${qualified}`);
+  });
+  if (matches.length > 1) {
+    throw new Error(
+      `Ambiguous web Route ${JSON.stringify(qualified)}; use its interface-relative Feature path.`,
+    );
+  }
+  const route = matches[0];
   if (!route) throw new Error(`Unknown web Route ${JSON.stringify(qualified)}.`);
   return formatWebRoute(route, destination);
 }
@@ -716,8 +755,8 @@ function matchPath(
   route: WebRouteIR,
   pathname: string,
 ): Readonly<Record<string, Scalar>> | undefined {
-  const pattern = route.path.split("/").slice(1);
-  const source = pathname.replace(/\/$/, "").split("/").slice(1);
+  const pattern = pathSegments(route.path);
+  const source = pathSegments(pathname);
   const values: Record<string, Scalar> = {};
   let index = 0;
   for (; index < pattern.length; index++) {
@@ -744,6 +783,11 @@ function matchPath(
     } else if (decode(raw) !== expected) return undefined;
   }
   return index === source.length ? values : undefined;
+}
+
+function pathSegments(path: string): readonly string[] {
+  const value = path.replace(/\/+$/, "");
+  return value === "" ? [] : value.slice(1).split("/");
 }
 
 function decodeFields(
@@ -904,7 +948,7 @@ function decode(value: string): string {
 }
 
 function featureRouteBase(
-  features: ReadonlyMap<string, ApplicationIR["features"][number]>,
+  features: ReadonlyMap<string, SystemIR["features"][number]>,
   path: string,
 ): string {
   let base = "/";

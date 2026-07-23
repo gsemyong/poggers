@@ -1,9 +1,6 @@
 import { webCompilerExtension } from "@/adapters/web/compiler";
-import {
-  developWebApplication,
-  type WebDevelopmentOptions,
-} from "@/adapters/web/development/server";
-import { buildWebApplication } from "@/adapters/web/production/build";
+import { developWebSystem, type WebDevelopmentOptions } from "@/adapters/web/development/server";
+import { buildWebSystem } from "@/adapters/web/production/build";
 import { createWebUIAdapter, type WebUIAdapter } from "@/adapters/web/ui/adapter";
 import { createWebPresentationAdapter } from "@/adapters/web/ui/presentation/adapter";
 import type { PlatformAdapter } from "@/contracts/platform";
@@ -21,12 +18,12 @@ export function createWebPlatformAdapter(
     compiler: [webCompilerExtension],
     ui: createWebUIAdapter(createWebPresentationAdapter()),
     async develop(input) {
-      assertWebInput(input.platform, input.programs);
-      return developWebApplication(input, options);
+      assertWebInput(input.platform, input.programs, input.interfaces);
+      return developWebSystem(input, options);
     },
     async build(input) {
-      assertWebInput(input.platform, input.programs);
-      return buildWebApplication(input);
+      assertWebInput(input.platform, input.programs, input.interfaces);
+      return buildWebSystem(input);
     },
   };
 }
@@ -38,6 +35,7 @@ function assertWebInput(
     environment: Readonly<{ name: string; platform: string }>;
     ui?: unknown;
   }>[],
+  interfaces: readonly Readonly<{ id: string; platform: string }>[],
 ): void {
   if (platform !== "web") throw new Error(`The web adapter cannot realize Platform ${platform}.`);
   const unsupported = programs.filter(
@@ -48,6 +46,12 @@ function assertWebInput(
   if (unsupported.length) {
     throw new Error(
       `The web adapter does not yet realize ${unsupported.map(({ id }) => JSON.stringify(id)).join(", ")}.`,
+    );
+  }
+  const unsupportedInterfaces = interfaces.filter((interface_) => interface_.platform !== "web");
+  if (unsupportedInterfaces.length) {
+    throw new Error(
+      `The web adapter cannot realize ${unsupportedInterfaces.map(({ id }) => JSON.stringify(id)).join(", ")}.`,
     );
   }
 }

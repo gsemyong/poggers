@@ -1,23 +1,59 @@
-import { testApplication } from "@poggers/kit/testing";
-import { chromium, firefox, webkit, type BrowserContext } from "playwright";
+import { testSystem } from "@poggers/kit/testing";
 import { expect } from "vitest";
 
 const referenceDocuments = new Map<string, string>();
 
-testApplication({
-  name: "request-rendered web application",
+testSystem({
+  name: "request-rendered web System",
   directory: new URL("..", import.meta.url).pathname,
-  async verify({ location, realization, metrics }) {
+  async verify({ location, locations, realization, metrics }) {
+    const productLocation = locations["interface/product.web"]?.[0] ?? location;
+    const adminLocation = locations["interface/product.admin"]?.[0];
+    expect(adminLocation).toBeTruthy();
+    expect(adminLocation).not.toBe(productLocation);
+    expect(locations["program/server"]).toHaveLength(1);
     const request = async (path: string, init: RequestInit = {}) => {
-      const response = await fetch(`${location}${path}`, {
+      const response = await fetch(`${productLocation}${path}`, {
         ...init,
         headers: { accept: "text/html", ...init.headers },
       });
       return response;
     };
+    const admin = await fetch(`${adminLocation}/`, {
+      headers: { accept: "text/html" },
+    });
+    const adminHtml = await admin.text();
+    expect(
+      admin.status,
+      `${adminLocation}\n${admin.url}\n${JSON.stringify(locations)}\n${adminHtml}`,
+    ).toBe(200);
+    expect(adminHtml).toContain("<title>Admin</title>");
+    expect(adminHtml).toContain('data-poggers-rendering="client"');
+    expect(adminHtml).not.toContain("Administration");
+    expect(adminHtml).not.toContain('data-interface="admin"');
+
+    const adminManifest = await fetch(`${adminLocation}/manifest.webmanifest`);
+    expect(adminManifest.status).toBe(200);
+    expect(await adminManifest.json()).toMatchObject({
+      name: "Web request conformance",
+      short_name: "Admin",
+      start_url: "/",
+      scope: "/",
+    });
+
+    const workerPath =
+      realization === "production" ? "/service-worker.js" : "/service-worker.generated.ts";
+    const [productWorker, adminWorker] = await Promise.all([
+      fetch(`${productLocation}${workerPath}`).then((response) => response.text()),
+      fetch(`${adminLocation}${workerPath}`).then((response) => response.text()),
+    ]);
+    expect(productWorker).toContain("poggers-assets-");
+    expect(adminWorker).toContain("poggers-assets-");
+    expect(adminWorker).not.toBe(productWorker);
+
     const defaultGreeting = await request("/hello/Ada");
     const defaultHtml = await defaultGreeting.text();
-    expect(defaultGreeting.status).toBe(200);
+    expect(defaultGreeting.status, defaultHtml).toBe(200);
     expect(defaultGreeting.headers.get("content-type")).toBe("text/html; charset=utf-8");
     expect(defaultGreeting.headers.get("cache-control")).toBe("no-store");
     expect(defaultGreeting.headers.get("x-poggers-cache")).toBe("bypass");
@@ -59,7 +95,7 @@ testApplication({
         title: "Greeting",
       },
       params: { name: "Ada" },
-      route: { feature: "greeting", name: "greeting" },
+      route: { feature: "product.web.greeting", name: "greeting" },
       search: { punctuation: "!" },
       version: 1,
     });
@@ -75,7 +111,7 @@ testApplication({
     expect(markdown).toContain('title: "Greeting"');
     expect(markdown).toContain("Hello, Ada!");
 
-    const manifestResponse = await fetch(`${location}/manifest.webmanifest`);
+    const manifestResponse = await fetch(`${productLocation}/manifest.webmanifest`);
     expect(manifestResponse.status).toBe(200);
     expect(manifestResponse.headers.get("content-type")).toContain("application/manifest+json");
     expect(await manifestResponse.json()).toMatchObject({
@@ -109,7 +145,7 @@ testApplication({
     expect(hydration(loadedHtml)).toMatchObject({
       loader: { data: { message: "Loaded for Ada" } },
       params: { name: "Ada" },
-      route: { feature: "greeting", name: "loaded" },
+      route: { feature: "product.web.greeting", name: "loaded" },
     });
     expectDocumentParity(realization, "loader", loadedHtml);
 
@@ -133,7 +169,7 @@ testApplication({
           },
         },
       },
-      route: { feature: "greeting", name: "deferred" },
+      route: { feature: "product.web.greeting", name: "deferred" },
     });
 
     const streamStarted = performance.now();
@@ -172,7 +208,7 @@ testApplication({
     const failedBody = await failed.text();
     expect(failedBody).toContain("Internal server error.");
     expect(failedBody).not.toContain("sensitive fixture failure");
-    expect(failedBody).not.toContain("app.tsx");
+    expect(failedBody).not.toContain("system.ts");
 
     const privateRequest = await request("/private", {
       headers: { cookie: "session=private" },
@@ -306,13 +342,10 @@ testApplication({
 
     const serverMetrics =
       realization === "production"
-        ? await verifyProductionPerformance(location, defaultHtml, metrics)
+        ? await verifyProductionPerformance(productLocation, defaultHtml, metrics)
         : undefined;
-    const browserMetrics = await verifyBrowsers(location, realization);
     if (serverMetrics) {
-      console.info(
-        `[poggers] web production metrics ${JSON.stringify({ ...serverMetrics, browsers: browserMetrics })}`,
-      );
+      console.info(`[poggers] web production metrics ${JSON.stringify(serverMetrics)}`);
     }
   },
 });
@@ -381,7 +414,7 @@ async function verifyProductionPerformance(
   expect(preloads).toContain(entry);
   const routePreloads = preloads.filter((path) => path.includes("/route-"));
   expect(routePreloads).toHaveLength(1);
-  expect(routePreloads[0]).toContain("route-greeting-greeting-");
+  expect(routePreloads[0]).toContain("route-product-web-greeting-greeting-");
   const javascriptBytes = (
     await Promise.all(
       preloads.map(async (path) => {
@@ -452,421 +485,4 @@ async function requestDistribution(
 
 function percentile(values: readonly number[], fraction: number): number {
   return values[Math.min(values.length - 1, Math.floor(values.length * fraction))]!;
-}
-
-async function verifyBrowsers(
-  location: string,
-  realization: "development" | "production",
-): Promise<
-  readonly Readonly<{
-    engine: string;
-    hydrationMs: number;
-    longestTaskMs: number;
-    layoutShift: number;
-    lcpMs?: number;
-    longestEventMs?: number;
-  }>[]
-> {
-  const metrics: Array<{
-    engine: string;
-    hydrationMs: number;
-    longestTaskMs: number;
-    layoutShift: number;
-    lcpMs?: number;
-    longestEventMs?: number;
-  }> = [];
-  for (const [name, engine] of Object.entries({ chromium, firefox, webkit })) {
-    const browser = await engine.launch({
-      headless: true,
-      ...(name === "chromium" ? { channel: "chromium" } : {}),
-    });
-    try {
-      const context = await browser.newContext();
-      await context.addInitScript(() => {
-        const evidence: {
-          hydratedAt?: number;
-          initial?: Element;
-          longTasks: number[];
-          layoutShift: number;
-          lcpMs?: number;
-          eventDurations: number[];
-        } = {
-          longTasks: [],
-          layoutShift: 0,
-          eventDurations: [],
-        };
-        Object.defineProperty(window, "__poggersHydrationEvidence", { value: evidence });
-        const capture = () => {
-          evidence.initial ??= document.querySelector('main[data-kind="greeting"]') ?? undefined;
-          if (
-            evidence.hydratedAt === undefined &&
-            document.querySelector("#app")?.getAttribute("data-poggers-rendering") === "hydrated"
-          ) {
-            evidence.hydratedAt = performance.now();
-          }
-        };
-        new MutationObserver(capture).observe(document, {
-          attributes: true,
-          childList: true,
-          subtree: true,
-        });
-        document.addEventListener("DOMContentLoaded", capture);
-        addEventListener("load", capture);
-        try {
-          new PerformanceObserver((list) => {
-            evidence.longTasks.push(...list.getEntries().map(({ duration }) => duration));
-          }).observe({ type: "longtask", buffered: true });
-        } catch {}
-        try {
-          new PerformanceObserver((list) => {
-            for (const entry of list.getEntries()) {
-              const shift = entry as PerformanceEntry & {
-                hadRecentInput?: boolean;
-                value?: number;
-              };
-              if (!shift.hadRecentInput) evidence.layoutShift += shift.value ?? 0;
-            }
-          }).observe({ type: "layout-shift", buffered: true });
-        } catch {}
-        try {
-          new PerformanceObserver((list) => {
-            evidence.lcpMs = list.getEntries().at(-1)?.startTime;
-          }).observe({ type: "largest-contentful-paint", buffered: true });
-        } catch {}
-        try {
-          new PerformanceObserver((list) => {
-            evidence.eventDurations.push(...list.getEntries().map(({ duration }) => duration));
-          }).observe({
-            type: "event",
-            buffered: true,
-            durationThreshold: 16,
-          } as PerformanceObserverInit & { durationThreshold: number });
-        } catch {}
-      });
-      const page = await context.newPage();
-      const errors: string[] = [];
-      page.on("console", (message) => {
-        if (message.type() === "error" && !message.text().startsWith("Failed to load resource:")) {
-          errors.push(message.text());
-        }
-      });
-      page.on("pageerror", (error) => errors.push(error.message));
-      page.on("response", (response) => {
-        const url = new URL(response.url());
-        if (response.status() >= 400 && url.pathname !== "/favicon.ico") {
-          errors.push(`${response.status()} ${url.pathname}`);
-        }
-      });
-      const routeDataRequests: string[] = [];
-      const routeModuleRequests: string[] = [];
-      let redirectDataStarted: number | undefined;
-      let redirectModuleStarted: number | undefined;
-      page.on("request", (request) => {
-        if (request.headers().accept?.includes("application/vnd.poggers.route+json")) {
-          const path = new URL(request.url()).pathname;
-          routeDataRequests.push(path);
-          if (path === "/go") redirectDataStarted = performance.now();
-        }
-        if (
-          request.resourceType() === "script" &&
-          request.url().includes("route-greeting-loaded-")
-        ) {
-          routeModuleRequests.push(request.url());
-        }
-        if (
-          request.resourceType() === "script" &&
-          request.url().includes("route-greeting-redirect-")
-        ) {
-          redirectModuleStarted = performance.now();
-        }
-      });
-
-      await page.goto(`${location}/hello/Ada`, { waitUntil: "load" });
-      await page.locator('[aria-label="Hydration input"]').waitFor();
-      await expect
-        .poll(() => page.locator("[data-poggers-h]").count(), { message: `${name} hydration` })
-        .toBe(0);
-      await expect
-        .poll(() => page.locator("#app").getAttribute("data-poggers-rendering"), {
-          message: `${name} hydration state`,
-        })
-        .toBe("hydrated");
-      await expect
-        .poll(
-          () =>
-            page.evaluate(
-              () =>
-                (
-                  window as unknown as {
-                    __poggersHydrationEvidence: { hydratedAt?: number };
-                  }
-                ).__poggersHydrationEvidence.hydratedAt,
-            ),
-          { message: `${name} hydration evidence` },
-        )
-        .toBeTypeOf("number");
-      const hydrationMs = await page.evaluate(
-        () =>
-          (
-            window as unknown as {
-              __poggersHydrationEvidence: { hydratedAt: number };
-            }
-          ).__poggersHydrationEvidence.hydratedAt,
-      );
-      expect(hydrationMs, `${name} hydration duration`).toBeLessThan(5_000);
-      expect(
-        await page.evaluate(() => {
-          const evidence = (
-            window as unknown as { __poggersHydrationEvidence: { initial?: Element } }
-          ).__poggersHydrationEvidence;
-          return evidence.initial === document.querySelector('main[data-kind="greeting"]');
-        }),
-        `${name} retained the server DOM node`,
-      ).toBe(true);
-      expect(
-        await page
-          .locator('main[data-kind="greeting"]')
-          .evaluate((element) => getComputedStyle(element).boxSizing),
-      ).toBe("border-box");
-      expect(
-        await page.locator("style[data-poggers-ssr],style[data-poggers-presentation]").count(),
-      ).toBe(1);
-      expect(await page.locator('meta[property="og:type"][content="website"]').count()).toBe(1);
-      expect(await page.locator('script[type="application/ld+json"]').count()).toBe(1);
-      expect(routeDataRequests).toEqual([]);
-
-      expect(
-        await page.evaluate(async () => {
-          if (!("serviceWorker" in navigator)) return { supported: false };
-          const registration = await navigator.serviceWorker.ready;
-          const ask = (message: string) =>
-            new Promise<unknown>((resolve, reject) => {
-              const timeout = setTimeout(
-                () => reject(new Error(`Service-worker Program did not respond to ${message}.`)),
-                5_000,
-              );
-              navigator.serviceWorker.addEventListener(
-                "message",
-                (event) => {
-                  clearTimeout(timeout);
-                  resolve(event.data);
-                },
-                { once: true },
-              );
-              registration.active?.postMessage(message);
-            });
-          return {
-            supported: true,
-            registrations: (await navigator.serviceWorker.getRegistrations()).length,
-            responses: [await ask("poggers:ping"), await ask("poggers:status")],
-          };
-        }),
-      ).toEqual({
-        supported: true,
-        registrations: 1,
-        responses: ["poggers:pong", "poggers:ready"],
-      });
-
-      const input = page.getByLabel("Hydration input");
-      await input.fill("draft");
-      await input.focus();
-      await page
-        .getByRole("button", { name: "Increment" })
-        .evaluate((button) => (button as HTMLButtonElement).click());
-      await expect.poll(() => page.getByLabel("Count").textContent()).toBe("1");
-      expect(await input.inputValue()).toBe("draft");
-      expect(await input.evaluate((element) => element === document.activeElement)).toBe(true);
-
-      await page.getByRole("link", { name: "Prefetch loaded route" }).hover();
-      await expect.poll(() => routeModuleRequests.length).toBe(1);
-      expect(routeDataRequests).toEqual([]);
-
-      await page.getByRole("button", { name: "Open client route" }).click();
-      await expect.poll(() => new URL(page.url()).pathname).toBe("/client");
-      await expect
-        .poll(() => page.getByRole("heading").textContent())
-        .toBe("Rendered in the browser");
-      await page.goBack({ waitUntil: "load" });
-      await expect.poll(() => new URL(page.url()).pathname).toBe("/hello/Ada");
-      await expect.poll(() => page.getByRole("heading").textContent()).toBe("Hello, Ada!");
-      expect(await page.locator('meta[property="og:type"][content="website"]').count()).toBe(1);
-
-      await page.getByRole("link", { name: "Prefetch loaded route" }).click();
-      await expect.poll(() => new URL(page.url()).pathname).toBe("/loaded/Prefetched");
-      await expect
-        .poll(() => page.getByRole("heading").textContent())
-        .toBe("Loaded for Prefetched");
-      await expect.poll(() => page.title()).toBe("Loaded Prefetched");
-      expect(await page.locator('meta[property="og:type"]').count()).toBe(0);
-      expect(await page.locator('script[type="application/ld+json"]').count()).toBe(0);
-      expect(routeDataRequests).toEqual(["/loaded/Prefetched"]);
-      expect(routeModuleRequests).toHaveLength(1);
-
-      await page.evaluate(() => {
-        history.pushState(null, "", "/go");
-        dispatchEvent(new PopStateEvent("popstate"));
-      });
-      await expect.poll(() => new URL(page.url()).pathname).toBe("/client");
-      await expect
-        .poll(() => page.getByRole("heading").textContent())
-        .toBe("Rendered in the browser");
-      expect(routeDataRequests).toEqual(["/loaded/Prefetched", "/go"]);
-      expect(redirectDataStarted).toBeTypeOf("number");
-      expect(redirectModuleStarted).toBeTypeOf("number");
-      expect(Math.abs(redirectDataStarted! - redirectModuleStarted!)).toBeLessThan(250);
-
-      await page.goto(`${location}/loaded/Ada`, { waitUntil: "load" });
-      await expect.poll(() => page.getByRole("heading").textContent()).toBe("Loaded for Ada");
-
-      await page.evaluate(() => {
-        history.pushState(null, "", "/deferred/Browser");
-        dispatchEvent(new PopStateEvent("popstate"));
-      });
-      await expect.poll(() => new URL(page.url()).pathname).toBe("/deferred/Browser");
-      await expect
-        .poll(() => page.locator("#app").innerText(), {
-          message: `${name} deferred Route (${errors.join("; ") || "no browser error"})`,
-        })
-        .toContain("Loaded for Browser");
-      expect(await page.getByText("Loading activity", { exact: true }).count()).toBe(0);
-      expect(errors, `${name} successful hydration errors`).toEqual([]);
-      const browserTiming = await page.evaluate(() => {
-        const evidence = (
-          window as unknown as {
-            __poggersHydrationEvidence: {
-              hydratedAt?: number;
-              longTasks: number[];
-              layoutShift: number;
-              lcpMs?: number;
-              eventDurations: number[];
-            };
-          }
-        ).__poggersHydrationEvidence;
-        return {
-          longestTaskMs: Math.max(0, ...evidence.longTasks),
-          layoutShift: evidence.layoutShift,
-          lcpMs: evidence.lcpMs,
-          longestEventMs: evidence.eventDurations.length
-            ? Math.max(...evidence.eventDurations)
-            : undefined,
-        };
-      });
-      const timing = { hydrationMs, ...browserTiming };
-      if (realization === "production") {
-        expect(timing.longestTaskMs, `${name} longest task`).toBeLessThan(250);
-        expect(timing.layoutShift, `${name} cumulative layout shift proxy`).toBeLessThan(0.1);
-        if (timing.lcpMs !== undefined) {
-          expect(timing.lcpMs, `${name} largest-contentful-paint proxy`).toBeLessThan(5_000);
-        }
-        if (timing.longestEventMs !== undefined) {
-          expect(timing.longestEventMs, `${name} longest event duration`).toBeLessThan(250);
-        }
-      }
-      metrics.push({ engine: name, ...timing });
-
-      if (realization === "production" && name !== "webkit") {
-        await verifyOfflineApplication(context, location, name);
-      }
-
-      const mismatch = await context.newPage();
-      const mismatchErrors: string[] = [];
-      mismatch.on("console", (message) => {
-        if (message.type() === "error") mismatchErrors.push(message.text());
-      });
-      mismatch.on("pageerror", (error) => mismatchErrors.push(error.message));
-      await mismatch.addInitScript(() => {
-        const observer = new MutationObserver(() => {
-          const title = document.querySelector('main[data-kind="greeting"] h1');
-          if (!title) return;
-          title.lastChild!.textContent = "tampered";
-          observer.disconnect();
-        });
-        observer.observe(document, { childList: true, subtree: true });
-      });
-      await mismatch.goto(`${location}/hello/Grace`, { waitUntil: "load" });
-      await expect
-        .poll(() => mismatch.locator("#app").getAttribute("data-poggers-rendering"))
-        .toBe("client-recovered");
-      expect(
-        mismatchErrors.filter((message) => message.includes("SSR hydration mismatch")),
-      ).toHaveLength(1);
-      expect(
-        await mismatch.evaluate(() => performance.getEntriesByType("navigation").length),
-        `${name} mismatch recovery did not reload`,
-      ).toBe(1);
-      await context.close();
-    } finally {
-      await browser.close();
-    }
-  }
-  return Object.freeze(metrics);
-}
-
-async function verifyOfflineApplication(
-  context: BrowserContext,
-  location: string,
-  engine: string,
-): Promise<void> {
-  const page = await context.newPage();
-  const errors: string[] = [];
-  const failed: string[] = [];
-  page.on("console", (message) => {
-    if (message.type() === "error") errors.push(message.text());
-  });
-  page.on("pageerror", (error) => errors.push(error.message));
-  page.on("requestfailed", (request) => {
-    failed.push(`${new URL(request.url()).pathname}: ${request.failure()?.errorText ?? "failed"}`);
-  });
-  try {
-    await page.goto(`${location}/client`, { waitUntil: "load" });
-    await expect
-      .poll(() => page.getByRole("heading").textContent())
-      .toBe("Rendered in the browser");
-    await expect
-      .poll(
-        () =>
-          page.evaluate(async () => {
-            const names = await caches.keys();
-            return {
-              controlled: Boolean(navigator.serviceWorker.controller),
-              caches: names,
-              entries: (
-                await Promise.all(
-                  names.map(async (name) =>
-                    (await (await caches.open(name)).keys()).map(
-                      ({ url }) => new URL(url).pathname,
-                    ),
-                  ),
-                )
-              ).flat(),
-            };
-          }),
-        { message: `${engine} service-worker control` },
-      )
-      .toMatchObject({
-        controlled: true,
-        caches: expect.arrayContaining([
-          expect.stringMatching(/^poggers-assets-/),
-          expect.stringMatching(/^poggers-documents-/),
-        ]),
-        entries: expect.arrayContaining(["/client"]),
-      });
-
-    await context.setOffline(true);
-    await page.goto(`${location}/hello/Offline`, { waitUntil: "load" });
-    await expect
-      .poll(() => page.locator("#app").innerText(), {
-        message: `${engine} offline application (${errors.join("; ")}; ${failed.join("; ")})`,
-      })
-      .toContain("Hello, Offline!");
-    expect(errors, `${engine} offline browser errors`).toEqual([]);
-    expect(
-      await page
-        .locator('main[data-kind="greeting"]')
-        .evaluate((element) => getComputedStyle(element).boxSizing),
-    ).toBe("border-box");
-  } finally {
-    await context.setOffline(false);
-    await page.close();
-  }
 }

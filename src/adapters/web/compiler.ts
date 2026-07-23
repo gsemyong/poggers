@@ -4,16 +4,16 @@ import * as ts from "@typescript/typescript6";
 
 import {
   WEB_COMPILER_IR_VERSION,
-  webApplicationCompilerIR,
   type CompiledWebComponentIR,
   type CompiledWebRouteIR,
   type WebFeatureCompilerIR,
-  type WebApplicationCompilerIR,
   type WebProgramCompilerIR,
   type WebRenderNodeIR,
   type WebRenderValueIR,
   type WebRouteIR,
+  collectWebRoutes,
   planWebRouteDocument,
+  webProgramCompilerIR,
 } from "@/adapters/web/routing";
 import type {
   ProgramSourceContext,
@@ -21,32 +21,32 @@ import type {
   SourceCompilerExtension,
 } from "@/compiler/extension";
 import type { DependencyIR, ExtensionIR, SourceSpan } from "@/compiler/ir";
-import { ApplicationDiagnostic } from "@/compiler/source";
+import { SystemDiagnostic } from "@/compiler/source";
 
 /** Extracts web-only address and rendering meaning without teaching generic core about Routes. */
 export const webCompilerExtension: SourceCompilerExtension = Object.freeze({
   name: "web",
-  application(context) {
-    const web = context.source.member(context.implementation, "web");
-    if (!web) return undefined;
-    const definition = context.source.object(web);
-    if (!definition)
-      return context.source.fail(web, "The web application definition must be an object.");
-    const installationValue = context.source.member(definition, "installation");
-    const result: WebApplicationCompilerIR = {
+  feature(context) {
+    const { contract, implementation, location, source } = context;
+    const routePath = source.optionalLiteral(contract, "RoutePath", location);
+    const interfaceContract = source.property(contract, "Interface", location);
+    const platform = interfaceContract
+      ? source.property(interfaceContract, "Platform", location)
+      : undefined;
+    const isWebInterface =
+      platform !== undefined && source.literal(platform, "Name", location) === "web";
+    const installationValue = isWebInterface
+      ? source.member(implementation, "installation")
+      : undefined;
+    if (routePath === undefined && !isWebInterface) return undefined;
+    const result: WebFeatureCompilerIR = {
       version: WEB_COMPILER_IR_VERSION,
+      ...(routePath === undefined ? {} : { routePath }),
       ...(installationValue
         ? { installation: compileWebInstallation(context, installationValue) }
         : {}),
     };
-    webApplicationCompilerIR(result);
     return result;
-  },
-  feature({ contract, location, source }) {
-    const routePath = source.optionalLiteral(contract, "RoutePath", location);
-    return routePath === undefined
-      ? undefined
-      : ({ version: WEB_COMPILER_IR_VERSION, routePath } satisfies WebFeatureCompilerIR);
   },
   program(context) {
     if (platformName(context) !== "web") return undefined;
@@ -59,12 +59,37 @@ export const webCompilerExtension: SourceCompilerExtension = Object.freeze({
       routes: routeList(context, routes, values),
     } satisfies WebProgramCompilerIR;
   },
+  validate(ir) {
+    for (const interface_ of ir.interfaces) {
+      if (interface_.platform !== "web") continue;
+      for (const id of interface_.programs) {
+        const program = ir.programs.find((candidate) => candidate.id === id);
+        if (!program) {
+          throw new Error(
+            `Web interface ${JSON.stringify(interface_.feature)} owns unknown Program ${JSON.stringify(id)}.`,
+          );
+        }
+        try {
+          collectWebRoutes(ir, program.name);
+        } catch (error) {
+          const routes = program.contributions.flatMap((contribution) =>
+            contribution.extensions?.web
+              ? webProgramCompilerIR(contribution.extensions.web).routes
+              : [],
+          );
+          const span = routes.at(-1)?.span ?? program.contributions.at(-1)?.span;
+          if (!span) throw error;
+          throw new SystemDiagnostic(error instanceof Error ? error.message : String(error), span);
+        }
+      }
+    }
+  },
 });
 
 function compileWebInstallation(
-  context: Parameters<NonNullable<SourceCompilerExtension["application"]>>[0],
+  context: Parameters<NonNullable<SourceCompilerExtension["feature"]>>[0],
   expression: ts.Expression,
-): NonNullable<WebApplicationCompilerIR["installation"]> {
+): NonNullable<WebFeatureCompilerIR["installation"]> {
   const value = staticExtensionValue(context.checker, expression, new Set());
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return context.source.fail(expression, "The web installation must be compiler-readable data.");
@@ -82,34 +107,30 @@ function compileWebInstallation(
     ...(installation.shortName !== undefined
       ? { shortName: installation.shortName as string }
       : {}),
-    start: installation.start as NonNullable<WebApplicationCompilerIR["installation"]>["start"],
+    start: installation.start as NonNullable<WebFeatureCompilerIR["installation"]>["start"],
     display: (installation.display ?? "standalone") as NonNullable<
-      WebApplicationCompilerIR["installation"]
+      WebFeatureCompilerIR["installation"]
     >["display"],
-    icons: (installation.icons ?? []) as NonNullable<
-      WebApplicationCompilerIR["installation"]
-    >["icons"],
+    icons: (installation.icons ?? []) as NonNullable<WebFeatureCompilerIR["installation"]>["icons"],
     shortcuts: Array.isArray(installation.shortcuts)
       ? installation.shortcuts.map((value) => {
           const shortcut = value as Readonly<Record<string, unknown>>;
           return {
             name: shortcut.name as string,
             destination: shortcut.destination as NonNullable<
-              WebApplicationCompilerIR["installation"]
+              WebFeatureCompilerIR["installation"]
             >["start"],
             icons: (shortcut.icons ?? []) as NonNullable<
-              WebApplicationCompilerIR["installation"]
+              WebFeatureCompilerIR["installation"]
             >["icons"],
           };
         })
       : installation.shortcuts === undefined
         ? []
         : (installation.shortcuts as NonNullable<
-            WebApplicationCompilerIR["installation"]
+            WebFeatureCompilerIR["installation"]
           >["shortcuts"]),
-    offline: installation.offline as NonNullable<
-      WebApplicationCompilerIR["installation"]
-    >["offline"],
+    offline: installation.offline as NonNullable<WebFeatureCompilerIR["installation"]>["offline"],
   };
 }
 
@@ -268,7 +289,11 @@ function routeList(
               name: `${name}.load`,
             })
           : false,
-        view: compileRenderFunction(context, renderView, { feature: "", elements: {} }),
+        view: compileRenderFunction(context, renderView, {
+          feature: context.interface ?? "",
+          global: true,
+          elements: {},
+        }),
       },
       implementationSpan: relativeSpan(context.root, source.span(implementation)),
       span: relativeSpan(context.root, source.span(location)),
@@ -304,6 +329,7 @@ type RenderBinding =
 
 type RenderScope = Readonly<{
   feature: string;
+  global: boolean;
   elements: Readonly<Record<string, string>>;
   bindings: Map<string, RenderBinding>;
 }>;
@@ -345,7 +371,7 @@ function componentList(context: ProgramSourceContext): CompiledWebComponentIR[] 
         span,
       };
     } catch (error) {
-      if (!(error instanceof ApplicationDiagnostic)) throw error;
+      if (!(error instanceof SystemDiagnostic)) throw error;
       return {
         feature: context.feature,
         name,
@@ -409,7 +435,11 @@ function staticComponentState(
 function compileRenderFunction(
   context: ProgramSourceContext,
   declaration: ts.ObjectLiteralElementLike,
-  input: Readonly<{ feature: string; elements: Readonly<Record<string, string>> }>,
+  input: Readonly<{
+    feature: string;
+    global?: boolean;
+    elements: Readonly<Record<string, string>>;
+  }>,
 ): WebRenderNodeIR {
   const functionLike = renderFunction(declaration);
   if (!functionLike?.body) {
@@ -417,6 +447,7 @@ function compileRenderFunction(
   }
   const scope: RenderScope = {
     feature: input.feature,
+    global: input.global ?? false,
     elements: input.elements,
     bindings: new Map(),
   };
@@ -503,7 +534,7 @@ function bindRenderPattern(
         scope.bindings.set(element.name.text, {
           kind: "component-member",
           feature: scope.feature,
-          global: scope.feature === "",
+          global: scope.global,
           name,
         });
       } else if (sourceName === "elements") {
@@ -532,7 +563,7 @@ function bindRenderPattern(
     scope.bindings.set(binding.text, {
       kind: "components",
       feature: scope.feature,
-      global: scope.feature === "",
+      global: scope.global,
     });
   }
 }

@@ -1,4 +1,4 @@
-import { createApplicationUI, type WebComponentAdapter } from "@/adapters/web/ui/component/adapter";
+import { createInterfaceUI, type WebComponentAdapter } from "@/adapters/web/ui/component/adapter";
 import { jsx as webJSX } from "@/adapters/web/ui/component/runtime";
 import type { WebPresentationAdapter } from "@/adapters/web/ui/presentation/adapter";
 import { webUIRuntime } from "@/adapters/web/ui/runtime";
@@ -21,12 +21,12 @@ export function createWebUIAdapter(
   presentation: WebPresentationAdapter = emptyWebPresentationAdapter,
 ): WebUIAdapter {
   const component: WebComponentAdapter = {
-    async createApplicationUI(options) {
+    async createInterfaceUI(options) {
       const activation = activateJSXRenderer(renderWebIntrinsic, "web");
       const runtime = activateWebUIRuntime(webUIRuntime);
       let ui;
       try {
-        ui = await createApplicationUI({ ...options, presentationAdapter: presentation });
+        ui = await createInterfaceUI({ ...options, presentationAdapter: presentation });
       } catch (error) {
         runtime[Symbol.dispose]();
         activation[Symbol.dispose]();
@@ -39,7 +39,7 @@ export function createWebUIAdapter(
         components: ui.components,
         renderRoot: () => ui.renderRoot(),
         captureHotState: () => ui.captureHotState(),
-        updatePresentations: (presentations) => ui.updatePresentations(presentations),
+        updatePresentation: (next) => ui.updatePresentation(next),
         async dispose() {
           if (disposed) return;
           disposed = true;
@@ -77,7 +77,7 @@ const emptyWebPresentationAdapter: WebPresentationAdapter = {
           reconfigure() {},
           dispose() {},
           inspect() {
-            throw new Error("An application without a Presentation has no frame to inspect.");
+            throw new Error("An interface without a Presentation has no frame to inspect.");
           },
           snapshot() {
             return Object.freeze({ channels: Object.freeze([]) });

@@ -53,5 +53,6 @@
     "${configDir}/src/**/*.tsx",
     "${configDir}/src/**/*.d.ts",
     "${configDir}/scripts/**/*.ts"
-  ]
+  ],
+  "exclude": ["${configDir}/src/adapters/**/fixtures/**"]
 }

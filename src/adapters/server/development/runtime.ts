@@ -1,6 +1,6 @@
 import type { ProgramIR, ProgramManifest } from "@/compiler/ir";
 import { collectProgramManifest, linkProgram } from "@/compiler/linker";
-import type { Application, ApplicationContract } from "@/core/application";
+import type { System, SystemContract } from "@/core/system";
 import { executeLinkedProgramIR, type DependencyImplementations } from "@/runtime/interpreter";
 import { assembleProgram } from "@/runtime/process";
 
@@ -18,8 +18,8 @@ export type RunningServerProgram = AsyncDisposable &
   }>;
 
 /** Starts one Program against an already-owned host Dependency scope. */
-export async function startServerProgramInstance<Contract extends ApplicationContract>(
-  application: Application<Contract>,
+export async function startServerProgramInstance<Contract extends SystemContract>(
+  system: System<Contract>,
   program: ProgramIR,
   dependencies: Readonly<Record<string, unknown>>,
 ): Promise<RunningServerProgram> {
@@ -42,7 +42,7 @@ export async function startServerProgramInstance<Contract extends ApplicationCon
   }
   const manifest = collectProgramManifest(program);
   const process = await assembleProgram({
-    application,
+    system,
     name: program.name,
     dependencies,
     manifest,
@@ -62,8 +62,8 @@ export async function startServerProgramInstance<Contract extends ApplicationCon
 }
 
 /** Starts one independently deployable server Program as one Process instance. */
-export async function startServerProgram<Contract extends ApplicationContract>(
-  application: Application<Contract>,
+export async function startServerProgram<Contract extends SystemContract>(
+  system: System<Contract>,
   program: ProgramIR,
   createHost: ProgramHostFactory,
   profile: "development" | "production",
@@ -75,7 +75,7 @@ export async function startServerProgram<Contract extends ApplicationContract>(
   }
   let instance: RunningServerProgram;
   try {
-    instance = await startServerProgramInstance(application, program, dependencies);
+    instance = await startServerProgramInstance(system, program, dependencies);
   } catch (error) {
     await disposeServerDependencies(dependencies);
     throw error;
@@ -141,8 +141,8 @@ export async function disposeServerDependencies(
 }
 
 /** Starts each server Program with one adapter-owned host scope per Process instance. */
-export async function startServerPrograms<Contract extends ApplicationContract>(
-  application: Application<Contract>,
+export async function startServerPrograms<Contract extends SystemContract>(
+  system: System<Contract>,
   programs: readonly ProgramIR[],
   createHost: ProgramHostFactory,
   profile: "development" | "production",
@@ -150,7 +150,7 @@ export async function startServerPrograms<Contract extends ApplicationContract>(
   const running: RunningServerProgram[] = [];
   try {
     for (const program of programs) {
-      running.push(await startServerProgram(application, program, createHost, profile));
+      running.push(await startServerProgram(system, program, createHost, profile));
     }
   } catch (error) {
     await disposeServerPrograms(running);

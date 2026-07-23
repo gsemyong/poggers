@@ -20,7 +20,6 @@ import {
 } from "vite";
 
 import type { DevelopmentWebLoaderRegistry } from "@/adapters/integration/web-server";
-import { webCompilerExtension } from "@/adapters/web/compiler";
 import { createWebResponseCache } from "@/adapters/web/development/cache";
 import {
   prepareClientWebDocument,
@@ -44,7 +43,9 @@ import {
 } from "@/adapters/web/installation";
 import {
   collectWebRoutes,
+  compiledWebComponentIdentity,
   compiledWebRoute,
+  createCompiledWebComponentResolver,
   matchWebRoute,
   resolveWebDestination,
   validateWebRouteMetadata,
@@ -60,15 +61,11 @@ import {
   validateWebPresentationSource,
   webResetCss,
 } from "@/adapters/web/ui/presentation/compiler";
-import type { ApplicationIR, ComponentIR, DependencyContractIR, ProgramIR } from "@/compiler/ir";
+import type { SystemIR, ComponentIR, DependencyContractIR, ProgramIR } from "@/compiler/ir";
 import { collectProgramManifest, linkProgram, projectDependencyContracts } from "@/compiler/linker";
 import { compilePresentationSource } from "@/compiler/presentation";
-import {
-  createApplicationCompiler,
-  resolveApplication,
-  type ApplicationCompiler,
-  type ApplicationPaths,
-} from "@/compiler/source";
+import { resolveSystem, type SystemPaths } from "@/compiler/source";
+import type { SystemCompilationRevision, SystemRevisionSource } from "@/contracts/platform";
 import type { WebRouteMetadataResult } from "@/platforms/web/routing";
 import { createHotReplacementManifest } from "@/runtime/interpreter";
 
@@ -77,11 +74,12 @@ export type DevelopmentServer = Readonly<{
   stop(): Promise<void>;
 }>;
 
-type PreparedApplication = Readonly<{
+type PreparedInterface = Readonly<{
   candidate: string;
   documentEvaluator?: string;
   entry: string;
-  ir: ApplicationIR;
+  interface: string;
+  ir: SystemIR;
   presentationSources: ReadonlySet<string>;
   revision: number;
   updateKind: "full" | "presentation";
@@ -90,8 +88,8 @@ type PreparedApplication = Readonly<{
   serviceWorker?: string;
 }>;
 
-type PreparedApplicationState = {
-  current: PreparedApplication;
+type PreparedInterfaceState = {
+  current: PreparedInterface;
 };
 
 type WebRouteEntry = Readonly<{
@@ -101,6 +99,7 @@ type WebRouteEntry = Readonly<{
 }>;
 
 type WebWorkerEntry = Readonly<{
+  identity: string;
   program: string;
   environment: "browser-worker" | "browser-service-worker";
   source: string;
@@ -109,7 +108,12 @@ type WebWorkerEntry = Readonly<{
 
 export type WebBuild = Readonly<{
   directory: string;
-  entries: readonly Readonly<{ program: string; environment: string; path: string }>[];
+  entries: readonly Readonly<{
+    identity: string;
+    kind: "interface" | "program";
+    environment: string;
+    path: string;
+  }>[];
 }>;
 
 export const WEB_ROUTE_ARTIFACT_VERSION = 3 as const;
@@ -142,7 +146,11 @@ type WebComponentEnvironmentContract = Readonly<{
   propCallbacks: readonly string[];
 }>;
 
-function webApplicationContract(ir: ApplicationIR): Readonly<{
+function webInterfaceContract(
+  ir: SystemIR,
+  interfaceId: string,
+): Readonly<{
+  interface: SystemIR["interfaces"][number];
   uiProgram: string;
   components: Readonly<Record<string, WebComponentEnvironmentContract>>;
   headless: readonly ProgramIR[];
@@ -150,8 +158,13 @@ function webApplicationContract(ir: ApplicationIR): Readonly<{
   routes: ReturnType<typeof collectWebRoutes>;
   installation?: WebInstallationPlan;
 }> {
+  const interface_ = ir.interfaces.find(({ id }) => id === interfaceId);
+  if (!interface_ || interface_.platform !== "web") {
+    throw new Error(`Unknown web interface ${JSON.stringify(interfaceId)}.`);
+  }
+  const programs = ir.programs.filter(({ interface: owner }) => owner === interface_.feature);
   const names = new Set(
-    ir.programs
+    programs
       .filter(
         ({ environment, contributions }) =>
           environment.name === "browser-main" && contributions.some(({ ui }) => ui),
@@ -160,12 +173,13 @@ function webApplicationContract(ir: ApplicationIR): Readonly<{
   );
   if (names.size !== 1) {
     throw new Error(
-      `Application must define exactly one BrowserMainThread UI Program; found ${names.size}.`,
+      `Web interface ${JSON.stringify(interfaceId)} must define exactly one ` +
+        `BrowserMainThread UI Program; found ${names.size}.`,
     );
   }
   const uiProgram = [...names][0]!;
   const components: Record<string, WebComponentEnvironmentContract> = Object.create(null);
-  for (const program of ir.programs) {
+  for (const program of programs) {
     if (
       program.name !== uiProgram ||
       program.environment.name !== "browser-main" ||
@@ -182,15 +196,16 @@ function webApplicationContract(ir: ApplicationIR): Readonly<{
       }
     }
   }
-  const headless = ir.programs.filter(
+  const headless = programs.filter(
     ({ name, environment }) => environment.name === "browser-main" && name !== uiProgram,
   );
-  const workers = ir.programs.filter(({ environment }) =>
+  const workers = programs.filter(({ environment }) =>
     ["browser-worker", "browser-service-worker"].includes(environment.name),
   );
   const routes = collectWebRoutes(ir, uiProgram);
-  const installation = planWebInstallation(ir, routes);
+  const installation = planWebInstallation(ir, interface_.id, routes);
   return {
+    interface: interface_,
     uiProgram,
     components,
     headless,
@@ -201,7 +216,7 @@ function webApplicationContract(ir: ApplicationIR): Readonly<{
 }
 
 function collectCompiledWebComponents(
-  ir: ApplicationIR,
+  ir: SystemIR,
   program: string,
 ): readonly CompiledWebComponentIR[] {
   const components = ir.programs
@@ -214,21 +229,17 @@ function collectCompiledWebComponents(
       ),
     )
     .sort((left, right) =>
-      componentCompilerIdentity(left).localeCompare(componentCompilerIdentity(right)),
+      compiledWebComponentIdentity(left).localeCompare(compiledWebComponentIdentity(right)),
     );
   const identities = new Set<string>();
   for (const component of components) {
-    const identity = componentCompilerIdentity(component);
+    const identity = compiledWebComponentIdentity(component);
     if (identities.has(identity)) {
       throw new Error(`Duplicate compiled web Component ${JSON.stringify(identity)}.`);
     }
     identities.add(identity);
   }
   return Object.freeze(components);
-}
-
-function componentCompilerIdentity(component: CompiledWebComponentIR): string {
-  return component.feature ? `${component.feature}.${component.name}` : component.name;
 }
 
 function runtimeComponentName(feature: string, component: string): string {
@@ -244,12 +255,15 @@ function componentEnvironmentContract(component: ComponentIR): WebComponentEnvir
   };
 }
 
-export async function buildApplication(options: {
+/** Builds one independently deployable web interface from already compiled System meaning. */
+export async function buildWebInterface(options: {
   directory: string;
   outdir: string;
+  interface: string;
+  ir: SystemIR;
   development?: boolean;
 }): Promise<WebBuild> {
-  const paths = resolveApplication(options.directory);
+  const paths = resolveSystem(options.directory);
   const outdir = resolve(paths.directory, options.outdir);
   const work = await realpath(
     await mkdtemp(
@@ -259,13 +273,20 @@ export async function buildApplication(options: {
   await rm(outdir, { recursive: true, force: true });
   await mkdir(outdir, { recursive: true });
   try {
-    const prepared = await prepareApplication(paths, work, options.development ?? false);
-    const contract = webApplicationContract(prepared.ir);
+    const prepared = await prepareInterface(
+      paths,
+      work,
+      options.interface,
+      options.development ?? false,
+      { ir: options.ir, presentationSources: new Set() },
+    );
+    const contract = webInterfaceContract(prepared.ir, prepared.interface);
     const compiledComponents = collectCompiledWebComponents(prepared.ir, contract.uiProgram);
     let routeDocuments = await prepareProductionDocuments(
       paths,
       work,
       prepared.ir,
+      prepared.interface,
       compiledComponents,
     );
     const workerInputs = Object.fromEntries(
@@ -345,15 +366,15 @@ export async function buildApplication(options: {
     return {
       directory: outdir,
       entries: [
-        ...prepared.ir.programs
-          .filter(({ environment }) => environment.name === "browser-main")
-          .map((program) => ({
-            program: program.name,
-            environment: program.environment.name,
-            path: resolve(outdir, client.entry.slice(1)),
-          })),
-        ...prepared.workers.map(({ program, environment, output }) => ({
-          program,
+        {
+          identity: contract.interface.id,
+          kind: "interface" as const,
+          environment: "browser-main",
+          path: outdir,
+        },
+        ...prepared.workers.map(({ identity, environment, output }) => ({
+          identity,
+          kind: "program" as const,
           environment,
           path: resolve(outdir, client.entries[output]!.slice(1)),
         })),
@@ -449,8 +470,8 @@ export function inspectClientManifest(
       .filter((chunk) => chunk.isEntry && chunk.name)
       .map((chunk) => [chunk.name!, `/${chunk.file}`]),
   );
-  const app = Object.values(manifest).find((chunk) => chunk.isEntry && chunk.name === "app");
-  if (!app) throw new Error("Web client build did not emit its application entry.");
+  const entry = Object.values(manifest).find((chunk) => chunk.isEntry && chunk.name === "app");
+  if (!entry) throw new Error("Web client build did not emit its entry.");
   const imports = (chunk: ClientManifestChunk): readonly string[] => {
     const files: string[] = [];
     const visited = new Set<string>();
@@ -473,33 +494,36 @@ export function inspectClientManifest(
       .map((chunk) => [chunk.name!, Object.freeze([`/${chunk.file}`, ...imports(chunk)])]),
   );
   return Object.freeze({
-    entry: `/${app.file}`,
-    preloads: imports(app),
+    entry: `/${entry.file}`,
+    preloads: imports(entry),
     entries: Object.freeze(entries),
     chunks: Object.freeze(chunks),
   });
 }
 
-export async function runApplication(options: {
+/** Runs one web interface while sharing the caller-owned System revision source. */
+export async function runWebInterface(options: {
   directory: string;
+  interface: string;
+  revisions: SystemRevisionSource;
   port?: number;
   serverOrigin?: string;
   webLoaders?: DevelopmentWebLoaderRegistry;
+  strictPort?: boolean;
 }): Promise<DevelopmentServer> {
-  const paths = resolveApplication(options.directory);
+  const paths = resolveSystem(options.directory);
   const work = await realpath(await mkdtemp(resolve(tmpdir(), "poggers-web-dev-")));
-  const compiler = createApplicationCompiler(paths.application, [webCompilerExtension]);
-  const prepared = await prepareApplication(
+  const prepared = await prepareInterface(
     paths,
     work,
+    options.interface,
     true,
+    options.revisions.current,
     "full",
-    compiler,
-    undefined,
     undefined,
     options.serverOrigin,
   );
-  const applicationState: PreparedApplicationState = { current: prepared };
+  const interfaceState: PreparedInterfaceState = { current: prepared };
   await writeFile(resolve(work, "index.html"), htmlSource("/browser.generated.ts"));
 
   const server = await createServer({
@@ -510,19 +534,19 @@ export async function runApplication(options: {
       presentationContractPlugin(
         paths,
         work,
-        compiler,
-        applicationState,
+        options.revisions,
+        interfaceState,
         options.serverOrigin,
         options.webLoaders,
       ),
-      ...vitePlugins(paths, () => applicationState.current.ir),
+      ...vitePlugins(paths, () => interfaceState.current.ir),
     ],
     root: work,
     server: {
       fs: { allow: [work, paths.directory, resolve(import.meta.dirname, "../../..")] },
       host: "localhost",
       port: options.port ?? 3000,
-      strictPort: options.port !== undefined,
+      strictPort: options.strictPort ?? options.port !== undefined,
     },
   });
   await server.listen();
@@ -555,38 +579,22 @@ async function removeWorkDirectory(work: string): Promise<void> {
   await rm(work, { recursive: true, force: true });
 }
 
-async function prepareApplication(
-  paths: ApplicationPaths,
+async function prepareInterface(
+  paths: SystemPaths,
   work: string,
+  interfaceId: string,
   development: boolean,
+  compilation: SystemCompilationRevision,
   updateKind: "full" | "presentation" = "full",
-  compiler: ApplicationCompiler = createApplicationCompiler(paths.application, [
-    webCompilerExtension,
-  ]),
-  previous?: PreparedApplication,
-  changedFile?: string,
+  previous?: PreparedInterface,
   serverOrigin?: string,
-): Promise<PreparedApplication> {
+): Promise<PreparedInterface> {
   await mkdir(work, { recursive: true });
-  const compilation =
-    updateKind === "presentation" && previous
-      ? { ir: previous.ir, presentationSources: previous.presentationSources }
-      : compiler.compile(changedFile);
   const { ir } = compilation;
-  const contract = webApplicationContract(ir);
+  const contract = webInterfaceContract(ir, interfaceId);
   const revision = (previous?.revision ?? -1) + 1;
-  if (!development) {
-    const application = await loadApplication(paths, work);
-    validateUIProgramRoot(application, contract.uiProgram);
-    const authored = record(application.presentations);
-    for (const presentation of ir.application.presentations) {
-      if (!authored[presentation]) {
-        throw new Error(`Application is missing Presentation "${presentation}".`);
-      }
-    }
-  }
 
-  const candidate = resolve(work, "application.generated.ts");
+  const candidate = resolve(work, "interface.generated.ts");
   const documentEvaluator = development
     ? resolve(work, "document-evaluator.generated.ts")
     : undefined;
@@ -596,7 +604,8 @@ async function prepareApplication(
     await writeIfChanged(
       documentEvaluator,
       developmentDocumentEvaluatorSource({
-        application: paths.application,
+        system: paths.system,
+        interface: contract.interface.feature,
         document: resolve(import.meta.dirname, `document${moduleExtension()}`),
         revision,
       }),
@@ -610,7 +619,7 @@ async function prepareApplication(
       await writeIfChanged(
         source,
         workerSource({
-          application: paths.application,
+          system: paths.system,
           development,
           serverOrigin,
           host: resolve(import.meta.dirname, `host${moduleExtension()}`),
@@ -622,6 +631,7 @@ async function prepareApplication(
         }),
       );
       return {
+        identity: program.id,
         program: program.name,
         environment: program.environment.name as WebWorkerEntry["environment"],
         source,
@@ -658,10 +668,10 @@ async function prepareApplication(
       await writeIfChanged(
         source,
         routeModuleSource({
-          application: paths.application,
+          system: paths.system,
           development,
           revision,
-          program: contract.uiProgram,
+          program: ui.logicalName,
           route,
         }),
       );
@@ -671,7 +681,7 @@ async function prepareApplication(
   await writeIfChanged(
     candidate,
     candidateSource({
-      application: paths.application,
+      system: paths.system,
       development,
       serverOrigin,
       host: resolve(import.meta.dirname, `host${moduleExtension()}`),
@@ -682,7 +692,8 @@ async function prepareApplication(
         `./ui/presentation/adapter${moduleExtension()}`,
       ),
       processRuntime: resolve(import.meta.dirname, `../../runtime/process${moduleExtension()}`),
-      program: contract.uiProgram,
+      interface: contract.interface.feature,
+      program: ui,
       programManifest,
       dependencies: projectDependencyContracts(linkProgram(ui).external),
       components: contract.components,
@@ -694,6 +705,7 @@ async function prepareApplication(
         const manifest = collectProgramManifest(program);
         return {
           program: program.name,
+          logicalProgram: program.logicalName,
           manifest,
           dependencies: projectDependencyContracts(linkProgram(program).external),
         };
@@ -728,6 +740,7 @@ async function prepareApplication(
     ...(documentEvaluator ? { documentEvaluator } : {}),
     entry,
     ir,
+    interface: interfaceId,
     presentationSources: compilation.presentationSources,
     revision,
     updateKind,
@@ -745,7 +758,7 @@ async function writeIfChanged(path: string, contents: string): Promise<boolean> 
   return true;
 }
 
-function viteConfiguration(paths: ApplicationPaths, development = false, ir?: ApplicationIR) {
+function viteConfiguration(paths: SystemPaths, development = false, ir?: SystemIR) {
   return {
     configFile: false as const,
     mode: development ? "development" : "production",
@@ -784,49 +797,59 @@ function moduleExtension(): ".ts" | ".js" {
   return import.meta.filename.endsWith(".ts") ? ".ts" : ".js";
 }
 
-function vitePlugins(
-  paths: ApplicationPaths,
-  ir?: ApplicationIR | (() => ApplicationIR),
-): Plugin[] {
+function vitePlugins(paths: SystemPaths, ir?: SystemIR | (() => SystemIR)): Plugin[] {
   return [
     ...(ir ? [routeSourcePlugin(paths, ir)] : []),
-    applicationAliasPlugin(paths.source),
+    systemAliasPlugin(paths.source),
     presentationTransformPlugin(paths.source),
     componentTransformPlugin(paths.source),
   ];
 }
 
-function routeSourcePlugin(
-  paths: ApplicationPaths,
-  application: ApplicationIR | (() => ApplicationIR),
-): Plugin {
+function routeSourcePlugin(paths: SystemPaths, system: SystemIR | (() => SystemIR)): Plugin {
   type RouteLocation = Readonly<{
     identity: string;
+    program: string;
     span: CompiledWebRouteIR["implementationSpan"];
   }>;
+  type ProgramLocation = Readonly<{
+    identity: string;
+    span: ProgramIR["contributions"][number]["span"];
+  }>;
   const contract = () => {
-    const ir = typeof application === "function" ? application() : application;
-    const locations = new Map<string, RouteLocation[]>();
+    const ir = typeof system === "function" ? system() : system;
+    const routeLocations = new Map<string, RouteLocation[]>();
+    const programLocations = new Map<string, ProgramLocation[]>();
     for (const program of ir.programs) {
+      for (const contribution of program.contributions) {
+        const file = canonicalSourcePath(resolve(paths.directory, contribution.span.file));
+        const current = programLocations.get(file) ?? [];
+        current.push({ identity: program.name, span: contribution.span });
+        programLocations.set(file, current);
+      }
       if (program.environment.platform !== "web") continue;
       for (const contribution of program.contributions) {
         if (!contribution.extensions?.web) continue;
         for (const route of webProgramCompilerIR(contribution.extensions.web).routes) {
           const file = canonicalSourcePath(resolve(paths.source, route.implementationSpan.file));
-          const current = locations.get(file) ?? [];
-          current.push({ identity: routeIdentity(route), span: route.implementationSpan });
-          locations.set(file, current);
+          const current = routeLocations.get(file) ?? [];
+          current.push({
+            identity: routeIdentity(route),
+            program: program.name,
+            span: route.implementationSpan,
+          });
+          routeLocations.set(file, current);
         }
       }
     }
     return {
-      locations,
+      routeLocations,
+      programLocations,
       browserMainPrograms: new Set(
         ir.programs
           .filter(({ environment }) => environment.name === "browser-main")
           .map(({ name }) => name),
       ),
-      programNames: new Set(ir.programs.map(({ name }) => name)),
     };
   };
 
@@ -845,7 +868,7 @@ function routeSourcePlugin(
       );
       if (!resolved) return;
       const id = cleanId(resolved.id);
-      if (!isApplicationSourceModule(id, paths.source)) return;
+      if (!isSystemSourceModule(id, paths.source)) return;
       const parameters = sourceProjection(source)
         ? sourceParameters(source)
         : new URLSearchParams();
@@ -858,9 +881,10 @@ function routeSourcePlugin(
     transform(code, rawId) {
       const projection = sourceProjection(rawId);
       if (!projection) return;
-      const { locations, browserMainPrograms, programNames } = contract();
+      const { routeLocations, programLocations, browserMainPrograms } = contract();
       const id = canonicalSourcePath(cleanId(rawId));
-      const routes = locations.get(id) ?? [];
+      const routes = routeLocations.get(id) ?? [];
+      const programs = programLocations.get(id) ?? [];
       const source = ts.createSourceFile(
         id,
         code,
@@ -878,8 +902,16 @@ function routeSourcePlugin(
       };
       visit(source);
       const replacements: Array<Readonly<{ start: number; end: number; value: string }>> = [];
+      const retainedPrograms =
+        projection.kind === "program" ? new Set([projection.name]) : browserMainPrograms;
+      const retainedProgramSpans = new Set(
+        programs
+          .filter(({ identity }) => retainedPrograms.has(identity))
+          .map(({ span }) => `${span.line}:${span.column}`),
+      );
       if (projection.kind === "route") {
         for (const route of routes) {
+          if (!retainedPrograms.has(route.program)) continue;
           const node = objects.get(`${route.span.line}:${route.span.column}`);
           if (!node) {
             throw new Error(
@@ -892,17 +924,30 @@ function routeSourcePlugin(
           }
         }
       }
-      const retainedPrograms =
-        projection.kind === "program" ? new Set([projection.name]) : browserMainPrograms;
-      replacements.push(
-        ...excludedProgramReplacements(
-          source,
-          new Set([...programNames].filter((name) => !retainedPrograms.has(name))),
-        ),
-      );
+      for (const program of programs) {
+        if (retainedPrograms.has(program.identity)) continue;
+        const location = `${program.span.line}:${program.span.column}`;
+        if (retainedProgramSpans.has(location)) continue;
+        const node = objects.get(location);
+        if (!node) {
+          throw new Error(
+            `${program.span.file}:${program.span.line}:${program.span.column}: ` +
+              `Unable to isolate Program ${JSON.stringify(program.identity)}.`,
+          );
+        }
+        replacements.push({ start: node.getStart(source), end: node.end, value: "{}" });
+      }
       if (!replacements.length) return;
       let transformed = code;
-      for (const replacement of replacements.sort((left, right) => right.start - left.start)) {
+      const unique = [
+        ...new Map(
+          replacements.map((replacement) => [
+            `${replacement.start}:${replacement.end}`,
+            replacement,
+          ]),
+        ).values(),
+      ];
+      for (const replacement of unique.sort((left, right) => right.start - left.start)) {
         transformed = `${transformed.slice(0, replacement.start)}${replacement.value}${transformed.slice(replacement.end)}`;
       }
       return { code: pruneProjectionImports(transformed, id), map: null };
@@ -977,63 +1022,9 @@ function canonicalSourcePath(path: string): string {
   }
 }
 
-function excludedProgramReplacements(
-  source: ts.SourceFile,
-  excluded: ReadonlySet<string>,
-): Array<Readonly<{ start: number; end: number; value: string }>> {
-  const replacements: Array<Readonly<{ start: number; end: number; value: string }>> = [];
-  const visit = (node: ts.Node): void => {
-    if (ts.isPropertyAssignment(node) && sourcePropertyName(node.name) === "programs") {
-      const programs = unwrapSourceExpression(node.initializer);
-      if (ts.isObjectLiteralExpression(programs)) {
-        for (const property of programs.properties) {
-          const name = sourcePropertyName(property.name);
-          if (!name || !excluded.has(name)) continue;
-          if (ts.isPropertyAssignment(property)) {
-            replacements.push({
-              start: property.initializer.getStart(source),
-              end: property.initializer.end,
-              value: "{}",
-            });
-          } else if (ts.isShorthandPropertyAssignment(property)) {
-            replacements.push({
-              start: property.getStart(source),
-              end: property.end,
-              value: `${name}: {}`,
-            });
-          }
-        }
-      }
-    }
-    ts.forEachChild(node, visit);
-  };
-  visit(source);
-  return replacements;
-}
-
-function sourcePropertyName(name: ts.PropertyName | undefined): string | undefined {
-  if (!name) return undefined;
-  if (ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNumericLiteral(name)) {
-    return name.text;
-  }
-  return undefined;
-}
-
-function unwrapSourceExpression(expression: ts.Expression): ts.Expression {
-  while (
-    ts.isParenthesizedExpression(expression) ||
-    ts.isAsExpression(expression) ||
-    ts.isSatisfiesExpression(expression) ||
-    ts.isNonNullExpression(expression)
-  ) {
-    expression = expression.expression;
-  }
-  return expression;
-}
-
-function isApplicationSourceModule(id: string, source: string): boolean {
-  const root = resolve(source);
-  const file = resolve(id);
+function isSystemSourceModule(id: string, source: string): boolean {
+  const root = canonicalSourcePath(source);
+  const file = canonicalSourcePath(id);
   return (file === root || file.startsWith(`${root}${sep}`)) && /\.[cm]?[jt]sx?$/.test(file);
 }
 
@@ -1053,20 +1044,16 @@ function sourceProjection(
   return program ? { kind: "program", name: program } : undefined;
 }
 
-function routeApplicationSpecifier(application: string, route: string, revision?: number): string {
+function routeSystemSpecifier(system: string, route: string, revision?: number): string {
   const parameters = new URLSearchParams({ "poggers-route": route });
   if (revision !== undefined) parameters.set("poggers-revision", String(revision));
-  return routeSourceId(application, parameters);
+  return routeSourceId(system, parameters);
 }
 
-function programApplicationSpecifier(
-  application: string,
-  program: string,
-  revision?: number,
-): string {
+function programSystemSpecifier(system: string, program: string, revision?: number): string {
   const parameters = new URLSearchParams({ "poggers-program": program });
   if (revision !== undefined) parameters.set("poggers-revision", String(revision));
-  return routeSourceId(application, parameters);
+  return routeSourceId(system, parameters);
 }
 
 function routeSourceId(id: string, parameters: URLSearchParams): string {
@@ -1088,20 +1075,20 @@ function routeModuleName(identity: string): string {
 }
 
 function routeModuleSource(input: {
-  application: string;
+  system: string;
   development: boolean;
   revision: number;
   program: string;
   route: ReturnType<typeof collectWebRoutes>[number];
 }): string {
-  const application = routeApplicationSpecifier(
-    input.application,
+  const system = routeSystemSpecifier(
+    input.system,
     routeIdentity(input.route),
     input.development ? input.revision : undefined,
   );
-  return `import application from ${JSON.stringify(application)};
+  return `import system from ${JSON.stringify(system)};
 
-let feature = application;
+let feature = system;
 for (const name of ${JSON.stringify(input.route.feature.split(".").filter(Boolean))}) {
   feature = feature.features?.[name];
 }
@@ -1144,10 +1131,10 @@ function componentTransformPlugin(source: string): Plugin {
   };
 }
 
-function applicationAliasPlugin(source: string): Plugin {
+function systemAliasPlugin(source: string): Plugin {
   const kit = resolve(import.meta.dirname, "../..");
   return {
-    name: "poggers-application-alias",
+    name: "poggers-system-alias",
     enforce: "pre",
     resolveId(id, importer) {
       if (!id.startsWith("@/")) return;
@@ -1159,10 +1146,10 @@ function applicationAliasPlugin(source: string): Plugin {
 }
 
 function presentationContractPlugin(
-  paths: ApplicationPaths,
+  paths: SystemPaths,
   work: string,
-  compiler: ApplicationCompiler,
-  state: PreparedApplicationState,
+  revisions: SystemRevisionSource,
+  state: PreparedInterfaceState,
   serverOrigin?: string,
   webLoaders?: DevelopmentWebLoaderRegistry,
 ): Plugin {
@@ -1187,14 +1174,15 @@ function presentationContractPlugin(
         const updateKind = presentationUpdate(context, prepared.presentationSources)
           ? "presentation"
           : "full";
-        prepared = await prepareApplication(
+        const compilation = revisions.compile(context.file);
+        prepared = await prepareInterface(
           paths,
           work,
+          prepared.interface,
           true,
+          compilation,
           updateKind,
-          compiler,
           prepared,
-          context.file,
           serverOrigin,
         );
         state.current = prepared;
@@ -1241,7 +1229,7 @@ function presentationContractPlugin(
           return;
         }
         if (location.pathname === WEB_MANIFEST_PATH) {
-          const installation = webApplicationContract(prepared.ir).installation;
+          const installation = webInterfaceContract(prepared.ir, prepared.interface).installation;
           if (!installation) {
             next();
             return;
@@ -1279,7 +1267,7 @@ function presentationContractPlugin(
         response.once("close", disconnected);
         void abortable(
           (async () => {
-            const contract = webApplicationContract(prepared.ir);
+            const contract = webInterfaceContract(prepared.ir, prepared.interface);
             if (!contract.routes.length) {
               next();
               return;
@@ -1476,9 +1464,9 @@ async function writeDevelopmentWebChunk(
 
 async function prepareDevelopmentDocument(input: {
   server: ViteDevServer;
-  paths: ApplicationPaths;
-  prepared: PreparedApplication;
-  contract: ReturnType<typeof webApplicationContract>;
+  paths: SystemPaths;
+  prepared: PreparedInterface;
+  contract: ReturnType<typeof webInterfaceContract>;
   headers: Readonly<Record<string, string | readonly string[] | undefined>>;
   location: URL;
   match: NonNullable<ReturnType<typeof matchWebRoute>>;
@@ -1496,7 +1484,7 @@ async function prepareDevelopmentDocument(input: {
   }>
 > {
   const { route } = input.match;
-  const title = route.metadata.title ?? input.prepared.ir.application.name ?? "Poggers";
+  const title = route.metadata.title ?? input.prepared.ir.system.name ?? "Poggers";
   const metadata = routeDocumentMetadata(route.metadata);
   let document: WebDocumentIR;
   let markdownAllowed = !route.metadata.robots
@@ -1519,20 +1507,19 @@ async function prepareDevelopmentDocument(input: {
     const evaluator = (await input.server.ssrLoadModule(
       `${evaluatorPath}?poggers-revision=${input.prepared.revision}`,
     )) as {
-      application?: unknown;
+      system?: unknown;
       prepare?(input: Readonly<Record<string, unknown>>): Promise<WebDocumentIR>;
     };
-    const application = record(evaluator.application);
+    const system = record(evaluator.system);
     if (typeof evaluator.prepare !== "function") {
       throw new Error("Development web document evaluator has no prepare function.");
     }
-    validateUIProgramRoot(application, input.contract.uiProgram);
     const program = input.prepared.ir.programs.find(
       ({ name }) => name === input.contract.uiProgram,
     );
     if (!program)
       throw new Error(`Missing UI Program ${JSON.stringify(input.contract.uiProgram)}.`);
-    const definition = runtimeWebRoute(application, input.contract.uiProgram, route);
+    const definition = runtimeWebRoute(system, program.logicalName, route);
     if (definition.load && (route.cache === false || route.cache.scope !== "public")) {
       markdownAllowed = false;
     }
@@ -1562,6 +1549,7 @@ async function prepareDevelopmentDocument(input: {
     const data = isRecordValue(loaded) && "data" in loaded ? loaded.data : undefined;
     document = await evaluator.prepare({
       program: input.contract.uiProgram,
+      logicalProgram: program.logicalName,
       manifest: collectProgramManifest(program),
       components: input.contract.components,
       presentationDependencies: collectPresentationDependencies(
@@ -1736,11 +1724,11 @@ type RuntimeWebRoute = Readonly<{
 }>;
 
 function runtimeWebRoute(
-  application: Readonly<Record<string, unknown>>,
+  system: Readonly<Record<string, unknown>>,
   program: string,
   route: ReturnType<typeof collectWebRoutes>[number],
 ): RuntimeWebRoute {
-  let feature: unknown = application;
+  let feature: unknown = system;
   for (const name of route.feature.split(".").filter(Boolean)) {
     feature = record(feature).features;
     feature = record(feature)[name];
@@ -1755,7 +1743,7 @@ function runtimeWebRoute(
 
 function loadDevelopmentWebRoute(
   input: Readonly<{
-    paths: ApplicationPaths;
+    paths: SystemPaths;
     headers: Readonly<Record<string, string | readonly string[] | undefined>>;
     location: URL;
     match: NonNullable<ReturnType<typeof matchWebRoute>>;
@@ -1863,47 +1851,14 @@ function presentationUpdate(
   return false;
 }
 
-async function loadApplication(
-  paths: ApplicationPaths,
-  work: string,
-): Promise<Record<string, unknown>> {
-  const evaluate = resolve(work, "evaluate");
-  await rm(evaluate, { recursive: true, force: true });
-  await build({
-    configFile: false,
-    root: paths.directory,
-    resolve: {
-      alias: kitAliases(),
-      conditions: ["poggers-source", ...defaultServerConditions],
-    },
-    plugins: [applicationAliasPlugin(paths.source)],
-    build: {
-      emptyOutDir: true,
-      minify: false,
-      outDir: evaluate,
-      rollupOptions: {
-        input: paths.application,
-        output: { entryFileNames: "application.js", format: "es" },
-      },
-      ssr: true,
-      target: "node26",
-    },
-    ssr: { noExternal: true },
-  });
-  const output = resolve(evaluate, "application.js");
-  const loaded = (await import(`${pathToFileURL(output).href}?v=${Date.now()}`)) as {
-    default?: unknown;
-  };
-  return record(loaded.default ?? loaded);
-}
-
 async function prepareProductionDocuments(
-  paths: ApplicationPaths,
+  paths: SystemPaths,
   work: string,
-  ir: ApplicationIR,
+  ir: SystemIR,
+  interfaceId: string,
   components: readonly CompiledWebComponentIR[],
 ): Promise<readonly PreparedRouteDocument[]> {
-  const contract = webApplicationContract(ir);
+  const contract = webInterfaceContract(ir, interfaceId);
   const program = ir.programs.find(({ name }) => name === contract.uiProgram);
   if (!program) throw new Error(`Missing UI Program ${JSON.stringify(contract.uiProgram)}.`);
   const entries = contract.routes.map((route) => {
@@ -1921,22 +1876,32 @@ async function prepareProductionDocuments(
   if (staticRoutes.length || contract.routes.length === 0) {
     await writeIfChanged(
       source,
-      `import application from ${JSON.stringify(paths.application)};
+      `import system from ${JSON.stringify(paths.system)};
 import { prepareClientWebDocument, prepareWebDocument } from ${JSON.stringify(resolve(import.meta.dirname, `document${moduleExtension()}`))};
 
+let interfaceFeature = system;
+for (const name of ${JSON.stringify(contract.interface.feature.split(".").filter(Boolean))}) {
+  interfaceFeature = interfaceFeature.features?.[name];
+}
+if (!interfaceFeature?.presentation) {
+  throw new Error(${JSON.stringify(`Web interface ${contract.interface.feature} has no Presentation.`)});
+}
 const routes = ${JSON.stringify(staticRoutes)};
 export default await Promise.all((routes.length ? routes : [undefined]).map(async (route) => ({
   route,
-  document: route?.document === "shell"
+      document: route?.document === "shell"
     ? prepareClientWebDocument({
-        title: route.metadata?.title ?? application.metadata?.name ?? "Poggers",
+        title: route.metadata?.title ?? system.metadata?.name ?? "Poggers",
         language: route.metadata?.language,
         metadata: Object.fromEntries(Object.entries(route.metadata ?? {}).filter(([name]) => name !== "title" && name !== "language")),
         entry: "/app.js",
       })
     : await prepareWebDocument({
-        application,
+        system,
+        interface: ${JSON.stringify(contract.interface.feature)},
         program: ${JSON.stringify(contract.uiProgram)},
+        logicalProgram: ${JSON.stringify(program.logicalName)},
+        presentation: interfaceFeature.presentation,
         manifest: ${JSON.stringify(collectProgramManifest(program))},
         components: ${JSON.stringify(contract.components)},
         presentationDependencies: ${JSON.stringify(collectPresentationDependencies(ir, contract.uiProgram))},
@@ -2045,16 +2010,14 @@ function validateRequestRenderClosure(
   view: WebRenderNodeIR,
   components: readonly CompiledWebComponentIR[],
 ): void {
-  const definitions = new Map(
-    components.map((component) => [componentCompilerIdentity(component), component] as const),
-  );
+  const resolveComponent = createCompiledWebComponentResolver(components);
   const pending = [...renderComponentTargets(view)];
   const visited = new Set<string>();
   while (pending.length) {
     const identity = pending.pop()!;
     if (visited.has(identity)) continue;
     visited.add(identity);
-    const component = definitions.get(identity);
+    const component = resolveComponent(identity);
     if (!component) {
       throw new Error(
         `Request-rendered web Route ${JSON.stringify(route)} references missing Component ${JSON.stringify(identity)}.`,
@@ -2102,13 +2065,13 @@ function renderComponentTargets(node: WebRenderNodeIR): readonly string[] {
 }
 
 function dynamicRouteDocument(
-  ir: ApplicationIR,
+  ir: SystemIR,
   route: ReturnType<typeof collectWebRoutes>[number],
 ): WebDocumentIR {
   return withWebStyles(
     Object.freeze({
       ...prepareClientWebDocument({
-        title: route.metadata.title ?? ir.application.name ?? "Poggers",
+        title: route.metadata.title ?? ir.system.name ?? "Poggers",
         language: route.metadata.language,
         metadata: routeDocumentMetadata(route.metadata),
         entry: "/app.js",
@@ -2186,7 +2149,7 @@ function defaultRouteDocument(
 }
 
 function workerSource(input: {
-  application: string;
+  system: string;
   development: boolean;
   serverOrigin?: string;
   host: string;
@@ -2196,8 +2159,8 @@ function workerSource(input: {
   manifest: unknown;
   dependencies: readonly DependencyContractIR[];
 }): string {
-  const application = programApplicationSpecifier(
-    input.application,
+  const system = programSystemSpecifier(
+    input.system,
     input.program.name,
     input.development ? input.revision : undefined,
   );
@@ -2217,7 +2180,7 @@ addEventListener("message", (event) => {
       close();
     });
 });`;
-  return `import application from ${JSON.stringify(application)};
+  return `import system from ${JSON.stringify(system)};
 import { createWebHost } from ${JSON.stringify(input.host)};
 import { startProcess } from ${JSON.stringify(input.processRuntime)};
 
@@ -2229,10 +2192,11 @@ const dependencies = createWebHost({
   ${input.development ? `serverOrigin: ${JSON.stringify(input.serverOrigin ?? "http://localhost:3010")},` : ""}
 });
 const ready = startProcess(
-  application,
+  system,
   ${JSON.stringify(input.program.name)},
   dependencies,
   ${JSON.stringify(input.manifest)},
+  ${JSON.stringify(input.program.logicalName)},
 );
 ${lifecycle}
 `;
@@ -2247,7 +2211,8 @@ function workerName(program: string, index: number): string {
 }
 
 function candidateSource(input: {
-  application: string;
+  system: string;
+  interface: string;
   development: boolean;
   serverOrigin?: string;
   host: string;
@@ -2255,7 +2220,7 @@ function candidateSource(input: {
   revision: number;
   runtime: string;
   presentationRuntime: string;
-  program: string;
+  program: ProgramIR;
   programManifest: unknown;
   components: unknown;
   presentationDependencies: unknown;
@@ -2265,6 +2230,7 @@ function candidateSource(input: {
   dependencies: readonly DependencyContractIR[];
   headless: readonly Readonly<{
     program: string;
+    logicalProgram: string;
     manifest: unknown;
     dependencies: readonly DependencyContractIR[];
   }>[];
@@ -2273,8 +2239,8 @@ function candidateSource(input: {
   }>[];
   serviceWorker?: Readonly<{ source: string; register: boolean }>;
 }): string {
-  const application = routeApplicationSpecifier(
-    input.application,
+  const system = routeSystemSpecifier(
+    input.system,
     "base",
     input.development ? input.revision : undefined,
   );
@@ -2290,13 +2256,20 @@ function candidateSource(input: {
   const routesWithLoaders = input.routeEntries
     .filter(({ loader }) => loader)
     .map(({ identity }) => identity);
-  return `import application from ${JSON.stringify(application)};
+  return `import system from ${JSON.stringify(system)};
 import { createWebHost } from ${JSON.stringify(input.host)};
 import { createWebUIAdapter, render } from ${JSON.stringify(input.runtime)};
 import { startProcess } from ${JSON.stringify(input.processRuntime)};
 
 export const manifest = ${JSON.stringify(input.hotManifest)};
-export const presentations = application.presentations ?? {};
+let interfaceFeature = system;
+for (const name of ${JSON.stringify(input.interface.split(".").filter(Boolean))}) {
+  interfaceFeature = interfaceFeature.features?.[name];
+}
+if (!interfaceFeature?.presentation) {
+  throw new Error(${JSON.stringify(`Web interface ${input.interface} has no Presentation.`)});
+}
+export const presentation = interfaceFeature.presentation;
 const development = ${JSON.stringify(input.development)};
 const headlessPrograms = ${JSON.stringify(input.headless)};
 const workerPrograms = ${JSON.stringify(input.workers)};
@@ -2415,10 +2388,11 @@ export async function activate(root, previous = {}) {
     await resetDevelopmentWorker();
     for (const definition of headlessPrograms) {
       const process = await startProcess(
-        application,
+        system,
         definition.program,
         createWebHost(hostOptions(definition.dependencies)),
         definition.manifest,
+        definition.logicalProgram,
       );
       cleanups.push(() => process.dispose());
     }
@@ -2437,11 +2411,9 @@ export async function activate(root, previous = {}) {
     await disposeAll(cleanups);
     throw error;
   }
-  const presentation =
-    Object.keys(presentations).length === 0
-      ? undefined
-      : (await import(${JSON.stringify(input.presentationRuntime)})).createWebPresentationAdapter();
-  const platform = createWebUIAdapter(presentation);
+  const presentationAdapter =
+    (await import(${JSON.stringify(input.presentationRuntime)})).createWebPresentationAdapter();
+  const platform = createWebUIAdapter(presentationAdapter);
   const dependencies = createWebHost(${JSON.stringify({
     dependencies: input.dependencies,
     routes: input.routes,
@@ -2449,12 +2421,14 @@ export async function activate(root, previous = {}) {
   })});
   let ui;
   try {
-    ui = await platform.component.createApplicationUI({
-      application,
-      program: ${JSON.stringify(input.program)},
+    ui = await platform.component.createInterfaceUI({
+      system,
+      interface: ${JSON.stringify(input.interface)},
+      program: ${JSON.stringify(input.program.name)},
+      logicalProgram: ${JSON.stringify(input.program.logicalName)},
       programManifest: ${JSON.stringify(input.programManifest)},
       dependencies,
-      presentations: { presentations },
+      presentation,
       components: ${JSON.stringify(input.components)},
       presentationDependencies: ${JSON.stringify(input.presentationDependencies)},
       routes: ${JSON.stringify(input.routes)},
@@ -2495,25 +2469,39 @@ export async function activate(root, previous = {}) {
 }
 
 function developmentDocumentEvaluatorSource(input: {
-  application: string;
+  system: string;
+  interface: string;
   document: string;
   revision: number;
 }): string {
-  const application = routeSourceId(
-    input.application,
+  const system = routeSourceId(
+    input.system,
     new URLSearchParams({ "poggers-revision": String(input.revision) }),
   );
-  return `import application from ${JSON.stringify(application)};
+  return `import system from ${JSON.stringify(system)};
 import { prepareWebDocument } from ${JSON.stringify(input.document)};
 
-export { application };
-export const prepare = (input) => prepareWebDocument({ ...input, application });
+let interfaceFeature = system;
+for (const name of ${JSON.stringify(input.interface.split(".").filter(Boolean))}) {
+  interfaceFeature = interfaceFeature.features?.[name];
+}
+if (!interfaceFeature?.presentation) {
+  throw new Error(${JSON.stringify(`Web interface ${input.interface} has no Presentation.`)});
+}
+export { system };
+export const prepare = (input) =>
+  prepareWebDocument({
+    ...input,
+    system,
+    interface: ${JSON.stringify(input.interface)},
+    presentation: interfaceFeature.presentation,
+  });
 `;
 }
 
 /** @internal Lowers source-level temporal provenance to runtime Component identities. */
 export function collectPresentationDependencies(
-  ir: ApplicationIR,
+  ir: SystemIR,
   programName: string,
 ): Readonly<
   Record<
@@ -2524,6 +2512,10 @@ export function collectPresentationDependencies(
     }>[]
   >
 > {
+  const selected = ir.programs.find(({ name }) => name === programName);
+  const presentationSources = selected?.interface
+    ? ir.presentations.filter(({ interface: owner }) => owner === selected.interface)
+    : [];
   const components = ir.programs
     .filter(
       ({ name, environment, ui }) =>
@@ -2545,7 +2537,7 @@ export function collectPresentationDependencies(
     )
     .sort((left, right) => right.semantic.length - left.semantic.length);
   const animationScopes = new Map(
-    ir.presentations.flatMap(({ animations }) =>
+    presentationSources.flatMap(({ animations }) =>
       animations.map(({ id, scope }) => [id, scope] as const),
     ),
   );
@@ -2557,7 +2549,7 @@ export function collectPresentationDependencies(
     }>
   >();
   const referenced = new Set<string>();
-  for (const source of ir.presentations) {
+  for (const source of presentationSources) {
     for (const declaration of source.declarations) {
       const component = components.find(({ semantic }) =>
         declaration.destination.startsWith(`${semantic}/`),
@@ -2632,7 +2624,7 @@ import { startWebDeferredStream } from ${JSON.stringify(input.stream)};
 
 startWebDeferredStream();
 const root = document.querySelector("#app");
-if (!root) throw new Error("Missing application root.");
+if (!root) throw new Error("Missing UI root.");
 const active = await candidate.activate(root);
 const dispose = () => void active.dispose();
 addEventListener("pagehide", dispose, { once: true });
@@ -2644,18 +2636,19 @@ import { startWebDeferredStream } from ${JSON.stringify(input.stream)};
 
 startWebDeferredStream();
 const root = document.querySelector("#app");
-if (!root) throw new Error("Missing application root.");
+if (!root) throw new Error("Missing UI root.");
 const coordinator = import.meta.hot?.data.coordinator ?? new HotUpdateCoordinator();
-let applications = 0;
+let activations = 0;
 const apply = async (candidate, updateKind) => {
   const started = performance.now();
-  const initial = applications++ === 0;
+  const initial = activations++ === 0;
   let status = "applied";
   try {
     if (
       updateKind === "presentation" &&
-      coordinator.value?.updatePresentations(candidate.presentations)
+      coordinator.value
     ) {
+      coordinator.value.updatePresentation(candidate.presentation);
       return;
     }
     const result = await coordinator.replace({
@@ -2717,7 +2710,7 @@ function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
 }
 
-export function validateUIProgramRoot(application: Record<string, unknown>, program: string): void {
+export function validateUIProgramRoot(system: Record<string, unknown>, program: string): void {
   const roots: string[] = [];
   let routes = 0;
   const visit = (features: unknown, parent: string) => {
@@ -2731,7 +2724,7 @@ export function validateUIProgramRoot(application: Record<string, unknown>, prog
       visit(feature.features, path);
     }
   };
-  visit(application.features, "");
+  visit(system.features, "");
   if ((routes === 0 && roots.length !== 1) || (routes > 0 && roots.length !== 0)) {
     throw new Error(
       routes > 0

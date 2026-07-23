@@ -1,122 +1,217 @@
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-import type { ApplicationIR } from "@/compiler/ir";
-import { compileApplication, resolveApplication } from "@/compiler/source";
+import {
+  selectSystemOutputs,
+  type PlatformInterfaceIR,
+  type ProgramIR,
+  type SystemIR,
+} from "@/compiler/ir";
+import { createSystemCompiler, resolveSystem } from "@/compiler/source";
 import {
   selectPlatformAdapters,
   type DevelopmentSession,
   type PlatformAdapterImplementation,
   type ProductionArtifacts,
+  type SystemRevisionSource,
 } from "@/contracts/platform";
 
-export type ApplicationRealization<Adapter extends PlatformAdapterImplementation> = Readonly<{
+export type SystemRealization<Adapter extends PlatformAdapterImplementation> = Readonly<{
   directory: string;
-  application: string;
-  ir: ApplicationIR;
+  system: string;
+  ir: SystemIR;
+  app?: string;
+  programs: readonly ProgramIR[];
+  interfaces: readonly PlatformInterfaceIR[];
+  revisions: SystemRevisionSource;
   adapters: readonly Adapter[];
 }>;
 
-export type RunningApplication = AsyncDisposable &
+export type SystemRealizationOptions = Readonly<{ app?: string }>;
+
+export type RunningSystem = AsyncDisposable &
   Readonly<{
-    ir: ApplicationIR;
+    ir: SystemIR;
     locations: Readonly<Record<string, readonly string[]>>;
   }>;
 
-export type BuiltApplication = Readonly<{
-  ir: ApplicationIR;
+export type BuiltSystem = Readonly<{
+  ir: SystemIR;
   directory: string;
   artifacts: Readonly<Record<string, ProductionArtifacts>>;
 }>;
 
-/** Resolves one authored Application into the Platform implementations it requires. */
-export function resolveApplicationRealization<Adapter extends PlatformAdapterImplementation>(
+/** Resolves one authored System into the Platform implementations it requires. */
+export function resolveSystemRealization<Adapter extends PlatformAdapterImplementation>(
   directory: string,
   adapters: Readonly<Record<string, Adapter>>,
-): ApplicationRealization<Adapter> {
-  const paths = resolveApplication(directory);
+  options: SystemRealizationOptions = {},
+): SystemRealization<Adapter> {
+  const paths = resolveSystem(directory);
   const extensions = Object.values(adapters).flatMap(({ compiler = [] }) => compiler);
-  const ir = compileApplication(paths.application, extensions);
+  const revisions = createSystemRevisionSource(paths.system, extensions);
+  const outputs = selectSystemOutputs(revisions.current.ir, options.app);
   return {
     directory: paths.directory,
-    application: paths.application,
-    ir,
-    adapters: selectPlatformAdapters(ir, adapters),
+    system: paths.system,
+    ir: revisions.current.ir,
+    ...(outputs.app ? { app: outputs.app } : {}),
+    programs: outputs.programs,
+    interfaces: outputs.interfaces,
+    revisions,
+    adapters: selectPlatformAdapters(outputs.platforms, adapters),
   };
 }
 
 /** Starts every required Platform through the canonical development path. */
-export async function developApplication<Adapter extends PlatformAdapterImplementation>(
+export async function developSystem<Adapter extends PlatformAdapterImplementation>(
   directory: string,
   adapters: Readonly<Record<string, Adapter>>,
-): Promise<RunningApplication> {
-  const realization = resolveApplicationRealization(directory, adapters);
-  const sessions = new Map<string, DevelopmentSession>();
-  try {
-    for (const adapter of realization.adapters) {
-      sessions.set(
-        adapter.name,
-        await adapter.develop({
-          directory: realization.directory,
-          application: realization.application,
-          ir: realization.ir,
-          platform: adapter.name,
-          programs: realization.ir.programs.filter(
-            ({ environment }) => environment.platform === adapter.name,
-          ),
-        }),
-      );
-    }
-  } catch (error) {
-    await disposeDevelopmentSessions(sessions.values());
-    throw error;
+  options: SystemRealizationOptions = {},
+): Promise<RunningSystem> {
+  const realization = resolveSystemRealization(directory, adapters, options);
+  const started = await Promise.allSettled(
+    realization.adapters.map(async (adapter) => ({
+      adapter,
+      session: await adapter.develop({
+        directory: realization.directory,
+        system: realization.system,
+        ir: realization.ir,
+        ...(realization.app ? { app: realization.app } : {}),
+        revisions: realization.revisions,
+        platform: adapter.name,
+        programs: realization.programs.filter(
+          ({ environment }) => environment.platform === adapter.name,
+        ),
+        interfaces: realization.interfaces.filter(({ platform }) => platform === adapter.name),
+      }),
+    })),
+  );
+  const sessions = started.flatMap((result) =>
+    result.status === "fulfilled" ? [result.value] : [],
+  );
+  const failures = started.flatMap((result) =>
+    result.status === "rejected" ? [result.reason] : [],
+  );
+  if (failures.length) {
+    const disposal = await disposeDevelopmentSessions(sessions.map(({ session }) => session));
+    failures.push(...disposal);
+    throwFailures(failures, "System development startup failed.");
   }
 
   let disposed = false;
   return {
     ir: realization.ir,
     get locations() {
-      return Object.fromEntries(
-        [...sessions].map(([platform, session]) => [platform, session.locations]),
-      );
+      return collectDevelopmentLocations(sessions);
     },
     async [Symbol.asyncDispose]() {
       if (disposed) return;
       disposed = true;
-      await disposeDevelopmentSessions(sessions.values());
+      const failures = await disposeDevelopmentSessions(sessions.map(({ session }) => session));
+      throwFailures(failures, "System disposal failed.");
+    },
+  };
+}
+
+function createSystemRevisionSource(
+  system: string,
+  extensions: Parameters<typeof createSystemCompiler>[1],
+): SystemRevisionSource {
+  const compiler = createSystemCompiler(system, extensions);
+  let current = compiler.compile();
+  const signatures = new Map<string, string>();
+  return {
+    get current() {
+      return current;
+    },
+    compile(changedFile) {
+      let signature: string;
+      try {
+        signature = createHash("sha256").update(readFileSync(changedFile)).digest("hex");
+      } catch {
+        signature = "<missing>";
+      }
+      if (signatures.get(changedFile) === signature) return current;
+      current = compiler.compile(changedFile);
+      signatures.set(changedFile, signature);
+      return current;
     },
   };
 }
 
 /** Builds every required Platform through the canonical production path. */
-export async function buildApplication(
+export async function buildSystem(
   directory: string,
   output: string,
   adapters: Readonly<Record<string, PlatformAdapterImplementation>>,
-): Promise<BuiltApplication> {
-  const realization = resolveApplicationRealization(directory, adapters);
-  const artifacts: Record<string, ProductionArtifacts> = {};
-  for (const adapter of realization.adapters) {
-    const platformOutput =
-      realization.adapters.length === 1 ? output : resolve(output, adapter.name);
-    artifacts[adapter.name] = await adapter.build({
-      directory: realization.directory,
-      application: realization.application,
-      ir: realization.ir,
-      platform: adapter.name,
-      programs: realization.ir.programs.filter(
-        ({ environment }) => environment.platform === adapter.name,
-      ),
-      output: platformOutput,
-    });
-  }
-  return { ir: realization.ir, directory: output, artifacts: Object.freeze(artifacts) };
+  options: SystemRealizationOptions = {},
+): Promise<BuiltSystem> {
+  const realization = resolveSystemRealization(directory, adapters, options);
+  const results = await Promise.all(
+    realization.adapters.map(async (adapter) => {
+      const platformOutput =
+        realization.adapters.length === 1 ? output : resolve(output, adapter.name);
+      const artifacts = await adapter.build({
+        directory: realization.directory,
+        system: realization.system,
+        ir: realization.ir,
+        ...(realization.app ? { app: realization.app } : {}),
+        platform: adapter.name,
+        programs: realization.programs.filter(
+          ({ environment }) => environment.platform === adapter.name,
+        ),
+        interfaces: realization.interfaces.filter(({ platform }) => platform === adapter.name),
+        output: platformOutput,
+      });
+      return [adapter.name, artifacts] as const;
+    }),
+  );
+  return {
+    ir: realization.ir,
+    directory: output,
+    artifacts: Object.freeze(Object.fromEntries(results)),
+  };
 }
 
-async function disposeDevelopmentSessions(sessions: Iterable<DevelopmentSession>): Promise<void> {
-  const results = await Promise.allSettled(
-    [...sessions].reverse().map((session) => session[Symbol.asyncDispose]()),
+function collectDevelopmentLocations(
+  sessions: readonly Readonly<{
+    adapter: PlatformAdapterImplementation;
+    session: DevelopmentSession;
+  }>[],
+): Readonly<Record<string, readonly string[]>> {
+  const locations = new Map<string, readonly string[]>();
+  for (const { adapter, session } of sessions) {
+    for (const [identity, values] of Object.entries(session.locations)) {
+      if (locations.has(identity)) {
+        throw new Error(
+          `Platform Adapter ${JSON.stringify(adapter.name)} returned duplicate output identity ${JSON.stringify(identity)}.`,
+        );
+      }
+      locations.set(identity, values);
+    }
+  }
+  return Object.freeze(
+    Object.fromEntries([...locations].sort(([left], [right]) => left.localeCompare(right))),
   );
-  const errors = results.flatMap((result) => (result.status === "rejected" ? [result.reason] : []));
-  if (errors.length === 1) throw errors[0];
-  if (errors.length > 1) throw new AggregateError(errors, "Application disposal failed.");
+}
+
+async function disposeDevelopmentSessions(
+  sessions: readonly DevelopmentSession[],
+): Promise<unknown[]> {
+  const failures: unknown[] = [];
+  for (const session of [...sessions].reverse()) {
+    try {
+      await session[Symbol.asyncDispose]();
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  return failures;
+}
+
+function throwFailures(failures: readonly unknown[], message: string): void {
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1) throw new AggregateError(failures, message);
 }

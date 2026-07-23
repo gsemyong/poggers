@@ -6,7 +6,7 @@ import process from "node:process";
 
 import { platformAdapters } from "@/adapters/registry";
 import type { PlatformAdapterImplementation } from "@/contracts/platform";
-import { buildApplication, developApplication } from "@/realization";
+import { buildSystem, developSystem } from "@/realization";
 
 export async function runCli(
   arguments_ = process.argv.slice(2),
@@ -18,12 +18,12 @@ export async function runCli(
   if (command === "create") {
     await createProject(commandArguments);
   } else if (command === "dev") {
-    const application = await developApplication(directory, adapters);
-    for (const location of Object.values(application.locations).flat()) {
+    const system = await developSystem(directory, adapters);
+    for (const location of Object.values(system.locations).flat()) {
       console.log(`poggers dev running on ${location}`);
     }
     const stop = async () => {
-      await application[Symbol.asyncDispose]();
+      await system[Symbol.asyncDispose]();
       process.exit();
     };
     process.on("SIGINT", () => void stop());
@@ -33,8 +33,8 @@ export async function runCli(
       directory,
       readFlag(commandArguments, "outdir") ?? readFlag(commandArguments, "outfile") ?? "dist",
     );
-    const application = await buildApplication(directory, root, adapters);
-    for (const artifacts of Object.values(application.artifacts)) {
+    const system = await buildSystem(directory, root, adapters);
+    for (const artifacts of Object.values(system.artifacts)) {
       console.log(`built ${artifacts.directory}`);
     }
   } else if (command === "typecheck") {
@@ -116,7 +116,7 @@ async function findTemplate(start: string): Promise<string> {
       if (!hasCode(error, "ENOENT")) throw error;
     }
     const parent = dirname(directory);
-    if (parent === directory) throw new Error("Cannot locate the Poggers application template.");
+    if (parent === directory) throw new Error("Cannot locate the Poggers System template.");
   }
 }
 

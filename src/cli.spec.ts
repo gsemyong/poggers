@@ -17,8 +17,8 @@ import { afterEach, describe, expect, test } from "vitest";
 
 import { validateUIProgramRoot } from "@/adapters/web/pipeline";
 import { createProject, runCli } from "@/cli";
-import { POGGERS_IR_VERSION } from "@/compiler/ir";
-import { compileApplication } from "@/compiler/source";
+import { SYSTEM_IR_VERSION } from "@/compiler/ir";
+import { compileSystem } from "@/compiler/source";
 
 const directories: string[] = [];
 afterEach(async () => {
@@ -26,7 +26,7 @@ afterEach(async () => {
 });
 
 describe("project template", () => {
-  test("creates the complete minimal application convention", { timeout: 30_000 }, async () => {
+  test("creates the complete minimal System convention", { timeout: 30_000 }, async () => {
     const parent = await mkdtemp(resolve(tmpdir(), "poggers-create-"));
     directories.push(parent);
     const target = resolve(parent, "example");
@@ -44,24 +44,22 @@ describe("project template", () => {
       "vitest.config.ts",
     ]);
     expect((await readdir(resolve(target, "src"))).sort()).toEqual([
-      "app.spec.ts",
-      "app.tsx",
       "features",
       "presentations",
+      "system.spec.ts",
+      "system.ts",
     ]);
     expect(await readdir(resolve(target, "src/features"))).toEqual(["shell.tsx"]);
     expect(await readdir(resolve(target, "src/presentations"))).toEqual(["clean.ts"]);
-    expect(await readFile(resolve(target, "src/app.tsx"), "utf8")).toContain(
-      "satisfies Application<App>",
+    expect(await readFile(resolve(target, "src/system.ts"), "utf8")).toContain(
+      "export default createSystem({",
     );
-    expect(await readFile(resolve(target, "src/app.spec.ts"), "utf8")).toContain(
-      "testApplication({",
-    );
+    expect(await readFile(resolve(target, "src/system.spec.ts"), "utf8")).toContain("testSystem({");
     expect(await readFile(resolve(target, "src/features/shell.tsx"), "utf8")).toContain(
       "satisfies Feature<ShellFeature>",
     );
     expect(await readFile(resolve(target, "src/presentations/clean.ts"), "utf8")).toContain(
-      "satisfies WebPresentation<App, typeof parameters>",
+      "satisfies WebPresentation<Web, typeof parameters>",
     );
     const packageJson = JSON.parse(await readFile(resolve(target, "package.json"), "utf8")) as {
       dependencies: Record<string, string>;
@@ -126,28 +124,33 @@ describe("project template", () => {
 
     await runCli(["build", "--dir", target, "--outdir", "dist"]);
     await expect(access(resolve(target, ".poggers"))).rejects.toHaveProperty("code", "ENOENT");
-    await expect(access(resolve(target, "dist/application.ir.json"))).rejects.toHaveProperty(
+    await expect(access(resolve(target, "dist/system.ir.json"))).rejects.toHaveProperty(
       "code",
       "ENOENT",
     );
-    const manifest = compileApplication(resolve(target, "src/app.tsx"));
-    expect(manifest.version).toBe(POGGERS_IR_VERSION);
+    const manifest = compileSystem(resolve(target, "src/system.ts"));
+    expect(manifest.version).toBe(SYSTEM_IR_VERSION);
     expect(manifest.platforms).toEqual(["web"]);
-    expect(manifest.features.map(({ id }) => id)).toEqual(["feature/shell"]);
+    expect(manifest.features.map(({ id }) => id)).toEqual([
+      "feature/app",
+      "feature/app.web",
+      "feature/app.web.shell",
+    ]);
     expect(manifest.programs).toHaveLength(1);
     expect(manifest.programs[0]).toMatchObject({
-      id: "program/browser",
+      id: "program/app.web.browser",
       environment: { name: "browser-main", platform: "web" },
-      ui: { root: { feature: "shell", component: "Application" } },
+      ui: { root: { feature: "app.web.shell", component: "Root" } },
     });
-    const html = await readFile(resolve(target, "dist/index.html"), "utf8");
+    const webOutput = resolve(target, "dist/interfaces/app.web");
+    const html = await readFile(resolve(webOutput, "index.html"), "utf8");
     expect(html).toContain("@layer poggers.reset{");
     expect(html).toContain(":where(dialog)::backdrop{background:transparent}");
     expect(html).not.toContain("stylex");
     expect(html).not.toContain('href="/styles.css"');
     const entry = html.match(/<script type="module" async src="([^"]+)"/)?.[1];
     expect(entry).toMatch(/^\/assets\/app-[A-Za-z0-9_-]+\.js$/);
-    await expect(access(resolve(target, "dist", entry!.slice(1)))).resolves.toBeUndefined();
+    await expect(access(resolve(webOutput, entry!.slice(1)))).resolves.toBeUndefined();
     expect(html).toContain(`<link rel="modulepreload" href="${entry}">`);
     expect(html.indexOf("@layer poggers.reset{")).toBeLessThan(html.indexOf(`src="${entry}"`));
 
@@ -166,15 +169,15 @@ describe("project template", () => {
     await createProject([target, "--no-install", "--force"]);
 
     await expect(access(resolve(target, "residue.txt"))).rejects.toThrow();
-    await expect(access(resolve(target, "src/app.tsx"))).resolves.toBeUndefined();
+    await expect(access(resolve(target, "src/system.ts"))).resolves.toBeUndefined();
   });
 
-  test("keeps every executable application on the canonical source convention", async () => {
+  test("keeps every executable System on the canonical source convention", async () => {
     const examples = resolve(import.meta.dirname, "../examples");
     for (const name of await readdir(examples)) {
       const source = resolve(examples, name, "src");
       await expectCanonicalSourceRoot(source);
-      expect(compileApplication(resolve(source, "app.tsx")).programs.length).toBeGreaterThan(0);
+      expect(compileSystem(resolve(source, "system.ts")).programs.length).toBeGreaterThan(0);
     }
   }, 30_000);
 
@@ -182,9 +185,9 @@ describe("project template", () => {
     const directory = await mkdtemp(resolve(tmpdir(), "poggers-custom-platform-"));
     directories.push(directory);
     const source = resolve(directory, "src");
-    const application = resolve(source, "app.ts");
+    const system = resolve(source, "system.ts");
     await mkdir(source, { recursive: true });
-    await writeFile(application, customPlatformApplication());
+    await writeFile(system, customPlatformSystem());
     let program = "";
 
     await runCli(["build", "--dir", directory], {
@@ -200,7 +203,14 @@ describe("project template", () => {
           await writeFile(artifact, "custom-platform");
           return {
             directory: input.output,
-            entries: [{ program, environment: "edge-worker", path: artifact }],
+            entries: [
+              {
+                identity: input.programs[0]!.id,
+                kind: "program",
+                environment: "edge-worker",
+                path: artifact,
+              },
+            ],
           };
         },
       },
@@ -216,7 +226,7 @@ describe("project template", () => {
     const directory = await mkdtemp(resolve(tmpdir(), "poggers-production-cli-"));
     directories.push(directory);
     await mkdir(resolve(directory, "src"), { recursive: true });
-    await writeFile(resolve(directory, "src/app.ts"), portableServerApplication());
+    await writeFile(resolve(directory, "src/system.ts"), portableServerSystem());
 
     await runCli(["build", "--dir", directory]);
 
@@ -229,12 +239,12 @@ describe("project template", () => {
 async function expectCanonicalSourceRoot(source: string): Promise<void> {
   const entries = await readdir(source, { withFileTypes: true });
   expect(entries.map(({ name }) => name).sort()).toEqual(
-    expect.arrayContaining(["app.tsx", "features", "presentations"]),
+    expect.arrayContaining(["system.ts", "features", "presentations"]),
   );
 
   const unexpected = entries
     .map(({ name }) => name)
-    .filter((name) => !["app.spec.ts", "app.tsx", "features", "presentations"].includes(name));
+    .filter((name) => !["system.spec.ts", "system.ts", "features", "presentations"].includes(name));
   expect(unexpected, `${source} has files outside the canonical source convention`).toEqual([]);
 
   const features = await readdir(resolve(source, "features"), { withFileTypes: true });
@@ -252,13 +262,13 @@ async function expectCanonicalSourceRoot(source: string): Promise<void> {
   expect(presentations.some(({ name }) => name === "presentation.ts")).toBe(false);
 
   for await (const file of glob("**/*.{ts,tsx}", { cwd: source })) {
-    if (file.endsWith(".spec.ts") && file !== "app.spec.ts") continue;
+    if (file.endsWith(".spec.ts") && file !== "system.spec.ts") continue;
     const contents = await readFile(resolve(source, file), "utf8");
     expect(contents, `${file} imports private framework realization code`).not.toMatch(
       /from\s+["'](?:@\/(?:adapters|contracts|core)\/|@poggers\/kit\/adapters\/)/,
     );
     expect(contents, `${file} names a backend implementation detail`).not.toMatch(
-      /\b(?:buildServerProgram|compileApplication|createNodeHost|startServerProgram)\b/,
+      /\b(?:buildServerProgram|compileSystem|createNodeHost|startServerProgram)\b/,
     );
   }
 }
@@ -271,29 +281,39 @@ function run(command: string, arguments_: readonly string[], cwd: string): Promi
   });
 }
 
-function customPlatformApplication(): string {
+function customPlatformSystem(): string {
   return `
 type EdgePlatform = { Name: "edge" };
 type EdgeWorker = { Name: "edge-worker"; Platform: EdgePlatform };
 type Program<Environment, Contract extends object = {}> = Contract & { Environment: Environment };
-type Application<Contract> = unknown;
-type App = { Features: { indexer: { Programs: { indexer: Program<EdgeWorker> } } } };
-export default {
+declare const featureContract: unique symbol;
+type Feature<Contract> = { readonly [featureContract]?: Contract; programs: unknown };
+const createFeature = <Contract>(value: Feature<Contract>): Feature<Contract> => value;
+const createSystem = <Features extends Readonly<Record<string, object>>>(value: {
+  metadata?: { name: string };
+  features: Features;
+}) => value;
+type Indexer = { Programs: { indexer: Program<EdgeWorker> } };
+const indexer = createFeature<Indexer>({ programs: { indexer: {} } });
+export default createSystem({
   metadata: { name: "custom-platform" },
-  features: { indexer: { programs: { indexer: {} } } },
-} satisfies Application<App>;
+  features: { indexer },
+});
 `;
 }
 
-function portableServerApplication(): string {
+function portableServerSystem(): string {
   return `
 type Server = { Name: "server"; Platform: { Name: "server" } };
 type Program<Environment, Contract extends object = {}> = Contract & { Environment: Environment };
-type Feature<Contract> = unknown;
-type Application<Contract> = unknown;
+declare const featureContract: unique symbol;
+type Feature<Contract> = { readonly [featureContract]?: Contract; programs: unknown };
+const createFeature = <Contract>(value: Feature<Contract>): Feature<Contract> => value;
+const createSystem = <Features extends Readonly<Record<string, object>>>(value: {
+  features: Features;
+}) => value;
 type Worker = { Programs: { worker: Program<Server> } };
-type App = { Features: { worker: Worker } };
-const worker = {
+const worker = createFeature<Worker>({
   programs: {
     worker: {
       start() {
@@ -302,7 +322,7 @@ const worker = {
       },
     },
   },
-} satisfies Feature<Worker>;
-export default { features: { worker } } satisfies Application<App>;
+});
+export default createSystem({ features: { worker } });
 `;
 }

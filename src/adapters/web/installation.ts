@@ -2,11 +2,11 @@ import { createHash } from "node:crypto";
 
 import {
   resolveWebDestination,
-  webApplicationCompilerIR,
+  webFeatureCompilerIR,
   type WebInstallationIconIR,
   type WebRouteIR,
 } from "@/adapters/web/routing";
-import type { ApplicationIR } from "@/compiler/ir";
+import type { SystemIR } from "@/compiler/ir";
 
 export const WEB_SERVICE_WORKER_PATH = "/service-worker.js";
 export { WEB_MANIFEST_PATH } from "@/platforms/web/routing";
@@ -27,17 +27,21 @@ export type WebInstallationPlan = Readonly<{
 
 /** Resolves typed installation destinations only after the complete Route graph exists. */
 export function planWebInstallation(
-  application: ApplicationIR,
+  system: SystemIR,
+  interfaceId: string,
   routes: readonly WebRouteIR[],
 ): WebInstallationPlan | undefined {
-  const extension = application.application.extensions?.web;
+  const interface_ = system.interfaces.find(({ id }) => id === interfaceId);
+  if (!interface_) throw new Error(`Unknown web interface ${JSON.stringify(interfaceId)}.`);
+  const feature = system.features.find(({ path }) => path === interface_.feature);
+  const extension = feature?.extensions?.web;
   if (!extension) return undefined;
-  const installation = webApplicationCompilerIR(extension).installation;
+  const installation = webFeatureCompilerIR(extension).installation;
   if (!installation) return undefined;
   const start = resolveWebDestination(routes, installation.start);
   const fallback = resolveWebDestination(routes, installation.offline.fallback);
   return Object.freeze({
-    name: application.application.name,
+    name: system.system.name,
     ...(installation.shortName ? { shortName: installation.shortName } : {}),
     start,
     display: installation.display,

@@ -1,4 +1,10 @@
-import type { Feature, Program } from "@poggers/kit";
+import {
+  createApp,
+  createFeature,
+  type Feature,
+  type PlatformInterfaceContract,
+  type Program,
+} from "@poggers/kit";
 import type { HttpServer, ServerProcess } from "@poggers/kit/server";
 import {
   Await,
@@ -7,10 +13,11 @@ import {
   type Deferred,
   type Navigation,
   type Validate,
-  type WebApplication,
   type WebFeature,
+  type WebPlatform,
   type WebRoute,
   type WebServiceWorkerRuntime,
+  createWebInterface,
 } from "@poggers/kit/web";
 
 type GreetingRoutes = {
@@ -105,7 +112,7 @@ type Greeting = Readonly<{
     browser: Program<
       BrowserMainThread,
       {
-        Requires: { navigation: Navigation<GreetingRoutes, App> };
+        Requires: { navigation: Navigation<GreetingRoutes, WebContract> };
         Actions: { goClient(): void };
         Components: {
           Message: {
@@ -151,11 +158,56 @@ type Background = Readonly<{
   };
 }>;
 
-export type App = Readonly<{
-  Features: { background: Background; greeting: Greeting; origin: Origin };
+type AdminRoutes = {
+  dashboard: WebRoute<{
+    Path: "";
+    Metadata: {
+      Title: "Admin";
+      Description: "Independent administration interface";
+      Robots: "noindex";
+    };
+  }>;
+};
+
+type AdminDashboard = Readonly<{
+  Programs: {
+    browser: Program<
+      BrowserMainThread,
+      {
+        Components: {
+          Dashboard: {
+            Elements: {
+              Root: "main";
+              Title: "h1";
+            };
+          };
+        };
+        Routes: AdminRoutes;
+      }
+    >;
+  };
 }>;
 
-const greeting: WebFeature<Greeting, App> = {
+type AdminContract = Readonly<{
+  Features: {
+    background: Background;
+    dashboard: AdminDashboard;
+  };
+}>;
+
+export type WebContract = Readonly<{
+  Features: { background: Background; greeting: Greeting };
+}>;
+
+export type Product = Readonly<{
+  Features: {
+    admin: PlatformInterfaceContract<AdminContract, WebPlatform>;
+    origin: Origin;
+    web: PlatformInterfaceContract<WebContract, WebPlatform>;
+  };
+}>;
+
+const greeting: WebFeature<Greeting, WebContract> = {
   programs: {
     browser: {
       actions: {
@@ -364,26 +416,95 @@ const background: Feature<Background> = {
   },
 };
 
-export default {
-  metadata: { name: "Web request conformance" },
-  features: { background, greeting, origin },
-  web: {
-    installation: {
-      shortName: "Conformance",
-      start: { to: "greeting.client" },
-      icons: [
-        {
-          src: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'%3E%3Crect width='192' height='192' rx='40' fill='%23111'/%3E%3C/svg%3E",
-          sizes: "192x192",
-          type: "image/svg+xml",
+const dashboard: WebFeature<AdminDashboard, AdminContract> = {
+  programs: {
+    browser: {
+      components: {
+        Dashboard: {
+          view({ elements: { Root, Title } }) {
+            return (
+              <Root data-interface="admin">
+                <Title>Administration</Title>
+              </Root>
+            );
+          },
         },
-        {
-          src: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Crect width='512' height='512' rx='104' fill='%23111'/%3E%3C/svg%3E",
-          sizes: "512x512",
-          type: "image/svg+xml",
+      },
+      routes: {
+        dashboard: {
+          view({ components: { Dashboard } }) {
+            return <Dashboard.Dashboard />;
+          },
         },
-      ],
-      offline: { fallback: { to: "greeting.client" } },
+      },
     },
   },
-} satisfies WebApplication<App>;
+};
+
+const admin = createWebInterface<AdminContract>({
+  features: { background, dashboard },
+  presentation: {
+    parameters: {},
+    create() {
+      return {
+        Dashboard: () => ({
+          Dashboard: () => ({}),
+        }),
+      };
+    },
+  },
+  installation: {
+    shortName: "Admin",
+    start: { to: "dashboard.dashboard" },
+    icons: [
+      {
+        src: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'%3E%3Crect width='192' height='192' rx='24' fill='%23522'/%3E%3C/svg%3E",
+        sizes: "192x192",
+        type: "image/svg+xml",
+      },
+      {
+        src: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Crect width='512' height='512' rx='64' fill='%23522'/%3E%3C/svg%3E",
+        sizes: "512x512",
+        type: "image/svg+xml",
+      },
+    ],
+    offline: { fallback: { to: "dashboard.dashboard" } },
+  },
+});
+
+const web = createWebInterface<WebContract>({
+  features: { background, greeting },
+  presentation: {
+    parameters: {},
+    create() {
+      return {
+        Greeting: () => ({
+          Message: () => ({}),
+        }),
+      };
+    },
+  },
+  installation: {
+    shortName: "Conformance",
+    start: { to: "greeting.client" },
+    icons: [
+      {
+        src: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'%3E%3Crect width='192' height='192' rx='40' fill='%23111'/%3E%3C/svg%3E",
+        sizes: "192x192",
+        type: "image/svg+xml",
+      },
+      {
+        src: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Crect width='512' height='512' rx='104' fill='%23111'/%3E%3C/svg%3E",
+        sizes: "512x512",
+        type: "image/svg+xml",
+      },
+    ],
+    offline: { fallback: { to: "greeting.client" } },
+  },
+});
+
+export const product = createApp(
+  createFeature<Product>({
+    features: { admin, origin, web },
+  }),
+);

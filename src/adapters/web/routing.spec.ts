@@ -45,6 +45,26 @@ const edit: WebRouteIR = {
 const identifier = fc.uuid({ version: [4] });
 
 describe("web routing", () => {
+  it("matches the canonical root Route", () => {
+    const root: WebRouteIR = {
+      feature: "shell",
+      name: "home",
+      path: "/",
+      document: "shell",
+      cache: false,
+      metadata: {},
+      params: [],
+      search: [],
+      deferred: [],
+    };
+
+    expect(matchWebRoute([root], new URL("https://example.test/"))).toEqual({
+      route: root,
+      params: {},
+      search: {},
+    });
+  });
+
   it("composes reusable Feature paths without admitting absolute child paths", () => {
     expect(composeWebRoutePath("/admin", "tasks/:id")).toBe("/admin/tasks/:id");
     expect(composeWebRoutePath("/admin", "")).toBe("/admin");
@@ -193,7 +213,7 @@ describe("web routing", () => {
       span: { file: "src/tasks.tsx", line: 1, column: 1 },
     } as const;
 
-    expect(webProgramCompilerIR({ version: 7, components: [], routes: [route] })).toMatchObject({
+    expect(webProgramCompilerIR({ version: 8, components: [], routes: [route] })).toMatchObject({
       routes: [{ name: "list" }],
     });
     expect(() => webProgramCompilerIR({ version: 2, components: [], routes: [route] })).toThrow(
@@ -201,14 +221,14 @@ describe("web routing", () => {
     );
     expect(() =>
       webProgramCompilerIR({
-        version: 7,
+        version: 8,
         components: [],
         routes: [{ ...route, surprise: true }],
       }),
     ).toThrow(/unsupported fields/);
     expect(() =>
       webProgramCompilerIR({
-        version: 7,
+        version: 8,
         components: [],
         routes: [{ ...route, implementation: { load: "sometimes", view: { kind: "none" } } }],
       }),

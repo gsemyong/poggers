@@ -1,4 +1,4 @@
-import type { UIContributionAPI } from "@/core/application";
+import type { UIContributionAPI } from "@/core/feature";
 import {
   createEntity,
   type EntityApi,

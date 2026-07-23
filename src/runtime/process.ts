@@ -6,8 +6,8 @@ import type {
   ProgramManifest,
   TypeIR,
 } from "@/compiler/ir";
-import type { Application, ApplicationContract } from "@/core/application";
 import type { ProgramContributionAddress } from "@/core/dependency";
+import type { System, SystemContract } from "@/core/system";
 import type { ActionEvent } from "@/core/ui/presentation";
 import { createActionEventLedger } from "@/runtime/presentation";
 import { createReactiveState } from "@/runtime/state";
@@ -245,7 +245,7 @@ type RuntimeFeature = Readonly<{
   features?: Readonly<Record<string, RuntimeFeature>>;
 }>;
 
-type RuntimeApplication = Readonly<{
+type RuntimeSystem = Readonly<{
   features?: Readonly<Record<string, RuntimeFeature>>;
 }>;
 
@@ -615,8 +615,9 @@ export type ProgramPlan = Readonly<{
 }>;
 
 export type ProgramAssemblyOptions = Readonly<{
-  application: RuntimeApplication;
+  system: RuntimeSystem;
   name: string;
+  logicalName?: string;
   dependencies: Readonly<Record<string, unknown>>;
   manifest: ProgramManifest;
   ownDependencies?: boolean;
@@ -651,34 +652,16 @@ export function validateDependencyBindings(
 
 /** Validates and orders the compiler-derived dependency graph for one Program. */
 export function planProgram(
-  application: RuntimeApplication,
+  system: RuntimeSystem,
   name: string,
   manifest: ProgramManifest,
+  logicalName = name,
 ): ProgramPlan {
   if (manifest.name !== name) {
     throw new Error(
       `Program manifest ${JSON.stringify(manifest.name)} cannot start Program ${JSON.stringify(name)}.`,
     );
   }
-
-  const runtime = new Map<
-    string,
-    Readonly<{ definition: RuntimeProgramDefinition; children: readonly string[] }>
-  >();
-  const visit = (feature: RuntimeFeature, path: string): void => {
-    const children: string[] = [];
-    for (const [childName, child] of sortedEntries(feature.features)) {
-      const childPath = qualify(path, childName);
-      children.push(childPath);
-      visit(child, childPath);
-    }
-    const definition = feature.programs?.[name];
-    if (definition) runtime.set(path, { definition, children });
-  };
-  for (const [featureName, feature] of sortedEntries(application.features)) {
-    visit(feature, featureName);
-  }
-  if (!runtime.size) throw new Error(`Application does not define Program "${name}".`);
 
   const declarations = new Map<string, ProgramContributionManifest>();
   const providers = new Map<string, string>();
@@ -700,6 +683,25 @@ export function planProgram(
       providers.set(dependency, contribution.feature);
     }
   }
+
+  const runtime = new Map<
+    string,
+    Readonly<{ definition: RuntimeProgramDefinition; children: readonly string[] }>
+  >();
+  const visit = (feature: RuntimeFeature, path: string): void => {
+    const children: string[] = [];
+    for (const [childName, child] of sortedEntries(feature.features)) {
+      const childPath = qualify(path, childName);
+      children.push(childPath);
+      visit(child, childPath);
+    }
+    const definition = feature.programs?.[logicalName];
+    if (definition && declarations.has(path)) runtime.set(path, { definition, children });
+  };
+  for (const [featureName, feature] of sortedEntries(system.features)) {
+    visit(feature, featureName);
+  }
+  if (!runtime.size) throw new Error(`System does not define Program "${name}".`);
 
   for (const path of runtime.keys()) {
     if (!declarations.has(path)) {
@@ -775,7 +777,12 @@ export function planProgram(
 
 /** Assembles and starts every Feature contribution to one named Program. */
 export async function assembleProgram(options: ProgramAssemblyOptions): Promise<ProgramAssembly> {
-  const plan = planProgram(options.application, options.name, options.manifest);
+  const plan = planProgram(
+    options.system,
+    options.name,
+    options.manifest,
+    options.logicalName ?? options.name,
+  );
   const ui: Record<string, Readonly<Record<string, unknown>>> = Object.create(null);
   const externalScope = new ResourceScope();
   const providedDependencies: Record<string, unknown> = Object.create(null);
@@ -865,15 +872,17 @@ export async function assembleProgram(options: ProgramAssemblyOptions): Promise<
 }
 
 /** Starts one live Process instance of a named Program. */
-export async function startProcess<Contract extends ApplicationContract>(
-  application: Application<Contract>,
+export async function startProcess<Contract extends SystemContract>(
+  system: System<Contract>,
   name: string,
   dependencies: Readonly<Record<string, unknown>>,
   manifest: ProgramManifest,
+  logicalName = name,
 ): Promise<Process> {
   return assembleProgram({
-    application: application as RuntimeApplication,
+    system: system as RuntimeSystem,
     name,
+    logicalName,
     dependencies,
     manifest,
   });

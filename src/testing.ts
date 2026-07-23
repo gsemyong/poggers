@@ -11,23 +11,23 @@ import { createPlatformAdapters, platformAdapters } from "@/adapters/registry";
 import { linkProgram } from "@/compiler/linker";
 import type { PlatformAdapterImplementation } from "@/contracts/platform";
 import {
-  buildApplication,
-  developApplication,
-  resolveApplicationRealization,
-  type BuiltApplication,
-  type RunningApplication,
+  buildSystem,
+  developSystem,
+  resolveSystemRealization,
+  type BuiltSystem,
+  type RunningSystem,
 } from "@/realization";
 
 export { createEntityFixture, createMemoryEventStore } from "@/features/entity.testing";
 export { createUIContributionInstance } from "@/runtime/process";
 export { createPresentationFrame } from "@/runtime/presentation";
 
-export type ApplicationTestContext = Readonly<{
+export type SystemTestContext = Readonly<{
   /** Realization under the same black-box specification. */
   realization: "development" | "production";
-  /** Public location through which a user reaches the complete application. */
+  /** Public location through which a user reaches the complete System. */
   location: string;
-  /** Public locations exposed by the Application's semantic Platforms. */
+  /** Public locations exposed by the System's semantic Platforms. */
   locations: Readonly<Record<string, readonly string[]>>;
   /** Realization timings and emitted bytes for broad regression budgets. */
   metrics: Readonly<{
@@ -36,20 +36,20 @@ export type ApplicationTestContext = Readonly<{
     artifactBytes?: number;
     environment: string;
   }>;
-  /** Restarts the realized application while preserving its durable test data. */
+  /** Restarts the realized System while preserving its durable test data. */
   restart(): Promise<void>;
 }>;
 
-export type ApplicationTestDefinition = Readonly<{
+export type SystemTestDefinition = Readonly<{
   name: string;
-  /** Project root containing the canonical src/app.tsx. Defaults to the current directory. */
+  /** Workspace root containing the canonical src/system.ts. Defaults to the current directory. */
   directory?: string;
   timeout?: number;
-  verify(context: ApplicationTestContext): void | PromiseLike<void>;
+  verify(context: SystemTestContext): void | PromiseLike<void>;
 }>;
 
-/** Runs one black-box product specification through development and production realizations. */
-export function testApplication(definition: ApplicationTestDefinition): void {
+/** Runs one black-box System specification through development and production realizations. */
+export function testSystem(definition: SystemTestDefinition): void {
   const timeout = definition.timeout ?? 240_000;
   describe.sequential(definition.name, () => {
     test("development", { timeout }, () => verifyDevelopment(definition));
@@ -57,83 +57,104 @@ export function testApplication(definition: ApplicationTestDefinition): void {
   });
 }
 
-async function verifyDevelopment(definition: ApplicationTestDefinition): Promise<void> {
+async function verifyDevelopment(definition: SystemTestDefinition): Promise<void> {
   const directory = resolve(definition.directory ?? process.cwd());
-  const temporary = await mkdtemp(resolve(tmpdir(), "poggers-application-development-"));
-  const database = resolve(temporary, "application.sqlite");
-  const realization = resolveApplicationRealization(directory, platformAdapters);
-  const serverCount = realization.ir.programs.filter(
-    ({ environment }) => environment.platform === "server",
-  ).length;
-  const serverPorts = await availablePortRange(Math.max(serverCount, 1));
-  const serverPort = serverPorts[0]!;
-  const webPort = await availablePort(new Set(serverPorts));
-  const adapters = testAdapters({ database, serverPort, webPort });
-  let application: RunningApplication | undefined;
+  const temporary = await mkdtemp(resolve(tmpdir(), "poggers-system-development-"));
+  const database = resolve(temporary, "system.sqlite");
+  let system: RunningSystem | undefined;
+  let allocation: Readonly<{ serverPort: number; webPort: number }> | undefined;
 
   const start = async () => {
-    const started = performance.now();
-    application = await developApplication(directory, adapters);
-    const location = publicLocation(application.locations);
-    await ready(location);
-    return { location, startupMs: performance.now() - started };
+    const realization = resolveSystemRealization(directory, platformAdapters);
+    const serverCount = realization.ir.programs.filter(
+      ({ environment }) => environment.platform === "server",
+    ).length;
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      if (!allocation) {
+        const serverPorts = await availablePortRange(Math.max(serverCount, 1));
+        allocation = {
+          serverPort: serverPorts[0]!,
+          webPort: await availablePort(new Set(serverPorts)),
+        };
+      }
+      const adapters = testAdapters({ database, ...allocation });
+      const started = performance.now();
+      try {
+        system = await developSystem(directory, adapters);
+        const location = publicLocation(system.locations);
+        await ready(location);
+        return { location, startupMs: performance.now() - started };
+      } catch (error) {
+        await system?.[Symbol.asyncDispose]();
+        system = undefined;
+        if (!hasErrorCode(error, "EADDRINUSE") || attempt === 9) throw error;
+        allocation = undefined;
+      }
+    }
+    throw new Error("Development System startup exhausted its port retries.");
   };
 
   try {
     const { location, startupMs } = await start();
-    const active = application;
-    if (!active) throw new Error("The development Application did not start.");
+    const active = system;
+    if (!active) throw new Error("The development System did not start.");
     await definition.verify({
       realization: "development",
       location,
       locations: active.locations,
       metrics: testMetrics({ startupMs }),
       async restart() {
-        await application?.[Symbol.asyncDispose]();
-        application = undefined;
+        await system?.[Symbol.asyncDispose]();
+        system = undefined;
         await start();
       },
     });
   } finally {
-    await application?.[Symbol.asyncDispose]();
+    await system?.[Symbol.asyncDispose]();
     await rm(temporary, { recursive: true, force: true });
   }
 }
 
-async function verifyProduction(definition: ApplicationTestDefinition): Promise<void> {
+async function verifyProduction(definition: SystemTestDefinition): Promise<void> {
   const directory = resolve(definition.directory ?? process.cwd());
-  const temporary = await mkdtemp(resolve(tmpdir(), "poggers-application-production-"));
-  const database = resolve(temporary, "application.sqlite");
+  const temporary = await mkdtemp(resolve(tmpdir(), "poggers-system-production-"));
+  const database = resolve(temporary, "system.sqlite");
   const output = resolve(temporary, "dist");
-  let running: ProductionApplication | undefined;
+  let running: ProductionSystem | undefined;
 
   try {
     const buildStarted = performance.now();
-    const built = await buildApplication(directory, output, platformAdapters);
+    const built = await buildSystem(directory, output, platformAdapters);
     const buildMs = performance.now() - buildStarted;
     const artifactBytes = await directoryBytes(output);
     const serverCount = built.artifacts.server?.entries.length ?? 0;
     const ports = await availablePortRange(Math.max(serverCount + 1, 1));
     const start = async () => {
       const started = performance.now();
-      running = await startProductionApplication(built, directory, database, ports[0]!);
-      await ready(running.location);
+      running = await startProductionSystem(built, directory, database, ports[0]!);
+      await ready(running.location, () => running?.diagnostics?.());
       return { location: running.location, startupMs: performance.now() - started };
     };
     const { location, startupMs } = await start();
     const active = running;
-    if (!active) throw new Error("The production Application did not start.");
-    await definition.verify({
-      realization: "production",
-      location,
-      locations: active.locations,
-      metrics: testMetrics({ artifactBytes, buildMs, startupMs }),
-      async restart() {
-        await running?.dispose();
-        running = undefined;
-        await start();
-      },
-    });
+    if (!active) throw new Error("The production System did not start.");
+    try {
+      await definition.verify({
+        realization: "production",
+        location,
+        locations: active.locations,
+        metrics: testMetrics({ artifactBytes, buildMs, startupMs }),
+        async restart() {
+          await running?.dispose();
+          running = undefined;
+          await start();
+        },
+      });
+    } catch (error) {
+      const diagnostics = running?.diagnostics?.()?.trim();
+      if (!diagnostics) throw error;
+      throw new Error(`Production System verification failed.\n${diagnostics}`, { cause: error });
+    }
   } finally {
     await running?.dispose();
     await rm(temporary, { recursive: true, force: true });
@@ -144,7 +165,7 @@ function testMetrics(input: {
   artifactBytes?: number;
   buildMs?: number;
   startupMs: number;
-}): ApplicationTestContext["metrics"] {
+}): SystemTestContext["metrics"] {
   return Object.freeze({
     ...input,
     environment: `${process.platform}/${process.arch} ${process.version}`,
@@ -172,7 +193,7 @@ function testAdapters(input: {
       developmentHost: {
         database: input.database,
         host: "localhost",
-        secret: "poggers-application-test-secret",
+        secret: "poggers-system-test-secret",
         shutdownTimeout: 500,
       },
       webOrigin,
@@ -185,28 +206,36 @@ function testAdapters(input: {
 }
 
 function publicLocation(locations: Readonly<Record<string, readonly string[]>>): string {
-  const location = locations.web?.[0] ?? locations.server?.[0];
-  if (!location) throw new Error("The Application exposes no public development location.");
+  const entries = Object.entries(locations).sort(([left], [right]) => {
+    const rank = (identity: string) => (identity.startsWith("interface/") ? 0 : 1);
+    return rank(left) - rank(right) || left.localeCompare(right);
+  });
+  const location = entries.flatMap(([, values]) => values)[0];
+  if (!location) throw new Error("The System exposes no public development location.");
   return location;
 }
 
-type ProductionApplication = Readonly<{
+type ProductionSystem = Readonly<{
   location: string;
   locations: Readonly<Record<string, readonly string[]>>;
+  diagnostics?(): string;
   dispose(): Promise<void>;
 }>;
 
-async function startProductionApplication(
-  built: BuiltApplication,
+async function startProductionSystem(
+  built: BuiltSystem,
   directory: string,
   database: string,
   basePort: number,
-): Promise<ProductionApplication> {
+): Promise<ProductionSystem> {
   const serverArtifacts = built.artifacts.server?.entries ?? [];
-  const webRoot = built.artifacts.web?.directory;
+  const interfaceArtifacts =
+    built.artifacts.web?.entries.filter(({ kind }) => kind === "interface") ?? [];
   if (!serverArtifacts.length) {
-    if (!webRoot) throw new Error("The production Application exposes no public artifact.");
-    return startStaticApplication(webRoot, basePort);
+    if (!interfaceArtifacts.length) {
+      throw new Error("The production System exposes no public artifact.");
+    }
+    return startStaticWebArtifacts(interfaceArtifacts, basePort);
   }
 
   const httpPrograms = new Set(
@@ -216,14 +245,33 @@ async function startProductionApplication(
           program.environment.platform === "server" &&
           linkProgram(program).external.some(({ name }) => name === "http"),
       )
-      .map(({ name }) => name),
+      .map(({ id }) => id),
+  );
+  const firstHttpIndex = serverArtifacts.findIndex(({ identity }) => httpPrograms.has(identity));
+  const firstHttpPort = firstHttpIndex < 0 ? undefined : basePort + firstHttpIndex;
+  const interfaceOrigins = new Map(
+    interfaceArtifacts.map((artifact, index) => [
+      artifact.identity,
+      interfaceArtifacts.length === 1
+        ? `http://127.0.0.1:${firstHttpPort}`
+        : `http://web-${index + 1}.localhost:${firstHttpPort}`,
+    ]),
+  );
+  const webInterfaces = JSON.stringify(
+    interfaceArtifacts.map((artifact) => ({
+      identity: artifact.identity,
+      origin: interfaceOrigins.get(artifact.identity)!,
+      root: artifact.path,
+    })),
   );
   const processes: RunningProcess[] = [];
-  const httpLocations: string[] = [];
+  const locations: Record<string, readonly string[]> = {};
   try {
     for (const [index, artifact] of serverArtifacts.entries()) {
       const port = basePort + index;
-      if (httpPrograms.has(artifact.program)) httpLocations.push(`http://127.0.0.1:${port}`);
+      const http = httpPrograms.has(artifact.identity);
+      const origin = `http://127.0.0.1:${port}`;
+      if (http) locations[artifact.identity] = [origin];
       processes.push(
         startProcess(artifact.path, directory, {
           HOST: "127.0.0.1",
@@ -232,16 +280,24 @@ async function startProductionApplication(
           POGGERS_HTTP_BODY_LIMIT: "1024",
           POGGERS_HTTP_TIMEOUT_MS: "2000",
           POGGERS_HTTP_SHUTDOWN_TIMEOUT_MS: "500",
-          POGGERS_WEB_ORIGIN: `http://127.0.0.1:${port}`,
-          ...(webRoot ? { POGGERS_WEB_ROOT: webRoot } : {}),
+          POGGERS_WEB_ORIGIN: interfaceOrigins.values().next().value ?? origin,
+          ...(http && interfaceArtifacts.length === 1
+            ? { POGGERS_WEB_ROOT: interfaceArtifacts[0]!.path }
+            : {}),
+          ...(http && interfaceArtifacts.length > 1
+            ? { POGGERS_WEB_INTERFACES: webInterfaces }
+            : {}),
         }),
       );
     }
-    if (!httpLocations.length) {
-      if (!webRoot) {
-        throw new Error("The production Application exposes no public HTTP or web artifact.");
+    if (firstHttpPort === undefined) {
+      if (!interfaceArtifacts.length) {
+        throw new Error("The production System exposes no public HTTP or web artifact.");
       }
-      const web = await startStaticApplication(webRoot, basePort + serverArtifacts.length);
+      const web = await startStaticWebArtifacts(
+        interfaceArtifacts,
+        basePort + serverArtifacts.length,
+      );
       return {
         ...web,
         async dispose() {
@@ -249,18 +305,47 @@ async function startProductionApplication(
         },
       };
     }
+    for (const [identity, origin] of interfaceOrigins) locations[identity] = [origin];
+    const location = interfaceOrigins.values().next().value ?? `http://127.0.0.1:${firstHttpPort}`;
     return {
-      location: httpLocations[0]!,
-      locations: {
-        server: httpLocations,
-        ...(webRoot ? { web: httpLocations } : {}),
-      },
+      location,
+      locations: Object.freeze(locations),
+      diagnostics: () =>
+        processes
+          .map(({ child, output }) => {
+            const status = child.exitCode ?? child.signalCode ?? "running";
+            return `[${status}]\n${output()}`;
+          })
+          .join("\n"),
       dispose: () => disposeProcesses(processes),
     };
   } catch (error) {
     await disposeProcesses(processes);
     throw error;
   }
+}
+
+async function startStaticWebArtifacts(
+  artifacts: readonly Readonly<{ identity: string; path: string }>[],
+  basePort: number,
+): Promise<ProductionSystem> {
+  const servers = await Promise.all(
+    artifacts.map((artifact, index) => startStaticWebArtifact(artifact.path, basePort + index)),
+  );
+  return {
+    location: servers[0]!.location,
+    locations: Object.freeze(
+      Object.fromEntries(
+        artifacts.map((artifact, index) => [
+          artifact.identity,
+          [servers[index]!.location] as const,
+        ]),
+      ),
+    ),
+    async dispose() {
+      await Promise.all(servers.map((server) => server.dispose()));
+    },
+  };
 }
 
 type RunningProcess = Readonly<{
@@ -304,10 +389,7 @@ async function disposeProcesses(processes: readonly RunningProcess[]): Promise<v
   );
 }
 
-async function startStaticApplication(
-  directory: string,
-  port: number,
-): Promise<ProductionApplication> {
+async function startStaticWebArtifact(directory: string, port: number): Promise<ProductionSystem> {
   const root = resolve(directory);
   const index = await readFile(resolve(root, "index.html"));
   const server = createHttpServer(async (request, response) => {
@@ -333,7 +415,7 @@ async function startStaticApplication(
   };
 }
 
-async function ready(location: string): Promise<void> {
+async function ready(location: string, diagnostics?: () => string | undefined): Promise<void> {
   const deadline = Date.now() + 15_000;
   let failure: unknown;
   while (Date.now() < deadline) {
@@ -346,7 +428,22 @@ async function ready(location: string): Promise<void> {
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
     }
   }
-  throw new Error(`Application did not become ready at ${location}.`, { cause: failure });
+  const output = diagnostics?.()?.trim();
+  throw new Error(`System did not become ready at ${location}.${output ? `\n${output}` : ""}`, {
+    cause: failure,
+  });
+}
+
+function hasErrorCode(error: unknown, code: string, seen = new Set<object>()): boolean {
+  if (!error || typeof error !== "object" || seen.has(error)) return false;
+  seen.add(error);
+  if ("code" in error && error.code === code) return true;
+  if (error instanceof AggregateError) {
+    for (const nested of error.errors) {
+      if (hasErrorCode(nested, code, seen)) return true;
+    }
+  }
+  return "cause" in error && hasErrorCode(error.cause, code, seen);
 }
 
 async function availablePort(excluded: ReadonlySet<number> = new Set()): Promise<number> {
@@ -357,7 +454,7 @@ async function availablePort(excluded: ReadonlySet<number> = new Set()): Promise
       server.listen(0, "127.0.0.1", () => {
         const address = server.address();
         if (!address || typeof address === "string") {
-          server.close(() => reject(new Error("Cannot allocate an application test port.")));
+          server.close(() => reject(new Error("Cannot allocate a System test port.")));
           return;
         }
         server.close((error) => (error ? reject(error) : resolvePromise(address.port)));
@@ -383,7 +480,7 @@ async function availablePortRange(size: number): Promise<readonly number[]> {
       await Promise.all(reservations.map(closePort));
     }
   }
-  throw new Error(`Cannot allocate ${size} contiguous application test ports.`);
+  throw new Error(`Cannot allocate ${size} contiguous System test ports.`);
 }
 
 function reservePort(port: number): Promise<ReturnType<typeof createPortServer>> {

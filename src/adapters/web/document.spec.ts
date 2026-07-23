@@ -39,6 +39,13 @@ const contracts: Record<string, WebDocumentComponentContract> = {
   },
 };
 
+const emptyPresentation = {
+  parameters: {},
+  create() {
+    return {};
+  },
+};
+
 afterEach(() => vi.unstubAllGlobals());
 
 describe("web document IR", () => {
@@ -514,14 +521,18 @@ Read [the reference](/reference).
     };
 
     const first = await prepareWebDocument({
-      application,
+      system: application,
+      interface: "shell",
       program: "browser",
+      presentation: emptyPresentation,
       manifest,
       components: contracts,
     });
     const second = await prepareWebDocument({
-      application,
+      system: application,
+      interface: "shell",
       program: "browser",
+      presentation: emptyPresentation,
       manifest,
       components: contracts,
     });
@@ -569,8 +580,10 @@ Read [the reference](/reference).
       },
     };
     const document = await prepareWebDocument({
-      application,
+      system: application,
+      interface: "shell",
       program: "browser",
+      presentation: emptyPresentation,
       manifest: {
         name: "browser",
         contributions: [{ feature: "shell", requires: [], provides: [] }],
@@ -690,8 +703,10 @@ Read [the reference](/reference).
       contributions: [{ feature: "shell", requires: ["repository"], provides: [] }],
     };
     const document = await prepareWebDocument({
-      application,
+      system: application,
+      interface: "shell",
       program: "browser",
+      presentation: emptyPresentation,
       manifest: shellManifest,
       components: {
         "@feature/shell/component/Application": {

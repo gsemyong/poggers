@@ -1,6 +1,6 @@
 import { endBatch, startBatch } from "alien-signals";
 
-import type { Feature } from "@/core/application";
+import type { Feature } from "@/core/feature";
 import type { Program } from "@/core/program";
 import { mapStream } from "@/core/stream";
 import type {
@@ -113,7 +113,7 @@ export type EntityAuthorization<Model extends EntityModelDefinition> =
       entity: ValueOf<Model>;
     }>;
 
-/** Domain implementation required from an application using the generic entity language. */
+/** Domain implementation required by a Feature using the generic entity language. */
 export type EntityImplementation<Model extends EntityModelDefinition> = Readonly<{
   name: Model["Name"];
   create(input: {

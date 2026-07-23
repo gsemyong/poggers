@@ -42,6 +42,6 @@ const unexpectedExternal: ProgramExternalDependencies<App, "browser"> = {
 };
 void unexpectedExternal;
 
-// @ts-expect-error clock is required by the complete Application contract.
+// @ts-expect-error clock is required by the complete System contract.
 const missingExternal: ProgramExternalDependencies<App, "browser"> = {};
 void missingExternal;

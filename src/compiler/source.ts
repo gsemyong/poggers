@@ -4,14 +4,14 @@ import { dirname, isAbsolute, relative, resolve } from "node:path";
 import * as ts from "@typescript/typescript6";
 
 import type {
-  ApplicationSourceContext,
+  SystemSourceContext,
   FeatureSourceContext,
   ProgramSourceContext,
   SourceCompilerAPI,
   SourceCompilerExtension,
 } from "@/compiler/extension";
 import {
-  POGGERS_IR_VERSION,
+  SYSTEM_IR_VERSION,
   type DependencyIR,
   type ComponentIR,
   type CompilerExtensionsIR,
@@ -21,7 +21,9 @@ import {
   type FeatureIR,
   type FieldIR,
   type FunctionIR,
-  type ApplicationIR,
+  type InterfacePresentationIR,
+  type PlatformInterfaceIR,
+  type SystemIR,
   type ProgramContributionIR,
   type ProgramIR,
   type SourceSpan,
@@ -30,62 +32,60 @@ import {
 } from "@/compiler/ir";
 import { compilePresentationSource } from "@/compiler/presentation";
 
-export class ApplicationDiagnostic extends Error {
+export class SystemDiagnostic extends Error {
   readonly span: SourceSpan;
 
   constructor(message: string, span: SourceSpan) {
     super(`${span.file}:${span.line}:${span.column}: ${message}`);
-    this.name = "ApplicationDiagnostic";
+    this.name = "SystemDiagnostic";
     this.span = span;
   }
 }
 
-export type ApplicationPaths = Readonly<{
+export type SystemPaths = Readonly<{
   directory: string;
   source: string;
-  application: string;
+  system: string;
 }>;
 
-export type ApplicationCompilation = Readonly<{
-  ir: ApplicationIR;
+export type SystemCompilation = Readonly<{
+  ir: SystemIR;
   presentationSources: ReadonlySet<string>;
 }>;
 
-export type ApplicationCompiler = Readonly<{
-  compile(changedFile?: string): ApplicationCompilation;
+export type SystemCompiler = Readonly<{
+  compile(changedFile?: string): SystemCompilation;
 }>;
 
-/** Resolves the one conventional Application entry without executing it. */
-export function resolveApplication(directory: string): ApplicationPaths {
+/** Resolves the one conventional System entry without executing it. */
+export function resolveSystem(directory: string): SystemPaths {
   const root = resolve(directory);
   const source = resolve(root, "src");
-  for (const name of ["app.tsx", "app.ts"]) {
-    const application = resolve(source, name);
-    try {
-      if (statSync(application).size > 0) return { directory: root, source, application };
-    } catch {
-      continue;
-    }
+  const system = resolve(source, "system.ts");
+  try {
+    if (statSync(system).size > 0) return { directory: root, source, system };
+  } catch {
+    // Report the one source convention below.
   }
-  throw new Error(`${source} must contain app.tsx or app.ts.`);
+  throw new Error(`${source} must contain system.ts.`);
 }
 
-export function compileApplication(
+export function compileSystem(
   entry: string,
   extensions: readonly SourceCompilerExtension[] = [],
-): ApplicationIR {
-  return compileApplicationProgram(entry, undefined, undefined, extensions).compilation.ir;
+): SystemIR {
+  return compileSystemProgram(entry, undefined, undefined, extensions).compilation.ir;
 }
 
 /** Retains TypeScript's semantic graph across development compilations. */
-export function createApplicationCompiler(
+export function createSystemCompiler(
   entry: string,
   extensions: readonly SourceCompilerExtension[] = [],
-): ApplicationCompiler {
+): SystemCompiler {
   let previous: ts.Program | undefined;
   return {
     compile(changedFile) {
-      const result = compileApplicationProgram(entry, previous, changedFile, extensions);
+      const result = compileSystemProgram(entry, previous, changedFile, extensions);
       previous = result.program;
       return result.compilation;
     },
@@ -145,8 +145,8 @@ function sourceCompilerAPI(checker: ts.TypeChecker): SourceCompilerAPI {
 
 function extensionField(
   extensions: readonly SourceCompilerExtension[],
-  kind: "application",
-  context: ApplicationSourceContext,
+  kind: "system",
+  context: SystemSourceContext,
 ): Readonly<{ extensions?: CompilerExtensionsIR }>;
 function extensionField(
   extensions: readonly SourceCompilerExtension[],
@@ -160,14 +160,14 @@ function extensionField(
 ): Readonly<{ extensions?: CompilerExtensionsIR }>;
 function extensionField(
   extensions: readonly SourceCompilerExtension[],
-  kind: "application" | "feature" | "program",
-  context: ApplicationSourceContext | FeatureSourceContext | ProgramSourceContext,
+  kind: "system" | "feature" | "program",
+  context: SystemSourceContext | FeatureSourceContext | ProgramSourceContext,
 ): Readonly<{ extensions?: CompilerExtensionsIR }> {
   const values: Record<string, ExtensionIR> = Object.create(null);
   for (const extension of extensions) {
     const value =
-      kind === "application"
-        ? extension.application?.(context as ApplicationSourceContext)
+      kind === "system"
+        ? extension.system?.(context as SystemSourceContext)
         : kind === "feature"
           ? extension.feature?.(context as FeatureSourceContext)
           : extension.program?.(context as ProgramSourceContext);
@@ -204,12 +204,12 @@ function assertExtensionIR(
   active.delete(value);
 }
 
-function compileApplicationProgram(
+function compileSystemProgram(
   entry: string,
   previous?: ts.Program,
   changedFile?: string,
   extensions: readonly SourceCompilerExtension[] = [],
-): Readonly<{ compilation: ApplicationCompilation; program: ts.Program }> {
+): Readonly<{ compilation: SystemCompilation; program: ts.Program }> {
   validateCompilerExtensions(extensions);
   const file = resolve(entry);
   const configuration = ts.findConfigFile(dirname(file), ts.sys.fileExists, "tsconfig.json");
@@ -245,87 +245,114 @@ function compileApplicationProgram(
   if (!source) throw new Error(`Cannot read ${file}.`);
   const checker = program.getTypeChecker();
   const assignment = source.statements.find(ts.isExportAssignment);
-  if (!assignment) throw diagnostic(source, "The application must have one default export.");
+  if (!assignment) throw diagnostic(source, "The System must have one default export.");
   const exported = unwrapExpression(assignment.expression);
-  const applicationObject = objectExpression(checker, exported);
-  if (!applicationObject)
-    throw diagnostic(exported, "The default export must be an application object.");
-  const contractNode = applicationContractNode(assignment.expression);
-  const contract = contractNode
-    ? checker.getTypeFromTypeNode(contractNode)
-    : checker.getTypeAtLocation(exported);
-  const featuresContract = propertyType(checker, contract, "Features", contractNode ?? exported);
-  const featuresValue = objectMember(checker, applicationObject, "features");
-  if (!featuresContract || !featuresValue) {
-    throw diagnostic(
-      applicationObject,
-      "The application contract and value must declare Features.",
-    );
+  const systemObject = objectExpression(checker, exported);
+  if (!systemObject) throw diagnostic(exported, "The default export must be a System object.");
+  const contract = checker.getTypeAtLocation(exported);
+  const featuresValue = objectMember(checker, systemObject, "features");
+  if (!featuresValue) {
+    throw diagnostic(systemObject, "The System must compose Features.");
   }
+  const featureValues = requireObject(checker, featuresValue, "System features must be an object.");
+  const featuresContract = checker.getTypeAtLocation(featureValues);
 
-  const metadata = objectExpression(checker, objectMember(checker, applicationObject, "metadata"));
-  const applicationName =
-    stringMember(checker, metadata, "name") ?? source.fileName.split("/").at(-2) ?? "app";
+  const metadata = objectExpression(checker, objectMember(checker, systemObject, "metadata"));
+  const systemName =
+    stringMember(checker, metadata, "name") ?? source.fileName.split("/").at(-2) ?? "system";
   const root = dirname(file);
-  const applicationExtensions = extensionField(extensions, "application", {
+  const systemExtensions = extensionField(extensions, "system", {
     checker,
     source: sourceCompilerAPI(checker),
     contract,
-    implementation: applicationObject,
-    location: contractNode ?? exported,
+    implementation: systemObject,
+    location: exported,
     root,
   });
   const features: FeatureIR[] = [];
   const contributions: UnassembledProgramIR[] = [];
+  const interfaceSources: InterfaceSource[] = [];
   extractFeatures(
     checker,
     featuresContract,
-    requireObject(checker, featuresValue, "Application features must be an object."),
+    featureValues,
     "",
     features,
     contributions,
+    interfaceSources,
     extensions,
     root,
+    featureValues,
+    undefined,
+    undefined,
+    undefined,
+    true,
   );
   validateProgramEnvironments(contributions);
   const programs = assemblePrograms(contributions);
 
   const platforms = [...new Set(programs.map(({ environment }) => environment.platform))].sort();
-
-  const implementationSources = presentationImplementationSources(
-    program,
-    checker,
-    applicationObject,
-    root,
-  );
-  const presentationIR = [...implementationSources]
-    .map((path) => {
+  const presentationSources = new Set<string>();
+  const presentationIR: InterfacePresentationIR[] = [];
+  const interfaces: PlatformInterfaceIR[] = [];
+  for (const item of interfaceSources.sort((left, right) => left.path.localeCompare(right.path))) {
+    const sources = presentationImplementationSources(program, checker, item.implementation, root);
+    sources.forEach((path) => presentationSources.add(path));
+    for (const path of sources) {
       const implementation = program.getSourceFile(path);
       if (!implementation) throw new Error(`Cannot read Presentation source ${path}.`);
-      return compilePresentationSource(implementation.text, relative(root, path)).ir;
-    })
-    .filter(({ animations, declarations }) => animations.length || declarations.length)
-    .sort(({ file: left }, { file: right }) => left.localeCompare(right));
+      const compiled = compilePresentationSource(implementation.text, relative(root, path)).ir;
+      if (compiled.animations.length || compiled.declarations.length) {
+        presentationIR.push({ interface: item.path, ...compiled });
+      }
+    }
+    interfaces.push({
+      id: `interface/${item.path}`,
+      feature: item.path,
+      app: item.app,
+      platform: item.platform,
+      programs: programs
+        .filter((candidate) => candidate.interface === item.path)
+        .map(({ id }) => id)
+        .sort(),
+      presentationSources: [...sources].map((path) => relative(root, path)).sort(),
+    });
+  }
+  const apps = features
+    .filter(({ kind }) => kind === "app")
+    .map(({ path }) => ({
+      id: `app/${path}`,
+      feature: path,
+      interfaces: interfaces
+        .filter(({ app }) => app === path)
+        .map(({ id }) => id)
+        .sort(),
+    }))
+    .sort(byId);
   const ir = normalizeSourceFiles(
     {
-      version: POGGERS_IR_VERSION,
-      application: {
-        id: `application/${applicationName}`,
-        name: applicationName,
-        presentations: presentationNames(checker, contract, contractNode ?? exported),
-        ...applicationExtensions,
+      version: SYSTEM_IR_VERSION,
+      system: {
+        id: "system",
+        name: systemName,
+        ...systemExtensions,
       },
       platforms,
+      apps,
+      interfaces: interfaces.sort(byId),
       features: features.sort(byId),
       programs: programs.sort(byId),
-      presentations: presentationIR,
+      presentations: presentationIR.sort((left, right) =>
+        `${left.interface}/${left.file}`.localeCompare(`${right.interface}/${right.file}`),
+      ),
     },
     configuration ? dirname(configuration) : root,
   );
+  for (const extension of extensions) extension.validate?.(ir);
   return {
     compilation: {
       ir,
-      presentationSources: implementationSources,
+      presentationSources,
     },
     program,
   };
@@ -334,8 +361,19 @@ function compileApplicationProgram(
 type UnassembledProgramIR = ProgramContributionIR &
   Readonly<{
     name: string;
+    logicalName: string;
     environment: ProgramIR["environment"];
+    interface?: string;
   }>;
+
+type InterfaceSource = Readonly<{
+  path: string;
+  app: string;
+  platform: string;
+  implementation: ts.ObjectLiteralExpression;
+}>;
+
+type InterfaceOwner = Readonly<{ path: string; platform: string }>;
 
 function validateProgramEnvironments(programs: readonly UnassembledProgramIR[]): void {
   const environments = new Map<string, ProgramIR["environment"]>();
@@ -346,7 +384,7 @@ function validateProgramEnvironments(programs: readonly UnassembledProgramIR[]):
       continue;
     }
     if (JSON.stringify(previous) === JSON.stringify(program.environment)) continue;
-    throw new ApplicationDiagnostic(
+    throw new SystemDiagnostic(
       `Program ${JSON.stringify(program.name)} has incompatible execution contexts ` +
         `${JSON.stringify(previous.name)} and ${JSON.stringify(program.environment.name)}.`,
       program.span,
@@ -365,7 +403,7 @@ function assemblePrograms(contributions: readonly UnassembledProgramIR[]): Progr
       ui?.root ? [{ feature, component: ui.root }] : [],
     );
     if (roots.length > 1) {
-      throw new ApplicationDiagnostic(
+      throw new SystemDiagnostic(
         `Program ${JSON.stringify(name)} declares multiple UI roots: ${roots
           .map(({ feature, component }) => `${feature}.${component}`)
           .join(", ")}.`,
@@ -375,8 +413,18 @@ function assemblePrograms(contributions: readonly UnassembledProgramIR[]): Progr
     return {
       id: `program/${name}`,
       name,
+      logicalName: members[0]!.logicalName,
       environment,
-      contributions: members.map(({ name: _name, environment: _environment, ...member }) => member),
+      ...(members[0]!.interface ? { interface: members[0]!.interface } : {}),
+      contributions: members.map(
+        ({
+          name: _name,
+          logicalName: _logicalName,
+          environment: _environment,
+          interface: _interface,
+          ...member
+        }) => member,
+      ),
       ...(roots[0] ? { ui: { root: roots[0] } } : {}),
     };
   });
@@ -385,25 +433,18 @@ function assemblePrograms(contributions: readonly UnassembledProgramIR[]): Progr
 function presentationImplementationSources(
   program: ts.Program,
   checker: ts.TypeChecker,
-  application: ts.ObjectLiteralExpression,
+  interfaceImplementation: ts.ObjectLiteralExpression,
   root: string,
 ): ReadonlySet<string> {
-  const presentations = objectExpression(
-    checker,
-    objectMember(checker, application, "presentations"),
-  );
-  if (!presentations) return new Set();
+  const presentation = objectMember(checker, interfaceImplementation, "presentation");
+  if (!presentation) return new Set();
   const sources = new Set<string>();
   const pending: ts.SourceFile[] = [];
 
-  for (const property of presentations.properties) {
-    const expression = propertyExpression(property);
-    if (!expression) continue;
-    for (const declaration of expressionDeclarations(checker, expression)) {
-      const source = declaration.getSourceFile();
-      if (source.isDeclarationFile || !inside(root, source.fileName)) continue;
-      pending.push(source);
-    }
+  for (const declaration of expressionDeclarations(checker, presentation)) {
+    const source = declaration.getSourceFile();
+    if (source.isDeclarationFile || !inside(root, source.fileName)) continue;
+    pending.push(source);
   }
 
   while (pending.length) {
@@ -431,12 +472,6 @@ function presentationImplementationSources(
   // Keep only files TypeScript actually included in this Program.
   const included = new Set(program.getSourceFiles().map((source) => resolve(source.fileName)));
   return new Set([...sources].filter((source) => included.has(source)));
-}
-
-function propertyExpression(property: ts.ObjectLiteralElementLike): ts.Expression | undefined {
-  if (ts.isPropertyAssignment(property)) return property.initializer;
-  if (ts.isShorthandPropertyAssignment(property)) return property.name;
-  return undefined;
 }
 
 function expressionDeclarations(
@@ -469,16 +504,23 @@ function extractFeatures(
   parent: string,
   features: FeatureIR[],
   programs: UnassembledProgramIR[],
+  interfaces: InterfaceSource[],
   extensions: readonly SourceCompilerExtension[],
   root: string,
   at: ts.Node = values!,
   owner?: ts.Expression,
+  app?: string,
+  interfaceOwner?: InterfaceOwner,
+  contractsAreFeatureValues = false,
 ): void {
   for (const symbol of sortedSymbols(contracts.getProperties())) {
     const name = symbol.getName();
     const path = parent ? `${parent}.${name}` : name;
     const location = symbol.valueDeclaration ?? at;
-    const contract = checker.getTypeOfSymbolAtLocation(symbol, location);
+    const symbolType = checker.getTypeOfSymbolAtLocation(symbol, location);
+    const contract = contractsAreFeatureValues
+      ? retainedFeatureContract(checker, symbolType, location)
+      : symbolType;
     const inherited = owner ? resolveFeatureChild(checker, owner, name) : undefined;
     const value = values
       ? resolveObjectMember(checker, values, name)
@@ -492,6 +534,55 @@ function extractFeatures(
       );
     const featureValue = value ? objectExpression(checker, value) : undefined;
     const featureLocation = value ?? location;
+    const isApp = booleanLiteralProperty(checker, contract, "App", location) === true;
+    const interfaceMarker = propertyType(checker, contract, "Interface", location);
+    if (isApp && interfaceMarker) {
+      throw diagnostic(
+        featureLocation,
+        `Feature ${JSON.stringify(path)} cannot be an App and an interface.`,
+      );
+    }
+    if (isApp && app) {
+      throw diagnostic(
+        featureLocation,
+        `App ${JSON.stringify(path)} cannot be nested in another App.`,
+      );
+    }
+    const ownedApp = isApp ? path : app;
+    let ownedInterface = interfaceOwner;
+    let interfacePlatform: string | undefined;
+    if (interfaceMarker) {
+      if (!ownedApp) {
+        throw diagnostic(
+          featureLocation,
+          `Interface ${JSON.stringify(path)} must belong to an App.`,
+        );
+      }
+      if (interfaceOwner) {
+        throw diagnostic(
+          featureLocation,
+          `Interface ${JSON.stringify(path)} cannot be nested in another interface.`,
+        );
+      }
+      const platform = propertyType(checker, interfaceMarker, "Platform", location);
+      if (!platform) {
+        throw diagnostic(featureLocation, `Interface ${JSON.stringify(path)} has no Platform.`);
+      }
+      interfacePlatform = literalProperty(checker, platform, "Name", location);
+      ownedInterface = { path, platform: interfacePlatform };
+      if (!featureValue) {
+        throw diagnostic(
+          featureLocation,
+          `Interface ${JSON.stringify(path)} must expose compiler-readable metadata.`,
+        );
+      }
+      interfaces.push({
+        path,
+        app: ownedApp,
+        platform: interfacePlatform,
+        implementation: featureValue,
+      });
+    }
     const programContracts = propertyType(checker, contract, "Programs", location);
     const programValues = objectExpression(
       checker,
@@ -519,27 +610,28 @@ function extractFeatures(
           throw diagnostic(programValues, `Program ${JSON.stringify(id)} has no implementation.`);
         }
         const programValue = implementation ? objectExpression(checker, implementation) : undefined;
-        const expandedProgram =
-          value && !featureValue ? resolveFeatureProgram(checker, value, programName) : undefined;
+        const expandedProgram = value
+          ? resolveFeatureProgram(checker, value, programName)
+          : undefined;
         const expandedStart = expandedProgram
           ? resolveStaticMember(checker, expandedProgram, "start")
           : undefined;
-        programs.push(
-          extractProgram(
-            checker,
-            programContract,
-            programValue,
-            path,
-            programName,
-            featureLocation,
-            Boolean((value && !featureValue) || (implementation && !programValue)),
-            expandedProgram,
-            expandedStart,
-            extensions,
-            root,
-          ),
+        const extracted = extractProgram(
+          checker,
+          programContract,
+          programValue,
+          path,
+          programName,
+          featureLocation,
+          Boolean((value && !featureValue) || (implementation && !programValue)),
+          expandedProgram,
+          expandedStart,
+          extensions,
+          root,
+          ownedInterface,
         );
-        programIds.push(id);
+        programs.push(extracted);
+        programIds.push(`program/${extracted.name}`);
       }
     }
 
@@ -556,18 +648,25 @@ function extractFeatures(
         path,
         features,
         programs,
+        interfaces,
         extensions,
         root,
         featureLocation,
         value,
+        ownedApp,
+        ownedInterface,
       );
     }
 
     features.push({
       id: `feature/${path}`,
       path,
+      kind: isApp ? "app" : interfaceMarker ? "interface" : "feature",
+      ...(ownedApp ? { app: ownedApp } : {}),
+      ...(ownedInterface ? { interface: ownedInterface.path } : {}),
+      ...(interfacePlatform ? { platform: interfacePlatform } : {}),
       children: childIds.sort(),
-      programs: programIds.sort(),
+      programs: [...new Set(programIds)].sort(),
       ...extensionField(extensions, "feature", {
         checker,
         source: sourceCompilerAPI(checker),
@@ -593,6 +692,7 @@ function extractProgram(
   expandedStart?: StaticValue,
   extensions: readonly SourceCompilerExtension[] = [],
   sourceRoot = dirname(at.getSourceFile().fileName),
+  interfaceOwner?: InterfaceOwner,
 ): UnassembledProgramIR {
   const location = value ?? at;
   const environment = propertyType(checker, contract, "Environment", location);
@@ -604,6 +704,10 @@ function extractProgram(
     throw diagnostic(location, `Environment ${JSON.stringify(environmentName)} has no Platform.`);
   }
   const platform = literalProperty(checker, platformContract, "Name", location);
+  const concreteName =
+    interfaceOwner && interfaceOwner.platform === platform
+      ? `${interfaceOwner.path}.${name}`
+      : name;
   const uiContract = propertyType(checker, environment, "UI", location);
   const ui = uiContract ? literalProperty(checker, uiContract, "Name", location) : undefined;
   const state = propertyType(checker, contract, "State", location);
@@ -624,9 +728,11 @@ function extractProgram(
     checker,
     objectMember(checker, readableValue, "components"),
   );
+  const directStart = value ? objectMemberDeclaration(value, "start") : undefined;
   const start =
-    (value ? objectMemberDeclaration(value, "start") : undefined) ??
-    functionNode(expandedStart?.node);
+    directStart && (isFunctionImplementation(directStart) || functionFromMember(directStart))
+      ? directStart
+      : functionNode(expandedStart?.node);
   const root = stringMember(checker, readableValue, "root");
   const implementation = programImplementation(
     checker,
@@ -640,8 +746,10 @@ function extractProgram(
   return {
     id: `feature/${feature}/program/${name}`,
     feature,
-    name,
+    name: concreteName,
+    logicalName: name,
     environment: { name: environmentName, platform, ...(ui ? { ui } : {}) },
+    ...(interfaceOwner?.platform === platform ? { interface: interfaceOwner.path } : {}),
     requires: dependencyList(
       checker,
       propertyType(checker, contract, "Requires", location),
@@ -672,6 +780,7 @@ function extractProgram(
       path: feature,
       root: sourceRoot,
       feature,
+      ...(interfaceOwner ? { interface: interfaceOwner.path } : {}),
       name,
     }),
     span: spanOf(location),
@@ -711,7 +820,7 @@ function programImplementation(
     };
   } catch (error) {
     if (
-      error instanceof ApplicationDiagnostic &&
+      error instanceof SystemDiagnostic &&
       /Unsupported portable (expression|statement)/.test(error.message)
     ) {
       return {
@@ -2471,32 +2580,6 @@ function dependencyBinding(parameter: ts.ParameterDeclaration | undefined): stri
   return undefined;
 }
 
-function applicationContractNode(expression: ts.Expression): ts.TypeNode | undefined {
-  let current = expression;
-  while (ts.isParenthesizedExpression(current)) current = current.expression;
-  if (!ts.isSatisfiesExpression(current)) return undefined;
-  if (!ts.isTypeReferenceNode(current.type) || current.type.typeArguments?.length !== 1)
-    return current.type;
-  return current.type.typeArguments[0];
-}
-
-function presentationNames(checker: ts.TypeChecker, contract: ts.Type, at: ts.Node): string[] {
-  const presentations = propertyType(checker, contract, "Presentations", at);
-  if (!presentations) return [];
-  if (presentations.flags & ts.TypeFlags.StringLiteral) {
-    return [(presentations as ts.StringLiteralType).value];
-  }
-  if (presentations.isUnion()) {
-    return presentations.types
-      .filter((type): type is ts.StringLiteralType =>
-        Boolean(type.flags & ts.TypeFlags.StringLiteral),
-      )
-      .map((type) => type.value)
-      .sort();
-  }
-  return sortedSymbols(presentations.getProperties()).map((symbol) => symbol.getName());
-}
-
 function propertyType(
   checker: ts.TypeChecker,
   owner: ts.Type,
@@ -2507,6 +2590,37 @@ function propertyType(
   return symbol
     ? checker.getTypeOfSymbolAtLocation(symbol, symbol.valueDeclaration ?? at)
     : undefined;
+}
+
+function booleanLiteralProperty(
+  checker: ts.TypeChecker,
+  owner: ts.Type,
+  name: string,
+  at: ts.Node,
+): boolean | undefined {
+  const value = propertyType(checker, owner, name, at);
+  if (!value || !(value.flags & ts.TypeFlags.BooleanLiteral)) return undefined;
+  return checker.typeToString(value, at) === "true";
+}
+
+function retainedFeatureContract(checker: ts.TypeChecker, feature: ts.Type, at: ts.Node): ts.Type {
+  for (const symbol of feature.getProperties()) {
+    const retained = symbol.declarations?.some((declaration) => {
+      if (!ts.isPropertySignature(declaration) || !ts.isComputedPropertyName(declaration.name)) {
+        return false;
+      }
+      return (
+        ts.isIdentifier(declaration.name.expression) &&
+        declaration.name.expression.text === "featureContract"
+      );
+    });
+    if (!retained) continue;
+    return fieldValueType(checker.getTypeOfSymbolAtLocation(symbol, at), true);
+  }
+  throw diagnostic(
+    at,
+    "System Features must be created by a typed Feature or reusable Feature factory.",
+  );
 }
 
 function literalProperty(
@@ -2644,10 +2758,6 @@ function stringMember(
 ): string | undefined {
   const value = objectMember(checker, object, name);
   return value && ts.isStringLiteral(value) ? value.text : undefined;
-}
-
-function resolveIdentifier(checker: ts.TypeChecker, identifier: ts.Identifier): ts.Expression {
-  return resolveSymbol(checker, checker.getSymbolAtLocation(identifier), identifier);
 }
 
 function resolveSymbol(
@@ -2995,11 +3105,16 @@ function objectExpression(
   expression: ts.Expression | undefined,
 ): ts.ObjectLiteralExpression | undefined {
   if (!expression) return undefined;
-  const unwrapped = unwrapExpression(expression);
-  if (ts.isIdentifier(unwrapped)) {
-    return objectExpression(checker, resolveIdentifier(checker, unwrapped));
-  }
-  return ts.isObjectLiteralExpression(unwrapped) ? unwrapped : undefined;
+  const resolved = resolveStaticValue(
+    checker,
+    { node: expression, bindings: new Map(), types: new Map() },
+    new Set(),
+  );
+  const node =
+    resolved?.node && ts.isExpression(resolved.node)
+      ? unwrapExpression(resolved.node)
+      : unwrapExpression(expression);
+  return ts.isObjectLiteralExpression(node) ? node : undefined;
 }
 
 function requireObject(
@@ -3092,8 +3207,8 @@ function spanOf(node: ts.Node): SourceSpan {
   return { file: source.fileName, line: position.line + 1, column: position.character + 1 };
 }
 
-function diagnostic(node: ts.Node, message: string): ApplicationDiagnostic {
-  return new ApplicationDiagnostic(message, spanOf(node));
+function diagnostic(node: ts.Node, message: string): SystemDiagnostic {
+  return new SystemDiagnostic(message, spanOf(node));
 }
 
 function formatTypeScriptDiagnostic(item: ts.Diagnostic): string {
@@ -3118,7 +3233,7 @@ function readCompilerOptions(configuration: string): ts.CompilerOptions {
   return parsed.options;
 }
 
-function normalizeSourceFiles(ir: ApplicationIR, root: string): ApplicationIR {
+function normalizeSourceFiles(ir: SystemIR, root: string): SystemIR {
   const normalizeSpan = (span: SourceSpan): SourceSpan => ({
     ...span,
     file: relative(root, span.file).replaceAll("\\", "/"),

@@ -3,8 +3,9 @@ import fc from "fast-check";
 import { describe, expect, test } from "vitest";
 
 import type { ProgramManifest } from "@/compiler/ir";
-import type { Application, Feature } from "@/core/application";
+import type { Feature } from "@/core/feature";
 import type { Program } from "@/core/program";
+import type { System } from "@/core/system";
 import type { BrowserMainThread } from "@/platforms/web/platform";
 import {
   bindDependenciesToScope,
@@ -480,7 +481,7 @@ describe("Program runtime", () => {
         >;
       };
     };
-    const application: Application<{ Features: { watcher: Watcher } }> = {
+    const application: System<{ Features: { watcher: Watcher } }> = {
       features: {
         watcher: {
           programs: {
@@ -540,7 +541,7 @@ describe("Program runtime", () => {
         },
       },
     };
-    const application: Application<App> = { features: { parent } };
+    const application: System<App> = { features: { parent } };
     const process = await startProcess(
       application,
       "cloud",
@@ -573,7 +574,7 @@ describe("Program runtime", () => {
         },
       },
     });
-    const application: Application<App> = {
+    const application: System<App> = {
       features: { first: feature("first"), second: feature("second") },
     };
 
@@ -600,7 +601,7 @@ describe("Program runtime", () => {
     };
     type App = { Features: { first: Leaf; second: Leaf } };
     const events: string[] = [];
-    const application: Application<App> = {
+    const application: System<App> = {
       features: {
         first: {
           programs: {
@@ -743,7 +744,7 @@ describe("Program runtime", () => {
         },
       },
     };
-    const application: Application<App> = { features: { consumer } };
+    const application: System<App> = { features: { consumer } };
     const implementations = [
       { reader: { read: () => "local" } },
       { reader: { read: () => "proxy" } },

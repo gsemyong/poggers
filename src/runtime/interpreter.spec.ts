@@ -1,11 +1,6 @@
 import { describe, expect, test } from "vitest";
 
-import {
-  POGGERS_IR_VERSION,
-  type ComponentIR,
-  type ApplicationIR,
-  type TypeIR,
-} from "@/compiler/ir";
+import { SYSTEM_IR_VERSION, type ComponentIR, type SystemIR, type TypeIR } from "@/compiler/ir";
 import {
   createHotReplacementManifest,
   HotUpdateCoordinator,
@@ -86,8 +81,8 @@ describe("semantic hot updates", () => {
   });
 
   test("derives a stable manifest from semantic IR rather than source spans", () => {
-    const first = createHotReplacementManifest(application("one.ts"));
-    const second = createHotReplacementManifest(application("moved.ts"));
+    const first = createHotReplacementManifest(system("one.ts"));
+    const second = createHotReplacementManifest(system("moved.ts"));
     expect(second).toEqual(first);
   });
 
@@ -188,16 +183,19 @@ function component(overrides: Partial<ComponentIR> = {}): ComponentIR {
   };
 }
 
-function application(file: string): ApplicationIR {
+function system(file: string): SystemIR {
   return {
-    version: POGGERS_IR_VERSION,
-    application: { id: "application/test", name: "test", presentations: [] },
+    version: SYSTEM_IR_VERSION,
+    system: { id: "system", name: "test" },
     platforms: ["web"],
-    features: [{ id: "feature/app", path: "app", children: [], programs: [] }],
+    apps: [],
+    interfaces: [],
+    features: [{ id: "feature/app", path: "app", kind: "feature", children: [], programs: [] }],
     programs: [
       {
         id: "program/browser",
         name: "browser",
+        logicalName: "browser",
         environment: { name: "browser-main", platform: "web", ui: "web" },
         contributions: [
           {

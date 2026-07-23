@@ -1,11 +1,12 @@
 import {
+  createFeature,
   placePrograms,
-  type Application,
   type Feature,
   type FeatureContractOf,
   type PlacedFeature,
-} from "@/core/application";
+} from "@/core/feature";
 import type { Program } from "@/core/program";
+import { createSystem } from "@/core/system";
 import type { BrowserMainThread, BrowserServiceWorker } from "@/platforms/web/platform";
 
 type Message = Readonly<{ id: string; text: string }>;
@@ -193,21 +194,12 @@ const shellFeature = {
   },
 } satisfies Feature<ShellFeature>;
 
-type TestApplication = {
-  Features: { shell: ShellFeature };
-  Presentations: "paper" | "native";
-};
-
-const application = {
+const system = createSystem({
   metadata: { name: "Messages" },
-  features: { shell: shellFeature },
-  presentations: {
-    paper: {},
-    native: {},
-  },
-} satisfies Application<TestApplication>;
+  features: { shell: createFeature<ShellFeature>(shellFeature) },
+});
 
-void application;
+void system;
 
 type InvalidHeadlessUI = Program<Server, { Components: {} }>;
 // @ts-expect-error Headless Environments cannot own UI.
@@ -243,12 +235,16 @@ type ConflictingEnvironments = {
 };
 
 // @ts-expect-error Contributions sharing a Program name require one Environment.
-const conflictingEnvironments: Application<ConflictingEnvironments> = {
+const conflictingEnvironments = createSystem({
   features: {
-    first: { programs: { shared: {} } },
-    second: { programs: { shared: {} } },
+    first: createFeature<ConflictingEnvironments["Features"]["first"]>({
+      programs: { shared: {} },
+    }),
+    second: createFeature<ConflictingEnvironments["Features"]["second"]>({
+      programs: { shared: {} },
+    }),
   },
-};
+});
 
 void conflictingEnvironments;
 
@@ -268,12 +264,16 @@ type SameNamedEnvironmentConflict = {
 };
 
 // @ts-expect-error Environment identity includes its Platform, not only its local name.
-const sameNamedEnvironmentConflict: Application<SameNamedEnvironmentConflict> = {
+const sameNamedEnvironmentConflict = createSystem({
   features: {
-    first: { programs: { shared: {} } },
-    second: { programs: { shared: {} } },
+    first: createFeature<SameNamedEnvironmentConflict["Features"]["first"]>({
+      programs: { shared: {} },
+    }),
+    second: createFeature<SameNamedEnvironmentConflict["Features"]["second"]>({
+      programs: { shared: {} },
+    }),
   },
-};
+});
 
 void sameNamedEnvironmentConflict;
 

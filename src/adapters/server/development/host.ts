@@ -142,7 +142,7 @@ export async function createNodeHost<Event = unknown>(
     const path =
       input.database ??
       process.env.POGGERS_DATABASE ??
-      resolve(input.directory ?? process.cwd(), ".data/application.sqlite");
+      resolve(input.directory ?? process.cwd(), ".data/system.sqlite");
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
     database = new DatabaseSync(path);
   }
@@ -156,7 +156,7 @@ export async function createNodeHost<Event = unknown>(
   try {
     if (requested.has("authentication")) {
       const auth = betterAuth({
-        appName: input.appName ?? "Poggers Application",
+        appName: input.appName ?? "Poggers",
         baseURL: origin,
         database: database!,
         emailAndPassword: { enabled: true },

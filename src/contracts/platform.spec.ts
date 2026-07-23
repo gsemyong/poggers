@@ -1,6 +1,5 @@
 import { describe, expect, test } from "vitest";
 
-import { POGGERS_IR_VERSION, type ApplicationIR } from "@/compiler/ir";
 import {
   selectPlatformAdapters,
   type DevelopmentSession,
@@ -13,27 +12,21 @@ describe("Platform Adapter selection", () => {
     const server = adapter("server");
     const web = adapter("web");
 
-    expect(selectPlatformAdapters(application(["server", "web"]), { web, server })).toEqual([
-      server,
-      web,
-    ]);
+    expect(selectPlatformAdapters(["server", "web"], { web, server })).toEqual([server, web]);
   });
 
   test("rejects missing, mismatched, and duplicate bindings", () => {
-    expect(() => selectPlatformAdapters(application(["web"]), {})).toThrow(
+    expect(() => selectPlatformAdapters(["web"], {})).toThrow(
       'No Platform Adapter is registered for "web".',
     );
-    expect(() => selectPlatformAdapters(application(["web"]), { web: adapter("native") })).toThrow(
+    expect(() => selectPlatformAdapters(["web"], { web: adapter("native") })).toThrow(
       'Platform Adapter "web" identifies itself as "native".',
     );
     expect(() =>
-      selectPlatformAdapters(
-        { ...application(["web"]), platforms: ["web", "web"] },
-        {
-          web: adapter("web"),
-        },
-      ),
-    ).toThrow("Application IR contains duplicate Platforms.");
+      selectPlatformAdapters(["web", "web"], {
+        web: adapter("web"),
+      }),
+    ).toThrow("System output selection contains duplicate Platforms.");
   });
 });
 
@@ -48,16 +41,5 @@ function adapter(name: string): PlatformAdapterImplementation {
     async build() {
       return artifacts;
     },
-  };
-}
-
-function application(platforms: readonly string[]): ApplicationIR {
-  return {
-    version: POGGERS_IR_VERSION,
-    application: { id: "application/test", name: "test", presentations: [] },
-    platforms,
-    features: [],
-    programs: [],
-    presentations: [],
   };
 }

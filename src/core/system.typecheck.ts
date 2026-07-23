@@ -1,4 +1,4 @@
-import { createFeature, type FeatureEnvironmentConflict } from "@/core/application";
+import { createFeature, type FeatureEnvironmentConflict } from "@/core/feature";
 import type { Program } from "@/core/program";
 import {
   createApp,

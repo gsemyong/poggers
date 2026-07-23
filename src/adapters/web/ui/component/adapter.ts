@@ -38,7 +38,7 @@ import { PresenceGraph } from "@/adapters/web/ui/presence";
 import { publishWebDeferredState, readWebJSONLines } from "@/adapters/web/ui/stream";
 import type { ProgramManifest } from "@/compiler/ir";
 import type { PresentationAdapter, PresentationAdapterInstance } from "@/contracts/platform";
-import type { Application, ApplicationContract, PresentationName } from "@/core/application";
+import type { System, SystemContract } from "@/core/system";
 import type { ComponentProps, ComponentName, ComponentState } from "@/core/ui/component";
 import type { WebElementPresentation, WebPresentationLanguage } from "@/platforms/web/presentation";
 import type { WebDestination } from "@/platforms/web/routing";
@@ -46,7 +46,7 @@ import { createActionEventLedger } from "@/runtime/presentation";
 import { assembleProgram, bindDependenciesToScope, ResourceScope } from "@/runtime/process";
 import { createReactiveState } from "@/runtime/state";
 
-export type ComponentRuntimeElements<Contract extends ApplicationContract> = {
+export type ComponentRuntimeElements<Contract extends SystemContract> = {
   [Name in ComponentName<Contract>]?: {
     readonly elements: Record<string, string>;
     readonly state?: readonly {
@@ -55,11 +55,6 @@ export type ComponentRuntimeElements<Contract extends ApplicationContract> = {
     readonly propCallbacks?: readonly (keyof ComponentProps<Contract, Name> & string)[];
   };
 };
-
-export type PresentationsDefinition<Contract extends ApplicationContract> = Readonly<{
-  defaultPresentation?: PresentationName<Contract>;
-  presentations: Partial<Record<PresentationName<Contract>, RuntimeConfiguredPresentation>>;
-}>;
 
 export type PresentationDependencyManifest = Readonly<
   Record<
@@ -71,22 +66,22 @@ export type PresentationDependencyManifest = Readonly<
   >
 >;
 
-export type ApplicationUI = Readonly<{
+export type InterfaceUI = Readonly<{
   api: Readonly<Record<string, unknown>>;
   features: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
   components: RuntimeComponentComposition["components"];
   renderRoot(): Child;
   captureHotState(): HotRenderState;
-  updatePresentations(
-    presentations: Readonly<Record<string, RuntimeConfiguredPresentation>>,
-  ): boolean;
+  updatePresentation(presentation: RuntimeConfiguredPresentation): void;
   dispose(): Promise<void>;
 }>;
 
-export type CreateApplicationUIOptions<Contract extends ApplicationContract> = Readonly<{
-  application: Application<Contract>;
+export type CreateInterfaceUIOptions<Contract extends SystemContract> = Readonly<{
+  system: System<Contract>;
+  interface: string;
   program: string;
-  presentations: PresentationsDefinition<Contract>;
+  logicalProgram?: string;
+  presentation: RuntimeConfiguredPresentation;
   /** @internal Compiler-derived temporal dependencies by runtime Component. */
   presentationDependencies?: PresentationDependencyManifest;
   components?: ComponentRuntimeElements<Contract>;
@@ -103,9 +98,9 @@ export type CreateApplicationUIOptions<Contract extends ApplicationContract> = R
 }>;
 
 export type WebComponentAdapter = Readonly<{
-  createApplicationUI<Contract extends ApplicationContract>(
-    options: Omit<CreateApplicationUIOptions<Contract>, "presentationAdapter">,
-  ): Promise<ApplicationUI>;
+  createInterfaceUI<Contract extends SystemContract>(
+    options: Omit<CreateInterfaceUIOptions<Contract>, "presentationAdapter">,
+  ): Promise<InterfaceUI>;
 }>;
 
 type RuntimeComponentConfig = {
@@ -120,12 +115,12 @@ type RuntimeFeature = Readonly<{
   programs?: Readonly<Record<string, RuntimeProgramDefinition>>;
   features?: Readonly<Record<string, RuntimeFeature>>;
 }>;
-type RuntimeApplication = Readonly<{
+type RuntimeSystem = Readonly<{
   metadata?: Readonly<{ name?: string }>;
   features?: Readonly<Record<string, RuntimeFeature>>;
 }>;
 
-type RuntimeConfiguredPresentation = Readonly<{
+export type RuntimeConfiguredPresentation = Readonly<{
   parameters: Readonly<Record<string, unknown>>;
   create(configuration: {
     readonly parameters: Readonly<Record<string, unknown>>;
@@ -210,10 +205,12 @@ type RuntimeComponentViewContext = {
   readonly components: Record<string, unknown>;
 };
 
-export async function createApplicationUI<Contract extends ApplicationContract>({
-  application,
+export async function createInterfaceUI<Contract extends SystemContract>({
+  system,
+  interface: interfacePath,
   program,
-  presentations,
+  logicalProgram = program,
+  presentation,
   presentationDependencies,
   components,
   hotState,
@@ -224,12 +221,10 @@ export async function createApplicationUI<Contract extends ApplicationContract>(
   routeLoaders,
   boundary,
   presentationAdapter,
-}: CreateApplicationUIOptions<Contract>): Promise<ApplicationUI> {
-  const runtimeApplication = application as RuntimeApplication;
-  const configuredPresentations = {
-    ...presentations.presentations,
-  } as Record<string, RuntimeConfiguredPresentation>;
-  validatePresentations(configuredPresentations);
+}: CreateInterfaceUIOptions<Contract>): Promise<InterfaceUI> {
+  const runtimeSystem = system as RuntimeSystem;
+  let configuredPresentation = presentation;
+  validatePresentation(configuredPresentation);
   const presentationInstance = presentationAdapter.mount({
     boundary,
     snapshot: hotState?.presentation,
@@ -237,8 +232,6 @@ export async function createApplicationUI<Contract extends ApplicationContract>(
   const presentationRevision = signal(0);
   const eventRevision = signal(0);
   const notifyActionEvent = () => eventRevision(eventRevision() + 1);
-  const defaultPresentation = firstPresentation(presentations);
-  const presentationName = () => defaultPresentation;
   const runtimeComponents = normalizeRuntimeComponents(components);
   const renderers: Record<string, (props?: RuntimeComponentProps) => Child> = Object.create(null);
   const componentGroups: RuntimeComponentComposition["componentGroups"] = {
@@ -248,10 +241,13 @@ export async function createApplicationUI<Contract extends ApplicationContract>(
     "": Object.create(null),
   };
   const programUI = await createProgramUI(
-    runtimeApplication,
+    runtimeSystem,
+    interfacePath,
     program,
+    logicalProgram,
     dependencies,
-    programManifest ?? inferEmptyProgramManifest(runtimeApplication, program),
+    programManifest ??
+      inferEmptyProgramManifest(runtimeSystem, interfacePath, program, logicalProgram),
     hotState,
     notifyActionEvent,
     routes.length > 0,
@@ -267,29 +263,28 @@ export async function createApplicationUI<Contract extends ApplicationContract>(
     lifecycles: new Set(),
   };
   const presentationGraph = createPresentationGraph({
-    application: runtimeApplication,
+    system: runtimeSystem,
+    interface: interfacePath,
     program,
-    presentations: configuredPresentations,
+    presentation: () => configuredPresentation,
     presentationRevision,
-    presentation: presentationName,
     adapter: presentationInstance,
     boundary,
     featureAPIs: programUI.apis,
     featureEvents: programUI.events,
     eventRevision,
-    rootComponents: Object.keys(runtimeComponents).filter((name) => !name.startsWith("@feature/")),
+    rootComponents: Object.keys(
+      requireRuntimeFeature(runtimeSystem, interfacePath).programs?.[logicalProgram]?.components ??
+        {},
+    ).map((name) => featureComponentName(interfacePath, name)),
     dependencies: presentationDependencies,
   });
 
-  for (const componentName of collectComponentNames(
-    runtimeApplication,
-    program,
-    runtimeComponents,
-  )) {
+  for (const componentName of Object.keys(runtimeComponents).sort()) {
     renderers[componentName] = (props: RuntimeComponentProps = {}) =>
       createComponentInstance(componentName, {
-        application: runtimeApplication,
-        program,
+        system: runtimeSystem,
+        program: logicalProgram,
         config: runtimeComponents[componentName] ?? { elements: {} },
         presentationRevision,
         presentationInstance,
@@ -299,32 +294,41 @@ export async function createApplicationUI<Contract extends ApplicationContract>(
       })(props as Props);
   }
 
-  for (const [name, renderer] of Object.entries(renderers)) {
-    if (!name.startsWith("@feature/")) componentGroups[""]![name] = renderer;
+  const interfaceFeature = requireRuntimeFeature(runtimeSystem, interfacePath);
+  const localComponents: Record<string, (props?: RuntimeComponentProps) => Child> =
+    Object.create(null);
+  for (const name of Object.keys(
+    interfaceFeature.programs?.[logicalProgram]?.components ?? {},
+  ).sort()) {
+    const renderer = renderers[featureComponentName(interfacePath, name)];
+    if (!renderer) throw new Error(`Missing renderer for Component ${interfacePath}.${name}.`);
+    localComponents[name] = renderer;
   }
-  componentNamespaces[""] = collectFeatureComponentScopes(
-    runtimeApplication.features,
-    program,
+  componentGroups[interfacePath] = localComponents;
+  const childComponents = collectFeatureComponentScopes(
+    interfaceFeature.features,
+    logicalProgram,
     renderers,
     componentGroups,
     componentNamespaces,
+    interfacePath,
   );
+  componentNamespaces[interfacePath] = childComponents;
+  componentNamespaces[""] = Object.assign(Object.create(null), localComponents, childComponents);
   const router = routes.length
     ? await createRouteRuntime({
-        application: runtimeApplication,
-        program,
+        system: runtimeSystem,
+        program: logicalProgram,
         routes,
         dependencies,
         apis: programUI.apis,
         featureDependencies: programUI.dependencies,
-        components: componentNamespaces[""],
+        components: componentNamespaces[""]!,
         loadRoute,
         routeLoaders,
         boundary,
       })
     : undefined;
-  updateRootPresentation(defaultPresentation);
-
   const captureHotState = (): HotRenderState => {
     const state = programUI.captureHotState();
     state.presentation = presentationInstance.snapshot();
@@ -334,10 +338,10 @@ export async function createApplicationUI<Contract extends ApplicationContract>(
   return {
     api: programUI.api,
     features: programUI.features,
-    components: componentGroups[""]!,
+    components: localComponents,
     renderRoot() {
       if (router) return router.render();
-      const rootName = collectProgramRoots(runtimeApplication, program);
+      const rootName = collectProgramRoots(runtimeSystem, interfacePath, logicalProgram);
       if (!rootName)
         throw new Error(`UI Program ${JSON.stringify(program)} has no root Component.`);
       const root = renderers[rootName];
@@ -345,18 +349,10 @@ export async function createApplicationUI<Contract extends ApplicationContract>(
       return root();
     },
     captureHotState,
-    updatePresentations(next) {
-      if (
-        Object.keys(configuredPresentations).sort().join("\n") !==
-        Object.keys(next).sort().join("\n")
-      ) {
-        return false;
-      }
-      validatePresentations(next);
-      for (const name of Object.keys(configuredPresentations)) delete configuredPresentations[name];
-      Object.assign(configuredPresentations, next);
+    updatePresentation(next) {
+      validatePresentation(next);
+      configuredPresentation = next;
       presentationRevision(presentationRevision() + 1);
-      return true;
     },
     async dispose() {
       captureHotState();
@@ -387,13 +383,13 @@ export async function createApplicationUI<Contract extends ApplicationContract>(
         errors.push(error);
       }
       if (errors.length === 1) throw errors[0];
-      if (errors.length > 1) throw new AggregateError(errors, "Application UI disposal failed.");
+      if (errors.length > 1) throw new AggregateError(errors, "Interface UI disposal failed.");
     },
   };
 }
 
 async function createRouteRuntime(options: {
-  application: RuntimeApplication;
+  system: RuntimeSystem;
   program: string;
   routes: readonly WebRouteIR[];
   dependencies: Readonly<Record<string, unknown>>;
@@ -434,7 +430,7 @@ async function createRouteRuntime(options: {
     if (!definition) {
       const requested = options.loadRoute
         ? options.loadRoute(route)
-        : Promise.resolve(routeDefinition(options.application, options.program, route));
+        : Promise.resolve(routeDefinition(options.system, options.program, route));
       definition = requested.catch((error: unknown) => {
         if (definitions.get(identity) === definition) definitions.delete(identity);
         throw error;
@@ -455,7 +451,7 @@ async function createRouteRuntime(options: {
       if (!match) {
         invalidatePendingHydration(options.boundary);
         current = undefined;
-        applyRouteMetadata(options.application, {});
+        applyRouteMetadata(options.system, {});
         revision(revision() + 1);
         return;
       }
@@ -556,12 +552,12 @@ async function createRouteRuntime(options: {
             : undefined,
         metadata: mergeRouteMetadata(match.route.metadata, outcome),
       };
-      applyRouteMetadata(options.application, current.metadata);
+      applyRouteMetadata(options.system, current.metadata);
     } catch (error) {
       if (disposed || ownGeneration !== generation) return;
       current = undefined;
       failure = error;
-      applyRouteMetadata(options.application, {});
+      applyRouteMetadata(options.system, {});
     }
     revision(revision() + 1);
   };
@@ -721,12 +717,12 @@ function invalidatePendingHydration(boundary: Element): void {
 }
 
 function routeDefinition(
-  application: RuntimeApplication,
+  system: RuntimeSystem,
   program: string,
   route: WebRouteIR,
 ): RuntimeRouteDefinition {
   let feature: RuntimeFeature | undefined;
-  let features = application.features;
+  let features = system.features;
   for (const name of route.feature.split(".")) {
     feature = features?.[name];
     features = feature?.features;
@@ -865,42 +861,38 @@ function mergeRouteMetadata(
   return Object.freeze({ ...base, ...dynamic });
 }
 
-function applyRouteMetadata(
-  application: RuntimeApplication,
-  metadata: WebRouteIR["metadata"],
-): void {
+function applyRouteMetadata(system: RuntimeSystem, metadata: WebRouteIR["metadata"]): void {
   applyWebDocumentHead({
-    title: metadata.title ?? application.metadata?.name ?? "Poggers",
+    title: metadata.title ?? system.metadata?.name ?? "Poggers",
     language: metadata.language ?? "en",
     metadata,
   });
 }
 
 function inferEmptyProgramManifest(
-  application: RuntimeApplication,
-  program: string,
+  system: RuntimeSystem,
+  interfacePath: string,
+  name: string,
+  logicalName: string,
 ): ProgramManifest {
   const contributions: Array<ProgramManifest["contributions"][number]> = [];
-  const visit = (
-    features: Readonly<Record<string, RuntimeFeature>> | undefined,
-    parent: string,
-  ): void => {
-    for (const [name, feature] of Object.entries(features ?? {})) {
-      const path = parent ? `${parent}.${name}` : name;
-      if (feature.programs?.[program]) {
-        contributions.push({ feature: path, requires: [], provides: [] });
-      }
-      visit(feature.features, path);
+  const visit = (feature: RuntimeFeature, path: string): void => {
+    if (feature.programs?.[logicalName]) {
+      contributions.push({ feature: path, requires: [], provides: [] });
+    }
+    for (const [name, child] of Object.entries(feature.features ?? {})) {
+      const childPath = `${path}.${name}`;
+      visit(child, childPath);
     }
   };
-  visit(application.features, "");
-  return { name: program, contributions };
+  visit(requireRuntimeFeature(system, interfacePath), interfacePath);
+  return { name, contributions };
 }
 
 function createComponentInstance(
   componentName: string,
   options: {
-    application: RuntimeApplication;
+    system: RuntimeSystem;
     program: string;
     config: RuntimeComponentConfig;
     presentationRevision: () => number;
@@ -926,11 +918,7 @@ function createComponentInstance(
       },
     });
   }
-  const componentEntry = resolveComponentDefinition(
-    options.application,
-    options.program,
-    componentName,
-  );
+  const componentEntry = resolveComponentDefinition(options.system, options.program, componentName);
   const definition =
     componentEntry && typeof componentEntry === "object"
       ? (componentEntry as RuntimeComponentDefinition)
@@ -1136,24 +1124,37 @@ function featureComponentName(path: string, component: string): string {
   return `@feature/${path}/component/${component}`;
 }
 
+function componentLocalName(component: string): string {
+  const separator = component.indexOf("/component/");
+  return separator < 0 ? component : component.slice(separator + "/component/".length);
+}
+
+function resolveRuntimeFeature(system: RuntimeSystem, path: string): RuntimeFeature | undefined {
+  let feature: RuntimeFeature | undefined;
+  let features = system.features;
+  for (const name of path.split(".").filter(Boolean)) {
+    feature = features?.[name];
+    if (!feature) return undefined;
+    features = feature.features;
+  }
+  return feature;
+}
+
+function requireRuntimeFeature(system: RuntimeSystem, path: string): RuntimeFeature {
+  const feature = resolveRuntimeFeature(system, path);
+  if (!feature) throw new Error(`Missing interface Feature ${JSON.stringify(path)}.`);
+  return feature;
+}
+
 function resolveComponentDefinition(
-  application: RuntimeApplication,
+  system: RuntimeSystem,
   program: string,
   component: string,
 ): unknown {
   const owner = componentOwner(component);
   if (!owner) return undefined;
-
-  let feature: RuntimeFeature | undefined;
-  let features = application.features;
-  for (const name of owner.split(".")) {
-    feature = features?.[name];
-    if (!feature) return undefined;
-    features = feature.features;
-  }
-
-  const separator = component.indexOf("/component/");
-  const name = component.slice(separator + "/component/".length);
+  const feature = resolveRuntimeFeature(system, owner);
+  const name = componentLocalName(component);
   return feature?.programs?.[program]?.components?.[name];
 }
 
@@ -1310,13 +1311,13 @@ export function ownedPresentationTargets(
   return first ? [first] : [];
 }
 
-/** @internal Creates the single Application/Feature Presentation evaluation graph. */
+/** @internal Creates one interface-local Presentation evaluation graph. */
 export function createPresentationGraph(options: {
-  application: RuntimeApplication;
+  system: RuntimeSystem;
+  interface: string;
   program: string;
-  presentations: Readonly<Record<string, RuntimeConfiguredPresentation>>;
+  presentation: () => RuntimeConfiguredPresentation;
   presentationRevision: () => number;
-  presentation: () => string;
   adapter: PresentationAdapterInstance<WebPresentationLanguage, Element>;
   boundary: Element;
   featureAPIs: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
@@ -1325,7 +1326,8 @@ export function createPresentationGraph(options: {
   rootComponents: readonly string[];
   dependencies?: PresentationDependencyManifest;
 }): RuntimePresentationGraph {
-  const scopeIdentities = collectPresentationScopes(options.application.features);
+  const interfaceFeature = requireRuntimeFeature(options.system, options.interface);
+  const scopeIdentities = collectPresentationScopes(interfaceFeature, options.interface);
   const scopePaths = Object.keys(scopeIdentities).sort();
   const scopeIndexes = new Map(scopePaths.map((path, index) => [path, index]));
   const revisions = new Map<string, Signal<number>>();
@@ -1391,38 +1393,36 @@ export function createPresentationGraph(options: {
       try {
         session?.render(({ scopes }) => {
           const next = new Map<string, RuntimePresentationComponent>();
-          const configured = options.presentations[options.presentation()];
-          if (configured) {
-            const rootScope = scopes[scopeIndexes.get("")!];
-            const tree = rootScope!.evaluate(() =>
-              configured.create({
-                parameters: configured.parameters,
-                environment: options.adapter.environment,
-                state: createPresentationState(options.featureAPIs[""] ?? {}, {}),
-                events: options.featureEvents[""] ?? {},
-              }),
-            );
-            for (const name of options.rootComponents) {
-              const component = tree[name];
-              if (typeof component === "function") {
-                next.set(name, component as RuntimePresentationComponent);
-              }
+          const configured = options.presentation();
+          const rootScope = scopes[scopeIndexes.get("")!];
+          const tree = rootScope!.evaluate(() =>
+            configured.create({
+              parameters: configured.parameters,
+              environment: options.adapter.environment,
+              state: createPresentationState(options.featureAPIs[options.interface] ?? {}, {}),
+              events: options.featureEvents[options.interface] ?? {},
+            }),
+          );
+          for (const name of options.rootComponents) {
+            const component = tree[componentLocalName(name)];
+            if (typeof component === "function") {
+              next.set(name, component as RuntimePresentationComponent);
             }
-            collectPresentationComponents({
-              features: options.application.features,
-              program: options.program,
-              tree,
-              parent: "",
-              scopeIndexes,
-              scopes,
-              featureAPIs: options.featureAPIs,
-              featureEvents: options.featureEvents,
-              previous: components,
-              refreshAll: authoredEvaluation,
-              sharedConsumers,
-              result: next,
-            });
           }
+          collectPresentationComponents({
+            features: interfaceFeature.features,
+            program: options.program,
+            tree,
+            parent: options.interface,
+            scopeIndexes,
+            scopes,
+            featureAPIs: options.featureAPIs,
+            featureEvents: options.featureEvents,
+            previous: components,
+            refreshAll: authoredEvaluation,
+            sharedConsumers,
+            result: next,
+          });
           components = next;
           notifyConsumers();
           return {};
@@ -1671,7 +1671,7 @@ function createPresentationState(
   });
 }
 
-function normalizeRuntimeComponents<Contract extends ApplicationContract>(
+function normalizeRuntimeComponents<Contract extends SystemContract>(
   components?: ComponentRuntimeElements<Contract>,
 ): RuntimeComponentContracts {
   const result: RuntimeComponentContracts = {};
@@ -1691,8 +1691,10 @@ function normalizeRuntimeComponents<Contract extends ApplicationContract>(
 }
 
 async function createProgramUI(
-  application: RuntimeApplication,
+  system: RuntimeSystem,
+  interfacePath: string,
   program: string,
+  logicalProgram: string,
   externalDependencies: Readonly<Record<string, unknown>>,
   manifest: ProgramManifest,
   hotState?: HotRenderState,
@@ -1708,8 +1710,9 @@ async function createProgramUI(
   dispose(): Promise<void>;
 }> {
   const assembly = await assembleProgram({
-    application,
+    system,
     name: program,
+    logicalName: logicalProgram,
     dependencies: externalDependencies,
     manifest,
     initialState: hotState?.programs,
@@ -1723,9 +1726,10 @@ async function createProgramUI(
     events[instance.address.feature] = instance.ui?.events ?? Object.freeze({});
   }
 
-  const root = collectProgramRoots(application, program, !routed);
+  const root = collectProgramRoots(system, interfacePath, logicalProgram, !routed);
   const owner = root ? componentOwner(root) : undefined;
-  const api = owner ? (apis[owner] ?? Object.freeze({})) : Object.freeze({});
+  const api = apis[owner ?? interfacePath] ?? Object.freeze({});
+  const interfaceFeature = requireRuntimeFeature(system, interfacePath);
 
   let disposed = false;
   const captureHotState = (): HotRenderState => {
@@ -1740,7 +1744,10 @@ async function createProgramUI(
   return {
     api,
     features: Object.fromEntries(
-      Object.keys(application.features ?? {}).map((name) => [name, apis[name] ?? {}]),
+      Object.keys(interfaceFeature.features ?? {}).map((name) => [
+        name,
+        apis[`${interfacePath}.${name}`] ?? {},
+      ]),
     ),
     apis,
     dependencies,
@@ -1755,49 +1762,24 @@ async function createProgramUI(
   };
 }
 
-function collectComponentNames(
-  application: RuntimeApplication,
-  program: string,
-  elements: RuntimeComponentContracts,
-): string[] {
-  const names = new Set<string>();
-  for (const name of Object.keys(elements)) names.add(name);
-  const visit = (
-    features: Readonly<Record<string, RuntimeFeature>> | undefined,
-    parent: string,
-  ) => {
-    for (const [name, feature] of Object.entries(features ?? {})) {
-      const path = parent ? `${parent}.${name}` : name;
-      for (const component of Object.keys(feature.programs?.[program]?.components ?? {})) {
-        names.add(featureComponentName(path, component));
-      }
-      visit(feature.features, path);
-    }
-  };
-  visit(application.features, "");
-  return [...names];
-}
-
 function collectProgramRoots(
-  application: RuntimeApplication,
+  system: RuntimeSystem,
+  interfacePath: string,
   program: string,
   required = true,
 ): string | undefined {
   const roots: string[] = [];
-  const visit = (
-    features: Readonly<Record<string, RuntimeFeature>> | undefined,
-    parent: string,
-  ) => {
+  const visit = (feature: RuntimeFeature, path: string) => {
+    const root = feature.programs?.[program]?.root;
+    if (root) roots.push(featureComponentName(path, root));
+    const features = feature.features;
     for (const [name, feature] of Object.entries(features ?? {}).sort(([left], [right]) =>
       left.localeCompare(right),
     )) {
-      const path = parent ? `${parent}.${name}` : name;
-      const root = feature.programs?.[program]?.root;
-      if (root) roots.push(featureComponentName(path, root));
-      visit(feature.features, path);
+      visit(feature, `${path}.${name}`);
     }
   };
-  visit(application.features, "");
+  visit(requireRuntimeFeature(system, interfacePath), interfacePath);
   if (roots.length !== 1 && (required || roots.length > 1)) {
     throw new Error(
       `UI Program "${program}" must define exactly one root Component; found ${roots.length}.`,
@@ -1806,34 +1788,23 @@ function collectProgramRoots(
   return roots[0];
 }
 
-function firstPresentation<Contract extends ApplicationContract>(
-  presentations: PresentationsDefinition<Contract>,
-): string {
-  const explicit = presentations.defaultPresentation;
-  if (explicit) return String(explicit);
-  return Object.keys(presentations.presentations)[0] ?? "default";
-}
-
-function validatePresentations(
-  presentations: Readonly<Record<string, RuntimeConfiguredPresentation>>,
-): void {
-  for (const [name, value] of Object.entries(presentations)) {
-    if (
-      !value ||
-      typeof value !== "object" ||
-      Array.isArray(value) ||
-      typeof value.create !== "function" ||
-      !value.parameters ||
-      typeof value.parameters !== "object" ||
-      Array.isArray(value.parameters)
-    ) {
-      throw new TypeError(`Presentation "${name}" must provide parameters and a create function.`);
-    }
+function validatePresentation(value: RuntimeConfiguredPresentation): void {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    typeof value.create !== "function" ||
+    !value.parameters ||
+    typeof value.parameters !== "object" ||
+    Array.isArray(value.parameters)
+  ) {
+    throw new TypeError("A Presentation must provide parameters and a create function.");
   }
 }
 
 function collectPresentationScopes(
-  features: Readonly<Record<string, RuntimeFeature>> | undefined,
+  feature: RuntimeFeature,
+  interfacePath: string,
 ): Record<string, object> {
   const scopes: Record<string, object> = { "": Object.freeze({}) };
   const visit = (
@@ -1846,15 +1817,8 @@ function collectPresentationScopes(
       visit(feature.features, path);
     }
   };
-  visit(features, "");
+  visit(feature.features, interfacePath);
   return scopes;
-}
-
-function updateRootPresentation(presentation: string) {
-  if (typeof document === "undefined") return;
-  const root = document.documentElement;
-  if (!root) return;
-  root.dataset.presentation = presentation;
 }
 
 function capitalize(value: string): string {

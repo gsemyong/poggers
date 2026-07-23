@@ -74,7 +74,7 @@
     "benchmark": "nub scripts/benchmark.ts",
     "dev:crud": "nub src/cli.ts dev --dir examples/authenticated-crud",
     "dev:example": "nub src/cli.ts dev --dir examples/web-presentation",
-    "typecheck": "tsc --noEmit && tsc -p examples/web-presentation/tsconfig.json && tsc -p examples/authenticated-crud/tsconfig.json",
+    "typecheck": "tsc --noEmit && tsc -p src/adapters/web/fixtures/request-render/tsconfig.json && tsc -p examples/web-presentation/tsconfig.json && tsc -p examples/authenticated-crud/tsconfig.json",
     "fmt": "oxfmt",
     "fmt:check": "oxfmt --check",
     "lint": "oxlint src scripts examples vitest.config.ts",
@@ -95,7 +95,6 @@
     "fast-check": "^4.9.0",
     "oxfmt": "^0.60.0",
     "oxlint": "^1.75.0",
-    "playwright": "1.61.1",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10"
   },

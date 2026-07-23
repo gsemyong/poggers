@@ -11,8 +11,8 @@ import {
   type WebStyle,
 } from "@poggers/kit/web";
 
-import type { App } from "../app";
 import type { SheetState } from "../features/dashboard";
+import type { Web } from "../system";
 
 const parameters = {
   color: {
@@ -101,7 +101,7 @@ const createEditorial = (({ parameters: values, environment }) => {
       const accentMotion = animate(featureState.warm ? 1 : 0, values.spring.control);
       const accentPulse = animate(events.toggleAccent.completed, values.feedback.accent);
       return {
-        Application: ({ state }) => {
+        Overview: ({ state }) => {
           const sheet = state.sheet;
           const dragging = sheet.status === "open" && sheet.interaction.kind === "dragging";
           const dragDismissal = sheet.status === "closed" && sheet.via.kind === "drag";
@@ -387,12 +387,12 @@ const createEditorial = (({ parameters: values, environment }) => {
       };
     },
   };
-}) satisfies WebPresentation<App, typeof parameters>;
+}) satisfies WebPresentation<Web, typeof parameters>;
 
 export const editorial = {
   parameters,
   create: createEditorial,
-} satisfies ConfiguredWebPresentation<App, typeof parameters>;
+} satisfies ConfiguredWebPresentation<Web, typeof parameters>;
 
 function interpolate(from: number, to: number, progress: number): number {
   return from + (to - from) * progress;

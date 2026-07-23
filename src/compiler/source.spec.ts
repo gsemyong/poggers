@@ -12,18 +12,15 @@ import {
 } from "@/adapters/server/production/fixtures/conformance";
 import type { SourceCompilerExtension } from "@/compiler/extension";
 import {
-  serializeApplicationIR,
-  type ApplicationIR,
+  selectSystemOutputs,
+  serializeSystemIR,
+  type SystemIR,
   type ExpressionIR,
   type ProgramContributionIR,
   type StatementIR,
   type TypeIR,
 } from "@/compiler/ir";
-import {
-  ApplicationDiagnostic,
-  compileApplication,
-  createApplicationCompiler,
-} from "@/compiler/source";
+import { SystemDiagnostic, compileSystem, createSystemCompiler } from "@/compiler/source";
 import { executeProgramFixtureIR, executeProgramIR } from "@/runtime/interpreter";
 
 const temporaryDirectories: string[] = [];
@@ -36,17 +33,16 @@ afterEach(async () => {
   );
 });
 
-describe("Poggers Application compiler", () => {
-  test("extracts stable Application meaning and portable control flow without executing source", async () => {
+describe("System compiler", () => {
+  test("extracts stable System meaning and portable control flow without executing source", async () => {
     const entry = await fixture(applicationSource());
-    const first = compileApplication(entry);
-    const second = compileApplication(entry);
+    const first = compileSystem(entry);
+    const second = compileSystem(entry);
 
-    expect(serializeApplicationIR(second)).toBe(serializeApplicationIR(first));
-    expect(first.application).toEqual({
-      id: "application/Portable fixture",
+    expect(serializeSystemIR(second)).toBe(serializeSystemIR(first));
+    expect(first.system).toEqual({
+      id: "system",
       name: "Portable fixture",
-      presentations: ["plain", "rich"],
     });
     expect(first.features.map(({ id }) => id)).toEqual([
       "feature/child",
@@ -77,25 +73,114 @@ describe("Poggers Application compiler", () => {
     const expressions = collectExpressions(contribution.implementation.start.body);
     expect(expressions.length).toBeGreaterThan(10);
     expect(
-      expressions.every(({ span, type }) => span.file === "app.ts" && Boolean(type.kind)),
+      expressions.every(({ span, type }) => span.file === "system.ts" && Boolean(type.kind)),
     ).toBe(true);
   });
 
   test("semantic IDs do not depend on declaration order", async () => {
     const entry = await fixture(applicationSource());
-    const original = compileApplication(entry);
+    const original = compileSystem(entry);
     await writeFile(
       entry,
       applicationSource().replace("child: Child; worker: Worker", "worker: Worker; child: Child"),
     );
-    const reordered = compileApplication(entry);
+    const reordered = compileSystem(entry);
 
     expect(reordered.features.map(({ id }) => id)).toEqual(original.features.map(({ id }) => id));
     expect(reordered.programs.map(({ id }) => id)).toEqual(original.programs.map(({ id }) => id));
   });
 
+  test("lowers two Apps into one shared Program and independent interface outputs", async () => {
+    const ir = compileSystem(await fixture(multiAppSystemSource()));
+
+    expect(ir.apps).toEqual([
+      {
+        id: "app/customer",
+        feature: "customer",
+        interfaces: ["interface/customer.web"],
+      },
+      {
+        id: "app/operations",
+        feature: "operations",
+        interfaces: ["interface/operations.web"],
+      },
+    ]);
+    expect(ir.interfaces).toEqual([
+      {
+        id: "interface/customer.web",
+        feature: "customer.web",
+        app: "customer",
+        platform: "web",
+        programs: ["program/customer.web.browser"],
+        presentationSources: ["system.ts"],
+      },
+      {
+        id: "interface/operations.web",
+        feature: "operations.web",
+        app: "operations",
+        platform: "web",
+        programs: ["program/operations.web.browser"],
+        presentationSources: ["system.ts"],
+      },
+    ]);
+    expect(ir.programs.map(({ id }) => id)).toEqual([
+      "program/api",
+      "program/customer.web.browser",
+      "program/operations.web.browser",
+    ]);
+    expect(
+      ir.programs
+        .find(({ id }) => id === "program/api")
+        ?.contributions.map(({ feature }) => feature),
+    ).toEqual(["customer.service", "operations.service", "shared"]);
+    expect(ir.features.find(({ path }) => path === "operations.web")).toMatchObject({
+      kind: "interface",
+      app: "operations",
+      interface: "operations.web",
+      platform: "web",
+      programs: ["program/operations.web.browser"],
+    });
+
+    const focused = selectSystemOutputs(ir, "operations");
+    expect(focused.interfaces.map(({ id }) => id)).toEqual(["interface/operations.web"]);
+    expect(focused.programs.map(({ id }) => id)).toEqual([
+      "program/api",
+      "program/operations.web.browser",
+    ]);
+    expect(
+      focused.programs
+        .find(({ id }) => id === "program/api")
+        ?.contributions.map(({ feature }) => feature),
+    ).toEqual(["operations.service", "shared"]);
+    expect(focused.platforms).toEqual(["server", "web"]);
+    expect(() => selectSystemOutputs(ir, "missing")).toThrow('Unknown App "missing".');
+  });
+
+  test("emits byte-identical System IR for Feature and App placement permutations", async () => {
+    const top = ["shared", "operations", "customer"] as const;
+    const app = ["service", "web"] as const;
+    const expected = serializeSystemIR(
+      compileSystem(await fixture(multiAppSystemSource(top, app, app))),
+    );
+
+    await fc.assert(
+      fc.asyncProperty(
+        fc.shuffledSubarray([...top], { minLength: top.length, maxLength: top.length }),
+        fc.shuffledSubarray([...app], { minLength: app.length, maxLength: app.length }),
+        fc.shuffledSubarray([...app], { minLength: app.length, maxLength: app.length }),
+        async (topOrder, operationsOrder, customerOrder) => {
+          const actual = compileSystem(
+            await fixture(multiAppSystemSource(topOrder, operationsOrder, customerOrder)),
+          );
+          expect(serializeSystemIR(actual)).toBe(expected);
+        },
+      ),
+      { numRuns: 12 },
+    );
+  }, 15_000);
+
   test("assembles nested same-named contributions and isolates distinct Programs", async () => {
-    const ir = compileApplication(await fixture(multiProgramApplicationSource()));
+    const ir = compileSystem(await fixture(multiProgramApplicationSource()));
 
     expect(ir.programs.map(({ name, environment }) => [name, environment.name])).toEqual([
       ["api", "server"],
@@ -122,13 +207,40 @@ describe("Poggers Application compiler", () => {
       ),
     );
 
-    expect(() => compileApplication(entry)).toThrow(
-      'Program "cloud" has incompatible execution contexts "device" and "server"',
+    let failure: unknown;
+    try {
+      compileSystem(entry);
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(SystemDiagnostic);
+    expect(String(failure)).toMatch(
+      /system\.ts:\d+:\d+: Program "cloud" has incompatible execution contexts "device" and "server"/,
+    );
+  });
+
+  test("reports invalid App and interface ownership at the authored Feature", async () => {
+    const entry = await fixture(
+      componentApplicationSource().replace(
+        "type Product = { App: true; Features: { web: Web } };",
+        "type Product = { Features: { web: Web } };",
+      ),
+    );
+
+    let failure: unknown;
+    try {
+      compileSystem(entry);
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(SystemDiagnostic);
+    expect(String(failure)).toMatch(
+      /system\.ts:\d+:\d+: Interface "product\.web" must belong to an App/,
     );
   });
 
   test("extracts deterministic Component state, actions, Elements, and lifecycle", async () => {
-    const ir = compileApplication(await fixture(componentApplicationSource()));
+    const ir = compileSystem(await fixture(componentApplicationSource()));
     const component = ir.programs[0]?.contributions[0]?.ui?.components[0];
 
     expect(ir.programs[0]?.environment).toEqual({
@@ -166,7 +278,7 @@ describe("Poggers Application compiler", () => {
   test("carries a non-web Platform compiler extension without knowing its vocabulary", async () => {
     const extension: SourceCompilerExtension = {
       name: "canvas",
-      application({ implementation, source }) {
+      system({ implementation, source }) {
         return source.member(implementation, "metadata") ? { renderer: "gpu" } : undefined;
       },
       program({ contract, location, source }) {
@@ -187,11 +299,11 @@ describe("Poggers Application compiler", () => {
       componentApplicationSource().replaceAll('Name: "web"', 'Name: "canvas"'),
     );
 
-    const generic = compileApplication(entry);
-    const extended = compileApplication(entry, [extension]);
+    const generic = compileSystem(entry);
+    const extended = compileSystem(entry, [extension]);
 
     expect(generic.programs[0]?.contributions[0]?.extensions).toBeUndefined();
-    expect(extended.application.extensions).toEqual({ canvas: { renderer: "gpu" } });
+    expect(extended.system.extensions).toEqual({ canvas: { renderer: "gpu" } });
     expect(extended.programs[0]?.contributions[0]?.extensions).toEqual({
       canvas: { version: 1, scene: ["Drawer"] },
     });
@@ -200,13 +312,13 @@ describe("Poggers Application compiler", () => {
   test("retains an incremental Program and identifies Presentation implementation sources", async () => {
     const entry = await fixture(
       `import { clean } from "./presentation";\n${componentApplicationSource().replace(
-        "presentations: { clean: {} },",
-        "presentations: { clean },",
+        "presentation,",
+        "presentation: clean,",
       )}`,
     );
     const presentation = resolve(entry, "../presentation.ts");
     await writeFile(presentation, "export const clean = {};\n");
-    const compiler = createApplicationCompiler(entry);
+    const compiler = createSystemCompiler(entry);
 
     const first = compiler.compile();
     await writeFile(presentation, "export const clean = Object.freeze({});\n");
@@ -214,7 +326,38 @@ describe("Poggers Application compiler", () => {
 
     expect(first.presentationSources).toEqual(new Set([presentation]));
     expect(second.presentationSources).toEqual(new Set([presentation]));
-    expect(serializeApplicationIR(second.ir)).toBe(serializeApplicationIR(first.ir));
+    expect(serializeSystemIR(second.ir)).toBe(serializeSystemIR(first.ir));
+  });
+
+  test("assigns compiled Presentation meaning to its exact interface output", async () => {
+    const entry = await fixture(
+      `import { clean } from "./presentation";\n${componentApplicationSource().replace(
+        "presentation,",
+        "presentation: clean,",
+      )}`,
+    );
+    await writeFile(
+      resolve(entry, "../presentation.ts"),
+      `
+declare function animate(value: number, animation: unknown): number;
+export const clean = ({ parameters }: { parameters: { sheet: unknown } }) => ({
+  Drawer({ state }: { state: { open: boolean } }) {
+    const openness = animate(state.open ? 1 : 0, parameters.sheet);
+    return { Root: { opacity: openness } };
+  },
+});
+`,
+    );
+
+    const ir = compileSystem(entry);
+
+    expect(ir.presentations).toEqual([
+      expect.objectContaining({
+        interface: "product.web",
+        file: "presentation.ts",
+        animations: [expect.objectContaining({ binding: "openness" })],
+      }),
+    ]);
   });
 
   test("rejects undeclared runtime calls at their source location", async () => {
@@ -225,8 +368,8 @@ describe("Poggers Application compiler", () => {
       ),
     );
 
-    expect(() => compileApplication(entry)).toThrow(ApplicationDiagnostic);
-    expect(() => compileApplication(entry)).toThrow(/Portable helper calls must resolve/);
+    expect(() => compileSystem(entry)).toThrow(SystemDiagnostic);
+    expect(() => compileSystem(entry)).toThrow(/Portable helper calls must resolve/);
   });
 
   test("distinguishes synchronous and asynchronous Dependency operations", async () => {
@@ -236,7 +379,7 @@ describe("Poggers Application compiler", () => {
         "read(input: { count: number }): Promise<readonly number[]>;\n  offset(input: {}): number;",
       )
       .replace("let total = 0;", "let total = dependencies.numbers.offset({});");
-    const ir = compileApplication(await fixture(source));
+    const ir = compileSystem(await fixture(source));
     const writes: unknown[] = [];
     await executeProgramIR(ir, "feature/worker/program/cloud", {
       numbers: { read: async () => [1, 2, 3], offset: () => 4 },
@@ -250,7 +393,7 @@ describe("Poggers Application compiler", () => {
         "dependencies.numbers.read({ count: 4 });\n        const values: readonly number[] = [];",
       ),
     );
-    expect(() => compileApplication(unawaited)).toThrow(/must be awaited/);
+    expect(() => compileSystem(unawaited)).toThrow(/must be awaited/);
   });
 
   test("lowers authored dependency callbacks as portable closures", async () => {
@@ -266,7 +409,7 @@ describe("Poggers Application compiler", () => {
         ),
     );
     const implementation = programContribution(
-      compileApplication(entry),
+      compileSystem(entry),
       "feature/worker/program/cloud",
     )?.implementation;
     expect(implementation?.kind).toBe("portable");
@@ -281,7 +424,7 @@ describe("Poggers Application compiler", () => {
       applicationSource().replace("read(input: { count: number })", "read(input: any)"),
     );
 
-    expect(() => compileApplication(entry)).toThrow(/cannot contain any/);
+    expect(() => compileSystem(entry)).toThrow(/cannot contain any/);
   });
 
   test("lowers real-time Dependency streams without exposing iterator machinery", async () => {
@@ -291,7 +434,7 @@ describe("Poggers Application compiler", () => {
         "read(input: { count: number }): Promise<readonly number[]>;\n  changes(): AsyncIterable<{ revision: number }>;",
       ),
     );
-    const ir = compileApplication(entry);
+    const ir = compileSystem(entry);
     const program = programContribution(ir, "feature/worker/program/cloud");
     const numbers = program?.requires.find(({ name }) => name === "numbers");
 
@@ -319,7 +462,7 @@ describe("Poggers Application compiler", () => {
 
   test("lowers and executes for-await-of over Dependency streams", async () => {
     const entry = await fixture(streamApplicationSource());
-    const ir = compileApplication(entry);
+    const ir = compileSystem(entry);
     const contribution = programContribution(ir, "feature/worker/program/cloud");
     if (contribution?.implementation.kind !== "portable") {
       throw new Error("Expected portable IR.");
@@ -353,7 +496,7 @@ describe("Poggers Application compiler", () => {
         .replace("revision: change.revision", "revision: change"),
     );
 
-    expect(() => compileApplication(entry)).toThrow(
+    expect(() => compileSystem(entry)).toThrow(
       "Portable for-await-of requires an asynchronous stream.",
     );
   });
@@ -366,7 +509,7 @@ describe("Poggers Application compiler", () => {
       ),
     );
     const numbers = programContribution(
-      compileApplication(entry),
+      compileSystem(entry),
       "feature/worker/program/cloud",
     )?.requires.find(({ name }) => name === "numbers");
 
@@ -401,7 +544,7 @@ describe("Poggers Application compiler", () => {
         .replace("Promise<readonly number[]>", "Promise<ReadonlyArray<number>>"),
     );
     const numbers = programContribution(
-      compileApplication(entry),
+      compileSystem(entry),
       "feature/worker/program/cloud",
     )?.requires.find(({ name }) => name === "numbers");
 
@@ -454,7 +597,7 @@ describe("Poggers Application compiler", () => {
       ),
     );
     const numbers = programContribution(
-      compileApplication(entry),
+      compileSystem(entry),
       "feature/worker/program/cloud",
     )?.requires.find(({ name }) => name === "numbers");
     if (numbers?.type.kind !== "record") throw new Error("Expected Numbers record.");
@@ -487,14 +630,15 @@ describe("Poggers Application compiler", () => {
   });
 
   test("expands a headless Feature factory and lowers its supplied implementation", async () => {
-    const ir = compileApplication(await fixture(headlessFactoryApplicationSource()));
+    const ir = compileSystem(await fixture(headlessFactoryApplicationSource()));
 
     expect(ir.features).toEqual([
       {
         id: "feature/tasks",
         path: "tasks",
+        kind: "feature",
         children: [],
-        programs: ["feature/tasks/program/server"],
+        programs: ["program/server"],
       },
     ]);
     expect(ir.programs[0]).toMatchObject({
@@ -513,7 +657,7 @@ describe("Poggers Application compiler", () => {
   });
 
   test("expands nested Feature factories through mounting and Program placement", async () => {
-    const ir = compileApplication(await fixture(nestedFactoryApplicationSource()));
+    const ir = compileSystem(await fixture(nestedFactoryApplicationSource()));
     const contribution = programContribution(ir, "feature/parent.child/program/api");
 
     expect(contribution?.implementation).toMatchObject({
@@ -525,7 +669,7 @@ describe("Poggers Application compiler", () => {
   test("expands a differently shaped closure factory without a compiler special case", async () => {
     const source = callbackFactoryApplicationSource();
     const entry = await fixture(source);
-    const ir = compileApplication(entry);
+    const ir = compileSystem(entry);
 
     expect(programContribution(ir, "feature/tasks/program/server")?.implementation).toMatchObject({
       kind: "portable",
@@ -535,15 +679,15 @@ describe("Poggers Application compiler", () => {
       entry,
       source.replace("defineServerFeature<Tasks>(0)", "defineServerFeature<Tasks>(1)"),
     );
-    const changed = compileApplication(entry);
-    expect(serializeApplicationIR(changed)).not.toBe(serializeApplicationIR(ir));
+    const changed = compileSystem(entry);
+    expect(serializeSystemIR(changed)).not.toBe(serializeSystemIR(ir));
     expect(programContribution(changed, "feature/tasks/program/server")?.implementation.kind).toBe(
       "portable",
     );
   });
 
   test("extracts state and actions from a Component-free UI Feature factory", async () => {
-    const ir = compileApplication(await fixture(uiFactoryApplicationSource()));
+    const ir = compileSystem(await fixture(uiFactoryApplicationSource()));
     const program = ir.programs[0];
     const contribution = program?.contributions[0];
 
@@ -560,7 +704,7 @@ describe("Poggers Application compiler", () => {
   });
 
   test("executes the extracted process through injected Dependencies", async () => {
-    const ir = compileApplication(await fixture(applicationSource()));
+    const ir = compileSystem(await fixture(applicationSource()));
     const writes: unknown[] = [];
     const execution = await executeProgramIR(ir, "feature/worker/program/cloud", {
       numbers: { read: async () => [1, 2, 3, 4] },
@@ -600,7 +744,7 @@ describe("Poggers Application compiler", () => {
 }
 `,
     );
-    const ir = compileApplication(entry);
+    const ir = compileSystem(entry);
     const contribution = programContribution(ir, "feature/worker/program/cloud");
 
     expect(contribution?.implementation).toMatchObject({
@@ -616,7 +760,7 @@ describe("Poggers Application compiler", () => {
   });
 
   test("preserves Dependency failures from their implementation", async () => {
-    const ir = compileApplication(await fixture(applicationSource()));
+    const ir = compileSystem(await fixture(applicationSource()));
     const calls: string[] = [];
     await expect(
       executeProgramIR(ir, "feature/worker/program/cloud", {
@@ -633,7 +777,7 @@ describe("Poggers Application compiler", () => {
   });
 
   test("generates and runs a standalone Rust artifact from the same portable IR", async () => {
-    const ir = compileApplication(await fixture(applicationSource()));
+    const ir = compileSystem(await fixture(applicationSource()));
     const program = programContribution(ir, "feature/worker/program/cloud")!;
     const directory = await temporaryDirectory("poggers-production-");
     const executable = resolve(directory, "portable-program");
@@ -703,7 +847,7 @@ describe("Poggers Application compiler", () => {
       await executeProgramFixtureIR(ir, "feature/worker/program/cloud", failureScenario),
     );
 
-    const factoryIR = compileApplication(await fixture(headlessFactoryApplicationSource()));
+    const factoryIR = compileSystem(await fixture(headlessFactoryApplicationSource()));
     const factoryProgram = programContribution(factoryIR, "feature/tasks/program/server")!;
     const factoryExecutable = resolve(directory, "factory-program");
     const factoryScenario = {
@@ -718,7 +862,7 @@ describe("Poggers Application compiler", () => {
 
 async function fixture(source: string): Promise<string> {
   const directory = await temporaryDirectory("poggers-ir-");
-  const entry = resolve(directory, "app.ts");
+  const entry = resolve(directory, "system.ts");
   await writeFile(entry, source);
   return entry;
 }
@@ -729,14 +873,26 @@ async function temporaryDirectory(prefix: string): Promise<string> {
   return directory;
 }
 
+function compositionTypes(): string {
+  return `
+declare const featureContract: unique symbol;
+type Feature<C> = Readonly<{ readonly [featureContract]?: C }>;
+function createFeature<C>(definition: object): Feature<C> {
+  return definition as Feature<C>;
+}
+function createSystem(definition: object): object {
+  return definition;
+}
+`;
+}
+
 function applicationSource(): string {
   return `
 type UI = { readonly Name: string };
 type Platform = { readonly Name: string; readonly UI?: UI };
 type Environment = { readonly Name: string; readonly Platform: Platform; readonly UI?: UI };
 type Program<E extends Environment, C extends object = {}> = Readonly<C & { Environment: E }>;
-type Feature<C> = unknown;
-type Application<C> = unknown;
+${compositionTypes()}
 
 type Numbers = {
   read(input: { count: number }): Promise<readonly number[]>;
@@ -759,8 +915,8 @@ type App = {
   Presentations: "rich" | "plain";
 };
 
-const child = { programs: { cloud: {} } } satisfies Feature<Child>;
-const worker = {
+const child = createFeature<Child>({ programs: { cloud: {} } });
+const worker = createFeature<Worker>({
   features: { child },
   programs: {
     cloud: {
@@ -778,13 +934,13 @@ const worker = {
       },
     },
   },
-} satisfies Feature<Worker>;
+});
 
-throw new Error("The compiler must never execute application source.");
-export default {
+throw new Error("The compiler must never execute System source.");
+export default createSystem({
   metadata: { name: "Portable fixture" },
   features: { child, worker },
-} satisfies Application<App>;
+});
 `;
 }
 
@@ -793,8 +949,7 @@ function streamApplicationSource(): string {
 type Platform = { readonly Name: "server" };
 type Environment = { readonly Name: "server"; readonly Platform: Platform };
 type Program<E extends Environment, C extends object = {}> = Readonly<C & { Environment: E }>;
-type Feature<C> = unknown;
-type Application<C> = unknown;
+${compositionTypes()}
 type Changes = { subscribe(input: {}): AsyncIterable<{ revision: number }> };
 type Output = { write(input: { revision: number }): Promise<void> };
 type Worker = {
@@ -804,7 +959,7 @@ type Worker = {
 };
 type App = { Features: { worker: Worker } };
 
-const worker = {
+const worker = createFeature<Worker>({
   programs: {
     cloud: {
       async start({ dependencies }: { dependencies: { changes: Changes; output: Output } }) {
@@ -815,12 +970,12 @@ const worker = {
       },
     },
   },
-} satisfies Feature<Worker>;
+});
 
-export default {
+export default createSystem({
   metadata: { name: "Stream fixture" },
   features: { worker },
-} satisfies Application<App>;
+});
 `;
 }
 
@@ -830,8 +985,7 @@ type UI = { readonly Name: string };
 type Platform = { readonly Name: string; readonly UI?: UI };
 type Environment = { readonly Name: string; readonly Platform: Platform; readonly UI?: UI };
 type Program<E extends Environment, C extends object = {}> = Readonly<C & { Environment: E }>;
-type Feature<C> = unknown;
-type Application<C> = unknown;
+${compositionTypes()}
 
 type Shell = {
   Programs: {
@@ -857,9 +1011,13 @@ type Shell = {
     >;
   };
 };
-type App = { Features: { shell: Shell }; Presentations: "clean" };
+type Web = {
+  Interface: { Platform: { Name: "web" } };
+  Features: { shell: Shell };
+};
+type Product = { App: true; Features: { web: Web } };
 
-const shell = {
+const shell = createFeature<Shell>({
   programs: {
     browser: {
       components: {
@@ -872,13 +1030,23 @@ const shell = {
       },
     },
   },
-} satisfies Feature<Shell>;
-
-export default {
-  metadata: { name: "Component fixture" },
+});
+const presentation = {
+  parameters: {},
+  create() {
+    return { Shell: () => ({ Drawer: () => ({}) }) };
+  },
+};
+const web = createFeature<Web>({
   features: { shell },
-  presentations: { clean: {} },
-} satisfies Application<App>;
+  presentation,
+});
+const product = createFeature<Product>({ features: { web } });
+
+export default createSystem({
+  metadata: { name: "Component fixture" },
+  features: { product },
+});
 `;
 }
 
@@ -888,8 +1056,7 @@ type UI = { readonly Name: string };
 type Platform = { readonly Name: string; readonly UI?: UI };
 type Environment = { readonly Name: string; readonly Platform: Platform; readonly UI?: UI };
 type Program<E extends Environment, C extends object = {}> = Readonly<C & { Environment: E }>;
-type Feature<C> = unknown;
-type Application<C> = unknown;
+${compositionTypes()}
 
 type Server = { Name: "server"; Platform: { Name: "server" } };
 type Browser = {
@@ -909,16 +1076,86 @@ type Jobs = {
 };
 type App = { Features: { orders: Orders; jobs: Jobs } };
 
-const shared = { programs: { api: {}, "browser-worker": {} } } satisfies Feature<Shared>;
-const orders = {
+const shared = createFeature<Shared>({ programs: { api: {}, "browser-worker": {} } });
+const orders = createFeature<Orders>({
   programs: { api: {}, browser: {} },
   features: { shared },
-} satisfies Feature<Orders>;
-const jobs = {
+});
+const jobs = createFeature<Jobs>({
   programs: { worker: {}, "browser-worker": {} },
-} satisfies Feature<Jobs>;
+});
 
-export default { features: { orders, jobs } } satisfies Application<App>;
+export default createSystem({ features: { orders, jobs } });
+`;
+}
+
+function multiAppSystemSource(
+  topOrder: readonly ("shared" | "operations" | "customer")[] = [
+    "shared",
+    "operations",
+    "customer",
+  ],
+  operationsOrder: readonly ("service" | "web")[] = ["service", "web"],
+  customerOrder: readonly ("service" | "web")[] = ["service", "web"],
+): string {
+  const fields = (order: readonly ("service" | "web")[]) =>
+    order.map((name) => `${name}: ${name === "service" ? "Service" : "Web"}`).join("; ");
+  const values = (order: readonly ("service" | "web")[]) => order.join(", ");
+  return `
+type Platform = { readonly Name: string };
+type Environment = { readonly Name: string; readonly Platform: Platform };
+type Program<E extends Environment, C extends object = {}> = Readonly<C & { Environment: E }>;
+${compositionTypes()}
+
+type Server = { Name: "server"; Platform: { Name: "server" } };
+type Browser = { Name: "browser-main"; Platform: { Name: "web" } };
+type Shared = { Programs: { api: Program<Server> } };
+type Service = { Programs: { api: Program<Server> } };
+type Web = {
+  Interface: { Platform: { Name: "web" } };
+  Programs: { browser: Program<Browser> };
+};
+type Operations = {
+  App: true;
+  Features: { ${fields(operationsOrder)} };
+};
+type Customer = {
+  App: true;
+  Features: { ${fields(customerOrder)} };
+};
+
+const shared = createFeature<Shared>({ programs: { api: {} } });
+const operationsService = createFeature<Service>({ programs: { api: {} } });
+const operationsWeb = createFeature<Web>({
+  programs: { browser: {} },
+  presentation: { parameters: {}, create() { return {}; } },
+});
+const operations = createFeature<Operations>({
+  features: {
+    ${values(operationsOrder)
+      .replace("service", "service: operationsService")
+      .replace("web", "web: operationsWeb")}
+  },
+});
+const customerService = createFeature<Service>({ programs: { api: {} } });
+const customerWeb = createFeature<Web>({
+  programs: { browser: {} },
+  presentation: { parameters: {}, create() { return {}; } },
+});
+const customer = createFeature<Customer>({
+  features: {
+    ${values(customerOrder)
+      .replace("service", "service: customerService")
+      .replace("web", "web: customerWeb")}
+  },
+});
+
+export default createSystem({
+  metadata: { name: "Company" },
+  features: {
+    ${topOrder.join(", ")}
+  },
+});
 `;
 }
 
@@ -927,8 +1164,7 @@ function headlessFactoryApplicationSource(): string {
 type Platform = { readonly Name: string };
 type Environment = { readonly Name: string; readonly Platform: Platform };
 type Program<E extends Environment, C extends object = {}> = Readonly<C & { Environment: E }>;
-type Feature<C> = unknown;
-type Application<C> = unknown;
+${compositionTypes()}
 
 type Tasks = {
   Programs: {
@@ -966,10 +1202,10 @@ const tasks = createTasksFeature("tasks", {
   },
 });
 
-export default {
+export default createSystem({
   metadata: { name: "Factory fixture" },
   features: { tasks },
-} satisfies Application<App>;
+});
 `;
 }
 
@@ -979,8 +1215,7 @@ type UI = { readonly Name: "web"; readonly Child: unknown; readonly Elements: {}
 type Platform = { readonly Name: "web"; readonly UI: UI };
 type Environment = { readonly Name: "browser"; readonly Platform: Platform; readonly UI: UI };
 type Program<E extends Environment, C extends object = {}> = Readonly<C & { Environment: E }>;
-type Feature<C> = unknown;
-type Application<C> = unknown;
+${compositionTypes()}
 
 type Data = {
   Programs: {
@@ -996,10 +1231,10 @@ type Data = {
 type App = { Features: { data: Data } };
 declare function createData(): Feature<Data>;
 
-export default {
+export default createSystem({
   metadata: { name: "UI factory fixture" },
   features: { data: createData() },
-} satisfies Application<App>;
+});
 `;
 }
 
@@ -1008,8 +1243,7 @@ function nestedFactoryApplicationSource(): string {
 type Platform = { readonly Name: "server" };
 type Environment = { readonly Name: "server"; readonly Platform: Platform };
 type Program<E, C extends object = {}> = Readonly<C & { Environment: E }>;
-type Feature<C> = unknown;
-type Application<C> = unknown;
+${compositionTypes()}
 type Repository = { read(input: {}): Promise<readonly string[]> };
 type Child = {
   Programs: { api: Program<Environment, { Requires: { repository: Repository } }> };
@@ -1028,15 +1262,15 @@ function createChild() {
     },
   };
 }
-declare function placePrograms(value: unknown, placement: { server: "api" }): unknown;
-declare function mountFeature(value: unknown, input: { path: "parent" }): unknown;
+declare function placePrograms(value: unknown, placement: { server: "api" }): Feature<Child>;
+declare function mountFeature(value: unknown, input: { path: "parent" }): Feature<Parent>;
 const parent = {
   features: { child: placePrograms(createChild(), { server: "api" }) },
 };
 
-export default {
+export default createSystem({
   features: { parent: mountFeature(parent, { path: "parent" }) },
-} satisfies Application<App>;
+});
 `;
 }
 
@@ -1045,8 +1279,7 @@ function callbackFactoryApplicationSource(): string {
 type Platform = { readonly Name: string };
 type Environment = { readonly Name: string; readonly Platform: Platform };
 type Program<E extends Environment, C extends object = {}> = Readonly<C & { Environment: E }>;
-type Feature<C> = unknown;
-type Application<C> = unknown;
+${compositionTypes()}
 
 type Repository = { read(input: {}): Promise<readonly string[]> };
 type Tasks = {
@@ -1075,7 +1308,7 @@ function defineServerFeature<Contract>(threshold: number): Feature<Tasks> {
 
 const tasks = defineServerFeature<Tasks>(0);
 
-export default { features: { tasks } } satisfies Application<App>;
+export default createSystem({ features: { tasks } });
 `;
 }
 
@@ -1090,7 +1323,7 @@ function numberType(): TypeIR {
   return { kind: "primitive", name: "number" };
 }
 
-function programContribution(ir: ApplicationIR, id: string): ProgramContributionIR | undefined {
+function programContribution(ir: SystemIR, id: string): ProgramContributionIR | undefined {
   return ir.programs.flatMap(({ contributions }) => contributions).find((item) => item.id === id);
 }
 

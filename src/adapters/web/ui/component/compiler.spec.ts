@@ -18,7 +18,7 @@ describe("component compiler", () => {
         },
         presentations: { clean: () => ({}) },
       };`,
-      "app.tsx",
+      "system.tsx",
       { stripPresentations: true },
     );
 
@@ -36,7 +36,7 @@ describe("component compiler", () => {
             return <Root aria-disabled={disabled}>{state.count}</Root>;
           },
         } } } };`,
-        "app.tsx",
+        "system.tsx",
       ),
     ).toThrow("snapshots reactive disabled");
   });

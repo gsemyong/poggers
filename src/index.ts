@@ -1,15 +1,10 @@
 export type {
-  Application,
-  ApplicationContract,
-  ApplicationFeatures,
-  ApplicationMetadata,
   Feature,
   FeatureContract,
   FeatureContractOf,
   FeatureDefinitions,
   FeatureUIAPIs,
   PlacedFeature,
-  PresentationName,
   ProgramOwner,
   ProgramNamesIn,
   ProgramStartContext,
@@ -17,8 +12,8 @@ export type {
   UIActionContext,
   UIContributionAPI,
   UIState,
-} from "@/core/application";
-export { createFeature, placePrograms } from "@/core/application";
+} from "@/core/feature";
+export { createFeature, placePrograms } from "@/core/feature";
 export type {
   AppFeature,
   AppFeatureContract,

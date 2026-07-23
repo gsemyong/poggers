@@ -9,7 +9,7 @@ import {
   buildRustProgram,
   createRustProgramSession,
 } from "@/adapters/server/production/fixtures/conformance";
-import { compileApplication } from "@/compiler/source";
+import { compileSystem } from "@/compiler/source";
 import { executeProgramFixtureIR } from "@/runtime/interpreter";
 
 const temporaryDirectories: string[] = [];
@@ -25,9 +25,9 @@ afterEach(async () => {
 test("keeps canonical operators and traces equivalent across JavaScript and Rust", async () => {
   const directory = await mkdtemp(resolve(tmpdir(), "poggers-rust-conformance-"));
   temporaryDirectories.push(directory);
-  const entry = resolve(directory, "app.ts");
+  const entry = resolve(directory, "system.ts");
   await writeFile(entry, conformanceSource());
-  const ir = compileApplication(entry);
+  const ir = compileSystem(entry);
   const contribution = ir.programs[0]!.contributions[0]!;
   const executable = resolve(directory, "conformance");
   await buildRustProgram(contribution, executable);
@@ -88,8 +88,12 @@ function conformanceSource(): string {
 type Platform = { readonly Name: string };
 type Environment = { readonly Name: string; readonly Platform: Platform };
 type Program<E extends Environment, C extends object = {}> = Readonly<C & { Environment: E }>;
-type Feature<C> = unknown;
-type Application<C> = unknown;
+declare const featureContract: unique symbol;
+type Feature<C> = { readonly [featureContract]?: C; programs: unknown };
+const createFeature = <Contract>(value: Feature<Contract>): Feature<Contract> => value;
+const createSystem = <Features extends Readonly<Record<string, object>>>(value: {
+  features: Features;
+}) => value;
 
 type Input = {
   left: number;
@@ -141,9 +145,7 @@ type Worker = {
     >;
   };
 };
-type App = { Features: { worker: Worker } };
-
-const worker = {
+const worker = createFeature<Worker>({
   programs: {
     worker: {
       async start({ dependencies }: {
@@ -190,8 +192,8 @@ const worker = {
       },
     },
   },
-} satisfies Feature<Worker>;
+});
 
-export default { features: { worker } } satisfies Application<App>;
+export default createSystem({ features: { worker } });
 `;
 }
