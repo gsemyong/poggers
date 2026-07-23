@@ -4,7 +4,7 @@ Poggers is a TypeScript product language for portable Programs, typed
 Dependencies, platform Components, and complete Presentations. Applications
 compose reusable Features; Platform Adapters own realization.
 
-## Create An Application
+## Current Application Workflow
 
 ```sh
 nub x @poggers/kit create my-app
@@ -14,7 +14,7 @@ nub install
 nub run dev
 ```
 
-The generated project is the canonical application convention:
+The currently shipped CLI creates the existing single-Application project:
 
 ```text
 src/
@@ -26,18 +26,15 @@ src/
     clean.ts
 ```
 
-`app.tsx` is only the composition root. A Feature owns product structure and
-behavior. A Presentation owns adapter-defined user-facing decisions, including
-visuals, assets, and motion on the web. Every project retains this organization
-as it grows; Feature and Presentation paths do not change with project size.
-`app.spec.ts` states observable product behavior once; the framework runs it
-through both the hot-reloadable development realization and the optimized
-production realization.
+`app.tsx` is the current composition root. A Feature owns product structure and
+behavior, while a Presentation owns adapter-defined user-facing decisions. This
+workflow remains functional while the repository migrates to the documented
+System and multi-App model; it is not the final external Workspace convention.
 
 ## Develop The Kit
 
-This repository contains the framework package, its canonical template, and
-focused examples that pressure-test individual adapter surfaces.
+This repository currently contains the framework package, its packaged starter,
+and focused examples that pressure-test individual adapter surfaces.
 
 ```sh
 mise install
@@ -64,10 +61,11 @@ reorder and layout continuity, repeated action feedback, shared environment
 observations, reduced motion, frame inspection, and deterministic realization
 of each frame.
 
-See [the architecture document](docs/architecture.md) for the product model,
-project convention, adapter boundaries, and package surface. Headless code
-intended for both JavaScript development and optimized production follows the
-deliberately small [Portable TypeScript profile](docs/portable-typescript.md);
-unsupported host code is identified in IR and can never become a silent
-production fallback. The active migration and its acceptance evidence are
-tracked in [the architecture migration ledger](docs/architecture-migration.md).
+See [the architecture document](docs/architecture.md) for the normative target,
+the audited current state, the live gap ledger, and the verification gates. The
+active migration is tracked in the
+[System implementation ledger](docs/system-implementation.md).
+Headless code intended for both JavaScript development and optimized production
+follows the deliberately small
+[Portable TypeScript profile](docs/portable-typescript.md); unsupported host
+code is identified in IR and can never become a silent production fallback.
