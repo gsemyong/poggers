@@ -1,4 +1,4 @@
-import type { DevelopmentWebLoaderRegistry } from "@/adapters/integration/web-server";
+import type { DevelopmentWebLoaderRegistry } from "@/adapters/web-server";
 import { runWebInterface } from "@/adapters/web/pipeline";
 import type { DevelopmentSession, PlatformDevelopmentInput } from "@/contracts/platform";
 import type { WebPlatform } from "@/platforms/web/platform";

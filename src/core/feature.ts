@@ -348,7 +348,7 @@ type EnvironmentIdentity<Environment extends EnvironmentContract> = Environment 
   Name: infer EnvironmentName extends string;
   Platform: { Name: infer PlatformName extends string };
 }
-  ? Environment extends { UI: { Name: infer UIName extends string } }
+  ? Environment["Platform"] extends { UI: { Name: infer UIName extends string } }
     ? `${EnvironmentName}@${PlatformName}/${UIName}`
     : `${EnvironmentName}@${PlatformName}`
   : never;

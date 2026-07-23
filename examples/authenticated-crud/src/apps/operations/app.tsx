@@ -1,7 +1,7 @@
 import { createApp } from "kit";
 
-import { createWorkspaceWeb, type WorkspaceWeb } from "../web";
+import { createWorkspaceWeb } from "../web";
 
-export const operations = createApp<{ Features: { web: WorkspaceWeb } }>({
+export const operations = createApp({
   features: { web: createWorkspaceWeb({ shortName: "Operations" }) },
 });

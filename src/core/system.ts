@@ -78,11 +78,11 @@ export type AppFeatureContract<Contract extends FeatureContract> = Readonly<
 
 export type AppFeature<Contract extends FeatureContract> = Feature<AppFeatureContract<Contract>>;
 
-/** Creates a product App without introducing another composition primitive. */
-export function createApp<Contract extends FeatureContract>(
-  feature: Feature<Contract>,
-): AppFeature<Contract> {
-  return feature as unknown as AppFeature<Contract>;
+/** Marks an inferred Feature composition as one product App. */
+export function createApp<const Features extends FeatureValues>(
+  feature: Readonly<{ features: Features }>,
+): AppFeature<InferredSystemContract<Features>> {
+  return feature as unknown as AppFeature<InferredSystemContract<Features>>;
 }
 
 /** Type-only ownership marker added by a Platform's interface Feature factory. */

@@ -1,4 +1,4 @@
-import type { Feature, Program } from "kit";
+import { createFeature, type Program } from "kit";
 import type { BrowserMainThread } from "kit/web";
 
 export type ShellFeature = {
@@ -16,7 +16,7 @@ export type ShellFeature = {
   };
 };
 
-export const shell = {
+export const shell = createFeature<ShellFeature>({
   programs: {
     browser: {
       state: { count: 0 },
@@ -42,4 +42,4 @@ export const shell = {
       root: "Root",
     },
   },
-} satisfies Feature<ShellFeature>;
+});

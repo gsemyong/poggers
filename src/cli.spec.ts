@@ -59,7 +59,7 @@ describe("project template", () => {
     );
     expect(await readFile(resolve(target, "src/system.spec.ts"), "utf8")).toContain("testSystem({");
     expect(await readFile(resolve(target, "src/features/shell.tsx"), "utf8")).toContain(
-      "satisfies Feature<ShellFeature>",
+      "createFeature<ShellFeature>",
     );
     expect(await readFile(resolve(target, "src/presentations/clean.ts"), "utf8")).toContain(
       "satisfies WebPresentation<Web, typeof parameters>",

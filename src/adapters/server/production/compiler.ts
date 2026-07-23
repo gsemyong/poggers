@@ -14,7 +14,6 @@ import {
 import { homedir } from "node:os";
 import { dirname, relative, resolve } from "node:path";
 
-import { planWebRouteLoaders, type WebRouteLoaderPlan } from "@/adapters/integration/web-server";
 import {
   resolveServerProductionDependencies,
   serverProductionDependencies,
@@ -25,6 +24,7 @@ import {
   generateRustProgram,
   type RustProgramFunctionExport,
 } from "@/adapters/server/production/program";
+import { planWebRouteLoaders, type WebRouteLoaderPlan } from "@/adapters/web-server";
 import type { SystemIR, LinkedProgramIR, ProgramIR, TypeIR } from "@/compiler/ir";
 import { linkProgram } from "@/compiler/linker";
 

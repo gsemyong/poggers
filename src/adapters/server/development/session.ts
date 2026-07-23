@@ -4,11 +4,6 @@ import { isAbsolute, relative, resolve } from "node:path";
 import { createServer, defaultServerConditions, type Plugin } from "vite";
 
 import {
-  planWebRouteLoaders,
-  type DevelopmentWebLoaderRegistry,
-  type WebRouteLoaderPlan,
-} from "@/adapters/integration/web-server";
-import {
   beginNodeHostReplacement,
   createNodeHost,
   type NodeHostOptions,
@@ -18,6 +13,12 @@ import {
   startServerProgramInstance,
   type RunningServerProgram,
 } from "@/adapters/server/development/runtime";
+import { packageSourceAliases } from "@/adapters/source";
+import {
+  planWebRouteLoaders,
+  type DevelopmentWebLoaderRegistry,
+  type WebRouteLoaderPlan,
+} from "@/adapters/web-server";
 import {
   selectSystemOutputs,
   type DependencyIR,
@@ -55,7 +56,7 @@ export async function developServerPrograms(
     plugins: [systemAliasPlugin(source)],
     root: input.directory,
     resolve: {
-      alias: kitAliases(),
+      alias: packageSourceAliases(resolve(import.meta.dirname, "../../.."), moduleExtension()),
       conditions: ["source", ...defaultServerConditions],
     },
     server: { middlewareMode: true, ws: false },
@@ -443,32 +444,8 @@ function serverPort(
   return configured + (index < 0 ? 0 : index);
 }
 
-function kitAliases() {
-  const source = resolve(import.meta.dirname, "../../..");
-  const extension = import.meta.filename.endsWith(".ts") ? ".ts" : ".js";
-  return [
-    {
-      find: /^kit\/jsx-dev-runtime$/,
-      replacement: resolve(source, `jsx/development${extension}`),
-    },
-    {
-      find: /^kit\/jsx-runtime$/,
-      replacement: resolve(source, `jsx/runtime${extension}`),
-    },
-    {
-      find: /^kit\/adapters\/server$/,
-      replacement: resolve(source, `adapters/server/adapter${extension}`),
-    },
-    {
-      find: /^kit\/server$/,
-      replacement: resolve(source, `platforms/server/platform${extension}`),
-    },
-    {
-      find: /^kit\/web$/,
-      replacement: resolve(source, `platforms/web/platform${extension}`),
-    },
-    { find: /^kit$/, replacement: resolve(source, `index${extension}`) },
-  ];
+function moduleExtension(): ".js" | ".ts" {
+  return import.meta.filename.endsWith(".ts") ? ".ts" : ".js";
 }
 
 function systemAliasPlugin(source: string): Plugin {

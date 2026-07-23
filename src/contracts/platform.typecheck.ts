@@ -46,13 +46,11 @@ type Server = { readonly Name: "server"; readonly Platform: ServerPlatform };
 type IOSForeground = {
   readonly Name: "ios-foreground";
   readonly Platform: IOSPlatform;
-  readonly UI: IOSUI;
 };
 type IOSBackground = { readonly Name: "ios-background"; readonly Platform: IOSPlatform };
 type IOSWidget = {
   readonly Name: "ios-widget";
   readonly Platform: IOSPlatform;
-  readonly UI: IOSUI;
 };
 
 type ServerProgram = Program<Server>;
@@ -74,16 +72,6 @@ const iosWidgetProgram: IOSWidgetProgram = {
   Components: { Root: { Elements: { Root: "stack" } } },
 };
 void [serverProgram, iosProgram, iosBackgroundProgram, iosWidgetProgram];
-
-type WrongUIEnvironment = {
-  readonly Name: "wrong";
-  readonly Platform: IOSPlatform;
-  readonly UI: OtherUI;
-};
-type WrongUIProgram = Program<WrongUIEnvironment, { Components: {} }>;
-// @ts-expect-error An Environment cannot use another Platform's UI language.
-const wrongUIProgram: WrongUIProgram = { Environment: {} as WrongUIEnvironment, Components: {} };
-void wrongUIProgram;
 
 type HeadlessUIProgram = Program<Server, { Components: {} }>;
 // @ts-expect-error A process-only Platform cannot receive UI declarations.

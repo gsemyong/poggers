@@ -1,6 +1,6 @@
 import type { JSXElement, JSXPlatformRegistration } from "kit/jsx-runtime";
 
-import type { Feature } from "@/core/feature";
+import { createFeature } from "@/core/feature";
 import type { Program } from "@/core/program";
 import type { UIElement } from "@/core/ui/language";
 import type { BrowserMainThread } from "@/platforms/web/platform";
@@ -23,7 +23,6 @@ type NativePlatform = Readonly<{ Name: "native"; UI: NativeUI }>;
 type NativeMain = Readonly<{
   Name: "native-main";
   Platform: NativePlatform;
-  UI: NativeUI;
 }>;
 
 declare module "kit/jsx-runtime" {
@@ -47,7 +46,7 @@ type WebFeature = {
   };
 };
 
-const webFeature = {
+const webFeature = createFeature<WebFeature>({
   programs: {
     browser: {
       components: {
@@ -60,7 +59,7 @@ const webFeature = {
       root: "Page",
     },
   },
-} satisfies Feature<WebFeature>;
+});
 
 type NativeFeature = {
   Programs: {
@@ -76,7 +75,7 @@ type NativeFeature = {
   };
 };
 
-const nativeFeature = {
+const nativeFeature = createFeature<NativeFeature>({
   programs: {
     native: {
       components: {
@@ -98,7 +97,7 @@ const nativeFeature = {
       root: "Page",
     },
   },
-} satisfies Feature<NativeFeature>;
+});
 
 const webIntrinsic = <main id="web-intrinsic" />;
 const nativeIntrinsic = <stack axis="horizontal" />;

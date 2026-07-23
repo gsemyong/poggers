@@ -17,21 +17,7 @@ export type PlatformContract = Readonly<{
 export type EnvironmentContract = Readonly<{
   Name: string;
   Platform: PlatformContract;
-  UI?: UIContract;
 }>;
-
-/** Rejects an Environment whose UI is not the UI language owned by its Platform. */
-export type EnvironmentDefinition<Environment extends EnvironmentContract> = Environment extends {
-  UI: infer UI extends UIContract;
-}
-  ? Environment["Platform"] extends { UI: infer PlatformUI extends UIContract }
-    ? [UI] extends [PlatformUI]
-      ? [PlatformUI] extends [UI]
-        ? Environment
-        : never
-      : never
-    : never
-  : Environment;
 
 export type ProgramContract = {
   Environment: EnvironmentContract;
@@ -73,7 +59,10 @@ type ComponentPrimitiveNames<Contract> = [keyof ProgramComponents<Contract>] ext
     ? Elements[keyof Elements]
     : never;
 
-type SupportsComponents<Environment extends EnvironmentContract, Contract> = Environment extends {
+type SupportsComponents<
+  Environment extends EnvironmentContract,
+  Contract,
+> = Environment["Platform"] extends {
   UI: infer UI extends UIContract;
 }
   ? UI extends UIDefinition<UI>
@@ -87,12 +76,10 @@ type SupportsComponents<Environment extends EnvironmentContract, Contract> = Env
 
 /** Declares one Program and the Environment in which its Processes execute. */
 export type Program<Environment extends EnvironmentContract, Contract extends object = Empty> =
-  Environment extends EnvironmentDefinition<Environment>
-    ? HasProgramUI<Contract> extends true
-      ? Environment extends { UI: UIContract }
-        ? SupportsComponents<Environment, Contract> extends true
-          ? Readonly<Contract & { Environment: Environment }>
-          : never
+  HasProgramUI<Contract> extends true
+    ? Environment["Platform"] extends { UI: UIContract }
+      ? SupportsComponents<Environment, Contract> extends true
+        ? Readonly<Contract & { Environment: Environment }>
         : never
-      : Readonly<Contract & { Environment: Environment }>
-    : never;
+      : never
+    : Readonly<Contract & { Environment: Environment }>;

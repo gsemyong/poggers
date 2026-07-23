@@ -856,7 +856,7 @@ function extractProgram(
     interfaceOwner && interfaceOwner.platform === platform
       ? `${interfaceOwner.path}.${name}`
       : name;
-  const uiContract = propertyType(checker, environment, "UI", location);
+  const uiContract = propertyType(checker, platformContract, "UI", location);
   const ui = uiContract ? literalProperty(checker, uiContract, "Name", location) : undefined;
   const state = propertyType(checker, contract, "State", location);
   const actions = propertyType(checker, contract, "Actions", location);

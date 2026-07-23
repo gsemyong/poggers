@@ -21,7 +21,7 @@ export type ComponentContract = {
 
 /** A Feature or Program shape from which Component meaning can be projected. */
 export type ComponentOwner = {
-  Environment?: { Name: string; UI?: UIContract };
+  Environment?: { Name: string; Platform?: { UI?: UIContract } };
   State?: object;
   Actions?: ActionRecord;
   Requires?: object;
@@ -30,7 +30,7 @@ export type ComponentOwner = {
   Programs?: Record<
     string,
     {
-      Environment?: { Name: string; UI?: UIContract };
+      Environment?: { Name: string; Platform?: { UI?: UIContract } };
       State?: object;
       Actions?: ActionRecord;
       Requires?: object;
@@ -39,7 +39,6 @@ export type ComponentOwner = {
     }
   >;
   Features?: Record<string, ComponentOwner>;
-  Presentations?: string | Record<string, unknown>;
 };
 
 type UIKey = "State" | "Actions" | "Components";
@@ -61,7 +60,7 @@ type UIOf<Owner extends ComponentOwner> = [DirectUIOf<Owner>] extends [never]
   : DirectUIOf<Owner>;
 export type ComponentUI<Owner extends ComponentOwner> =
   UIOf<Owner> extends {
-    Environment: { UI: infer UI extends UIContract };
+    Environment: { Platform: { UI: infer UI extends UIContract } };
   }
     ? UI
     : never;

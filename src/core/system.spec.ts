@@ -6,7 +6,7 @@ import { createApp, createSystem } from "@/core/system";
 describe("System authoring", () => {
   it("retains one ordinary Feature tree without runtime wrappers", () => {
     const leaf = createFeature<{}>({});
-    const app = createApp<{ Features: { leaf: {} } }>({
+    const app = createApp({
       features: { leaf },
     });
     const system = createSystem({

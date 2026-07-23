@@ -33,7 +33,6 @@ type NativePlatform = Readonly<{ Name: "native"; UI: NativeUI }>;
 type NativeMain = Readonly<{
   Name: "native-main";
   Platform: NativePlatform;
-  UI: NativeUI;
 }>;
 
 type Principal = Readonly<{ id: string }>;
@@ -209,7 +208,7 @@ const operationsNative = createFeature<OperationsNative>({
   },
 });
 
-const operations = createApp<Operations>({
+const operations = createApp({
   features: { web: operationsWeb, native: operationsNative },
 });
 
@@ -248,7 +247,7 @@ const customerWeb = createWebInterface<CustomerWebContract>({
   },
 });
 
-const customer = createApp<Customer>({ features: { web: customerWeb } });
+const customer = createApp({ features: { web: customerWeb } });
 
 export type SystemConflictProbe = FeatureEnvironmentConflict<{
   Features: {
@@ -288,7 +287,7 @@ void incompatiblePresentation;
 void identity.features.tasks;
 
 // @ts-expect-error App is a Feature factory, not a second nested App registry.
-createApp<{ Apps: { nested: Operations } }>({ apps: { nested: operations } });
+createApp({ apps: { nested: operations } });
 
 type DuplicateAppIdentity = { operations: typeof operations } & {
   operations: typeof customer;

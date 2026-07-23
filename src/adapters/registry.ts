@@ -1,8 +1,8 @@
-import { createDevelopmentWebLoaderRegistry } from "@/adapters/integration/web-server";
 import {
   createServerPlatformAdapter,
   type ServerPlatformAdapterOptions,
 } from "@/adapters/server/adapter";
+import { createDevelopmentWebLoaderRegistry } from "@/adapters/web-server";
 import { createWebPlatformAdapter, type WebPlatformAdapterOptions } from "@/adapters/web/adapter";
 import type { PlatformAdapters } from "@/contracts/platform";
 import type { ServerPlatform } from "@/platforms/server/platform";

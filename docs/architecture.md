@@ -1,323 +1,147 @@
-# Framework architecture
+# Architecture
 
-Status: normative architecture and live acceptance record.
-
-This document defines the end state of the framework and records the distance
-between that state and the current repository. The target sections are
-normative. The gap ledger describes the implementation as audited on
-2026-07-23; a gap is not complete until its stated evidence exists.
-
-The framework is a portable TypeScript product language. One company repository
-describes a complete System made from reusable Features. Features co-locate
-logic for Programs that run in different Environments, and Programs interact
-with authority outside their own code through typed Dependencies. Platform
-Adapters turn that meaning into hot-reloadable development processes and
-optimized production artifacts.
-
-The framework should make product code semantic, type-safe, portable, and easy
-to compose. It should not make every product author understand compiler,
-deployment, transport, native-language, or adapter plumbing.
-
-## North star
-
-The final model is:
+Kit is a portable TypeScript product language. A company Workspace describes
+one System made from reusable Features. Features contribute Programs for
+specific Environments, and Programs interact with authority outside their own
+logic through typed Dependencies. Platform Adapters realize that meaning for
+development and production.
 
 ```text
-Workspace
-`- System
-   |- shared Features
-   |  `- Program contributions
-   |- App Features
-   |  |- private Features
-   |  `- platform-interface Features
-   |     |- Components and routes
-   |     |- Presentation selection
-   |     `- platform installation metadata
-   `- compiled Programs
-      `- live Processes
+TypeScript product source
+  -> System IR
+  -> linked Programs
+  -> Platform Adapters
+       |- live development sessions
+       `- production artifacts
 ```
 
-The essential flow is:
+## Invariants
 
-```text
-typed TypeScript product source
-  -> one canonical, versioned System IR
-  -> linked Program IR
-  -> selected Platform Adapters
-       |- development sessions with hot replacement
-       `- optimized production artifacts
-```
-
-The architectural invariants are:
-
-1. **Feature is the only composition unit.** Shared domain behavior, Apps,
-   platform interfaces, and optional product groupings are all Features or
-   reusable Feature factories. Core does not need a second composition tree.
-2. **System is the only root.** A System describes the complete company-level
-   composition compiled and developed together.
-3. **App is not a new core primitive.** An App is a specialized Feature made by
-   an app Feature factory. One App may contain web, native, desktop, and other
-   platform interfaces.
-4. **Program is the deployment unit.** Same-named contributions from the
-   Feature tree link into one Program. A live replica of that artifact is a
-   Process.
-5. **Dependency is the interaction boundary.** Product code uses typed
-   Dependencies for external authority and shared semantic APIs. Concrete
-   hosts, protocols, databases, and native libraries remain behind providers
-   or Platform Adapters.
-6. **Adapters own realization.** Core carries no Vite, Node.js, Rust, Swift,
-   browser, database, transport, SSR, PWA, or deployment implementation.
-7. **UI meaning remains platform-specific.** JSX is shared syntax, while
-   structural primitives, accessibility, navigation, observations, and
-   Presentation declarations belong to a UI Platform.
-8. **Presentation depends on behavior, never the reverse.** A Presentation may
-   read typed Component meaning and enrich Elements, but it cannot mutate
-   product behavior or invoke actions.
-9. **There is one semantic compile per source revision.** Adapters consume the
-   resulting IR; they do not create independent TypeScript compiler graphs for
-   the same revision.
-10. **The physical tree mirrors architectural ownership.** A file exists for
-    one clear concept or one substantial implementation unit. Empty symmetry,
-    mechanical splitting, and residue are not architecture.
+1. **System is the only root.** It is the complete compilation and development
+   boundary for one Workspace.
+2. **Feature is the only recursive composition unit.** Apps and platform
+   interfaces are marked Features, not parallel composition systems.
+3. **Program is the authored deployment unit.** Same-named compatible
+   contributions link into one Program. A live replica is a Process.
+4. **Environment selects one Platform.** The Platform owns its authoring
+   language and optional UI language; Environments do not repeat that meaning.
+5. **Dependency is the interaction boundary.** A Dependency is provided either
+   by another Feature contribution or by the selected Platform Adapter.
+6. **Adapters own realization.** Core contains no browser, Node.js, Vite, Rust,
+   database, transport, deployment, or protocol policy.
+7. **Component owns UI behavior and structure.** Its view is a pure projection
+   of state and props; actions mutate state and Programs perform effects.
+8. **Presentation depends on Component meaning, never the reverse.** It may
+   enrich named Elements with platform-specific experiential declarations but
+   cannot mutate product behavior.
+9. **One source revision has one semantic compilation.** Every adapter consumes
+   the same versioned IR.
+10. **The physical tree follows ownership.** Files split at real architectural,
+    lifecycle, or distribution boundaries, not for mechanical symmetry.
 
 ## Vocabulary
 
-These names are precise and non-overlapping.
-
 ### Workspace
 
-A Workspace is the source repository and development boundary. It contains one
-System, shared Features, Apps, shared Presentations, tests, and configuration.
-Workspace is a tooling term, not product meaning and not part of core IR.
+The source repository and development boundary. It contains one `src/system.ts`,
+shared Features, App Features, Presentations, tests, and configuration. It is a
+tooling convention, not an IR primitive.
 
 ### System
 
-A System is the complete compilation and development root. It owns metadata and
-one Feature tree. It does not contain adapter instances, infrastructure wiring,
-or a global Presentation registry.
-
-System replaced the former single-root type; no parallel composition
-abstraction remains.
-
-### Feature
-
-A Feature is a reusable vertical slice and the sole recursive composition
-primitive. A Feature may:
-
-- compose child Features;
-- contribute to one or more named Programs;
-- require typed Dependencies;
-- provide semantic Dependencies;
-- define state, actions, Components, and routes for a UI Program;
-- expose a domain-focused API;
-- provide specialized testing support when its domain needs it.
-
-A Feature receives only the APIs and Dependencies it declares. There is no
-ambient, untyped access to the whole System. A composition Feature coordinates
-siblings explicitly when coordination is product meaning.
-
-### App
-
-An App is a product-level experience represented by a specialized Feature. It
-is not synonymous with web, mobile, or a deployment artifact. One App can have
-several platform interfaces and can consume System-shared Features.
-
-Examples are an operations app and a customer app. Each may provide a web PWA
-and a native interface while sharing identity, tasks, billing, and server
-Programs.
-
-### Program and Process
-
-A Program is all same-named Feature contributions linked into one independently
-realizable artifact for one Environment. Logical Program roles inside reusable
-factories may be placed into concrete Program names at composition.
-
-A Process is one running instance or replica of a Program. Horizontal scaling
-creates more Processes from the same artifact. Replication, sharding,
-coordination, and remote communication are expressed through Dependencies and
-adapter configuration, not through a second Program model.
-
-### Environment and Platform
-
-An Environment names the execution context of a Program and selects one
-Platform. Examples include a browser main thread, browser service worker,
-owned server, user-hosted server, iOS foreground process, and iOS background
-process.
-
-A Platform defines the public authoring language for a related family of
-Environments. Every Platform supports headless Processes; a Platform may also
-define a UI language.
-
-### Dependency
-
-A Dependency is a typed API through which a Program accesses authority or
-meaning not implemented at the call site. It can be synchronous, asynchronous,
-streaming, stateful, pure, or effectful.
-
-There are exactly two provider origins:
-
-1. A Feature contribution provides a portable semantic Dependency.
-2. A Platform Adapter provides a Dependency still unresolved after linking.
-
-For each Program, the linker rejects missing or duplicate providers,
-incompatible contracts, and cycles. One Process creates one provider scope;
-consumers share each binding in that scope and disposal follows reverse
-ownership order. A provider may connect every Process to shared distributed
-infrastructure, so process-local instantiation does not imply system-local
-state.
-
-### Component and Presentation
-
-A Component owns UI behavior: props, state, synchronous actions, hierarchy,
-listeners, accessibility, lifecycle, and named Elements. Rendering is a pure
-projection of current props and state. Effects and external authority remain in
-Program code and Dependencies.
-
-A Presentation is a typed, platform-specific mapping from Component meaning to
-visual and experiential declarations. It can use props, state, Elements,
-environment observations, explicit parameters, and declarative temporal
-meaning. It cannot change structure or product behavior unless the Platform's
-public UI contract explicitly models that meaning.
-
-### Platform Adapter
-
-A Platform Adapter is the top-level implementation contract for one Platform.
-It owns:
-
-- source extensions for the Platform language;
-- development execution and hot replacement;
-- production artifact generation;
-- unresolved Environment Dependency implementations;
-- UI and Presentation realization when the Platform supports UI.
-
-JavaScript, Vite, Rust, Swift, Cargo, SwiftPM, SQLite, NATS, the DOM, CSS, and
-graphics engines are implementation details below this boundary.
-
-## Composition semantics
-
-### One System, many Apps
-
-The System Feature tree contains shared Features and App Features as siblings.
-Shared domain Features are instantiated once in source. Their same-named server
-contributions link once into shared server Programs. App Features consume their
-semantic APIs without copying their providers.
-
-An App contains private Features and platform-interface Features. A web
-interface Feature owns its web routes, metadata, installation manifest, service
-worker contribution, selected Presentation, and browser Program contribution.
-A native interface Feature owns equivalent native meaning. Neither web nor
-native is itself an App.
-
-This model supports:
-
-- multiple Apps in one company Workspace;
-- several platform interfaces per App;
-- one shared backend used by several Apps;
-- App-private backend contributions;
-- several independently named server Programs;
-- several replicas of any Program in production;
-- focused development or build of one App while preserving its shared
-  dependencies.
-
-The settled composition syntax is:
+The company-level composition root. It contains metadata and named Features.
+It contains no adapter instances, host wiring, or global Presentation registry.
 
 ```ts
-const shared = createFeature<SharedContract>({ programs: { api: {} } });
-
-const web = createWebInterface<WebContract>({
-  programs: { browser: webProgram },
-  presentation,
-  installation,
-});
-
-const operations = createApp<OperationsContract>({
-  features: { web },
-});
-
 export default createSystem({
   metadata: { name: "Company" },
-  features: { shared, operations },
+  features: { identity, tasks, operations, customer },
 });
 ```
 
-`createFeature` retains the contract that `satisfies` can validate but cannot
-preserve in an inferred value. `createApp` and `createWebInterface` only enrich
-that same Feature contract with type-level ownership. `createSystem` infers the
-complete root contract from those values, so the Feature map is never repeated
-as a root generic type argument.
+### Feature
 
-### Cross-Feature communication
+The reusable vertical slice and sole recursive composition primitive. A Feature
+may compose child Features and contribute to several Programs. A reusable
+factory exposes a domain language while lowering it to Feature, Program, and
+Dependency contracts.
 
-Reusable Feature factories expose an ideal domain API and lower it to the core
-Feature, Program, and Dependency contracts. Product authors consume the domain
-API rather than wiring transports or hosts.
+```ts
+export const tasks = createFeature<Tasks>({
+  programs: {
+    api: { start({ dependencies }) {} },
+    browser: { state, actions, components },
+  },
+});
+```
 
-Feature-to-Feature communication has one rule:
+A Feature sees only its declared children and Dependencies. It has no ambient
+access to the consuming System.
 
-- direct composition uses an explicitly exposed typed child API;
-- authority, asynchronous communication, or separately realized Programs use a
-  typed Dependency.
+### App
 
-There is no service locator, global dependency bag, hidden event bus, or
-adapter import in product code.
+A product experience marked by `createApp`. It remains an ordinary Feature and
+may contain several platform-interface Features.
 
-### Program assembly
+```ts
+export const operations = createApp({
+  features: { web, ios },
+});
+```
 
-The compiler recursively collects contributions from the complete System
-Feature tree. Contributions with the same concrete Program name and compatible
-Environment link into one Program. Different names produce independent
-artifacts.
+Web and iOS are interfaces of the App, not separate Apps. Shared domain Features
+remain System siblings so several Apps can consume one backend contribution.
 
-App and platform Feature factories may use logical Program role names
-internally. Composition maps those roles to concrete names once. This permits
-two Apps to share one server Program or to isolate their server workloads
-without changing the reusable Feature factory.
+### Program And Process
 
-## UI and Presentation ownership
+A Program is the linked result of every compatible contribution with the same
+concrete name. Different names produce independently realizable artifacts.
+`placePrograms` maps logical roles used by a reusable factory to concrete names
+at composition.
 
-Shared JSX remains one TypeScript syntax dispatcher so a source file can use
-different Platform JSX vocabularies. JSX does not imply a universal DOM or one
-cross-platform primitive set.
+A Process is one running Program instance. Replication creates more Processes
+from the same artifact. Coordination, sharding, persistence, and communication
+are expressed through Dependencies rather than a second execution model.
 
-Each UI Platform defines:
+### Environment And Platform
 
-- primitive Elements and structural properties;
-- events, accessibility, and navigation meaning;
-- target handles and platform observations;
-- its Presentation declaration language;
-- the adapter contract that realizes those declarations.
+An Environment names one execution context, such as `browser-main`,
+`browser-service-worker`, or `server`, and selects one Platform.
 
-Presentation ownership moves from the System root to the platform-interface
-Feature that owns the Component tree. This is necessary because two Apps may
-have unrelated trees, and one App may have web and native interfaces with
-different Presentation languages.
+A Platform defines the authoring and realization family. Every Platform can run
+headless Programs; some also own a UI language. The web Platform, for example,
+owns browser structure, routes, navigation, metadata, rendering policy,
+installation, service-worker meaning, and its Presentation language.
 
-Presentation reuse has three explicit levels:
+### Dependency
 
-1. **Parameters and assets** share brand values, icons, fonts, audio, and other
-   typed inputs.
-2. **Recipes** share pure declaration constructors for compatible Element and
-   state contracts.
-3. **Presentation factories** create a complete typed Presentation for a
-   concrete platform-interface contract.
+A typed API for authority or meaning not implemented at the call site. It may
+be synchronous, asynchronous, streaming, stateful, pure, or effectful.
 
-A concrete Presentation is directly reusable only when the Component contract
-is compatible. Different trees reuse parameters, recipes, or a generic factory.
-Factories and recipes are ordinary typed pure functions. Object literals
-assemble their results. A duplicate direct property is a TypeScript error;
-object spread is the sole explicit override mechanism, and its source order
-states precedence. Core adds no implicit inheritance, cascade, deep merge, or
-last-writer-wins registry.
+There are two provider origins:
 
-The existing generic Presentation type is a strong foundation: it already
-binds a Presentation to the exact Component hierarchy, props, state, events,
-Elements, environment observations, parameters, and Platform language. The
-ownership and reusable factory API need adjustment, not a second presentation
-model.
+1. another Feature contribution provides a portable semantic API;
+2. a Platform Adapter provides a host API still unresolved after linking.
 
-## Adapter and language model
+The linker rejects missing, duplicate, incompatible, and cyclic providers. Each
+Process owns one provider scope and disposes it in reverse ownership order.
+Process-local instantiation does not imply process-local data: a provider may
+connect every replica to shared infrastructure.
 
-The stable adapter shape remains conceptually:
+### Component And Presentation
+
+A Component declares props, state, synchronous actions, slots, hierarchy,
+accessibility, lifecycle, and named Elements. Components compose through JSX
+while platform primitives remain platform-specific.
+
+A Presentation maps the exact Component contract to one Platform's experiential
+declarations. It may read props, state, named Elements, observations, and typed
+parameters. Reuse comes from pure recipes and factories; object spread is the
+only explicit override mechanism.
+
+### Platform Adapter
+
+The implementation contract for one Platform:
 
 ```ts
 type PlatformAdapter<Platform> = {
@@ -329,483 +153,103 @@ type PlatformAdapter<Platform> = {
 };
 ```
 
-Both profiles consume the same linked IR:
+Development prioritizes fast startup, diagnostics, and state-preserving hot
+replacement. Production prioritizes deterministic, minimal artifacts. Both
+consume the same linked IR and may use different implementation languages.
 
-- Development prioritizes immediate startup, state-preserving hot replacement,
-  source diagnostics, and inspection. A JavaScript runtime is an implementation
-  choice, not product meaning.
-- Production prioritizes deterministic, minimal, optimized artifacts. An
-  adapter may lower portable Program code to Rust, Swift, JavaScript, or several
-  languages.
+## Composition
 
-Compiler-derived Dependency IR is the source of truth. A TypeScript development
-host, generated Rust trait, or generated Swift protocol must be checked against
-that same contract. Product operation signatures are never maintained manually
-in several languages.
+The compiler walks the Feature tree once, links Program contributions, resolves
+Dependencies, and records exact output ownership. This supports:
 
-Adding an iOS Platform should require additions under `platforms/ios` and
-`adapters/ios`, plus registry and export changes. It must not require changing
-System, Feature, Program, Dependency, Component, Presentation, or generic IR
-semantics.
+- several Apps in one System;
+- several interfaces per App;
+- shared and App-private backend Programs;
+- focused App development without duplicating shared Programs;
+- independent Program replicas in production.
 
-## Web Platform ownership
+Cross-Feature communication has one rule: composition reads an explicitly
+exposed child API, while authority or communication across separately realized
+Programs uses a typed Dependency. There is no service locator, global
+dependency bag, hidden event bus, or adapter import in product code.
 
-Web-specific concerns remain entirely in the web Platform and adapter:
-
-- typed routes, params, search, navigation, redirects, and metadata;
-- browser, service-worker, and server Program integration;
-- client rendering, server rendering, caching, hydration, and code splitting;
-- documents, assets, styles, and Presentation compilation;
-- PWA manifests, installation, offline behavior, and service workers;
-- development HMR and production browser/server artifacts.
-
-Each web interface Feature owns one independently addressable web output and
-its installation metadata. A System may therefore build several PWAs without a
-global manifest or global route namespace. Shared server Programs remain shared
-rather than starting once per PWA.
-
-Rendering policy is a web Feature concern and compiler input, not a generic core
-concept. The web adapter may optimize that meaning into cached HTML, streamed
-responses, client-only navigation, selective hydration, and crawler artifacts
-without leaking those mechanisms into core.
-
-## Target authoring Workspace
-
-Every generated company Workspace follows one convention:
+## Source Layout
 
 ```text
 src/
-  system.ts
-  features/
-    identity.ts
-    tasks.ts
-  presentations/
-    company-web.ts
-  apps/
-    operations/
-      app.tsx
-      features/
-        dashboard.tsx
-      presentations/
-        operations-web.ts
-    customer/
-      app.tsx
-      features/
-        account.tsx
-      presentations/
-        customer-web.ts
+  core/         product-language contracts
+  compiler/     TypeScript meaning, IR, and linking
+  runtime/      platform-neutral interpretation and Process scopes
+  jsx/          shared JSX dispatch
+  contracts/    adapter contracts
+  platforms/    platform authoring languages
+  features/     shipped reusable Feature factories
+  adapters/     development and production realizations
 ```
 
-Ownership is:
+Top-level source files are public facades or whole-System orchestration:
 
-- `src/system.ts` composes the complete System.
-- `src/features/` contains System-shared Feature instances.
-- `src/presentations/` contains shared Presentation factories, recipes,
-  parameters, and assets.
-- `src/apps/<name>/app.tsx` defines one App Feature and its platform interfaces.
-- `src/apps/<name>/features/` contains App-private Feature instances.
-- `src/apps/<name>/presentations/` contains App-private Presentations.
+- `index.ts`, `ui.ts`, and platform modules define package entry points;
+- `realization.ts` coordinates one compiled System with selected adapters;
+- `testing.ts` verifies complete development and production realizations;
+- `cli.ts` exposes the command boundary.
 
-The `features` and `presentations` directories are stable conventions at both
-shared and App scope. Tests stay beside the subject they prove and exist only
-when they protect meaningful behavior. Product Workspaces do not contain
-adapter, compiler, runtime, host, or manual Dependency-wiring directories.
-
-## Target framework repository
-
-The framework remains one package:
+Adapter implementations organize by Platform, then by lifecycle:
 
 ```text
-src/
-  core/          portable product meaning
-  compiler/      TypeScript extraction, canonical IR, and linking
-  runtime/       reference Process and UI execution
-  jsx/           shared JSX toolchain entry points
-  contracts/     Platform Adapter contracts
-  platforms/     public platform authoring languages
-  adapters/      concrete platform realizations
-  features/      reusable semantic Feature factories
-  realization.ts
-  testing.ts
-  cli.ts
-  index.ts
-examples/
-  basic/         canonical runnable starter used by create
-  authenticated-crud/
-playground/      mutable Feature and adapter development laboratory
-docs/
-changes/
-scripts/
-  build.ts
+adapters/
+  server/
+    development/
+    production/
+  web/
+    development/
+    production/
+    ui/
 ```
 
-This is already close to the current `src/` layout. The target does not justify
-a broad directory reshuffle.
+Adapter-root modules contain only coordination shared by concrete adapters:
+registry wiring, public-package source resolution, and the explicit web/server
+route-loader bridge.
 
-Directory rules:
+Native-language code lives under the production profile that owns it.
+Dependency implementations group by semantic Dependency, adding a technology
+subdirectory only when several real implementations exist.
 
-- one substantial implementation unit may remain a large file;
-- split only at a real ownership, dependency, testing, caching, or distribution
-  boundary;
-- do not create generic `internal`, `native`, `types`, `helpers`, or `utils`
-  directories;
-- development and production are the primary adapter profiles;
-- language-specific source lives under the profile that owns it;
-- Dependency implementations are grouped by semantic Dependency, with a
-  technology subdirectory only when several real implementations exist;
-- generated artifacts, caches, databases, and native build output are ignored
-  and never committed.
+## Public Surface
 
-## External developer experience
-
-### Creation and commands
-
-The canonical starter is `examples/basic`; there is no separate drifting
-`template/` copy. The CLI copies that example and rewrites only project-local
-identity and package location.
-
-The intended command vocabulary is:
-
-```text
-kit create <workspace>
-kit dev
-kit dev <app>
-kit build
-kit build <app>
-kit check
-```
-
-`kit` is the intended neutral command name in this document. The eventual
-package locator may differ, but branding is not allowed to leak into IR,
-generated identifiers, cache keys, or architectural names.
-
-`kit dev` starts shared Programs once and every App interface. `kit dev <app>`
-focuses the requested App while retaining the shared Programs it needs.
-Equivalent rules apply to builds.
-
-### Public API
-
-Ordinary product authors should see semantic composition and reusable Feature
-factories, not compiler or adapter plumbing. Public entry points should be
-small and intentional:
+Ordinary product code uses:
 
 ```text
 kit
+kit/ui
 kit/web
-kit/<feature-factory>
+kit/server
 kit/testing
 ```
 
-Adapter authoring may use an explicit advanced contract entry point. Concrete
-shipped adapters may be public for framework assembly, but compiler and runtime
-implementation modules remain private. The package root must not expose
-low-level implementation APIs merely because they are used internally.
-
-### Feature factories
-
-Feature instances belong in the company Workspace. New reusable kinds of
-Feature factory belong in the central framework repository. A factory should
-provide:
-
-- one semantic type model with validation helpers;
-- one inferred domain API;
-- portable Program contributions and Dependency contracts;
-- optional Components and platform interfaces;
-- focused domain testing support when useful;
-- no app-specific host wiring.
-
-Entity, identity, workflow, search, and other factories can expose very
-different domain languages while lowering to the same small core.
-
-### Change management
-
-The package has one version. Feature factories are not independently versioned
-inside it.
-
-Before version 1, the repository needs:
-
-- a root `CHANGELOG.md`;
-- change fragments grouped by affected public entry point or Feature factory;
-- `docs/migrations/` for every breaking public change;
-- a compatibility and deprecation policy;
-- Feature factory authoring guidelines;
-- generated public API manifests for every exported subpath.
-
-CI should require a change fragment when a public API manifest changes and a
-migration document when the change is breaking.
-
-## Development performance model
-
-Development should use one retained semantic graph for the System:
+Adapter authors use the explicit advanced entries:
 
 ```text
-one TypeScript graph
-  -> one System IR per revision
-  -> affected Program and App-interface slices
-  -> concurrently started Adapter sessions
-  -> state-preserving HMR
+kit/adapter
+kit/adapters/web
+kit/adapters/server
 ```
 
-The compiler owns incremental source meaning. Adapters receive IR and affected
-source information; they must not compile the System again. Web development
-uses a persistent Workspace cache and one coordinated Vite graph or equivalent
-multi-entry graph where feasible. Generated virtual modules are preferred when
-writing a temporary source tree provides no semantic value.
+Compiler and runtime implementation modules remain private. Public declarations
+are recorded in `docs/api.json`; an intentional change requires a file under
+`changes/`.
 
-A shared Feature edit updates every affected App and Program. An App-private
-edit does not rebuild unrelated Apps. Shared server Programs start once.
+## Verification
 
-Performance gates measure phases separately:
+`nub run check` is the repository acceptance gate. It verifies declarations,
+portable source, architecture boundaries, deterministic compiler behavior,
+runtime and adapter contracts, web artifacts, Rust production crates, package
+API drift, formatting, and linting.
 
-- source discovery;
-- TypeScript graph creation or update;
-- semantic extraction and linking;
-- adapter preparation;
-- development server readiness;
-- first browser response;
-- HMR propagation.
+`kit/testing` runs the same black-box System specification against development
+and production realizations. Browser inspection is used for end-to-end product
+behavior; committed tests verify framework semantics rather than browser
+implementations.
 
-Absolute budgets should be recorded after the target pipeline exists. Until
-then, structural gates are mandatory: one semantic compile, persistent caches,
-concurrent independent startup, and no Program or backend duplication caused by
-the number of Apps.
-
-## Implemented state
-
-The repository implements the target model:
-
-- one private package with explicit `core`, `compiler`, `runtime`, `contracts`,
-  `platforms`, `adapters`, and `features` ownership;
-- one `src/system.ts` root and canonical versioned System IR;
-- recursive Features, reusable App and platform-interface Feature factories,
-  named Program contributions, typed Dependencies, deterministic linking,
-  Process scopes, and Program placement;
-- one retained TypeScript semantic graph with exact output ownership;
-- whole-System and focused-App realization with concurrent independent adapter
-  startup and reverse disposal;
-- isolated web outputs, routes, Presentations, manifests, service workers, and
-  cache namespaces per interface;
-- shared JSX dispatch with platform-specific UI and Presentation languages;
-- JavaScript development and Rust production for server Programs;
-- a canonical generated Workspace, stable examples, and one mutable playground;
-- machine-checked public declarations, change records, compatibility policy,
-  and migration notes.
-
-Fresh in-app browser evidence covers development and production, including both
-authenticated CRUD interfaces, direct nested routes, state-preserving HMR, and
-the native Rust server. The complete evidence is recorded in
-[`system-implementation.md`](system-implementation.md).
-
-## Gap ledger
-
-| ID  | Area                         | Implemented evidence                                                                                                                                                                                                              | Status   |
-| --- | ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
-| G01 | Root meaning                 | [`core/system.ts`](../src/core/system.ts) defines the only root and [`index.ts`](../src/index.ts) exports `createSystem`.                                                                                                         | Complete |
-| G02 | Apps                         | `createApp` creates marked Features; compiler and realization tests prove discovery, ownership, and focused selection.                                                                                                            | Complete |
-| G03 | Multiple platform interfaces | System type fixtures and authenticated CRUD prove several isolated interfaces and reusable interface Features.                                                                                                                    | Complete |
-| G04 | Presentation ownership       | Presentation source spans and declarations belong to interface IR; each authenticated CRUD interface selects its own Presentation.                                                                                                | Complete |
-| G05 | Compiler entry               | [`compiler/source.ts`](../src/compiler/source.ts) resolves one `src/system.ts` and recursively extracts its Feature graph.                                                                                                        | Complete |
-| G06 | Canonical IR                 | [`compiler/ir.ts`](../src/compiler/ir.ts) defines versioned deterministic System, Feature, App, interface, Program, and ownership records.                                                                                        | Complete |
-| G07 | Realization                  | [`realization.ts`](../src/realization.ts) compiles once, slices outputs, starts adapters concurrently, and disposes in reverse order.                                                                                             | Complete |
-| G08 | Shared backend               | Runtime and realization tests prove same-named contributions link once and focused Apps retain required shared Programs.                                                                                                          | Complete |
-| G09 | Web output                   | Web compiler, routing, pipeline, and adapter tests prove isolated entries, routes, manifests, caches, and service workers per interface.                                                                                          | Complete |
-| G10 | Presentation reuse           | Exact Presentation factories, parameters, recipes, collision rules, and web dynamics have type, compiler, and runtime coverage.                                                                                                   | Complete |
-| G11 | Development graph            | One retained compiler graph emits exact affected outputs; stable web caches and selective server/web HMR have regression tests and measured budgets.                                                                              | Complete |
-| G12 | Starter and examples         | `examples/basic` is the CLI source, authenticated CRUD is the stable multi-App example, and `playground/` is mutable.                                                                                                             | Complete |
-| G13 | CLI                          | [`cli.ts`](../src/cli.ts) provides neutral System-wide and focused-App create, dev, build, typecheck, test, and check commands.                                                                                                   | Complete |
-| G14 | Public package surface       | [`package.json`](../package.json) has deliberate subpaths; [`api.json`](api.json) records every exported symbol and reachable declaration.                                                                                        | Complete |
-| G15 | External identity            | Package, command, cache, generated protocol, Rust crates, examples, and copy use one neutral identity; repository and generated-path searches are empty.                                                                          | Complete |
-| G16 | Change governance            | Root changelog, change records, API drift checks, compatibility policy, Feature guidance, and migrations are present and enforced by `test`.                                                                                      | Complete |
-| G17 | Target conformance tests     | Type, property, compiler, runtime, adapter, package, native, multi-App, focused-build, shared-Program, isolation, and HMR gates pass.                                                                                             | Complete |
-| G18 | Runtime evidence             | Final development and Rust-production browser workflows, exact URLs, HMR isolation, state/focus retention, PWA artifacts, CRUD, and empty error records are documented in [`system-implementation.md`](system-implementation.md). | Complete |
-
-## Migration sequence
-
-The order prevents adapter work from defining core semantics accidentally.
-
-### 1. Freeze the target contract
-
-- [x] Add type-level fixtures for System, App Feature, shared Features, two Apps,
-      two web interfaces, and one App with web plus native interfaces.
-- [x] Settle the exact inferred App Feature factory syntax without adding a core
-      App primitive.
-- [x] Settle explicit Presentation factory and recipe composition rules.
-- [x] Record current public API manifests and startup phase measurements.
-
-### 2. Rename and generalize the root
-
-- [x] Rename the single-root semantic responsibility to System across core,
-      compiler, runtime, realization, tests, and generated identifiers.
-- [x] Preserve Feature, Program, Process, Dependency, Environment, Platform,
-      Component, and Presentation semantics.
-- [x] Remove Presentations from the System contract.
-- [x] Add typed App and platform-interface Feature markers through reusable
-      factories.
-
-### 3. Lower the complete System
-
-- [x] Resolve `src/system.ts`.
-- [x] Introduce a versioned System IR that preserves Feature, App, interface,
-      Program, and Presentation ownership.
-- [x] Link same-named compatible Program contributions once across the System.
-- [x] Reject duplicate App/interface identities, incompatible Program
-      Environments, route collisions within one interface, and invalid
-      Presentation ownership.
-- [x] Emit deterministic affected-output relationships for incremental builds.
-
-### 4. Correct realization and adapters
-
-- [x] Pass one compiled System IR to every selected adapter.
-- [x] Remove per-adapter compiler construction for the same revision.
-- [x] Start independent adapter sessions concurrently and dispose them
-      deterministically.
-- [x] Let adapters return artifacts and locations keyed by Program and
-      platform-interface identity.
-- [x] Ensure focused App mode starts only the App, its interfaces, and required
-      shared Programs.
-
-### 5. Make web multi-interface
-
-- [x] Move routes, metadata, rendering policy, Presentation selection,
-      installation, and service-worker ownership into a web interface Feature.
-- [x] Generate isolated route namespaces, browser entries, manifests, caches,
-      and service workers per interface.
-- [x] Share server Programs and generated assets when their semantic owner is
-      shared.
-- [x] Preserve direct loads, client navigation, redirects, hydration, styling,
-      focus, and HMR for nested Feature routes.
-
-### 6. Establish the external Workspace
-
-- [x] Replace `template/` with `examples/basic`.
-- [x] Add the System, shared Feature, shared Presentation, and `apps/`
-      convention to the starter.
-- [x] Add a mutable `playground/`.
-- [x] Teach create, dev, build, test, and check commands about all Apps and
-      focused App selection.
-- [x] Keep generated Workspaces one package unless a real distribution boundary
-      requires otherwise.
-
-### 7. Tighten the package and repository
-
-- [x] Choose and apply the neutral package and CLI name atomically.
-- [x] Reduce ordinary public exports to semantic composition, shipped Feature
-      factories, Platform authoring, and testing.
-- [x] Isolate adapter authoring and concrete adapter entry points.
-- [x] Remove superseded examples, benchmarks, generated residue, and duplicate
-      setup only after their replacement gates pass.
-- [x] Add change governance and Feature factory authoring guidance.
-
-### 8. Optimize and prove
-
-- [x] Instrument every development startup and HMR phase.
-- [x] Use one retained semantic graph and persistent caches.
-- [x] Verify shared Feature changes update all affected Apps without restarting
-      unrelated Programs.
-- [x] Run the complete verification matrix below from a clean checkout.
-- [x] Mark gaps complete only with linked automated evidence.
-
-## Verification gates
-
-### Semantic and type gates
-
-- A two-App System infers every shared and private Feature API without casts.
-- One App can contain web and native interface Features.
-- A reusable Feature factory remains unaware of the System that consumes it.
-- Missing, duplicate, incompatible, and cyclic Dependency providers fail at
-  compile or link time with source-located diagnostics.
-- Same-named compatible Program contributions merge; incompatible Environments
-  fail.
-- App and route identities are isolated and deterministic.
-- Presentation factories cannot target incompatible Component contracts.
-- Core imports no Platform, Adapter, compiler implementation, native language,
-  or web concern.
-
-### Compiler and artifact gates
-
-- Exactly one semantic compile occurs for an initial revision.
-- System IR serialization is deterministic across repeated builds.
-- Development and production consume the same linked Program and Dependency IR.
-- `kit build` emits all shared Programs and App interfaces exactly once.
-- `kit build <app>` emits the selected App plus required shared artifacts only.
-- Two web interfaces produce independent browser entries, manifests, route
-  maps, cache namespaces, and service workers.
-- No product-specific Feature type or hand-written operation schema appears in
-  generated native runtime code.
-
-### Runtime gates
-
-- Two Apps use one shared identity and task server Program.
-- App-private Programs remain isolated.
-- Multiple Process replicas receive independent scopes while shared external
-  infrastructure preserves intended coordination.
-- Startup, partial failure, and disposal are deterministic.
-- Development and Rust production pass the same portable Program behavior
-  fixtures.
-
-### Browser gates
-
-Use the in-app browser as the end-to-end verification surface against
-development and production. Do not add a committed Chromium, Firefox, or WebKit
-test matrix; the purpose is to verify framework behavior, not browser-engine
-behavior.
-
-- direct loading and refreshing every nested route is styled and correct;
-- typed params, search, navigation, redirects, and metadata are correct;
-- authentication redirects to the correct URL rather than rendering the wrong
-  route in place;
-- create, edit, complete, delete, and subscription flows retain focus and
-  settle without reload loops;
-- each PWA has the correct manifest, offline fallback, service worker, and cache
-  isolation;
-- shared Feature HMR updates every affected App without full-page navigation;
-- App-private HMR leaves unrelated Apps and shared server Processes running;
-- browser console, uncaught errors, hydration diagnostics, and failed network
-  requests are empty.
-
-### Performance gates
-
-- Startup instrumentation proves one compiler graph and no per-adapter
-  recompilation.
-- Independent adapters begin concurrently.
-- Vite or equivalent cache paths are stable across restarts.
-- HMR rebuilds only affected Programs and interfaces.
-- Adding a second App does not duplicate shared backend startup or compilation.
-- Recorded cold-start, warm-start, first-response, and HMR budgets do not
-  regress without an explicit accepted change.
-
-### Repository gates
-
-- `nub run check` and `nub run build` pass from a clean checkout.
-- The packed package contains only intentional public files.
-- A project created from `examples/basic` installs, checks, develops, builds,
-  and runs independently.
-- No generated database, cache, native target, build output, or temporary
-  application source is tracked.
-- Documentation, public API manifests, changelog, and migration records match
-  the shipped package.
-
-## External identity
-
-The neutral package locator is `kit`, the CLI command is `kit`, and the
-private cache namespace is `.kit`. External naming is now governed like every
-other public change: it requires an explicit change record and migration
-guidance when compatibility is affected. It does not alter semantic
-identifiers or introduce another composition unit, global Presentation
-ownership, implicit Dependency lookup, or adapter concerns in core.
-
-## Definition of done
-
-The repository reaches this end state only when:
-
-- the target vocabulary maps one-to-one to code and directories;
-- one System composes several Apps and shared Features;
-- each App can own several platform interfaces;
-- compiler, adapters, CLI, examples, and public exports use that model;
-- development is incremental and production artifacts preserve the same
-  semantics;
-- browser and native production paths pass the verification gates;
-- the old single-root path and duplicate starter are removed;
-- no compatibility residue remains unless a published compatibility policy
-  explicitly requires it;
-- every gap in this document is supported by current automated evidence.
+Generated databases, caches, native targets, build output, and temporary source
+are ignored and never part of the architecture.

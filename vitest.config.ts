@@ -2,6 +2,7 @@ import { resolve } from "node:path";
 
 import { defineConfig } from "vitest/config";
 
+import { packageSourceAliases } from "./src/adapters/source";
 import { transformPresentationSource } from "./src/compiler/presentation";
 
 export default defineConfig({
@@ -28,46 +29,7 @@ export default defineConfig({
         find: /^@\/(.*)$/,
         replacement: `${resolve(import.meta.dirname, "src")}/$1`,
       },
-      {
-        find: /^kit\/adapter$/,
-        replacement: resolve(import.meta.dirname, "src/contracts/platform.ts"),
-      },
-      {
-        find: /^kit\/adapters\/server$/,
-        replacement: resolve(import.meta.dirname, "src/adapters/server/adapter.ts"),
-      },
-      {
-        find: /^kit\/adapters\/web$/,
-        replacement: resolve(import.meta.dirname, "src/adapters/web/adapter.ts"),
-      },
-      {
-        find: /^kit\/server$/,
-        replacement: resolve(import.meta.dirname, "src/platforms/server/platform.ts"),
-      },
-      {
-        find: /^kit\/testing$/,
-        replacement: resolve(import.meta.dirname, "src/testing.ts"),
-      },
-      {
-        find: /^kit\/web$/,
-        replacement: resolve(import.meta.dirname, "src/platforms/web/platform.ts"),
-      },
-      {
-        find: /^kit\/ui$/,
-        replacement: resolve(import.meta.dirname, "src/ui.ts"),
-      },
-      {
-        find: /^kit\/jsx-dev-runtime$/,
-        replacement: resolve(import.meta.dirname, "src/jsx/development.ts"),
-      },
-      {
-        find: /^kit\/jsx-runtime$/,
-        replacement: resolve(import.meta.dirname, "src/jsx/runtime.ts"),
-      },
-      {
-        find: /^kit$/,
-        replacement: resolve(import.meta.dirname, "src/index.ts"),
-      },
+      ...packageSourceAliases(resolve(import.meta.dirname, "src"), ".ts"),
     ],
     conditions: ["source"],
   },

@@ -19,7 +19,8 @@ import {
   type ViteDevServer,
 } from "vite";
 
-import type { DevelopmentWebLoaderRegistry } from "@/adapters/integration/web-server";
+import { packageSourceAliases } from "@/adapters/source";
+import type { DevelopmentWebLoaderRegistry } from "@/adapters/web-server";
 import { createWebResponseCache } from "@/adapters/web/development/cache";
 import {
   prepareClientWebDocument,
@@ -804,31 +805,11 @@ function viteConfiguration(paths: SystemPaths, development = false, ir?: SystemI
     ...(development ? { optimizeDeps: { include: [], noDiscovery: true } } : {}),
     plugins: vitePlugins(paths, ir),
     resolve: {
-      alias: kitAliases(),
+      alias: packageSourceAliases(resolve(import.meta.dirname, "../.."), moduleExtension()),
       conditions: ["source", ...defaultClientConditions],
     },
     root: paths.directory,
   };
-}
-
-function kitAliases() {
-  const kit = resolve(import.meta.dirname, "../..");
-  const extension = moduleExtension();
-  return [
-    {
-      find: /^kit\/jsx-dev-runtime$/,
-      replacement: resolve(kit, `jsx/development${extension}`),
-    },
-    {
-      find: /^kit\/jsx-runtime$/,
-      replacement: resolve(kit, `jsx/runtime${extension}`),
-    },
-    {
-      find: /^kit\/web$/,
-      replacement: resolve(kit, `platforms/web/platform${extension}`),
-    },
-    { find: /^kit$/, replacement: resolve(kit, `index${extension}`) },
-  ];
 }
 
 function moduleExtension(): ".ts" | ".js" {
@@ -1984,7 +1965,7 @@ export default await Promise.all((routes.length ? routes : [undefined]).map(asyn
       configFile: false,
       root: paths.directory,
       resolve: {
-        alias: kitAliases(),
+        alias: packageSourceAliases(resolve(import.meta.dirname, "../.."), moduleExtension()),
         conditions: ["source", ...defaultServerConditions],
       },
       plugins: vitePlugins(paths),

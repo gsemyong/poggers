@@ -68,5 +68,4 @@ nub run dev:crud
 
 See the [architecture](docs/architecture.md), [Feature convention](docs/features.md),
 [compatibility policy](docs/compatibility.md), and
-[Portable TypeScript profile](docs/portable-typescript.md). The active
-verification ledger is [docs/system-implementation.md](docs/system-implementation.md).
+[Portable TypeScript profile](docs/portable-typescript.md).

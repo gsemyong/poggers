@@ -1,4 +1,4 @@
-import type { Feature, Program } from "kit";
+import { createFeature, type Program } from "kit";
 import { createPress, For, mountDialog, mountDrag, type BrowserMainThread } from "kit/web";
 
 type SheetView = "summary" | "detail";
@@ -93,7 +93,7 @@ export type DashboardFeature = {
   };
 };
 
-export const dashboard: Feature<DashboardFeature> = {
+export const dashboard = createFeature<DashboardFeature>({
   programs: {
     browser: {
       state: {
@@ -322,7 +322,7 @@ export const dashboard: Feature<DashboardFeature> = {
       root: "Overview",
     },
   },
-};
+});
 
 const metrics = [
   {

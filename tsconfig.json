@@ -30,7 +30,8 @@
       "kit/adapters/server": [
         "./src/adapters/server/adapter.ts",
         "./dist/source/adapters/server/adapter.ts"
-      ]
+      ],
+      "kit/cli": ["./src/cli.ts", "./dist/source/cli.ts"]
     },
     "verbatimModuleSyntax": true,
     "noEmit": true,

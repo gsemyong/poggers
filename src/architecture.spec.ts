@@ -3,6 +3,8 @@ import { resolve } from "node:path";
 
 import { describe, expect, test } from "vitest";
 
+import { packageSources } from "@/adapters/source";
+
 type Boundary = Readonly<{
   directory: string;
   imports: readonly string[];
@@ -22,28 +24,16 @@ const boundaries: readonly Boundary[] = [
   { directory: "platforms", imports: ["platforms", "core", "jsx"] },
   { directory: "features", imports: ["features", "platforms", "core"] },
   {
-    directory: "adapters/integration",
-    imports: [
-      "adapters/integration",
-      "adapters/server",
-      "adapters/web",
-      "contracts",
-      "compiler",
-      "runtime",
-      "core",
-      "jsx",
-      "platforms",
-    ],
-  },
-  {
     directory: "adapters/server",
     imports: [
       "adapters/server",
-      "adapters/integration",
+      "adapters/source",
+      "adapters/web-server",
       "contracts",
       "compiler",
       "runtime",
       "core",
+      "features",
       "jsx",
       "platforms",
     ],
@@ -52,7 +42,8 @@ const boundaries: readonly Boundary[] = [
     directory: "adapters/web",
     imports: [
       "adapters/web",
-      "adapters/integration",
+      "adapters/source",
+      "adapters/web-server",
       "contracts",
       "compiler",
       "runtime",
@@ -74,8 +65,10 @@ const modules: readonly ModuleBoundary[] = [
   { file: "cli.ts", imports: ["adapters", "contracts", "realization"] },
   {
     file: "adapters/registry.ts",
-    imports: ["adapters/integration", "adapters/server", "adapters/web", "contracts", "platforms"],
+    imports: ["adapters/server", "adapters/web", "adapters/web-server", "contracts", "platforms"],
   },
+  { file: "adapters/source.ts", imports: [] },
+  { file: "adapters/web-server.ts", imports: ["adapters/web", "compiler", "runtime"] },
 ] as const;
 
 describe("architecture import graph", () => {
@@ -137,6 +130,36 @@ describe("architecture import graph", () => {
         .map((directory) => directory.slice(import.meta.dirname.length + 1))
         .filter((directory) => directory.split("/").some((name) => forbidden.has(name))),
     ).toEqual([]);
+  });
+
+  test("keeps public package source resolution consistent", async () => {
+    const root = resolve(import.meta.dirname, "..");
+    const packageManifest = JSON.parse(await readFile(resolve(root, "package.json"), "utf8")) as {
+      exports: Readonly<
+        Record<string, string | Readonly<{ source?: string; types?: string; default?: string }>>
+      >;
+    };
+    const tsconfig = JSON.parse(await readFile(resolve(root, "tsconfig.json"), "utf8")) as {
+      compilerOptions: { paths: Readonly<Record<string, readonly string[]>> };
+    };
+    const sourceExports = Object.entries(packageManifest.exports)
+      .filter(([, value]) => typeof value === "object" && value.source)
+      .map(([name]) => (name === "." ? "kit" : `kit${name.slice(1)}`))
+      .sort();
+    const aliases = Object.keys(packageSources).sort();
+    const paths = Object.keys(tsconfig.compilerOptions.paths)
+      .filter((name) => name === "kit" || name.startsWith("kit/"))
+      .sort();
+
+    expect(aliases).toEqual(sourceExports);
+    expect(paths).toEqual(sourceExports);
+    for (const [specifier, source] of Object.entries(packageSources)) {
+      const name = specifier === "kit" ? "." : `.${specifier.slice(3)}`;
+      const definition = packageManifest.exports[name];
+      expect(typeof definition === "object" ? definition.source : undefined).toBe(
+        `./dist/source/${source}.ts`,
+      );
+    }
   });
 });
 

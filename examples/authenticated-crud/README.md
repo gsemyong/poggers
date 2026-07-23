@@ -113,7 +113,7 @@ const web = createWebInterface<WebContract>({
   presentation: clean,
 });
 
-const operations = createApp<{ Features: { web: OperationsWeb } }>({
+const operations = createApp({
   features: { web },
 });
 

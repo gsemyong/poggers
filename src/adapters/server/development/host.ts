@@ -22,34 +22,10 @@ import { betterAuth } from "better-auth";
 import { getMigrations } from "better-auth/db/migration";
 
 import type { DependencyContractIR } from "@/compiler/ir";
+import type { Clock, EventStore, Identifiers, StoredEvent } from "@/features/entity";
+import type { AuthenticationBackend } from "@/features/identity";
 import type { HttpField, HttpRequest, HttpResponse, HttpServer } from "@/platforms/server/platform";
 import { conformExternalDependencies } from "@/runtime/process";
-
-type StoredEvent<Event> = Readonly<{
-  stream: string;
-  revision: number;
-  event: Event;
-}>;
-
-type EventStore<Event> = Readonly<{
-  read(input: { stream: string; after?: number }): Promise<readonly StoredEvent<Event>[]>;
-  append(input: {
-    stream: string;
-    expectedRevision: number;
-    events: readonly Event[];
-  }): Promise<readonly StoredEvent<Event>[] | undefined>;
-  subscribe(input: { stream: string; after?: number }): AsyncIterable<StoredEvent<Event>>;
-}>;
-
-type AuthenticationBackend = Readonly<{
-  authenticate(input: {
-    cookie?: string;
-  }): Promise<Readonly<{ id: string; name: string; email: string }> | undefined>;
-  handle(input: { request: HttpRequest; path: string }): Promise<HttpResponse>;
-}>;
-
-type Identifiers = Readonly<{ create(input: {}): string }>;
-type Clock = Readonly<{ now(input: {}): number }>;
 
 export type NodeHostOptions = Readonly<{
   directory?: string;

@@ -15,6 +15,6 @@ const web = createWebInterface<WebContract>({
   presentation: editorial,
 });
 
-export const main = createApp<{ Features: { web: Web } }>({
+export const main = createApp({
   features: { web },
 });

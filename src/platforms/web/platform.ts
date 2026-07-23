@@ -30,7 +30,6 @@ export type WebPlatform = { readonly Name: "web"; readonly UI: WebUI };
 export type BrowserMainThread = {
   readonly Name: "browser-main";
   readonly Platform: WebPlatform;
-  readonly UI: WebUI;
 };
 export type BrowserServiceWorker = {
   readonly Name: "browser-service-worker";
