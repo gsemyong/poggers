@@ -150,10 +150,10 @@ function implementation(
     name: `${dependency.name}-production`,
     dependency: dependency.name,
     configuration: [],
-    crate: { package: `poggers-${dependency.name}`, directory: dependency.name },
+    crate: { package: `kit-${dependency.name}`, directory: dependency.name },
     rust: {
-      type: `poggers_${dependency.name}::Dependency`,
-      constructor: `poggers_${dependency.name}::create`,
+      type: `kit_${dependency.name}::Dependency`,
+      constructor: `kit_${dependency.name}::create`,
     },
     ...overrides,
   });

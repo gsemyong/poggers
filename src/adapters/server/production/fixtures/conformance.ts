@@ -25,8 +25,8 @@ export async function buildRustProgram(
   output: string,
 ): Promise<string> {
   const generated = generateVerificationSource(contribution);
-  const directory = await mkdtemp(resolve(tmpdir(), "poggers-rust-"));
-  const target = resolve(tmpdir(), "poggers-rust-target-v2");
+  const directory = await mkdtemp(resolve(tmpdir(), "kit-rust-"));
+  const target = resolve(tmpdir(), "kit-rust-target-v2");
   try {
     await mkdir(resolve(directory, "src"), { recursive: true });
     await writeFile(resolve(directory, "Cargo.toml"), generated.manifest);
@@ -134,7 +134,7 @@ function generateVerificationSource(contribution: ProgramContributionIR): RustVe
   };
   const linked = linkProgram(program);
   const source = generateRustProgram(linked);
-  const name = `poggers_${createHash("sha256").update(source).digest("hex").slice(0, 16)}`;
+  const name = `kit_${createHash("sha256").update(source).digest("hex").slice(0, 16)}`;
   const runtime = resolve(import.meta.dirname, "../runtime").replaceAll("\\", "/");
   return {
     name,
@@ -144,7 +144,7 @@ version = "0.0.0"
 edition = "2024"
 
 [dependencies]
-poggers-server-runtime = { path = ${JSON.stringify(runtime)} }
+kit-server-runtime = { path = ${JSON.stringify(runtime)} }
 serde_json = "1"
 tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread"] }
 `,
@@ -171,7 +171,7 @@ function verificationMain(dependencies: readonly string[]): string {
     sync::{Arc, Mutex},
 };
 
-use poggers_server_runtime::{
+use kit_server_runtime::{
     Dependency, Engine, NativeError, NativeFuture, NativeResult, Value,
 };
 use serde_json::{json, Value as JsonValue};

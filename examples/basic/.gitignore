@@ -3,7 +3,7 @@ dist/
 coverage/
 target/
 Cargo.lock
-.poggers/
+.kit/
 .data/
 .DS_Store
 .env

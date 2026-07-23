@@ -1,11 +1,11 @@
 [package]
-name = "poggers-server-authentication"
+name = "kit-server-authentication"
 version = "0.0.0"
 edition = "2024"
 
 [dependencies]
 argon2 = "0.5.3"
-poggers-server-runtime = { path = "../../runtime" }
+kit-server-runtime = { path = "../../runtime" }
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 serde_json = "1.0.145"
 uuid = { version = "1.18.1", features = ["v4"] }

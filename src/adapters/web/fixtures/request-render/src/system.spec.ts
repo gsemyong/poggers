@@ -1,4 +1,4 @@
-import { testSystem } from "@poggers/kit/testing";
+import { testSystem } from "@duction/kit/testing";
 import { expect } from "vitest";
 
 const referenceDocuments = new Map<string, string>();
@@ -28,7 +28,7 @@ testSystem({
       `${adminLocation}\n${admin.url}\n${JSON.stringify(locations)}\n${adminHtml}`,
     ).toBe(200);
     expect(adminHtml).toContain("<title>Admin</title>");
-    expect(adminHtml).toContain('data-poggers-rendering="client"');
+    expect(adminHtml).toContain('data-kit-rendering="client"');
     expect(adminHtml).not.toContain("Administration");
     expect(adminHtml).not.toContain('data-interface="admin"');
 
@@ -47,8 +47,8 @@ testSystem({
       fetch(`${productLocation}${workerPath}`).then((response) => response.text()),
       fetch(`${adminLocation}${workerPath}`).then((response) => response.text()),
     ]);
-    expect(productWorker).toContain("poggers-assets-");
-    expect(adminWorker).toContain("poggers-assets-");
+    expect(productWorker).toContain("kit-assets-");
+    expect(adminWorker).toContain("kit-assets-");
     expect(adminWorker).not.toBe(productWorker);
 
     const defaultGreeting = await request("/hello/Ada");
@@ -56,7 +56,7 @@ testSystem({
     expect(defaultGreeting.status, defaultHtml).toBe(200);
     expect(defaultGreeting.headers.get("content-type")).toBe("text/html; charset=utf-8");
     expect(defaultGreeting.headers.get("cache-control")).toBe("no-store");
-    expect(defaultGreeting.headers.get("x-poggers-cache")).toBe("bypass");
+    expect(defaultGreeting.headers.get("x-kit-cache")).toBe("bypass");
     expect(defaultGreeting.headers.get("x-content-type-options")).toBe("nosniff");
     expect(defaultGreeting.headers.get("x-request-id")).toBeTruthy();
     expect(defaultHtml).toContain("<title>Greeting</title>");
@@ -67,7 +67,7 @@ testSystem({
     expect(defaultHtml).toContain('rel="manifest" href="/manifest.webmanifest"');
     expect(defaultHtml).toContain('type="application/ld+json"');
     expect(defaultHtml).toContain("Hello, Ada!");
-    expect(defaultHtml).toContain('data-poggers-rendering="hydrate"');
+    expect(defaultHtml).toContain('data-kit-rendering="hydrate"');
     expect(hydration(defaultHtml)).toEqual({
       loader: false,
       location: "/hello/Ada",
@@ -152,9 +152,9 @@ testSystem({
     const deferred = await request("/deferred/Ada");
     const deferredHtml = await deferred.text();
     expect(deferred.status).toBe(200);
-    expect(deferredHtml).toContain('data-poggers-boundary-start="d0"');
+    expect(deferredHtml).toContain('data-kit-boundary-start="d0"');
     expect(deferredHtml).toContain("Loading activity");
-    expect(deferredHtml).toContain('data-poggers-deferred-frame="d0"');
+    expect(deferredHtml).toContain('data-kit-deferred-frame="d0"');
     expect(deferredHtml).toContain("Loaded for Ada");
     expect(hydration(deferredHtml)).toMatchObject({
       loader: {
@@ -183,7 +183,7 @@ testSystem({
     const shell = decoder.decode(firstChunk.value, { stream: true });
     expect(firstChunk.done).toBe(false);
     expect(shell).toContain("Loading activity");
-    expect(shell).not.toContain('data-poggers-deferred-frame="d0"');
+    expect(shell).not.toContain('data-kit-deferred-frame="d0"');
     let completion = "";
     while (true) {
       const chunk = await reader!.read();
@@ -192,7 +192,7 @@ testSystem({
     }
     completion += decoder.decode();
     const streamCompleteMs = performance.now() - streamStarted;
-    expect(completion).toContain('data-poggers-deferred-frame="d0"');
+    expect(completion).toContain('data-kit-deferred-frame="d0"');
     expect(completion).toContain("Loaded for Stream");
     expect(streamHeadersMs).toBeLessThan(5_000);
     expect(streamShellMs).toBeGreaterThanOrEqual(streamHeadersMs);
@@ -216,7 +216,7 @@ testSystem({
     const privateHtml = await privateRequest.text();
     expect(privateRequest.status).toBe(200);
     expect(privateRequest.headers.get("cache-control")).toBe("private, max-age=60");
-    expect(privateRequest.headers.get("x-poggers-cache")).toBe("bypass");
+    expect(privateRequest.headers.get("x-kit-cache")).toBe("bypass");
     expect(privateHtml).toContain("Request session=private");
     expect(privateRequest.headers.get("cache-control")).not.toContain("public");
     expectDocumentParity(realization, "private-request", privateHtml);
@@ -231,7 +231,7 @@ testSystem({
     expect(typed.headers.get("cache-control")).toBe(
       "public, max-age=60, stale-while-revalidate=30",
     );
-    expect(typed.headers.get("x-poggers-cache")).toBe("miss");
+    expect(typed.headers.get("x-kit-cache")).toBe("miss");
     expect(typedHtml).toContain("Typed 7/true/compact");
     expect(hydration(typedHtml)).toMatchObject({
       params: { count: 7, enabled: true },
@@ -241,34 +241,32 @@ testSystem({
 
     const typedFresh = await request("/typed/7/true?tag=one&tag=two");
     expect(typedFresh.status).toBe(200);
-    expect(typedFresh.headers.get("x-poggers-cache")).toBe("fresh");
+    expect(typedFresh.headers.get("x-kit-cache")).toBe("fresh");
     expect(await typedFresh.text()).toBe(typedHtml);
 
     const typedDifferent = await request("/typed/8/true?tag=one&tag=two");
     expect(typedDifferent.status).toBe(200);
-    expect(typedDifferent.headers.get("x-poggers-cache")).toBe("miss");
+    expect(typedDifferent.headers.get("x-kit-cache")).toBe("miss");
     expect(await typedDifferent.text()).toContain("Typed 8/true/compact");
 
     const cachedBurst = await Promise.all(Array.from({ length: 12 }, () => request("/cached/Ada")));
     const cachedBodies = await Promise.all(cachedBurst.map((response) => response.text()));
     expect(new Set(cachedBodies).size).toBe(1);
     expect(cachedBodies[0]).toContain("Cached Ada 1");
-    expect(cachedBurst.map((response) => response.headers.get("x-poggers-cache"))).toContain(
-      "miss",
-    );
+    expect(cachedBurst.map((response) => response.headers.get("x-kit-cache"))).toContain("miss");
     const cachedFresh = await request("/cached/Ada");
-    expect(cachedFresh.headers.get("x-poggers-cache")).toBe("fresh");
+    expect(cachedFresh.headers.get("x-kit-cache")).toBe("fresh");
     expect(await cachedFresh.text()).toBe(cachedBodies[0]);
     await new Promise((resolve) => setTimeout(resolve, 550));
     const cachedStale = await request("/cached/Ada");
-    expect(cachedStale.headers.get("x-poggers-cache")).toBe("stale");
+    expect(cachedStale.headers.get("x-kit-cache")).toBe("stale");
     expect(await cachedStale.text()).toBe(cachedBodies[0]);
     await expect
       .poll(async () => {
         const refreshed = await request("/cached/Ada");
         return {
           body: (await refreshed.text()).includes("Cached Ada 2"),
-          cache: refreshed.headers.get("x-poggers-cache"),
+          cache: refreshed.headers.get("x-kit-cache"),
         };
       })
       .toEqual({ body: true, cache: "fresh" });
@@ -331,8 +329,8 @@ testSystem({
     expect(client.status).toBe(200);
     expect(clientHtml).toContain("<title>Client</title>");
     expect(clientHtml).toContain('name="robots" content="noindex"');
-    expect(clientHtml).toContain('data-poggers-rendering="client"');
-    expect(clientHtml).not.toContain('id="poggers-hydration"');
+    expect(clientHtml).toContain('data-kit-rendering="client"');
+    expect(clientHtml).not.toContain('id="kit-hydration"');
     expect(clientHtml).toContain(
       realization === "production"
         ? '<script type="module" async src="/assets/'
@@ -345,7 +343,7 @@ testSystem({
         ? await verifyProductionPerformance(productLocation, defaultHtml, metrics)
         : undefined;
     if (serverMetrics) {
-      console.info(`[poggers] web production metrics ${JSON.stringify(serverMetrics)}`);
+      console.info(`[kit] web production metrics ${JSON.stringify(serverMetrics)}`);
     }
   },
 });
@@ -369,7 +367,7 @@ function normalizeDocument(html: string): string {
     .replace(/<link rel="modulepreload"[^>]*>/g, "")
     .replace(/<script type="module"[^>]*>[\s\S]*?<\/script>/g, "")
     .replace(
-      /(<script id="poggers-hydration" type="application\/json">)([^<]*)(<\/script>)/,
+      /(<script id="kit-hydration" type="application\/json">)([^<]*)(<\/script>)/,
       (_, open: string, value: string, close: string) =>
         `${open}${JSON.stringify(sortJSON(JSON.parse(value)))}${close}`,
     )
@@ -388,9 +386,7 @@ function sortJSON(value: unknown): unknown {
 }
 
 function hydration(html: string): unknown {
-  const match = html.match(
-    /<script id="poggers-hydration" type="application\/json">([^<]*)<\/script>/,
-  );
+  const match = html.match(/<script id="kit-hydration" type="application\/json">([^<]*)<\/script>/);
   expect(match).not.toBeNull();
   return JSON.parse(match![1]!);
 }
@@ -426,7 +422,7 @@ async function verifyProductionPerformance(
   ).reduce((total, size) => total + size, 0);
   const htmlBytes = new TextEncoder().encode(html).byteLength;
   const cssBytes = new TextEncoder().encode(
-    html.match(/<style data-poggers-ssr>([\s\S]*?)<\/style>/)?.[1] ?? "",
+    html.match(/<style data-kit-ssr>([\s\S]*?)<\/style>/)?.[1] ?? "",
   ).byteLength;
   const requests = await requestDistribution(location, "/hello/Performance", 80, 8);
 

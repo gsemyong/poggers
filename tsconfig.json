@@ -5,37 +5,38 @@
     "module": "Preserve",
     "moduleDetection": "force",
     "jsx": "react-jsx",
-    "jsxImportSource": "@poggers/kit",
+    "jsxImportSource": "@duction/kit",
     "allowImportingTsExtensions": true,
     "types": [],
     "moduleResolution": "bundler",
-    "customConditions": ["poggers-source"],
+    "customConditions": ["source"],
     "paths": {
       "@/*": ["./src/*"],
-      "@poggers/kit": ["./src/index.ts", "./dist/source/index.ts"],
-      "@poggers/kit/jsx-dev-runtime": [
+      "@duction/kit": ["./src/index.ts", "./dist/source/index.ts"],
+      "@duction/kit/ui": ["./src/ui.ts", "./dist/source/ui.ts"],
+      "@duction/kit/jsx-dev-runtime": [
         "./src/jsx/development.ts",
         "./dist/source/jsx/development.ts"
       ],
-      "@poggers/kit/jsx-runtime": ["./src/jsx/runtime.ts", "./dist/source/jsx/runtime.ts"],
-      "@poggers/kit/web": [
+      "@duction/kit/jsx-runtime": ["./src/jsx/runtime.ts", "./dist/source/jsx/runtime.ts"],
+      "@duction/kit/web": [
         "./src/platforms/web/platform.ts",
         "./dist/source/platforms/web/platform.ts"
       ],
-      "@poggers/kit/adapters/web": [
+      "@duction/kit/adapters/web": [
         "./src/adapters/web/adapter.ts",
         "./dist/source/adapters/web/adapter.ts"
       ],
-      "@poggers/kit/server": [
+      "@duction/kit/server": [
         "./src/platforms/server/platform.ts",
         "./dist/source/platforms/server/platform.ts"
       ],
-      "@poggers/kit/testing": ["./src/testing.ts", "./dist/src/testing.d.ts"],
-      "@poggers/kit/adapter": [
+      "@duction/kit/testing": ["./src/testing.ts", "./dist/src/testing.d.ts"],
+      "@duction/kit/adapter": [
         "./src/contracts/platform.ts",
         "./dist/source/contracts/platform.ts"
       ],
-      "@poggers/kit/adapters/server": [
+      "@duction/kit/adapters/server": [
         "./src/adapters/server/adapter.ts",
         "./dist/source/adapters/server/adapter.ts"
       ]

@@ -128,7 +128,7 @@ export function compileWebDynamicStyle(style: WebStyle): CompiledWebDynamicStyle
     dynamicCollector = undefined;
   }
   const className = `p${hash(template)}`;
-  const placeholder = "--poggers-value-";
+  const placeholder = "--kit-value-";
   const prefix = `--${className}-`;
   const css = template.replaceAll(placeholder, prefix).replaceAll("&", `.${className}`);
   return Object.freeze({
@@ -699,7 +699,7 @@ function numericToken(
   const result = `${normalized}${zeroUnitless && normalized === 0 ? "" : unit}`;
   if (!dynamicCollector) return result;
   const index = dynamicCollector.values.push(result) - 1;
-  return `var(--poggers-value-${index})`;
+  return `var(--kit-value-${index})`;
 }
 
 function ratioPercent(value: number): string {

@@ -794,7 +794,7 @@ export const clean = ({ parameters }: { parameters: { sheet: unknown } }) => ({
   test("generates and runs a standalone Rust artifact from the same portable IR", async () => {
     const ir = compileSystem(await fixture(applicationSource()));
     const program = programContribution(ir, "feature/worker/program/cloud")!;
-    const directory = await temporaryDirectory("poggers-production-");
+    const directory = await temporaryDirectory("kit-production-");
     const executable = resolve(directory, "portable-program");
 
     await buildRustProgram(program, executable);
@@ -876,7 +876,7 @@ export const clean = ({ parameters }: { parameters: { sheet: unknown } }) => ({
 });
 
 async function fixture(source: string): Promise<string> {
-  const directory = await temporaryDirectory("poggers-ir-");
+  const directory = await temporaryDirectory("kit-ir-");
   const entry = resolve(directory, "system.ts");
   await writeFile(entry, source);
   return entry;

@@ -1,5 +1,5 @@
-import type { Feature, Program } from "@poggers/kit";
-import { createPress, For, mountDialog, mountDrag, type BrowserMainThread } from "@poggers/kit/web";
+import type { Feature, Program } from "@duction/kit";
+import { createPress, For, mountDialog, mountDrag, type BrowserMainThread } from "@duction/kit/web";
 
 type SheetView = "summary" | "detail";
 

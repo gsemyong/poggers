@@ -128,10 +128,10 @@ test("keeps shipped Feature and infrastructure policy out of production compiler
   for (const forbidden of [
     "createIdentity",
     "createEntity",
-    "poggers_users",
-    "poggers_sessions",
-    "poggers_events",
-    "POGGERS_DATABASE",
+    "kit_users",
+    "kit_sessions",
+    "kit_events",
+    "KIT_DATABASE",
   ]) {
     expect(genericMachinery, `${forbidden} leaked into generic machinery`).not.toContain(forbidden);
   }
@@ -217,7 +217,7 @@ test.skipIf(spawnSync("nats-server", ["--version"], { stdio: "ignore" }).status 
     });
     const environment = {
       NATS_URL: `nats://127.0.0.1:${natsPort}`,
-      POGGERS_EVENT_STREAM: `POGGERS_NATIVE_REPLICAS_${natsPort}`,
+      KIT_EVENT_STREAM: `KIT_NATIVE_REPLICAS_${natsPort}`,
     };
 
     const first = await runRecorderProgram(
@@ -293,7 +293,7 @@ function emptyProgram(span: SourceSpan): ProgramIR {
 }
 
 async function temporaryDirectory(): Promise<string> {
-  const directory = await mkdtemp(resolve(tmpdir(), "poggers-server-adapter-"));
+  const directory = await mkdtemp(resolve(tmpdir(), "kit-server-adapter-"));
   directories.push(directory);
   return directory;
 }
@@ -303,16 +303,16 @@ function recorderDependency() {
     name: "recorder-fixture",
     dependency: "recorder",
     configuration: [
-      { name: "output", environment: "POGGERS_RECORDER_OUTPUT", required: true },
-      { name: "input", environment: "POGGERS_RECORDER_INPUT", required: true },
+      { name: "output", environment: "KIT_RECORDER_OUTPUT", required: true },
+      { name: "input", environment: "KIT_RECORDER_INPUT", required: true },
     ],
     crate: {
-      package: "poggers-server-recorder",
+      package: "kit-server-recorder",
       directory: resolve(import.meta.dirname, "fixtures/recorder"),
     },
     rust: {
-      type: "poggers_server_recorder::Recorder",
-      constructor: "poggers_server_recorder::create",
+      type: "kit_server_recorder::Recorder",
+      constructor: "kit_server_recorder::create",
     },
   });
 }
@@ -456,8 +456,8 @@ async function runNativeFixture(
   const child = spawn(executable, [], {
     env: {
       ...process.env,
-      POGGERS_RECORDER_INPUT: JSON.stringify(input),
-      POGGERS_RECORDER_OUTPUT: output,
+      KIT_RECORDER_INPUT: JSON.stringify(input),
+      KIT_RECORDER_OUTPUT: output,
     },
     stdio: "pipe",
   });
@@ -491,8 +491,8 @@ function startRecorderProgram(
     env: {
       ...process.env,
       ...environment,
-      POGGERS_RECORDER_INPUT: JSON.stringify(input),
-      POGGERS_RECORDER_OUTPUT: output,
+      KIT_RECORDER_INPUT: JSON.stringify(input),
+      KIT_RECORDER_OUTPUT: output,
     },
     stdio: "pipe",
   });

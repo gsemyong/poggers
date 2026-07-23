@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 
-import { createPresentationFrame, createUIContributionInstance } from "@poggers/kit/testing";
+import { createPresentationFrame, createUIContributionInstance } from "@duction/kit/testing";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 

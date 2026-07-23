@@ -55,7 +55,7 @@ export function createServerPlatformAdapter(
           environment: program.environment.name,
           path,
         });
-        console.log(`[poggers] production ${program.name}: cache ${result.cache}`);
+        console.log(`[kit] production ${program.name}: cache ${result.cache}`);
       }
       return { directory: input.output, entries };
     },

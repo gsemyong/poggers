@@ -1386,7 +1386,7 @@ describe("web Presentation adapter", () => {
     expect(second.classes).toEqual(new Set([itemClass!]));
     expect(root.classes).toContain("authored");
     expect(log).toHaveLength(1);
-    expect(log[0]).toMatch(/^@layer poggers\.reset,poggers\.presentation;/);
+    expect(log[0]).toMatch(/^@layer kit\.reset,kit\.presentation;/);
     expect(log[0]).toContain("box-sizing:border-box");
     expect(log[0]).toContain("opacity:0.7");
 

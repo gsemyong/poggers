@@ -77,9 +77,7 @@ export async function buildServerProgram(input: {
     }),
   );
   const cacheRoot = resolve(
-    input.cache ??
-      process.env.POGGERS_PRODUCTION_CACHE ??
-      resolve(homedir(), ".cache/poggers/production"),
+    input.cache ?? process.env.KIT_PRODUCTION_CACHE ?? resolve(homedir(), ".cache/kit/production"),
   );
   const project = digest(
     JSON.stringify({
@@ -109,7 +107,7 @@ export async function buildServerProgram(input: {
   const dependencyGraphHash = digest(
     JSON.stringify(generated.files.filter(({ path }) => path.endsWith("Cargo.toml"))),
   );
-  const lockMarker = resolve(workspace, ".poggers/Cargo.lock.source");
+  const lockMarker = resolve(workspace, ".kit/Cargo.lock.source");
   const dependencyGraphChanged =
     (await readFile(lockMarker, "utf8").catch(() => undefined)) !== dependencyGraphHash;
   const formatted = await command("cargo", ["fmt", "--all", "--", "--check"], workspace);
@@ -141,7 +139,7 @@ export async function buildServerProgram(input: {
   if (!dependencyGraphChanged && (await exists(resolve(workspace, "Cargo.lock")))) {
     buildArguments.push("--locked");
   }
-  if (process.env.POGGERS_PRODUCTION_TIMINGS === "1") buildArguments.push("--timings");
+  if (process.env.KIT_PRODUCTION_TIMINGS === "1") buildArguments.push("--timings");
   const built = await command("cargo", buildArguments, workspace, environment);
   if (built.code !== 0) {
     throw new Error(`Generated server production failed to build:\n${cargoErrors(built)}`);
@@ -253,7 +251,7 @@ async function generateRustWorkspace(
     files,
     packages: [
       binary,
-      "poggers-server-runtime",
+      "kit-server-runtime",
       ...dependencies.map(({ implementation }) => implementation.crate.package),
     ],
   };
@@ -318,7 +316,7 @@ version = "0.0.0"
 edition = "2024"
 
 [dependencies]
-poggers-server-runtime = { path = "crates/runtime" }
+kit-server-runtime = { path = "crates/runtime" }
 serde_json = "1.0.145"
 tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread", "signal"] }
 ${cargoDependencies}${cargoDependencies ? "\n" : ""}`;
@@ -390,7 +388,7 @@ ${operations.map((operation) => `            ${rustOperationContract(operation)}
     .join("\n\n    ");
   return `use std::{collections::BTreeMap, sync::Arc};
 
-use poggers_server_runtime::{
+use kit_server_runtime::{
     Dependency, DependencyContext, Engine, NativeError, NativeResult${
       dependencies.length
         ? ", ContractDependency, FieldContract, OperationContract, TypeContract"
@@ -591,7 +589,7 @@ function cargoErrors(value: Readonly<{ stdout: string; stderr: string }>): strin
 }
 
 function packageName(program: string): string {
-  return `poggers_${rustName(program)}`;
+  return `kit_${rustName(program)}`;
 }
 
 function fileName(value: string): string {
@@ -642,7 +640,7 @@ async function writeGeneratedFile(
   file: GeneratedFile,
 ): Promise<boolean> {
   if (!file.path.endsWith(".rs")) return writeIfChanged(path, file.source);
-  const marker = resolve(workspace, ".poggers", `${digest(file.path)}.source`);
+  const marker = resolve(workspace, ".kit", `${digest(file.path)}.source`);
   const sourceHash = digest(file.source);
   if (
     (await readFile(marker, "utf8").catch(() => undefined)) === sourceHash &&

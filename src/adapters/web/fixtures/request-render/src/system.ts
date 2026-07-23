@@ -1,4 +1,4 @@
-import { createSystem } from "@poggers/kit";
+import { createSystem } from "@duction/kit";
 
 import { product } from "@/product";
 

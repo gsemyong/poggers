@@ -197,7 +197,7 @@ const presentation = (({ parameters }) => ({
     expect(open.variables).not.toEqual(closed.variables);
     expect(open.compiled.css).toContain("opacity:var(--");
     expect(open.compiled.css).toContain("(inline-size<=420px)");
-    expect(open.compiled.css).not.toContain("var(--poggers-value-");
+    expect(open.compiled.css).not.toContain("var(--kit-value-");
   });
 
   it("keeps rich interpolated paint and transform declarations on one native template", () => {

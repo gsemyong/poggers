@@ -42,7 +42,7 @@ afterEach(async () => {
 test.skipIf(!available)(
   "two isolated replicas share contiguous durable JetStream history",
   async () => {
-    const directory = await mkdtemp(resolve(tmpdir(), "poggers-jetstream-"));
+    const directory = await mkdtemp(resolve(tmpdir(), "kit-jetstream-"));
     directories.push(directory);
     const port = await availablePort();
     const server = await startNatsServer(directory, port);
@@ -50,7 +50,7 @@ test.skipIf(!available)(
     const options = {
       kind: "jetstream" as const,
       servers: `nats://127.0.0.1:${port}`,
-      stream: `POGGERS_REPLICA_${port}`,
+      stream: `KIT_REPLICA_${port}`,
     };
     const [first, initialSecond] = await Promise.all([
       createJetStreamEventStore<{ value: string }>(options),
@@ -113,7 +113,7 @@ test.skipIf(!available)(
 test.skipIf(!available)(
   "two isolated Program replicas authorize and catch up through a network authority",
   async () => {
-    const directory = await mkdtemp(resolve(tmpdir(), "poggers-program-replicas-"));
+    const directory = await mkdtemp(resolve(tmpdir(), "kit-program-replicas-"));
     directories.push(directory);
     const natsPort = await availablePort();
     const server = await startNatsServer(directory, natsPort);
@@ -123,7 +123,7 @@ test.skipIf(!available)(
     const options = {
       kind: "jetstream" as const,
       servers: `nats://127.0.0.1:${natsPort}`,
-      stream: `POGGERS_PROGRAM_REPLICAS_${natsPort}`,
+      stream: `KIT_PROGRAM_REPLICAS_${natsPort}`,
     };
     const first = await startReplica(resolve(directory, "first"), firstPort, options);
     let second = await startReplica(resolve(directory, "second"), secondPort, options);
@@ -133,8 +133,8 @@ test.skipIf(!available)(
         body: JSON.stringify({ text: "Network authority" }),
         headers: {
           "content-type": "application/json",
-          "x-poggers-command": "create-network-note",
-          "x-poggers-entity": "network-note",
+          "x-kit-command": "create-network-note",
+          "x-kit-entity": "network-note",
         },
       });
       await expect

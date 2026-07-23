@@ -374,8 +374,8 @@ function createEntityHandler<Model extends EntityModelDefinition>(
         return jsonResponse(await service.list({ principal, filter }));
       }
       if (request.path === path && request.method === "POST") {
-        const commandId = getHttpValue(request.headers, { name: "x-poggers-command" });
-        const entityId = getHttpValue(request.headers, { name: "x-poggers-entity" });
+        const commandId = getHttpValue(request.headers, { name: "x-kit-command" });
+        const entityId = getHttpValue(request.headers, { name: "x-kit-entity" });
         return jsonResponse(
           await service.create({
             principal,
@@ -392,7 +392,7 @@ function createEntityHandler<Model extends EntityModelDefinition>(
       const id = request.path.slice(prefix.length);
       if (request.method === "GET") return jsonResponse(await service.get({ principal, id }));
       if (request.method === "PATCH") {
-        const updateCommandId = getHttpValue(request.headers, { name: "x-poggers-command" });
+        const updateCommandId = getHttpValue(request.headers, { name: "x-kit-command" });
         return jsonResponse(
           await service.update({
             principal,
@@ -403,7 +403,7 @@ function createEntityHandler<Model extends EntityModelDefinition>(
         );
       }
       if (request.method === "DELETE") {
-        const removeCommandId = getHttpValue(request.headers, { name: "x-poggers-command" });
+        const removeCommandId = getHttpValue(request.headers, { name: "x-kit-command" });
         return jsonResponse(
           await service.remove({
             principal,
@@ -928,8 +928,8 @@ function createEntityClient<Model extends EntityModelDefinition>(
     changes: (filter) => entityChanges(http, `${path}/changes${filterQuery(filter)}`),
     send(command) {
       const headers = {
-        "x-poggers-command": command.id,
-        ...(command.operation === "create" ? { "x-poggers-entity": command.entityId } : {}),
+        "x-kit-command": command.id,
+        ...(command.operation === "create" ? { "x-kit-entity": command.entityId } : {}),
       };
       if (command.operation === "create") {
         return entityRequest(http, path, {

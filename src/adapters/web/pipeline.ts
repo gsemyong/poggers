@@ -266,9 +266,7 @@ export async function buildWebInterface(options: {
   const paths = resolveSystem(options.directory);
   const outdir = resolve(paths.directory, options.outdir);
   const work = await realpath(
-    await mkdtemp(
-      resolve(tmpdir(), options.development ? "poggers-web-dev-build-" : "poggers-web-build-"),
-    ),
+    await mkdtemp(resolve(tmpdir(), options.development ? "kit-web-dev-build-" : "kit-web-build-")),
   );
   await rm(outdir, { recursive: true, force: true });
   await mkdir(outdir, { recursive: true });
@@ -807,7 +805,7 @@ function viteConfiguration(paths: SystemPaths, development = false, ir?: SystemI
     plugins: vitePlugins(paths, ir),
     resolve: {
       alias: kitAliases(),
-      conditions: ["poggers-source", ...defaultClientConditions],
+      conditions: ["source", ...defaultClientConditions],
     },
     root: paths.directory,
   };
@@ -818,18 +816,18 @@ function kitAliases() {
   const extension = moduleExtension();
   return [
     {
-      find: /^@poggers\/kit\/jsx-dev-runtime$/,
+      find: /^@duction\/kit\/jsx-dev-runtime$/,
       replacement: resolve(kit, `jsx/development${extension}`),
     },
     {
-      find: /^@poggers\/kit\/jsx-runtime$/,
+      find: /^@duction\/kit\/jsx-runtime$/,
       replacement: resolve(kit, `jsx/runtime${extension}`),
     },
     {
-      find: /^@poggers\/kit\/web$/,
+      find: /^@duction\/kit\/web$/,
       replacement: resolve(kit, `platforms/web/platform${extension}`),
     },
-    { find: /^@poggers\/kit$/, replacement: resolve(kit, `index${extension}`) },
+    { find: /^@duction\/kit$/, replacement: resolve(kit, `index${extension}`) },
   ];
 }
 
@@ -894,7 +892,7 @@ function routeSourcePlugin(paths: SystemPaths, system: SystemIR | (() => SystemI
   };
 
   return {
-    name: "poggers-route-source",
+    name: "kit-route-source",
     enforce: "pre",
     async resolveId(source, importer) {
       const projection = sourceProjection(source) ?? sourceProjection(importer);
@@ -912,10 +910,7 @@ function routeSourcePlugin(paths: SystemPaths, system: SystemIR | (() => SystemI
       const parameters = sourceProjection(source)
         ? sourceParameters(source)
         : new URLSearchParams();
-      parameters.set(
-        projection.kind === "route" ? "poggers-route" : "poggers-program",
-        projection.name,
-      );
+      parameters.set(projection.kind === "route" ? "kit-route" : "kit-program", projection.name);
       return routeSourceId(id, parameters);
     },
     transform(code, rawId) {
@@ -1085,21 +1080,21 @@ function sourceProjection(
 ): Readonly<{ kind: "program" | "route"; name: string }> | undefined {
   if (!id) return undefined;
   const parameters = sourceParameters(id);
-  const route = parameters.get("poggers-route");
+  const route = parameters.get("kit-route");
   if (route) return { kind: "route", name: route };
-  const program = parameters.get("poggers-program");
+  const program = parameters.get("kit-program");
   return program ? { kind: "program", name: program } : undefined;
 }
 
 function routeSystemSpecifier(system: string, route: string, revision?: number): string {
-  const parameters = new URLSearchParams({ "poggers-route": route });
-  if (revision !== undefined) parameters.set("poggers-revision", String(revision));
+  const parameters = new URLSearchParams({ "kit-route": route });
+  if (revision !== undefined) parameters.set("kit-revision", String(revision));
   return routeSourceId(system, parameters);
 }
 
 function programSystemSpecifier(system: string, program: string, revision?: number): string {
-  const parameters = new URLSearchParams({ "poggers-program": program });
-  if (revision !== undefined) parameters.set("poggers-revision", String(revision));
+  const parameters = new URLSearchParams({ "kit-program": program });
+  if (revision !== undefined) parameters.set("kit-revision", String(revision));
   return routeSourceId(system, parameters);
 }
 
@@ -1149,7 +1144,7 @@ export default definition;
 
 function presentationTransformPlugin(source: string): Plugin {
   return {
-    name: "poggers-presentations",
+    name: "kit-presentations",
     enforce: "pre",
     transform(code, rawId) {
       const id = cleanId(rawId);
@@ -1165,7 +1160,7 @@ function presentationTransformPlugin(source: string): Plugin {
 
 function componentTransformPlugin(source: string): Plugin {
   return {
-    name: "poggers-components",
+    name: "kit-components",
     enforce: "pre",
     transform(code, rawId) {
       const id = cleanId(rawId);
@@ -1181,7 +1176,7 @@ function componentTransformPlugin(source: string): Plugin {
 function systemAliasPlugin(source: string): Plugin {
   const kit = resolve(import.meta.dirname, "../..");
   return {
-    name: "poggers-system-alias",
+    name: "kit-system-alias",
     enforce: "pre",
     resolveId(id, importer) {
       if (!id.startsWith("@/")) return;
@@ -1239,7 +1234,7 @@ function presentationContractPlugin(
         state.current = prepared;
         responseCache.clear();
         context.server.config.logger.info(
-          `[poggers] ${updateKind} semantic update ${Math.round((performance.now() - started) * 10) / 10}ms`,
+          `[kit] ${updateKind} semantic update ${Math.round((performance.now() - started) * 10) / 10}ms`,
           { timestamp: true },
         );
         const candidateModules = [
@@ -1255,7 +1250,7 @@ function presentationContractPlugin(
         }
         context.server.ws.send({
           type: "custom",
-          event: "poggers:update-kind",
+          event: "kit:update-kind",
           data: { kind: updateKind },
         });
         // The browser entry accepts the generated candidate, not arbitrary authored leaves.
@@ -1270,10 +1265,10 @@ function presentationContractPlugin(
     return modules;
   };
   return {
-    name: "poggers-presentation-contract",
+    name: "kit-presentation-contract",
     configureServer(server) {
       server.middlewares.use((request, response, next) => {
-        const location = new URL(request.url ?? "/", "http://poggers.local");
+        const location = new URL(request.url ?? "/", "http://kit.local");
         if (location.pathname.endsWith("/service-worker.generated.ts")) {
           response.setHeader("service-worker-allowed", "/");
           next();
@@ -1357,7 +1352,7 @@ function presentationContractPlugin(
                 }),
             );
             const result = cached.value;
-            response.setHeader("x-poggers-cache", cached.status);
+            response.setHeader("x-kit-cache", cached.status);
             response.statusCode = result.status;
             for (const [name, value] of Object.entries(result.headers)) {
               response.setHeader(name, value);
@@ -1399,7 +1394,7 @@ function presentationContractPlugin(
               return;
             }
             if (error instanceof WebRouteValidationError) {
-              server.config.logger.warn(`[poggers] invalid web request: ${error.message}`);
+              server.config.logger.warn(`[kit] invalid web request: ${error.message}`);
               response.statusCode = 400;
               response.setHeader("content-type", "application/json");
               response.end(JSON.stringify({ message: "Invalid request." }));
@@ -1535,7 +1530,7 @@ async function prepareDevelopmentDocument(input: {
   }>
 > {
   const { route } = input.match;
-  const title = route.metadata.title ?? input.prepared.ir.system.name ?? "Poggers";
+  const title = route.metadata.title ?? input.prepared.ir.system.name ?? "Kit";
   const metadata = routeDocumentMetadata(route.metadata);
   let document: WebDocumentIR;
   let markdownAllowed = !route.metadata.robots
@@ -1556,7 +1551,7 @@ async function prepareDevelopmentDocument(input: {
     const evaluatorPath = input.prepared.documentEvaluator;
     if (!evaluatorPath) throw new Error("Development web document evaluator is unavailable.");
     const evaluator = (await input.server.ssrLoadModule(
-      `${evaluatorPath}?poggers-revision=${input.prepared.revision}`,
+      `${evaluatorPath}?kit-revision=${input.prepared.revision}`,
     )) as {
       system?: unknown;
       prepare?(input: Readonly<Record<string, unknown>>): Promise<WebDocumentIR>;
@@ -1942,7 +1937,7 @@ export default await Promise.all((routes.length ? routes : [undefined]).map(asyn
   route,
       document: route?.document === "shell"
     ? prepareClientWebDocument({
-        title: route.metadata?.title ?? system.metadata?.name ?? "Poggers",
+        title: route.metadata?.title ?? system.metadata?.name ?? "Kit",
         language: route.metadata?.language,
         metadata: Object.fromEntries(Object.entries(route.metadata ?? {}).filter(([name]) => name !== "title" && name !== "language")),
         entry: "/app.js",
@@ -1975,7 +1970,7 @@ export default await Promise.all((routes.length ? routes : [undefined]).map(asyn
       root: paths.directory,
       resolve: {
         alias: kitAliases(),
-        conditions: ["poggers-source", ...defaultServerConditions],
+        conditions: ["source", ...defaultServerConditions],
       },
       plugins: vitePlugins(paths),
       build: {
@@ -2122,7 +2117,7 @@ function dynamicRouteDocument(
   return withWebStyles(
     Object.freeze({
       ...prepareClientWebDocument({
-        title: route.metadata.title ?? ir.system.name ?? "Poggers",
+        title: route.metadata.title ?? ir.system.name ?? "Kit",
         language: route.metadata.language,
         metadata: routeDocumentMetadata(route.metadata),
         entry: "/app.js",
@@ -2171,8 +2166,8 @@ export function validateProductionWebRoute(
 
 function withWebStyles(document: WebDocumentIR): WebDocumentIR {
   const stylesheet =
-    `@layer poggers.reset,poggers.presentation;@layer poggers.reset{${webResetCss}}` +
-    `@layer poggers.presentation{${document.styles.join("")}}`;
+    `@layer kit.reset,kit.presentation;@layer kit.reset{${webResetCss}}` +
+    `@layer kit.presentation{${document.styles.join("")}}`;
   return Object.freeze({ ...document, styles: Object.freeze([stylesheet]) });
 }
 
@@ -2217,17 +2212,17 @@ function workerSource(input: {
   );
   const lifecycle =
     input.program.environment.name === "browser-service-worker"
-      ? `const programs = globalThis.__poggersServiceWorkerPrograms ??= [];
+      ? `const programs = globalThis.__kitServiceWorkerPrograms ??= [];
 programs.push(ready);`
       : `let disposed = false;
 addEventListener("message", (event) => {
-  if (event.data !== "poggers:dispose" || disposed) return;
+  if (event.data !== "kit:dispose" || disposed) return;
   disposed = true;
   void ready
     .then((process) => process.dispose())
-    .catch((error) => console.error("[poggers] Browser worker disposal failed", error))
+    .catch((error) => console.error("[kit] Browser worker disposal failed", error))
     .finally(() => {
-      event.ports[0]?.postMessage("poggers:disposed");
+      event.ports[0]?.postMessage("kit:disposed");
       close();
     });
 });`;
@@ -2372,9 +2367,9 @@ const disposeWorker = (worker) => new Promise((resolve) => {
   };
   const timeout = setTimeout(finish, 1000);
   channel.port1.onmessage = (event) => {
-    if (event.data === "poggers:disposed") finish();
+    if (event.data === "kit:disposed") finish();
   };
-  worker.postMessage("poggers:dispose", [channel.port2]);
+  worker.postMessage("kit:dispose", [channel.port2]);
 });
 
 const pwaPreview = () =>
@@ -2411,10 +2406,10 @@ const resetDevelopmentWorker = async () => {
   if ("caches" in globalThis) {
     const names = await caches.keys();
     await Promise.all(
-      names.filter((name) => name.startsWith("poggers-")).map((name) => caches.delete(name)),
+      names.filter((name) => name.startsWith("kit-")).map((name) => caches.delete(name)),
     );
   }
-  const marker = "poggers:development-worker-reset";
+  const marker = "kit:development-worker-reset";
   if (controlled && controlled.scriptURL !== target && sessionStorage.getItem(marker) !== "complete") {
     sessionStorage.setItem(marker, "complete");
     location.reload();
@@ -2449,7 +2444,7 @@ export async function activate(root, previous = {}) {
     }
     for (const definition of workerPrograms) {
       const url = new URL(definition.source, import.meta.url);
-      const worker = new Worker(url, { type: "module", name: "poggers" });
+      const worker = new Worker(url, { type: "module", name: "kit" });
       cleanups.push(() => disposeWorker(worker));
     }
     if (serviceWorkerRequested() && serviceWorkerSupported()) {
@@ -2527,7 +2522,7 @@ function developmentDocumentEvaluatorSource(input: {
 }): string {
   const system = routeSourceId(
     input.system,
-    new URLSearchParams({ "poggers-revision": String(input.revision) }),
+    new URLSearchParams({ "kit-revision": String(input.revision) }),
   );
   return `import system from ${JSON.stringify(system)};
 import { prepareWebDocument } from ${JSON.stringify(input.document)};
@@ -2714,7 +2709,7 @@ const apply = async (candidate, updateKind) => {
         location.reload();
         return;
       }
-      console.error("[poggers] hot update rejected: " + result.reason, result.cause);
+      console.error("[kit] hot update rejected: " + result.reason, result.cause);
     }
   } finally {
     const detail = {
@@ -2723,8 +2718,8 @@ const apply = async (candidate, updateKind) => {
       status,
       milliseconds: Math.round((performance.now() - started) * 100) / 100,
     };
-    globalThis.__poggersHotUpdate = detail;
-    dispatchEvent(new CustomEvent("poggers:hot-update", { detail }));
+    globalThis.__kitHotUpdate = detail;
+    dispatchEvent(new CustomEvent("kit:hot-update", { detail }));
   }
 };
 await apply(initialCandidate, "full");
@@ -2734,7 +2729,7 @@ addEventListener("pagehide", dispose, { once: true });
 if (import.meta.hot) {
   let pendingUpdateKind;
   import.meta.hot.data.coordinator = coordinator;
-  import.meta.hot.on("poggers:update-kind", ({ kind }) => {
+  import.meta.hot.on("kit:update-kind", ({ kind }) => {
     pendingUpdateKind = pendingUpdateKind === "full" || kind === "full" ? "full" : kind;
   });
   import.meta.hot.accept(${JSON.stringify(candidate)}, async (next) => {
@@ -2749,7 +2744,7 @@ if (import.meta.hot) {
 
 function htmlSource(entry: string): string {
   return `<!doctype html>
-<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><style>@layer poggers.reset,poggers.presentation;@layer poggers.reset{${webResetCss}}</style><title>Poggers</title></head><body><div id="app"></div><script type="module" src="${entry}"></script></body></html>`;
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><style>@layer kit.reset,kit.presentation;@layer kit.reset{${webResetCss}}</style><title>Kit</title></head><body><div id="app"></div><script type="module" src="${entry}"></script></body></html>`;
 }
 
 function cleanId(id: string): string {

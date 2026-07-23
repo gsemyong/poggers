@@ -49,7 +49,7 @@ export async function developServerPrograms(
     root: input.directory,
     resolve: {
       alias: kitAliases(),
-      conditions: ["poggers-source", ...defaultServerConditions],
+      conditions: ["source", ...defaultServerConditions],
     },
     server: { middlewareMode: true, ws: false },
   });
@@ -104,11 +104,11 @@ export async function developServerPrograms(
         );
         if (!affected.size) return;
         vite.config.logger.info(
-          `[poggers] reloading server Programs: ${[...affected].sort().join(", ")}`,
+          `[kit] reloading server Programs: ${[...affected].sort().join(", ")}`,
           { timestamp: true },
         );
         candidate = moduleDefault(
-          await vite.ssrLoadModule(`${input.system}?poggers-revision=${++revision}`),
+          await vite.ssrLoadModule(`${input.system}?kit-revision=${++revision}`),
         );
 
         activePrograms = await replaceDevelopmentPrograms({
@@ -429,33 +429,33 @@ function kitAliases() {
   const extension = import.meta.filename.endsWith(".ts") ? ".ts" : ".js";
   return [
     {
-      find: /^@poggers\/kit\/jsx-dev-runtime$/,
+      find: /^@duction\/kit\/jsx-dev-runtime$/,
       replacement: resolve(source, `jsx/development${extension}`),
     },
     {
-      find: /^@poggers\/kit\/jsx-runtime$/,
+      find: /^@duction\/kit\/jsx-runtime$/,
       replacement: resolve(source, `jsx/runtime${extension}`),
     },
     {
-      find: /^@poggers\/kit\/adapters\/server$/,
+      find: /^@duction\/kit\/adapters\/server$/,
       replacement: resolve(source, `adapters/server/adapter${extension}`),
     },
     {
-      find: /^@poggers\/kit\/server$/,
+      find: /^@duction\/kit\/server$/,
       replacement: resolve(source, `platforms/server/platform${extension}`),
     },
     {
-      find: /^@poggers\/kit\/web$/,
+      find: /^@duction\/kit\/web$/,
       replacement: resolve(source, `platforms/web/platform${extension}`),
     },
-    { find: /^@poggers\/kit$/, replacement: resolve(source, `index${extension}`) },
+    { find: /^@duction\/kit$/, replacement: resolve(source, `index${extension}`) },
   ];
 }
 
 function systemAliasPlugin(source: string): Plugin {
   const kit = resolve(import.meta.dirname, "../../..");
   return {
-    name: "poggers-system-alias",
+    name: "kit-system-alias",
     enforce: "pre",
     resolveId(id, importer) {
       if (!id.startsWith("@/")) return;

@@ -1,5 +1,5 @@
-import { createApp, type PlatformInterfaceContract } from "@poggers/kit";
-import { createWebInterface, type WebPlatform } from "@poggers/kit/web";
+import { createApp, type PlatformInterfaceContract } from "@duction/kit";
+import { createWebInterface, type WebPlatform } from "@duction/kit/web";
 
 import { dashboard, type DashboardFeature } from "../../features/dashboard";
 import { editorial } from "../../presentations/editorial";

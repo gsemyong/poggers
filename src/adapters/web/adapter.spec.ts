@@ -60,7 +60,7 @@ describe("web Platform Adapter", () => {
   });
 
   test("emits the document and worker Programs as explicit artifacts", async () => {
-    const directory = await mkdtemp(resolve(tmpdir(), "poggers-web-adapter-"));
+    const directory = await mkdtemp(resolve(tmpdir(), "kit-web-adapter-"));
     temporaryDirectories.push(directory);
     const source = resolve(directory, "src");
     const system = resolve(source, "system.ts");
@@ -97,10 +97,10 @@ describe("web Platform Adapter", () => {
       result.entries.find(({ environment }) => environment === "browser-worker")!.path,
       "utf8",
     );
-    expect(document).toContain("poggers:dispose");
-    expect(document).toContain("poggers:disposed");
-    expect(worker).toContain("poggers:dispose");
-    expect(worker).toContain("poggers:disposed");
+    expect(document).toContain("kit:dispose");
+    expect(document).toContain("kit:disposed");
+    expect(worker).toContain("kit:dispose");
+    expect(worker).toContain("kit:disposed");
     expect(worker).toContain(
       "dependencies:[{name:`http`,operations:[{name:`request`,mode:`asynchronous`",
     );

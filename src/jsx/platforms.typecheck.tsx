@@ -1,4 +1,4 @@
-import type { JSXElement, JSXPlatformRegistration } from "@poggers/kit/jsx-runtime";
+import type { JSXElement, JSXPlatformRegistration } from "@duction/kit/jsx-runtime";
 
 import type { Feature } from "@/core/feature";
 import type { Program } from "@/core/program";
@@ -26,7 +26,7 @@ type NativeMain = Readonly<{
   UI: NativeUI;
 }>;
 
-declare module "@poggers/kit/jsx-runtime" {
+declare module "@duction/kit/jsx-runtime" {
   interface JSXPlatforms {
     nativeTest: JSXPlatformRegistration<{
       stack: NativeStackProps;

@@ -262,7 +262,7 @@ function createLocalStore(): LocalStore & Disposable {
 
 function openLocalDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open("poggers", 1);
+    const request = indexedDB.open("kit", 1);
     request.onupgradeneeded = () => {
       if (!request.result.objectStoreNames.contains("values")) {
         request.result.createObjectStore("values");

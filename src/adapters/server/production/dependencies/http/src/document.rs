@@ -673,7 +673,7 @@ fn validate_render_node(value: &Value) -> Result<(), String> {
             for attribute in array(value, "attributes")? {
                 validate_keys(attribute, &["name", "value"], "web render attribute")?;
                 let name = string(attribute, "name")?;
-                if !valid_name(name, true) || name == "data-poggers-h" {
+                if !valid_name(name, true) || name == "data-kit-h" {
                     return Err(format!("invalid compiled web attribute {name:?}"));
                 }
                 validate_render_value(required(attribute, "value")?)?;
@@ -1194,7 +1194,7 @@ fn evaluate_render_node(
             }
             let owner = compiled_component_runtime_name(stack.last().map(String::as_str));
             attributes.insert(
-                "data-poggers-element".to_owned(),
+                "data-kit-element".to_owned(),
                 format!("{owner}/{}", string(node, "element")?),
             );
             let mut children = Vec::new();
@@ -1726,7 +1726,7 @@ fn lower_pending_node(node: &PendingNode, sequence: &mut RenderSequence) -> Resu
             let hydration = format!("{}e{}", sequence.prefix, sequence.element);
             sequence.element += 1;
             let mut attributes = attributes.clone();
-            attributes.insert("data-poggers-h".to_owned(), hydration.clone());
+            attributes.insert("data-kit-h".to_owned(), hydration.clone());
             let attributes = attributes
                 .into_iter()
                 .map(|(name, value)| json!({ "name": name, "value": value }))
@@ -2651,7 +2651,7 @@ fn render(document: &Value) -> Result<String, String> {
     escape_attribute(&mut output, language);
     output.push_str("\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1,viewport-fit=cover\">");
     if !styles.is_empty() {
-        output.push_str("<style data-poggers-ssr>");
+        output.push_str("<style data-kit-ssr>");
         for style in styles {
             let style = style
                 .as_str()
@@ -2680,7 +2680,7 @@ fn render(document: &Value) -> Result<String, String> {
     escape_text(&mut output, title);
     output.push_str("</title>");
     render_metadata(&mut output, metadata, title)?;
-    output.push_str("</head><body><div id=\"app\" data-poggers-rendering=\"");
+    output.push_str("</head><body><div id=\"app\" data-kit-rendering=\"");
     output.push_str(rendering);
     output.push_str("\">");
     let mut identities = HashSet::new();
@@ -2689,7 +2689,7 @@ fn render(document: &Value) -> Result<String, String> {
     }
     output.push_str("</div>");
     if hydration != &Value::Bool(false) {
-        output.push_str("<script id=\"poggers-hydration\" type=\"application/json\">");
+        output.push_str("<script id=\"kit-hydration\" type=\"application/json\">");
         let payload = serde_json::to_string(hydration)
             .map_err(|error| format!("encode web Route hydration: {error}"))?;
         escape_embedded_json(&mut output, &payload);
@@ -2902,7 +2902,7 @@ fn render_metadata(
         .into_iter()
         .flatten()
     {
-        output.push_str("<script type=\"application/ld+json\" data-poggers-route-head>");
+        output.push_str("<script type=\"application/ld+json\" data-kit-route-head>");
         let value = serde_json::to_string(value)
             .map_err(|error| format!("encode web structured data: {error}"))?;
         escape_embedded_json(output, &value);
@@ -2939,7 +2939,7 @@ fn write_meta(output: &mut String, identity: &str, name: &str, content: Option<&
     escape_attribute(output, name);
     output.push_str("\" content=\"");
     escape_attribute(output, content);
-    output.push_str("\" data-poggers-route-head>");
+    output.push_str("\" data-kit-route-head>");
 }
 
 fn write_meta_number(output: &mut String, name: &str, value: Option<&Value>) {
@@ -2962,7 +2962,7 @@ fn write_link(output: &mut String, attributes: &[(&str, Option<&str>)]) {
             output.push('"');
         }
     }
-    output.push_str(" data-poggers-route-head>");
+    output.push_str(" data-kit-route-head>");
 }
 
 fn render_deferred_frame(frame: &Value) -> Result<String, String> {
@@ -2991,16 +2991,16 @@ fn render_deferred_frame(frame: &Value) -> Result<String, String> {
         }
         _ => return Err("invalid web deferred frame state".to_owned()),
     }
-    let mut output = String::from("<template data-poggers-deferred-frame=\"");
+    let mut output = String::from("<template data-kit-deferred-frame=\"");
     escape_attribute(&mut output, boundary);
-    output.push_str("\" data-poggers-deferred-field=\"");
+    output.push_str("\" data-kit-deferred-field=\"");
     escape_attribute(&mut output, field);
     output.push_str("\">");
     let mut identities = HashSet::new();
     for node in array(frame, "root")? {
         render_node(&mut output, node, &mut identities)?;
     }
-    output.push_str("</template><script type=\"application/json\" data-poggers-deferred-state=\"");
+    output.push_str("</template><script type=\"application/json\" data-kit-deferred-state=\"");
     escape_attribute(&mut output, boundary);
     output.push_str("\">");
     let payload = serde_json::to_string(state)
@@ -3030,15 +3030,15 @@ fn render_node(
         {
             return Err("invalid web deferred boundary".to_owned());
         }
-        output.push_str("<template data-poggers-boundary-start=\"");
+        output.push_str("<template data-kit-boundary-start=\"");
         escape_attribute(output, boundary);
-        output.push_str("\" data-poggers-deferred-field=\"");
+        output.push_str("\" data-kit-deferred-field=\"");
         escape_attribute(output, field);
         output.push_str("\"></template>");
         for child in array(node, "children")? {
             render_node(output, child, identities)?;
         }
-        output.push_str("<template data-poggers-boundary-end=\"");
+        output.push_str("<template data-kit-boundary-end=\"");
         escape_attribute(output, boundary);
         output.push_str("\"></template>");
         return Ok(());
@@ -3057,7 +3057,7 @@ fn render_node(
         {
             return Err("web text hydration identity must start with t".to_owned());
         }
-        output.push_str("<!--poggers:");
+        output.push_str("<!--kit:");
         output.push_str(hydration);
         output.push_str("-->");
         escape_text(output, string(node, "value")?);
@@ -3100,7 +3100,7 @@ fn render_node(
         if !names.insert(name) {
             return Err(format!("duplicate web attribute {name}"));
         }
-        if name == "data-poggers-h" {
+        if name == "data-kit-h" {
             hydration_attribute = Some(value);
         }
         output.push(' ');
@@ -3287,7 +3287,7 @@ mod tests {
                 "tag": "main",
                 "attributes": [
                     { "name": "class", "value": "root" },
-                    { "name": "data-poggers-h", "value": "e0" }
+                    { "name": "data-kit-h", "value": "e0" }
                 ],
                 "children": [{ "kind": "text", "hydration": "t0", "value": "<script>&\"'" }]
             }]
@@ -3300,7 +3300,7 @@ mod tests {
         assert!(rendered.contains("<title>A &lt; B &amp; C</title>"));
         assert!(rendered.contains("<link rel=\"modulepreload\" href=\"/app.js\">"));
         assert!(rendered.contains("<link rel=\"modulepreload\" href=\"/shared.js\">"));
-        assert!(rendered.contains("<!--poggers:t0-->&lt;script&gt;&amp;\"'"));
+        assert!(rendered.contains("<!--kit:t0-->&lt;script&gt;&amp;\"'"));
     }
 
     #[test]
@@ -3316,7 +3316,7 @@ mod tests {
         client["rendering"] = json!("client");
         client["root"] = json!([]);
         let rendered = render(&client).expect("render client document");
-        assert!(rendered.contains("data-poggers-rendering=\"client\"></div>"));
+        assert!(rendered.contains("data-kit-rendering=\"client\"></div>"));
 
         client["root"] = document()["root"].clone();
         assert!(render(&client).is_err());

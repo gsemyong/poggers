@@ -12,12 +12,12 @@ use async_nats::{
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures_util::StreamExt;
-use poggers_server_runtime::{
+use kit_server_runtime::{
     Dependency, DependencyContext, Engine, NativeError, NativeFuture, NativeResult, Value,
 };
 use serde_json::{Value as JsonValue, json};
 
-const PREFIX: &str = "poggers.events";
+const PREFIX: &str = "kit.events";
 
 pub struct Events {
     client: Client,
@@ -289,8 +289,8 @@ mod tests {
 
     #[test]
     fn subjects_are_stable_and_safe_for_arbitrary_stream_names() {
-        assert_eq!(subject("orders/one"), "poggers.events.b3JkZXJzL29uZQ");
-        assert_eq!(subject("orders one.*"), "poggers.events.b3JkZXJzIG9uZS4q");
+        assert_eq!(subject("orders/one"), "kit.events.b3JkZXJzL29uZQ");
+        assert_eq!(subject("orders one.*"), "kit.events.b3JkZXJzIG9uZS4q");
     }
 
     #[test]

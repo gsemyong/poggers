@@ -129,7 +129,7 @@ const svgOk = (
   </svg>
 );
 
-const customElementOk = <poggers-widget data-id="main" someProp={{ ok: true }} />;
+const customElementOk = <kit-widget data-id="main" someProp={{ ok: true }} />;
 
 // @ts-expect-error unknown built-in tag names are rejected.
 const _unknownIntrinsic = <buton />;

@@ -348,27 +348,27 @@ Purpose: expose the product language rather than implementation plumbing.
 
 ### Work
 
-- [ ] Choose the final neutral package locator and CLI command.
-- [ ] Apply the rename atomically across package metadata, commands, IR symbols,
+- [x] Choose the final neutral package locator and CLI command.
+- [x] Apply the rename atomically across package metadata, commands, IR symbols,
       caches, generated code, examples, and documentation.
-- [ ] Restrict the root export to System composition and ordinary reusable
+- [x] Restrict the root export to System composition and ordinary reusable
       Feature factories.
-- [ ] Keep Platform authoring, testing, adapter authoring, and concrete shipped
+- [x] Keep Platform authoring, testing, adapter authoring, and concrete shipped
       adapters on explicit subpaths.
-- [ ] Keep compiler and runtime implementation modules private.
-- [ ] Generate and compare public API manifests for every exported subpath.
-- [ ] Add a root changelog, change fragments, compatibility policy, and
+- [x] Keep compiler and runtime implementation modules private.
+- [x] Generate and compare public API manifests for every exported subpath.
+- [x] Add a root changelog, change fragments, compatibility policy, and
       migration-document convention.
-- [ ] Add Feature factory authoring and testing guidance.
-- [ ] Require migration guidance for every breaking public API change.
+- [x] Add Feature factory authoring and testing guidance.
+- [x] Require migration guidance for every breaking public API change.
 
 ### Blocking gate
 
-- [ ] Package contents and exports contain only intentional public artifacts.
-- [ ] A product Workspace uses semantic factories without importing compiler,
+- [x] Package contents and exports contain only intentional public artifacts.
+- [x] A product Workspace uses semantic factories without importing compiler,
       runtime, or concrete adapter implementation modules.
-- [ ] Public API changes are machine-detected and require recorded intent.
-- [ ] No old branding remains in code, generated artifacts, caches, or copy.
+- [x] Public API changes are machine-detected and require recorded intent.
+- [x] No old branding remains in code, generated artifacts, caches, or copy.
 
 ## Phase 9: remove residue and accept the architecture
 
@@ -454,6 +454,10 @@ output, or browser observation. Do not replace evidence with a summary claim.
 | 2026-07-23 | 7     | Web development uses stable per-interface generated-source and Vite cache paths; generated modules are retained for exact diagnostics and written only when changed, so virtual modules would add indirection without removing churn                                             | Decision verified      |
 | 2026-07-23 | 7     | Basic development after clearing its adapter cache: 1827.0 ms to ready; retained-cache runs: 1861.4 and 1869.6 ms to ready; first warm response: 45.7 ms. Current measured budgets are 2500 ms to ready and 100 ms for the first local response                                  | Within budget          |
 | 2026-07-23 | 7     | Full repository gate after incremental ownership work: typecheck, Oxlint, Oxfmt, package build, 52 Vitest files with 412 tests, and the complete Rust workspace                                                                                                                  | Pass                   |
+| 2026-07-23 | 8     | `@duction/kit`, `kit`, `.kit`, Rust crate names, generated protocol names, examples, copy, and resolver aliases were renamed together; source, generated-file-name, and cache searches contain no previous identity                                                               | Pass                   |
+| 2026-07-23 | 8     | `docs/api.json` records 12 package subpaths, 311 exported symbols, and the 49-file reachable declaration closure; `api:check` blocks unrecorded drift and requires a valid change record                                                                                          | Pass                   |
+| 2026-07-23 | 8     | Package dry run contains the explicit runtime, source-condition, Rust host, starter, and consumer documentation artifacts; compiler/runtime internals have no export subpath, while UI, platform, testing, adapter authoring, concrete adapters, CLI, JSX, and tsconfig are explicit | Pass                   |
+| 2026-07-23 | 8     | Full repository gate after distribution work: typecheck, Oxlint, Oxfmt, API manifest, package build, 52 Vitest files with 413 tests, and the complete renamed Rust workspace                                                                                                    | Pass                   |
 
 ### Phase 0 observations
 
@@ -481,11 +485,11 @@ output, or browser observation. Do not replace evidence with a summary claim.
 
 ## Current position
 
-- Active phase: Phase 8, tighten external distribution.
-- Completed phases: Phases 0 through 4 and 6.
+- Active phase: Phase 9, remove residue and accept the architecture.
+- Completed phases: Phases 0 through 4, 6, and 8.
 - Implemented pending final browser acceptance: Phase 5.
 - Implemented pending final browser acceptance: Phase 7.
 - Blockers: none known.
-- Next action: apply the neutral package and command rename atomically, tighten
-  subpath exports, install public API change detection and governance, then run
-  final cleanup and browser acceptance.
+- Next action: audit production ownership and test value, verify a packed package
+  and clean external Workspace, then run final development and production
+  in-app browser acceptance.

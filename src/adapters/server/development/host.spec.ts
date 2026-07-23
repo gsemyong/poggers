@@ -15,7 +15,7 @@ afterEach(async () => {
 
 describe("server Platform host", () => {
   test("allocates only the Dependencies required by one Program instance", async () => {
-    const directory = await mkdtemp(resolve(tmpdir(), "poggers-host-"));
+    const directory = await mkdtemp(resolve(tmpdir(), "kit-host-"));
     directories.push(directory);
 
     const empty = await createNodeHost({ dependencies: [], directory });
@@ -53,14 +53,14 @@ describe("server Platform host", () => {
       method: "OPTIONS",
       headers: {
         origin: "http://localhost:3000",
-        "access-control-request-headers": "content-type,x-poggers-command,x-poggers-entity",
+        "access-control-request-headers": "content-type,x-kit-command,x-kit-entity",
         "access-control-request-method": "POST",
       },
     });
 
     expect(response.status).toBe(204);
-    expect(response.headers.get("access-control-allow-headers")).toContain("x-poggers-command");
-    expect(response.headers.get("access-control-allow-headers")).toContain("x-poggers-entity");
+    expect(response.headers.get("access-control-allow-headers")).toContain("x-kit-command");
+    expect(response.headers.get("access-control-allow-headers")).toContain("x-kit-entity");
     await host.http[Symbol.asyncDispose]();
   });
 

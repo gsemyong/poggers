@@ -1,8 +1,8 @@
 import { createConnection } from "node:net";
 import { resolve } from "node:path";
 
-import type { EntitySnapshot } from "@poggers/kit";
-import { testSystem } from "@poggers/kit/testing";
+import type { EntitySnapshot } from "@duction/kit";
+import { testSystem } from "@duction/kit/testing";
 import { expect } from "vitest";
 
 import type { Task } from "./features/tasks";
@@ -48,13 +48,13 @@ testSystem({
       expect(unchanged.headers.get("etag")).toBe(documentEtag);
       expect(await unchanged.text()).toBe("");
     }
-    expect(document).toContain('data-poggers-rendering="client"></div>');
-    expect(document).toContain("<style data-poggers-ssr>");
+    expect(document).toContain('data-kit-rendering="client"></div>');
+    expect(document).toContain("<style data-kit-ssr>");
     expect(document).toContain("<title>Tasks</title>");
     expect(document).toContain(
-      '<meta name="description" content="Manage workspace tasks" data-poggers-route-head>',
+      '<meta name="description" content="Manage workspace tasks" data-kit-route-head>',
     );
-    expect(document).toContain('<meta name="robots" content="noindex" data-poggers-route-head>');
+    expect(document).toContain('<meta name="robots" content="noindex" data-kit-route-head>');
     const head = await checkedFetch(new URL("/tasks", location), {
       method: "HEAD",
       headers: { accept: "text/html" },
@@ -76,7 +76,7 @@ testSystem({
     expect(authPage.headers.get("cache-control")).toBe("no-store");
     const authDocument = await authPage.text();
     expect(authDocument).toContain("<title>Sign in</title>");
-    expect(authDocument).toContain('data-poggers-rendering="client"></div>');
+    expect(authDocument).toContain('data-kit-rendering="client"></div>');
     const unsupportedMethod = await checkedFetch(new URL("/tasks", location), {
       method: "POST",
       headers: { accept: "text/html" },
@@ -92,14 +92,14 @@ testSystem({
     expect(createPage.headers.get("cache-control")).toBe("no-store");
     const createDocument = await createPage.text();
     expect(createDocument).toContain("<title>New task</title>");
-    expect(createDocument).toContain('data-poggers-rendering="client"></div>');
+    expect(createDocument).toContain('data-kit-rendering="client"></div>');
     const clientPage = await checkedFetch(
       new URL("/tasks/8da942a4-835f-4d4e-bc08-89545d523963", location),
       { headers: { accept: "text/html" }, signal: AbortSignal.timeout(10_000) },
     );
     expect(clientPage.status).toBe(200);
     expect(clientPage.headers.get("cache-control")).toBe("no-store");
-    expect(await clientPage.text()).toContain('data-poggers-rendering="client"></div>');
+    expect(await clientPage.text()).toContain('data-kit-rendering="client"></div>');
     if (realization === "production") {
       expect(page.headers.get("x-request-id")).toBeTruthy();
       expect(page.headers.get("x-content-type-options")).toBe("nosniff");
@@ -168,7 +168,7 @@ testSystem({
       expect(document).toContain(`<link rel="modulepreload" href="${entry}">`);
       const script = `<script type="module" async src="${entry}">`;
       expect(document).toContain(script);
-      expect(document.indexOf("<style data-poggers-ssr>")).toBeLessThan(document.indexOf(script));
+      expect(document.indexOf("<style data-kit-ssr>")).toBeLessThan(document.indexOf(script));
     }
     const asset = await checkedFetch(new URL(entry!, location), {
       signal: AbortSignal.timeout(10_000),
@@ -232,8 +232,8 @@ testSystem({
       entities: [],
     });
     const commandHeaders = {
-      "x-poggers-command": "create-durable-task",
-      "x-poggers-entity": "durable-task",
+      "x-kit-command": "create-durable-task",
+      "x-kit-entity": "durable-task",
     };
     const created = await alice.post<Task>("/api/tasks", { title: "Durable task" }, commandHeaders);
     expect(await alice.post<Task>("/api/tasks", { title: "Durable task" }, commandHeaders)).toEqual(

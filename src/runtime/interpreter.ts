@@ -290,7 +290,7 @@ function canonicalPortableValue(value: unknown): unknown {
   return value;
 }
 
-const portableCalls = Symbol("poggers.portable.calls");
+const portableCalls = Symbol("kit.portable.calls");
 
 class FixtureDependencyError extends Error {
   readonly data: unknown;

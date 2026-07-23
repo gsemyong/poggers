@@ -1,4 +1,4 @@
-import { createSystem } from "@poggers/kit";
+import { createSystem } from "@duction/kit";
 
 import { customer } from "./apps/customer/app";
 import { operations } from "./apps/operations/app";

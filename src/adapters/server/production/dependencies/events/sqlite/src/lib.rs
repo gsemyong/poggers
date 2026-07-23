@@ -5,7 +5,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use poggers_server_runtime::{
+use kit_server_runtime::{
     Dependency, DependencyContext, Engine, NativeError, NativeFuture, NativeResult, Value,
 };
 use rusqlite::{Connection, params};
@@ -35,7 +35,7 @@ pub async fn create(context: DependencyContext) -> NativeResult<Events> {
         .execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
-             CREATE TABLE IF NOT EXISTS poggers_events (
+             CREATE TABLE IF NOT EXISTS kit_events (
                stream TEXT NOT NULL,
                revision INTEGER NOT NULL,
                event TEXT NOT NULL,
@@ -91,7 +91,7 @@ fn append(state: &State, input: &JsonValue) -> NativeResult<Option<Vec<JsonValue
         .map_err(|error| NativeError::new("EventStoreFailure", error.to_string()))?;
     let current: i64 = transaction
         .query_row(
-            "SELECT COALESCE(MAX(revision), 0) FROM poggers_events WHERE stream = ?1",
+            "SELECT COALESCE(MAX(revision), 0) FROM kit_events WHERE stream = ?1",
             params![stream],
             |row| row.get(0),
         )
@@ -104,7 +104,7 @@ fn append(state: &State, input: &JsonValue) -> NativeResult<Option<Vec<JsonValue
         let revision = expected + index as i64 + 1;
         transaction
             .execute(
-                "INSERT INTO poggers_events (stream, revision, event) VALUES (?1, ?2, ?3)",
+                "INSERT INTO kit_events (stream, revision, event) VALUES (?1, ?2, ?3)",
                 params![stream, revision, event.to_string()],
             )
             .map_err(|error| NativeError::new("EventStoreFailure", error.to_string()))?;
@@ -158,7 +158,7 @@ fn read_events(state: &State, stream: &str, after: i64) -> NativeResult<Vec<Json
     let database = lock(&state.database);
     let mut statement = database
         .prepare(
-            "SELECT revision, event FROM poggers_events
+            "SELECT revision, event FROM kit_events
              WHERE stream = ?1 AND revision > ?2 ORDER BY revision",
         )
         .map_err(|error| NativeError::new("EventStoreFailure", error.to_string()))?;
@@ -317,7 +317,7 @@ mod tests {
     #[tokio::test]
     async fn persists_events_across_adapter_restarts() {
         let path = std::env::temp_dir().join(format!(
-            "poggers-events-{}-{}.sqlite",
+            "kit-events-{}-{}.sqlite",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)

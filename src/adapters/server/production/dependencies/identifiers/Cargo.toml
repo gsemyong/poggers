@@ -1,10 +1,10 @@
 [package]
-name = "poggers-server-identifiers"
+name = "kit-server-identifiers"
 version = "0.0.0"
 edition = "2024"
 
 [dependencies]
-poggers-server-runtime = { path = "../../runtime" }
+kit-server-runtime = { path = "../../runtime" }
 uuid = { version = "1.18.1", features = ["v4"] }
 
 [dev-dependencies]

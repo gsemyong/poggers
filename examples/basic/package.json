@@ -3,17 +3,17 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "poggers dev",
-    "build": "poggers build --outdir dist",
-    "typecheck": "poggers typecheck",
-    "test": "poggers test",
+    "dev": "kit dev",
+    "build": "kit build --outdir dist",
+    "typecheck": "kit typecheck",
+    "test": "kit test",
     "lint": "oxlint src",
     "fmt": "oxfmt",
     "fmt:check": "oxfmt --check",
-    "check": "poggers check"
+    "check": "kit check"
   },
   "dependencies": {
-    "@poggers/kit": "file:../.."
+    "@duction/kit": "file:../.."
   },
   "devDependencies": {
     "@types/node": "^26.1.1",

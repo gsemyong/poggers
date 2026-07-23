@@ -109,12 +109,12 @@ class RustProgramGenerator {
     })
 }`);
     }
-    return `// Generated from canonical Poggers Program IR. Do not edit.
+    return `// Generated from canonical Kit Program IR. Do not edit.
 #![allow(clippy::collapsible_if, clippy::needless_return)]
 
 use std::{collections::BTreeMap, sync::{Arc, Mutex}};
 
-use poggers_server_runtime::{${runtimeImports.sort().join(", ")}};
+use kit_server_runtime::{${runtimeImports.sort().join(", ")}};
 
 type Cell = Arc<Mutex<Value>>;
 

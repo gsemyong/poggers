@@ -27,7 +27,7 @@ afterEach(async () => {
 
 describe("project template", () => {
   test("creates the complete minimal System convention", { timeout: 30_000 }, async () => {
-    const parent = await mkdtemp(resolve(tmpdir(), "poggers-create-"));
+    const parent = await mkdtemp(resolve(tmpdir(), "kit-create-"));
     directories.push(parent);
     const target = resolve(parent, "example");
     await createProject([target, "--no-install"]);
@@ -81,7 +81,7 @@ describe("project template", () => {
       "fmt:check",
       "check",
     ]);
-    expect(packageJson.dependencies).toEqual({ "@poggers/kit": "latest" });
+    expect(packageJson.dependencies).toEqual({ "@duction/kit": "latest" });
     expect(packageJson.devDependencies["@types/node"]).toBe("^26.1.1");
     expect(packageJson.engines.node).toBe(">=26.0.0");
     expect(packageJson.packageManager).toBe("nub@0.4.13");
@@ -100,8 +100,8 @@ describe("project template", () => {
     ).toBe(0);
 
     const modules = resolve(target, "node_modules");
-    await mkdir(resolve(modules, "@poggers"), { recursive: true });
-    await symlink(resolve(import.meta.dirname, ".."), resolve(modules, "@poggers/kit"), "dir");
+    await mkdir(resolve(modules, "@duction"), { recursive: true });
+    await symlink(resolve(import.meta.dirname, ".."), resolve(modules, "@duction/kit"), "dir");
     await mkdir(resolve(modules, "@types"), { recursive: true });
     await symlink(
       resolve(import.meta.dirname, "../node_modules/@types/node"),
@@ -126,7 +126,7 @@ describe("project template", () => {
     ).toBe(0);
 
     await runCli(["build", "--dir", target, "--outdir", "dist"]);
-    await expect(access(resolve(target, ".poggers"))).rejects.toHaveProperty("code", "ENOENT");
+    await expect(access(resolve(target, ".kit"))).rejects.toHaveProperty("code", "ENOENT");
     await expect(access(resolve(target, "dist/system.ir.json"))).rejects.toHaveProperty(
       "code",
       "ENOENT",
@@ -147,7 +147,7 @@ describe("project template", () => {
     });
     const webOutput = resolve(target, "dist/interfaces/main.web");
     const html = await readFile(resolve(webOutput, "index.html"), "utf8");
-    expect(html).toContain("@layer poggers.reset{");
+    expect(html).toContain("@layer kit.reset{");
     expect(html).toContain(":where(dialog)::backdrop{background:transparent}");
     expect(html).not.toContain("stylex");
     expect(html).not.toContain('href="/styles.css"');
@@ -155,7 +155,7 @@ describe("project template", () => {
     expect(entry).toMatch(/^\/assets\/app-[A-Za-z0-9_-]+\.js$/);
     await expect(access(resolve(webOutput, entry!.slice(1)))).resolves.toBeUndefined();
     expect(html).toContain(`<link rel="modulepreload" href="${entry}">`);
-    expect(html.indexOf("@layer poggers.reset{")).toBeLessThan(html.indexOf(`src="${entry}"`));
+    expect(html.indexOf("@layer kit.reset{")).toBeLessThan(html.indexOf(`src="${entry}"`));
 
     expect(() =>
       validateUIProgramRoot({ features: { shell: { programs: { browser: {} } } } }, "browser"),
@@ -163,7 +163,7 @@ describe("project template", () => {
   });
 
   test("force replaces the target instead of preserving residue", async () => {
-    const parent = await mkdtemp(resolve(tmpdir(), "poggers-create-force-"));
+    const parent = await mkdtemp(resolve(tmpdir(), "kit-create-force-"));
     directories.push(parent);
     const target = resolve(parent, "example");
     await mkdir(target);
@@ -173,6 +173,24 @@ describe("project template", () => {
 
     await expect(access(resolve(target, "residue.txt"))).rejects.toThrow();
     await expect(access(resolve(target, "src/system.ts"))).resolves.toBeUndefined();
+  });
+
+  test("accepts a private package location without changing source identity", async () => {
+    const parent = await mkdtemp(resolve(tmpdir(), "kit-create-package-"));
+    directories.push(parent);
+    const target = resolve(parent, "example");
+
+    await createProject([target, "--no-install", "--package", "git+ssh://example.test/kit.git"]);
+
+    const manifest = JSON.parse(await readFile(resolve(target, "package.json"), "utf8")) as {
+      dependencies: Record<string, string>;
+    };
+    expect(manifest.dependencies).toEqual({
+      "@duction/kit": "git+ssh://example.test/kit.git",
+    });
+    expect(await readFile(resolve(target, "src/system.ts"), "utf8")).toContain(
+      'from "@duction/kit"',
+    );
   });
 
   test("keeps every executable System on the canonical source convention", async () => {
@@ -185,7 +203,7 @@ describe("project template", () => {
   }, 30_000);
 
   test("realizes a custom process-only Platform through an injected adapter", async () => {
-    const directory = await mkdtemp(resolve(tmpdir(), "poggers-custom-platform-"));
+    const directory = await mkdtemp(resolve(tmpdir(), "kit-custom-platform-"));
     directories.push(directory);
     const source = resolve(directory, "src");
     const system = resolve(source, "system.ts");
@@ -225,49 +243,53 @@ describe("project template", () => {
     );
   });
 
-  test("builds one focused App with its shared Program and isolated interface", async () => {
-    const output = await mkdtemp(resolve(tmpdir(), "poggers-focused-cli-"));
-    directories.push(output);
-    const observed = new Map<string, readonly string[]>();
-    const adapter = (name: string) => ({
-      name,
-      async develop() {
-        throw new Error("The focused build fixture must not start development.");
-      },
-      async build(input: {
-        output: string;
-        programs: readonly Readonly<{ id: string }>[];
-        interfaces: readonly Readonly<{ id: string }>[];
-      }) {
-        observed.set(name, [
-          ...input.programs.map(({ id }) => id),
-          ...input.interfaces.map(({ id }) => id),
-        ]);
-        return { directory: input.output, entries: [] };
-      },
-    });
+  test(
+    "builds one focused App with its shared Program and isolated interface",
+    { timeout: 30_000 },
+    async () => {
+      const output = await mkdtemp(resolve(tmpdir(), "kit-focused-cli-"));
+      directories.push(output);
+      const observed = new Map<string, readonly string[]>();
+      const adapter = (name: string) => ({
+        name,
+        async develop() {
+          throw new Error("The focused build fixture must not start development.");
+        },
+        async build(input: {
+          output: string;
+          programs: readonly Readonly<{ id: string }>[];
+          interfaces: readonly Readonly<{ id: string }>[];
+        }) {
+          observed.set(name, [
+            ...input.programs.map(({ id }) => id),
+            ...input.interfaces.map(({ id }) => id),
+          ]);
+          return { directory: input.output, entries: [] };
+        },
+      });
 
-    await runCli(
-      [
-        "build",
-        "operations",
-        "--dir",
-        resolve(import.meta.dirname, "../examples/authenticated-crud"),
-        "--outdir",
-        output,
-      ],
-      { server: adapter("server"), web: adapter("web") },
-    );
+      await runCli(
+        [
+          "build",
+          "operations",
+          "--dir",
+          resolve(import.meta.dirname, "../examples/authenticated-crud"),
+          "--outdir",
+          output,
+        ],
+        { server: adapter("server"), web: adapter("web") },
+      );
 
-    expect(observed.get("server")).toEqual(["program/api"]);
-    expect(observed.get("web")).toEqual([
-      "program/operations.web.browser",
-      "interface/operations.web",
-    ]);
-  });
+      expect(observed.get("server")).toEqual(["program/api"]);
+      expect(observed.get("web")).toEqual([
+        "program/operations.web.browser",
+        "interface/operations.web",
+      ]);
+    },
+  );
 
   test("builds a portable server Program through the normal production path", async () => {
-    const directory = await mkdtemp(resolve(tmpdir(), "poggers-production-cli-"));
+    const directory = await mkdtemp(resolve(tmpdir(), "kit-production-cli-"));
     directories.push(directory);
     await mkdir(resolve(directory, "src"), { recursive: true });
     await writeFile(resolve(directory, "src/system.ts"), portableServerSystem());
@@ -322,7 +344,7 @@ async function expectCanonicalSourceRoot(source: string): Promise<void> {
     if (file.endsWith(".spec.ts") && file !== "system.spec.ts") continue;
     const contents = await readFile(resolve(source, file), "utf8");
     expect(contents, `${file} imports private framework realization code`).not.toMatch(
-      /from\s+["'](?:@\/(?:adapters|contracts|core)\/|@poggers\/kit\/adapters\/)/,
+      /from\s+["'](?:@\/(?:adapters|contracts|core)\/|@duction\/kit\/adapters\/)/,
     );
     expect(contents, `${file} names a backend implementation detail`).not.toMatch(
       /\b(?:buildServerProgram|compileSystem|createNodeHost|startServerProgram)\b/,

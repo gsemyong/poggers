@@ -7,7 +7,7 @@ import { transformPresentationSource } from "./src/compiler/presentation";
 export default defineConfig({
   plugins: [
     {
-      name: "poggers-presentation-test-transform",
+      name: "kit-presentation-test-transform",
       enforce: "pre",
       transform(source, id) {
         const file = id.split("?", 1)[0]!;
@@ -29,43 +29,47 @@ export default defineConfig({
         replacement: `${resolve(import.meta.dirname, "src")}/$1`,
       },
       {
-        find: /^@poggers\/kit\/adapter$/,
+        find: /^@duction\/kit\/adapter$/,
         replacement: resolve(import.meta.dirname, "src/contracts/platform.ts"),
       },
       {
-        find: /^@poggers\/kit\/adapters\/server$/,
+        find: /^@duction\/kit\/adapters\/server$/,
         replacement: resolve(import.meta.dirname, "src/adapters/server/adapter.ts"),
       },
       {
-        find: /^@poggers\/kit\/adapters\/web$/,
+        find: /^@duction\/kit\/adapters\/web$/,
         replacement: resolve(import.meta.dirname, "src/adapters/web/adapter.ts"),
       },
       {
-        find: /^@poggers\/kit\/server$/,
+        find: /^@duction\/kit\/server$/,
         replacement: resolve(import.meta.dirname, "src/platforms/server/platform.ts"),
       },
       {
-        find: /^@poggers\/kit\/testing$/,
+        find: /^@duction\/kit\/testing$/,
         replacement: resolve(import.meta.dirname, "src/testing.ts"),
       },
       {
-        find: /^@poggers\/kit\/web$/,
+        find: /^@duction\/kit\/web$/,
         replacement: resolve(import.meta.dirname, "src/platforms/web/platform.ts"),
       },
       {
-        find: /^@poggers\/kit\/jsx-dev-runtime$/,
+        find: /^@duction\/kit\/ui$/,
+        replacement: resolve(import.meta.dirname, "src/ui.ts"),
+      },
+      {
+        find: /^@duction\/kit\/jsx-dev-runtime$/,
         replacement: resolve(import.meta.dirname, "src/jsx/development.ts"),
       },
       {
-        find: /^@poggers\/kit\/jsx-runtime$/,
+        find: /^@duction\/kit\/jsx-runtime$/,
         replacement: resolve(import.meta.dirname, "src/jsx/runtime.ts"),
       },
       {
-        find: /^@poggers\/kit$/,
+        find: /^@duction\/kit$/,
         replacement: resolve(import.meta.dirname, "src/index.ts"),
       },
     ],
-    conditions: ["poggers-source"],
+    conditions: ["source"],
   },
   test: {
     clearMocks: true,

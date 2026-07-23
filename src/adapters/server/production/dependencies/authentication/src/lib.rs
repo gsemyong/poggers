@@ -8,7 +8,7 @@ use argon2::{
     Argon2,
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
 };
-use poggers_server_runtime::{
+use kit_server_runtime::{
     Dependency, DependencyContext, Engine, NativeError, NativeFuture, NativeResult, Value,
 };
 use rusqlite::{Connection, OptionalExtension, params};
@@ -32,15 +32,15 @@ pub async fn create(context: DependencyContext) -> NativeResult<Authentication> 
         .execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
-             CREATE TABLE IF NOT EXISTS poggers_users (
+             CREATE TABLE IF NOT EXISTS kit_users (
                id TEXT PRIMARY KEY,
                name TEXT NOT NULL,
                email TEXT NOT NULL UNIQUE,
                password_hash TEXT NOT NULL
              ) STRICT;
-             CREATE TABLE IF NOT EXISTS poggers_sessions (
+             CREATE TABLE IF NOT EXISTS kit_sessions (
                token TEXT PRIMARY KEY,
-               user_id TEXT NOT NULL REFERENCES poggers_users(id) ON DELETE CASCADE
+               user_id TEXT NOT NULL REFERENCES kit_users(id) ON DELETE CASCADE
              ) STRICT;",
         )
         .map_err(|error| failure("AuthenticationFailure", error))?;
@@ -78,8 +78,8 @@ fn authenticate(
     lock(database)
         .query_row(
             "SELECT users.id, users.name, users.email
-             FROM poggers_sessions sessions
-             JOIN poggers_users users ON users.id = sessions.user_id
+             FROM kit_sessions sessions
+             JOIN kit_users users ON users.id = sessions.user_id
              WHERE sessions.token = ?1",
             params![token],
             |row| {
@@ -129,7 +129,7 @@ fn sign_up(database: &Mutex<Connection>, input: JsonValue) -> NativeResult<Value
     let database = lock(database);
     if database
         .query_row(
-            "SELECT 1 FROM poggers_users WHERE email = ?1",
+            "SELECT 1 FROM kit_users WHERE email = ?1",
             params![email],
             |_| Ok(()),
         )
@@ -152,7 +152,7 @@ fn sign_up(database: &Mutex<Connection>, input: JsonValue) -> NativeResult<Value
         .to_string();
     database
         .execute(
-            "INSERT INTO poggers_users (id, name, email, password_hash) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO kit_users (id, name, email, password_hash) VALUES (?1, ?2, ?3, ?4)",
             params![id, name, email, password_hash],
         )
         .map_err(|error| failure("AuthenticationFailure", error))?;
@@ -165,7 +165,7 @@ fn sign_in(database: &Mutex<Connection>, input: JsonValue) -> NativeResult<Value
     let database = lock(database);
     let account = database
         .query_row(
-            "SELECT id, name, email, password_hash FROM poggers_users WHERE email = ?1",
+            "SELECT id, name, email, password_hash FROM kit_users WHERE email = ?1",
             params![email],
             |row| {
                 Ok((
@@ -206,16 +206,13 @@ fn sign_in(database: &Mutex<Connection>, input: JsonValue) -> NativeResult<Value
 fn sign_out(database: &Mutex<Connection>, cookie: Option<&str>) -> NativeResult<Value> {
     if let Some(token) = cookie.and_then(session_token) {
         lock(database)
-            .execute(
-                "DELETE FROM poggers_sessions WHERE token = ?1",
-                params![token],
-            )
+            .execute("DELETE FROM kit_sessions WHERE token = ?1", params![token])
             .map_err(|error| failure("AuthenticationFailure", error))?;
     }
     response(
         200,
         json!({ "success": true }),
-        Some("poggers_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"),
+        Some("kit_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"),
     )
 }
 
@@ -223,7 +220,7 @@ fn session(database: &Connection, user: JsonValue) -> NativeResult<Value> {
     let token = Uuid::new_v4().to_string();
     database
         .execute(
-            "INSERT INTO poggers_sessions (token, user_id) VALUES (?1, ?2)",
+            "INSERT INTO kit_sessions (token, user_id) VALUES (?1, ?2)",
             params![token, string(&user, "id")?],
         )
         .map_err(|error| failure("AuthenticationFailure", error))?;
@@ -231,7 +228,7 @@ fn session(database: &Connection, user: JsonValue) -> NativeResult<Value> {
         200,
         json!({ "user": user }),
         Some(&format!(
-            "poggers_session={token}; Path=/; HttpOnly; SameSite=Lax"
+            "kit_session={token}; Path=/; HttpOnly; SameSite=Lax"
         )),
     )
 }
@@ -275,7 +272,7 @@ fn header<'a>(request: &'a JsonValue, name: &str) -> Option<&'a str> {
 fn session_token(cookie: &str) -> Option<&str> {
     cookie.split(';').find_map(|value| {
         let (name, value) = value.trim().split_once('=')?;
-        (name == "poggers_session" && !value.is_empty()).then_some(value)
+        (name == "kit_session" && !value.is_empty()).then_some(value)
     })
 }
 

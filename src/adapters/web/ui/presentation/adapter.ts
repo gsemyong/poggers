@@ -1278,8 +1278,8 @@ class WebStyleRegistry {
       .map(([, entry]) => entry.css)
       .join("");
     const emitted =
-      `@layer poggers.reset,poggers.presentation;@layer poggers.reset{${webResetCss}}` +
-      `@layer poggers.presentation{${css}}`;
+      `@layer kit.reset,kit.presentation;@layer kit.reset{${webResetCss}}` +
+      `@layer kit.presentation{${css}}`;
     if (emitted === this.#emitted) return;
     this.#emitted = emitted;
     this.#host.replace(emitted);
@@ -1399,12 +1399,12 @@ function createNativeStyleHost(boundary: Element): WebStyleHost {
     throw new Error("A web Presentation boundary must belong to a Document.");
   }
   const element = ownerDocument.createElement("style");
-  element.setAttribute("data-poggers-presentation", "");
+  element.setAttribute("data-kit-presentation", "");
   (ownerDocument.head ?? ownerDocument.documentElement).append(element);
   return {
     replace(css) {
       element.textContent = css;
-      for (const server of ownerDocument.querySelectorAll("style[data-poggers-ssr]")) {
+      for (const server of ownerDocument.querySelectorAll("style[data-kit-ssr]")) {
         server.remove();
       }
     },

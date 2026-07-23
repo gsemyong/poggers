@@ -198,7 +198,7 @@ describe("Program UI composition", () => {
       head: { querySelectorAll: () => [], append() {} },
       createElement: () => ({ setAttribute() {}, textContent: "" }),
       getElementById: (id: string) =>
-        id === "poggers-hydration" && hydrationAvailable
+        id === "kit-hydration" && hydrationAvailable
           ? {
               textContent: JSON.stringify({
                 version: 1,
@@ -218,10 +218,10 @@ describe("Program UI composition", () => {
     let rendering = "hydrate";
     const routeBoundary = {
       getAttribute(name: string) {
-        return name === "data-poggers-rendering" ? rendering : null;
+        return name === "data-kit-rendering" ? rendering : null;
       },
       setAttribute(name: string, value: string) {
-        if (name === "data-poggers-rendering") rendering = value;
+        if (name === "data-kit-rendering") rendering = value;
       },
     } as unknown as Element;
     const subscribers = new Set<(location: URL) => void>();

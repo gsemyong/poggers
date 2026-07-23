@@ -84,7 +84,7 @@ export type NodeHost<Event> = Readonly<{
 }>;
 export type NodeHostDependency = keyof NodeHost<unknown>;
 
-const beginRouteReplacement = Symbol("poggers.server.begin-route-replacement");
+const beginRouteReplacement = Symbol("kit.server.begin-route-replacement");
 
 /** Opens the adapter-owned overlap window used by transactional development replacement. */
 export function beginNodeHostReplacement(
@@ -141,7 +141,7 @@ export async function createNodeHost<Event = unknown>(
   ) {
     const path =
       input.database ??
-      process.env.POGGERS_DATABASE ??
+      process.env.KIT_DATABASE ??
       resolve(input.directory ?? process.cwd(), ".data/system.sqlite");
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
     database = new DatabaseSync(path);
@@ -156,14 +156,12 @@ export async function createNodeHost<Event = unknown>(
   try {
     if (requested.has("authentication")) {
       const auth = betterAuth({
-        appName: input.appName ?? "Poggers",
+        appName: input.appName ?? "Kit",
         baseURL: origin,
         database: database!,
         emailAndPassword: { enabled: true },
         secret:
-          input.secret ??
-          process.env.BETTER_AUTH_SECRET ??
-          "poggers-development-authentication-secret",
+          input.secret ?? process.env.BETTER_AUTH_SECRET ?? "kit-development-authentication-secret",
         trustedOrigins: [input.webOrigin ?? "http://localhost:3000"],
       });
       await (await getMigrations(auth.options)).runMigrations();
@@ -210,9 +208,7 @@ export async function createNodeHost<Event = unknown>(
         port,
         origin,
         shutdownTimeout:
-          input.shutdownTimeout ??
-          durationEnvironment("POGGERS_HTTP_SHUTDOWN_TIMEOUT_MS") ??
-          10_000,
+          input.shutdownTimeout ?? durationEnvironment("KIT_HTTP_SHUTDOWN_TIMEOUT_MS") ?? 10_000,
         webOrigin: input.webOrigin ?? "http://localhost:3000",
       });
     }
@@ -248,8 +244,8 @@ function durationEnvironment(name: string): number | undefined {
 function resolveEventStore(input: NodeHostOptions): NodeEventStoreOptions {
   if (input.eventStore) return input.eventStore;
   const servers = process.env.NATS_URL;
-  return process.env.POGGERS_EVENT_STORE === "jetstream" && servers
-    ? { kind: "jetstream", servers, stream: process.env.POGGERS_EVENT_STREAM }
+  return process.env.KIT_EVENT_STORE === "jetstream" && servers
+    ? { kind: "jetstream", servers, stream: process.env.KIT_EVENT_STREAM }
     : { kind: "sqlite" };
 }
 
@@ -266,7 +262,7 @@ export function createSqliteEventStore<Event>(
   close: () => void = () => undefined,
 ): EventStore<Event> & Disposable {
   database.exec(`
-    CREATE TABLE IF NOT EXISTS poggers_events (
+    CREATE TABLE IF NOT EXISTS kit_events (
       stream TEXT NOT NULL,
       revision INTEGER NOT NULL,
       event TEXT NOT NULL,
@@ -274,13 +270,13 @@ export function createSqliteEventStore<Event>(
     ) STRICT
   `);
   const read = database.prepare(
-    "SELECT revision, event FROM poggers_events WHERE stream = ? AND revision > ? ORDER BY revision",
+    "SELECT revision, event FROM kit_events WHERE stream = ? AND revision > ? ORDER BY revision",
   );
   const revision = database.prepare(
-    "SELECT COALESCE(MAX(revision), 0) AS revision FROM poggers_events WHERE stream = ?",
+    "SELECT COALESCE(MAX(revision), 0) AS revision FROM kit_events WHERE stream = ?",
   );
   const insert = database.prepare(
-    "INSERT INTO poggers_events (stream, revision, event) VALUES (?, ?, ?)",
+    "INSERT INTO kit_events (stream, revision, event) VALUES (?, ?, ?)",
   );
   const subscribers = new Map<string, Set<(event: StoredEvent<Event>) => void>>();
   let disposed = false;
@@ -347,8 +343,8 @@ export async function createJetStreamEventStore<Event>(
   const connection = await connect({
     servers: typeof options.servers === "string" ? options.servers : [...options.servers],
   });
-  const streamName = options.stream ?? "POGGERS_EVENTS";
-  const prefix = "poggers.events";
+  const streamName = options.stream ?? "KIT_EVENTS";
+  const prefix = "kit.events";
   let manager: JetStreamManager;
   try {
     manager = await jetstreamManager(connection);
@@ -849,9 +845,6 @@ function writeCors(request: IncomingMessage, response: ServerResponse, webOrigin
     response.setHeader("vary", "origin");
   }
   response.setHeader("access-control-allow-credentials", "true");
-  response.setHeader(
-    "access-control-allow-headers",
-    "content-type, x-poggers-command, x-poggers-entity",
-  );
+  response.setHeader("access-control-allow-headers", "content-type, x-kit-command, x-kit-entity");
   response.setHeader("access-control-allow-methods", "DELETE, GET, OPTIONS, PATCH, POST");
 }

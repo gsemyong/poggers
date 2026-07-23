@@ -23,7 +23,7 @@ afterEach(async () => {
 });
 
 test("keeps canonical operators and traces equivalent across JavaScript and Rust", async () => {
-  const directory = await mkdtemp(resolve(tmpdir(), "poggers-rust-conformance-"));
+  const directory = await mkdtemp(resolve(tmpdir(), "kit-rust-conformance-"));
   temporaryDirectories.push(directory);
   const entry = resolve(directory, "system.ts");
   await writeFile(entry, conformanceSource());

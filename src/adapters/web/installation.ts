@@ -156,9 +156,9 @@ export function renderWebServiceWorker(plan: WebServiceWorkerPlan): string {
   const imports = plan.modules.map((module) => `import ${JSON.stringify(module)};`).join("\n");
   return `${imports}${imports ? "\n" : ""}const VERSION = ${JSON.stringify(plan.version)};
 const CACHE_ENABLED = ${plan.caching === "always" ? "true" : 'new URL(self.location.href).searchParams.get("pwa") === "preview"'};
-const PROGRAMS = self.__poggersServiceWorkerPrograms ?? [];
-const ASSET_CACHE = "poggers-assets-" + VERSION;
-const DOCUMENT_CACHE = "poggers-documents-" + VERSION;
+const PROGRAMS = self.__kitServiceWorkerPrograms ?? [];
+const ASSET_CACHE = "kit-assets-" + VERSION;
+const DOCUMENT_CACHE = "kit-documents-" + VERSION;
 const ASSETS = ${JSON.stringify(plan.assets)};
 const DOCUMENTS = ${JSON.stringify(plan.documents)};
 const FALLBACK = ${JSON.stringify(plan.fallback ?? null)};
@@ -177,14 +177,14 @@ self.addEventListener("activate", (event) => {
   if (!CACHE_ENABLED) return;
   event.waitUntil(Promise.all([
     caches.keys().then((names) => Promise.all(names
-      .filter((name) => name.startsWith("poggers-") && name !== ASSET_CACHE && name !== DOCUMENT_CACHE)
+      .filter((name) => name.startsWith("kit-") && name !== ASSET_CACHE && name !== DOCUMENT_CACHE)
       .map((name) => caches.delete(name)))),
     self.registration.navigationPreload?.enable(),
   ]));
 });
 
 self.addEventListener("message", (event) => {
-  if (event.data === "poggers:activate") event.waitUntil(self.skipWaiting());
+  if (event.data === "kit:activate") event.waitUntil(self.skipWaiting());
 });
 
 self.addEventListener("fetch", (event) => {

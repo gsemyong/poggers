@@ -456,8 +456,7 @@ async function createRouteRuntime(options: {
         return;
       }
       let activeLocation = location;
-      const hydrationPending =
-        options.boundary.getAttribute?.("data-poggers-rendering") === "hydrate";
+      const hydrationPending = options.boundary.getAttribute?.("data-kit-rendering") === "hydrate";
       let seeded =
         hydrationPending && hydrationMatches(hydration, match, location) ? hydration : undefined;
       if (hydrationPending && !seeded) invalidatePendingHydration(options.boundary);
@@ -691,7 +690,7 @@ async function readInitialWebRouteRecord(
         publishWebDeferredState(frame.boundary, frame.state);
       }
     } catch (error) {
-      if (!signal.aborted) console.error("[poggers] Route state stream failed", error);
+      if (!signal.aborted) console.error("[kit] Route state stream failed", error);
     }
   })();
   return hydration;
@@ -711,8 +710,8 @@ function hydrationMatches(
 }
 
 function invalidatePendingHydration(boundary: Element): void {
-  if (boundary.getAttribute?.("data-poggers-rendering") === "hydrate") {
-    boundary.setAttribute("data-poggers-rendering", "client");
+  if (boundary.getAttribute?.("data-kit-rendering") === "hydrate") {
+    boundary.setAttribute("data-kit-rendering", "client");
   }
 }
 
@@ -863,7 +862,7 @@ function mergeRouteMetadata(
 
 function applyRouteMetadata(system: RuntimeSystem, metadata: WebRouteIR["metadata"]): void {
   applyWebDocumentHead({
-    title: metadata.title ?? system.metadata?.name ?? "Poggers",
+    title: metadata.title ?? system.metadata?.name ?? "Kit",
     language: metadata.language ?? "en",
     metadata,
   });
@@ -1605,7 +1604,7 @@ function createComponentElementComponent(
   const element = ((props: Props = {}) => {
     const { ref: authorRef, ...nativeProps } = props;
     return jsx(tagName, {
-      __poggersScene: {
+      __kitScene: {
         scene: options.scene,
         owner: options.sceneOwner,
         element: name,

@@ -16,7 +16,7 @@ use axum::{
     routing::any,
 };
 use bytes::Bytes;
-use poggers_server_runtime::{
+use kit_server_runtime::{
     Dependency, DependencyContext, Engine, NativeError, NativeFunction, NativeFuture, NativeResult,
     Value,
 };
@@ -297,26 +297,22 @@ impl CachedWebOutcome {
 pub async fn create(context: DependencyContext) -> NativeResult<Http> {
     let host = context.configuration("host")?;
     let port = configuration_number::<u16>(&context, "port", "PORT")?;
-    let body_limit =
-        configuration_number::<usize>(&context, "bodyLimit", "POGGERS_HTTP_BODY_LIMIT")?;
+    let body_limit = configuration_number::<usize>(&context, "bodyLimit", "KIT_HTTP_BODY_LIMIT")?;
     let web_cache_capacity =
-        configuration_number::<usize>(&context, "webCacheCapacity", "POGGERS_WEB_CACHE_CAPACITY")?;
+        configuration_number::<usize>(&context, "webCacheCapacity", "KIT_WEB_CACHE_CAPACITY")?;
     let web_cache_bytes =
-        configuration_number::<usize>(&context, "webCacheBytes", "POGGERS_WEB_CACHE_BYTES")?;
-    let web_cache_refreshes = configuration_number::<usize>(
-        &context,
-        "webCacheRefreshes",
-        "POGGERS_WEB_CACHE_REFRESHES",
-    )?;
+        configuration_number::<usize>(&context, "webCacheBytes", "KIT_WEB_CACHE_BYTES")?;
+    let web_cache_refreshes =
+        configuration_number::<usize>(&context, "webCacheRefreshes", "KIT_WEB_CACHE_REFRESHES")?;
     let request_timeout = Duration::from_millis(configuration_number::<u64>(
         &context,
         "requestTimeout",
-        "POGGERS_HTTP_TIMEOUT_MS",
+        "KIT_HTTP_TIMEOUT_MS",
     )?);
     let shutdown_timeout = Duration::from_millis(configuration_number::<u64>(
         &context,
         "shutdownTimeout",
-        "POGGERS_HTTP_SHUTDOWN_TIMEOUT_MS",
+        "KIT_HTTP_SHUTDOWN_TIMEOUT_MS",
     )?);
     if body_limit == 0
         || web_cache_capacity == 0
@@ -353,7 +349,7 @@ pub async fn create(context: DependencyContext) -> NativeResult<Http> {
             .map_err(|error| {
                 NativeError::new(
                     "InvalidConfiguration",
-                    format!("POGGERS_WEB_INTERFACES: {error}"),
+                    format!("KIT_WEB_INTERFACES: {error}"),
                 )
             })?;
         for interface in interfaces {
@@ -614,7 +610,7 @@ async fn dispatch(State(state): State<Arc<HttpState>>, request: Request<Body>) -
     let rendered = match result {
         Ok(value) => response_value(route.engine, value, state.stream_shutdown.subscribe()),
         Err(error) => {
-            eprintln!("[poggers] HTTP route failed: {error}");
+            eprintln!("[kit] HTTP route failed: {error}");
             Ok(response(500, "Internal server error."))
         }
     };
@@ -622,7 +618,7 @@ async fn dispatch(State(state): State<Arc<HttpState>>, request: Request<Body>) -
         &state,
         origin.as_ref(),
         rendered.unwrap_or_else(|error| {
-            eprintln!("[poggers] HTTP response failed: {error}");
+            eprintln!("[kit] HTTP response failed: {error}");
             response(500, "Internal server error.")
         }),
     )
@@ -666,10 +662,7 @@ async fn web_response(state: Arc<HttpState>, request: Request<Body>) -> Response
                 response(404, "Not found.")
             }
             Err(error) => {
-                eprintln!(
-                    "[poggers] cannot read web asset {}: {error}",
-                    source.display()
-                );
+                eprintln!("[kit] cannot read web asset {}: {error}", source.display());
                 response(500, "Internal server error.")
             }
         };
@@ -705,13 +698,13 @@ async fn web_response(state: Arc<HttpState>, request: Request<Body>) -> Response
                     );
                 }
                 Err(error) => {
-                    eprintln!("[poggers] dynamic web Route failed: {error}");
+                    eprintln!("[kit] dynamic web Route failed: {error}");
                     return response(500, "Internal server error.");
                 }
             }
         }
         RouteLookup::Invalid(message) => {
-            eprintln!("[poggers] invalid web request: {message}");
+            eprintln!("[kit] invalid web request: {message}");
             return response(400, "Invalid request.");
         }
         RouteLookup::NotFound => return response(404, "Not found."),
@@ -909,7 +902,7 @@ async fn resolve_dynamic_web(
                                     Ok(rendered) => cacheable_web_outcome(&rendered),
                                     Err(error) => {
                                         eprintln!(
-                                            "[poggers] background web cache refresh failed: {error}"
+                                            "[kit] background web cache refresh failed: {error}"
                                         );
                                         None
                                     }
@@ -980,7 +973,7 @@ fn dynamic_web_response(
                     return not_acceptable();
                 }
                 let Some(deferred) = deferred else {
-                    eprintln!("[poggers] deferred web Route has no reachable Await boundary");
+                    eprintln!("[kit] deferred web Route has no reachable Await boundary");
                     return response(500, "Internal server error.");
                 };
                 let Some(engine) = rendered.deferred_engine else {
@@ -1000,7 +993,7 @@ fn dynamic_web_response(
                 );
             }
             let (body, etag, content_type) = if route_data {
-                (route_body, route_etag, "application/vnd.poggers.route+json")
+                (route_body, route_etag, "application/vnd.kit.route+json")
             } else if markdown_requested {
                 let (Some(body), Some(etag)) = (markdown, markdown_etag) else {
                     return not_acceptable();
@@ -1013,7 +1006,7 @@ fn dynamic_web_response(
                 let mut response = not_modified(&etag, &cache_control);
                 response
                     .headers_mut()
-                    .insert("x-poggers-cache", HeaderValue::from_static(cache_status));
+                    .insert("x-kit-cache", HeaderValue::from_static(cache_status));
                 return response;
             }
             Response::builder()
@@ -1023,7 +1016,7 @@ fn dynamic_web_response(
                 .header(header::CACHE_CONTROL, cache_control)
                 .header(header::ETAG, etag)
                 .header(header::VARY, "Accept")
-                .header("x-poggers-cache", cache_status)
+                .header("x-kit-cache", cache_status)
                 .body(if head {
                     Body::empty()
                 } else {
@@ -1041,12 +1034,12 @@ fn dynamic_web_response(
                 let etag = strong_etag(body.as_bytes());
                 return Response::builder()
                     .status(StatusCode::OK)
-                    .header(header::CONTENT_TYPE, "application/vnd.poggers.route+json")
+                    .header(header::CONTENT_TYPE, "application/vnd.kit.route+json")
                     .header(header::CONTENT_LENGTH, body.len().to_string())
                     .header(header::CACHE_CONTROL, "no-store")
                     .header(header::ETAG, etag)
                     .header(header::VARY, "Accept")
-                    .header("x-poggers-cache", cache_status)
+                    .header("x-kit-cache", cache_status)
                     .body(if head {
                         Body::empty()
                     } else {
@@ -1058,7 +1051,7 @@ fn dynamic_web_response(
                 .status(StatusCode::FOUND)
                 .header(header::LOCATION, location)
                 .header(header::CACHE_CONTROL, "no-store")
-                .header("x-poggers-cache", cache_status)
+                .header("x-kit-cache", cache_status)
                 .body(Body::empty())
                 .expect("web Route redirect")
         }
@@ -1163,18 +1156,18 @@ fn deferred_web_response(
     deadline: Instant,
 ) -> Response<Body> {
     if deferred.boundaries().is_empty() {
-        eprintln!("[poggers] deferred web Route data has no reachable Await boundary");
+        eprintln!("[kit] deferred web Route data has no reachable Await boundary");
         return response(500, "Internal server error.");
     }
     let (prefix, tail, content_type) = if route_data {
         (
             format!("{route_body}\n"),
             String::new(),
-            "application/vnd.poggers.route+json; framing=ndjson",
+            "application/vnd.kit.route+json; framing=ndjson",
         )
     } else {
         let Some(boundary) = html.rfind("</body>") else {
-            eprintln!("[poggers] streamed web document has no body terminator");
+            eprintln!("[kit] streamed web document has no body terminator");
             return response(500, "Internal server error.");
         };
         (
@@ -1189,7 +1182,7 @@ fn deferred_web_response(
             .header(header::CONTENT_TYPE, content_type)
             .header(header::CACHE_CONTROL, cache_control)
             .header(header::VARY, "Accept")
-            .header("x-poggers-cache", cache_status)
+            .header("x-kit-cache", cache_status)
             .body(Body::empty())
             .expect("deferred web HEAD response");
     }
@@ -1291,7 +1284,7 @@ fn deferred_web_response(
         .header(header::CONTENT_TYPE, content_type)
         .header(header::CACHE_CONTROL, cache_control)
         .header(header::VARY, "Accept")
-        .header("x-poggers-cache", cache_status)
+        .header("x-kit-cache", cache_status)
         .body(body)
         .expect("deferred web response")
 }
@@ -1385,7 +1378,7 @@ fn web_representation(headers: &HeaderMap) -> WebRepresentation {
         if quality <= 0.0 {
             continue;
         }
-        route_data |= media == "application/vnd.poggers.route+json";
+        route_data |= media == "application/vnd.kit.route+json";
         markdown |= media == "text/markdown";
     }
     if route_data {
@@ -1530,12 +1523,12 @@ fn response_value(
                 match next {
                     Ok(Some(Value::String(value))) => yield Ok::<Bytes, std::io::Error>(Bytes::from(value)),
                     Ok(Some(value)) => {
-                        eprintln!("[poggers] HTTP response stream emitted {value:?} instead of a string.");
+                        eprintln!("[kit] HTTP response stream emitted {value:?} instead of a string.");
                         yield Err(std::io::Error::other(format!("HTTP stream emitted {value:?}.")));
                     }
                     Ok(None) => break,
                     Err(error) => {
-                        eprintln!("[poggers] HTTP response stream failed: {error}");
+                        eprintln!("[kit] HTTP response stream failed: {error}");
                         yield Err(std::io::Error::other(error.to_string()));
                         break;
                     }
@@ -1581,7 +1574,7 @@ fn cors(
     );
     headers.insert(
         header::ACCESS_CONTROL_ALLOW_HEADERS,
-        HeaderValue::from_static("content-type, x-poggers-command, x-poggers-entity"),
+        HeaderValue::from_static("content-type, x-kit-command, x-kit-entity"),
     );
     headers.insert(
         header::ACCESS_CONTROL_ALLOW_METHODS,

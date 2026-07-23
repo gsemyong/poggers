@@ -38,8 +38,8 @@ export const clockDependency = defineServerProductionDependency({
   name: "clock",
   dependency: "clock",
   configuration: [],
-  crate: { package: "poggers-server-clock", directory: dependencyDirectory("clock") },
-  rust: { type: "poggers_server_clock::Clock", constructor: "poggers_server_clock::create" },
+  crate: { package: "kit-server-clock", directory: dependencyDirectory("clock") },
+  rust: { type: "kit_server_clock::Clock", constructor: "kit_server_clock::create" },
 });
 
 export const identifiersDependency = defineServerProductionDependency({
@@ -47,12 +47,12 @@ export const identifiersDependency = defineServerProductionDependency({
   dependency: "identifiers",
   configuration: [],
   crate: {
-    package: "poggers-server-identifiers",
+    package: "kit-server-identifiers",
     directory: dependencyDirectory("identifiers"),
   },
   rust: {
-    type: "poggers_server_identifiers::Identifiers",
-    constructor: "poggers_server_identifiers::create",
+    type: "kit_server_identifiers::Identifiers",
+    constructor: "kit_server_identifiers::create",
   },
 });
 
@@ -62,15 +62,15 @@ export const eventsDependency = defineServerProductionDependency({
   configuration: [
     {
       name: "database",
-      environment: "POGGERS_DATABASE",
+      environment: "KIT_DATABASE",
       default: ".data/system.sqlite",
     },
   ],
   crate: {
-    package: "poggers-server-events",
+    package: "kit-server-events",
     directory: dependencyDirectory("events/sqlite"),
   },
-  rust: { type: "poggers_server_events::Events", constructor: "poggers_server_events::create" },
+  rust: { type: "kit_server_events::Events", constructor: "kit_server_events::create" },
 });
 
 export const jetStreamEventsDependency = defineServerProductionDependency({
@@ -78,15 +78,15 @@ export const jetStreamEventsDependency = defineServerProductionDependency({
   name: "events-jetstream",
   configuration: [
     { name: "servers", environment: "NATS_URL", default: "nats://127.0.0.1:4222" },
-    { name: "stream", environment: "POGGERS_EVENT_STREAM", default: "POGGERS_EVENTS" },
+    { name: "stream", environment: "KIT_EVENT_STREAM", default: "KIT_EVENTS" },
   ],
   crate: {
-    package: "poggers-server-events-jetstream",
+    package: "kit-server-events-jetstream",
     directory: dependencyDirectory("events/jetstream"),
   },
   rust: {
-    type: "poggers_server_events_jetstream::Events",
-    constructor: "poggers_server_events_jetstream::create",
+    type: "kit_server_events_jetstream::Events",
+    constructor: "kit_server_events_jetstream::create",
   },
 });
 
@@ -96,17 +96,17 @@ export const authenticationDependency = defineServerProductionDependency({
   configuration: [
     {
       name: "database",
-      environment: "POGGERS_DATABASE",
+      environment: "KIT_DATABASE",
       default: ".data/system.sqlite",
     },
   ],
   crate: {
-    package: "poggers-server-authentication",
+    package: "kit-server-authentication",
     directory: dependencyDirectory("authentication"),
   },
   rust: {
-    type: "poggers_server_authentication::Authentication",
-    constructor: "poggers_server_authentication::create",
+    type: "kit_server_authentication::Authentication",
+    constructor: "kit_server_authentication::create",
   },
 });
 
@@ -118,44 +118,44 @@ export const httpDependency = defineServerProductionDependency({
     { name: "port", environment: "PORT", default: "3010" },
     {
       name: "bodyLimit",
-      environment: "POGGERS_HTTP_BODY_LIMIT",
+      environment: "KIT_HTTP_BODY_LIMIT",
       default: "1048576",
     },
     {
       name: "requestTimeout",
-      environment: "POGGERS_HTTP_TIMEOUT_MS",
+      environment: "KIT_HTTP_TIMEOUT_MS",
       default: "30000",
     },
     {
       name: "shutdownTimeout",
-      environment: "POGGERS_HTTP_SHUTDOWN_TIMEOUT_MS",
+      environment: "KIT_HTTP_SHUTDOWN_TIMEOUT_MS",
       default: "10000",
     },
     {
       name: "webCacheCapacity",
-      environment: "POGGERS_WEB_CACHE_CAPACITY",
+      environment: "KIT_WEB_CACHE_CAPACITY",
       default: "256",
     },
     {
       name: "webCacheBytes",
-      environment: "POGGERS_WEB_CACHE_BYTES",
+      environment: "KIT_WEB_CACHE_BYTES",
       default: "16777216",
     },
     {
       name: "webCacheRefreshes",
-      environment: "POGGERS_WEB_CACHE_REFRESHES",
+      environment: "KIT_WEB_CACHE_REFRESHES",
       default: "8",
     },
     {
       name: "webOrigin",
-      environment: "POGGERS_WEB_ORIGIN",
+      environment: "KIT_WEB_ORIGIN",
       default: "http://localhost:3000",
     },
-    { name: "webRoot", environment: "POGGERS_WEB_ROOT" },
-    { name: "webInterfaces", environment: "POGGERS_WEB_INTERFACES" },
+    { name: "webRoot", environment: "KIT_WEB_ROOT" },
+    { name: "webInterfaces", environment: "KIT_WEB_INTERFACES" },
   ],
-  crate: { package: "poggers-server-http", directory: dependencyDirectory("http") },
-  rust: { type: "poggers_server_http::Http", constructor: "poggers_server_http::create" },
+  crate: { package: "kit-server-http", directory: dependencyDirectory("http") },
+  rust: { type: "kit_server_http::Http", constructor: "kit_server_http::create" },
 });
 
 export const serverProductionDependencies: readonly ServerProductionDependency[] = Object.freeze([

@@ -143,7 +143,7 @@ describe("server Platform adapter", () => {
 });
 
 async function createFixture(source: string) {
-  const directory = await mkdtemp(resolve(tmpdir(), "poggers-server-adapter-"));
+  const directory = await mkdtemp(resolve(tmpdir(), "kit-server-adapter-"));
   temporaryDirectories.push(directory);
   const sourceDirectory = resolve(directory, "src");
   const system = resolve(sourceDirectory, "system.ts");
@@ -153,7 +153,7 @@ async function createFixture(source: string) {
 }
 
 async function createSplitFixture() {
-  const directory = await mkdtemp(resolve(tmpdir(), "poggers-server-selective-reload-"));
+  const directory = await mkdtemp(resolve(tmpdir(), "kit-server-selective-reload-"));
   temporaryDirectories.push(directory);
   const sourceDirectory = resolve(directory, "src");
   const system = resolve(sourceDirectory, "system.ts");

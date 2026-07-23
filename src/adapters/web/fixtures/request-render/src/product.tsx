@@ -4,8 +4,8 @@ import {
   type Feature,
   type PlatformInterfaceContract,
   type Program,
-} from "@poggers/kit";
-import type { HttpServer, ServerProcess } from "@poggers/kit/server";
+} from "@duction/kit";
+import type { HttpServer, ServerProcess } from "@duction/kit/server";
 import {
   Await,
   type BrowserMainThread,
@@ -18,7 +18,7 @@ import {
   type WebRoute,
   type WebServiceWorkerRuntime,
   createWebInterface,
-} from "@poggers/kit/web";
+} from "@duction/kit/web";
 
 type GreetingRoutes = {
   greeting: WebRoute<{
@@ -399,7 +399,7 @@ const background: Feature<Background> = {
       start({ dependencies }) {
         return dependencies.serviceWorker.subscribe({
           message(event) {
-            if (event.data === "poggers:ping") event.respond("poggers:pong");
+            if (event.data === "kit:ping") event.respond("kit:pong");
           },
         });
       },
@@ -408,7 +408,7 @@ const background: Feature<Background> = {
       start({ dependencies }) {
         return dependencies.serviceWorker.subscribe({
           message(event) {
-            if (event.data === "poggers:status") event.respond("poggers:ready");
+            if (event.data === "kit:status") event.respond("kit:ready");
           },
         });
       },

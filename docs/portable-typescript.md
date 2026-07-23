@@ -1,7 +1,7 @@
 # Portable TypeScript
 
-Poggers accepts a deliberately small TypeScript profile for code that must run through more than
-one backend. TypeScript supplies syntax, inference, and resolved symbols. The Poggers IR, rather
+Kit accepts a deliberately small TypeScript profile for code that must run through more than
+one backend. TypeScript supplies syntax, inference, and resolved symbols. The Kit IR, rather
 than JavaScript, defines the runtime meaning.
 
 ## Boundary
@@ -67,7 +67,7 @@ The frontend resolves symbols and generic substitutions with the TypeScript comp
 lowers executable meaning statement by statement:
 
 ```text
-typed TypeScript AST -> canonical Poggers IR -> development or production backend
+typed TypeScript AST -> canonical Kit IR -> development or production backend
 ```
 
 This is not textual TypeScript-to-Rust rewriting. Backends may inline, monomorphize, or otherwise

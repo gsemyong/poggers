@@ -4,7 +4,7 @@ import {
   type FeatureContractOf,
   placePrograms,
   type Program,
-} from "@poggers/kit";
+} from "@duction/kit";
 import {
   For,
   type BrowserMainThread,
@@ -15,7 +15,7 @@ import {
   type WebFeature,
   type WebRoute,
   mountFeature,
-} from "@poggers/kit/web";
+} from "@duction/kit/web";
 
 import type { WorkspaceWeb } from "../apps/web";
 import type { User } from "./identity";

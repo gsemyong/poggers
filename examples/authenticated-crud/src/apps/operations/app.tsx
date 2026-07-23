@@ -1,4 +1,4 @@
-import { createApp } from "@poggers/kit";
+import { createApp } from "@duction/kit";
 
 import { createWorkspaceWeb, type WorkspaceWeb } from "../web";
 

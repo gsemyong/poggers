@@ -62,7 +62,7 @@ export function captureSignalOnHotRefresh<T>(current: Signal<T>, capture: () => 
   hotSignalCaptures.set(current as Signal<unknown>, capture);
 }
 
-const reactiveValueRead = Symbol.for("poggers.reactiveValue.read");
+const reactiveValueRead = Symbol.for("kit.reactiveValue.read");
 
 type ReactiveValue<T> = {
   readonly [reactiveValueRead]: () => T;
@@ -129,7 +129,7 @@ let currentChildHost: HTMLElement | null = null;
 let currentHydration: HydrationContext | null = null;
 let detachedPresenceSequence = 0;
 
-const scopedChild = Symbol("poggers.scoped-child");
+const scopedChild = Symbol("kit.scoped-child");
 type ScopedChild = Readonly<{ [scopedChild]: () => Child }>;
 
 export function currentPresenceGraph(): PresenceGraph<Element> | undefined {
@@ -220,7 +220,7 @@ type DeferredState<Value> =
   | Readonly<{ status: "resolved"; value: Value }>
   | Readonly<{ status: "rejected"; error: unknown }>;
 
-const deferredResource = Symbol("poggers.deferred-resource");
+const deferredResource = Symbol("kit.deferred-resource");
 
 type DeferredResource<Value> = Deferred<Value> &
   Readonly<{
@@ -409,7 +409,7 @@ function renderAttempt(
     }
     if (hotRefresh && hotScroll) restoreHotScroll(root, hotScroll);
     if (hotRefresh && hotFocus) restoreHotFocus(root, hotFocus);
-    if (!hydration && !hotRefresh && root.getAttribute("data-poggers-rendering") === "client") {
+    if (!hydration && !hotRefresh && root.getAttribute("data-kit-rendering") === "client") {
       releaseServerStyles(root);
     }
   } catch (error) {
@@ -430,9 +430,9 @@ function renderAttempt(
   if (hydrationFailure !== undefined) {
     const message =
       hydrationFailure instanceof Error ? hydrationFailure.message : String(hydrationFailure);
-    console.error(`[poggers] ${message} Recovering with a client render.`);
+    console.error(`[kit] ${message} Recovering with a client render.`);
     root.replaceChildren();
-    root.setAttribute("data-poggers-rendering", "client-recovered");
+    root.setAttribute("data-kit-rendering", "client-recovered");
     const recovered = renderAttempt(child, root, hotState, false);
     releaseServerStyles(root);
     return recovered;
@@ -543,7 +543,7 @@ function restoreHotScroll(
 }
 
 type ErasedComponent = (props: never) => Child;
-const hydrationElement = Symbol("poggers.hydration-element");
+const hydrationElement = Symbol("kit.hydration-element");
 type HydrationElement = Readonly<{
   [hydrationElement]: true;
   type: string;
@@ -1458,10 +1458,10 @@ function createNode(type: string | ErasedComponent, props: Props): Child {
 }
 
 function populateElement(element: HTMLElement, props: Props, hydrating: boolean): HTMLElement {
-  const { children, __poggersStructuralChildren, __poggersScene, ...attributes } = props;
+  const { children, __kitStructuralChildren, __kitScene, ...attributes } = props;
 
-  if (__poggersScene) {
-    const registration = __poggersScene as SceneElementRegistration;
+  if (__kitScene) {
+    const registration = __kitScene as SceneElementRegistration;
     mountPresenceElement(element, registration, currentChildHost);
     registerCleanup(() => unmountPresenceElement(element, registration.scene));
   }
@@ -1474,7 +1474,7 @@ function populateElement(element: HTMLElement, props: Props, hydrating: boolean)
   currentChildHost = element;
   try {
     const resolvedChildren =
-      __poggersStructuralChildren === true && typeof children === "function"
+      __kitStructuralChildren === true && typeof children === "function"
         ? untrack(() => resolveChild(children))
         : children;
     const nodes = toNodes(resolvedChildren);
@@ -2168,10 +2168,10 @@ function blockEffect(fn: () => void | (() => void)) {
 }
 
 function createHydrationContext(root: Element): HydrationContext | null {
-  if (root.getAttribute("data-poggers-rendering") !== "hydrate") return null;
+  if (root.getAttribute("data-kit-rendering") !== "hydrate") return null;
   const elements = new Map<string, HTMLElement>();
-  for (const element of root.querySelectorAll<HTMLElement>("[data-poggers-h]")) {
-    const identity = element.getAttribute("data-poggers-h");
+  for (const element of root.querySelectorAll<HTMLElement>("[data-kit-h]")) {
+    const identity = element.getAttribute("data-kit-h");
     if (!identity || elements.has(identity)) {
       throw new Error(`Invalid SSR element hydration identity ${JSON.stringify(identity)}.`);
     }
@@ -2181,8 +2181,8 @@ function createHydrationContext(root: Element): HydrationContext | null {
   const visit = (node: Node) => {
     if (node.nodeType === Node.COMMENT_NODE) {
       const marker = (node as Comment).data;
-      if (marker.startsWith("poggers:")) {
-        const identity = marker.slice("poggers:".length);
+      if (marker.startsWith("kit:")) {
+        const identity = marker.slice("kit:".length);
         if (!identity || textMarkers.has(identity)) {
           throw new Error(`Invalid SSR text hydration identity ${JSON.stringify(identity)}.`);
         }
@@ -2236,16 +2236,16 @@ function finishHydration(root: Element, hydration: HydrationContext): void {
       `SSR hydration left unclaimed nodes: ${hydration.elements.size - hydration.elementCursor} elements and ${hydration.textMarkers.size - hydration.textCursor} text nodes.`,
     );
   }
-  for (const element of hydration.elements.values()) element.removeAttribute("data-poggers-h");
-  root.setAttribute("data-poggers-rendering", "hydrated");
+  for (const element of hydration.elements.values()) element.removeAttribute("data-kit-h");
+  root.setAttribute("data-kit-rendering", "hydrated");
   releaseServerStyles(root);
 }
 
 function releaseServerStyles(root: Element): void {
   const document = root.ownerDocument;
-  const client = document.querySelector<HTMLStyleElement>("style[data-poggers-presentation]");
+  const client = document.querySelector<HTMLStyleElement>("style[data-kit-presentation]");
   if (!client?.textContent) return;
-  for (const style of document.querySelectorAll("style[data-poggers-ssr]")) {
+  for (const style of document.querySelectorAll("style[data-kit-ssr]")) {
     style.remove();
   }
 }

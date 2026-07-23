@@ -26,7 +26,7 @@ import { createActionEventLedger } from "@/runtime/presentation";
 import { createUIContributionInstance, type UIContributionInstance } from "@/runtime/process";
 
 export const WEB_DOCUMENT_IR_VERSION = 4 as const;
-export const WEB_ROUTE_DATA_MEDIA_TYPE = "application/vnd.poggers.route+json";
+export const WEB_ROUTE_DATA_MEDIA_TYPE = "application/vnd.kit.route+json";
 export const WEB_MARKDOWN_MEDIA_TYPE = "text/markdown";
 
 export type WebDocumentAttributeIR = Readonly<{
@@ -268,8 +268,8 @@ const ignoredProperties = new Set([
   "children",
   "key",
   "ref",
-  "__poggersScene",
-  "__poggersStructuralChildren",
+  "__kitScene",
+  "__kitStructuralChildren",
 ]);
 const voidElements = new Set([
   "area",
@@ -373,7 +373,7 @@ export async function prepareWebDocument(input: {
           version: WEB_DOCUMENT_IR_VERSION,
           rendering: "hydrate",
           language: input.route?.metadata?.language ?? "en",
-          title: input.route?.metadata?.title ?? system.metadata?.name ?? "Poggers",
+          title: input.route?.metadata?.title ?? system.metadata?.name ?? "Kit",
           metadata: documentMetadata(input.route?.metadata),
           entry: input.entry ?? "/app.js",
           preloads: Object.freeze([]),
@@ -435,7 +435,7 @@ type CompiledRenderScope = Readonly<{
   locals: Readonly<Record<string, unknown>>;
 }>;
 
-const compiledDeferred = Symbol("poggers.compiled-deferred");
+const compiledDeferred = Symbol("kit.compiled-deferred");
 
 type CompiledDeferredSource = Readonly<{
   [compiledDeferred]: true;
@@ -727,7 +727,7 @@ function evaluateRenderNode(
       });
       attributes.push(
         Object.freeze({
-          name: "data-poggers-element",
+          name: "data-kit-element",
           value: `${compiledComponentRuntimeName(stack.at(-1))}/${node.element}`,
         }),
       );
@@ -971,8 +971,8 @@ function lowerPendingNode(
   }
   const hydration = `${sequence.prefix}e${sequence.element++}`;
   const attributes = [
-    ...node.attributes.filter(({ name }) => name !== "data-poggers-h"),
-    { name: "data-poggers-h", value: hydration },
+    ...node.attributes.filter(({ name }) => name !== "data-kit-h"),
+    { name: "data-kit-h", value: hydration },
   ]
     .sort((left, right) => left.name.localeCompare(right.name))
     .map((attribute) => Object.freeze(attribute));
@@ -989,7 +989,7 @@ function lowerPendingNode(
 export function renderWebDocument(document: WebDocumentIR): string {
   validateWebDocument(document);
   const styles = document.styles.length
-    ? `<style data-poggers-ssr>${document.styles.join("")}</style>`
+    ? `<style data-kit-ssr>${document.styles.join("")}</style>`
     : "";
   const entry = escapeAttribute(document.entry);
   const preloads = [document.entry, ...document.preloads]
@@ -998,9 +998,9 @@ export function renderWebDocument(document: WebDocumentIR): string {
     .join("");
   const metadata = renderMetadata(document.metadata, document.title);
   const hydration = document.hydration
-    ? `<script id="poggers-hydration" type="application/json">${escapeEmbeddedJson(JSON.stringify(document.hydration))}</script>`
+    ? `<script id="kit-hydration" type="application/json">${escapeEmbeddedJson(JSON.stringify(document.hydration))}</script>`
     : "";
-  return `<!doctype html><html lang="${escapeAttribute(document.language)}"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">${styles}${preloads}<title>${escapeText(document.title)}</title>${metadata}</head><body><div id="app" data-poggers-rendering="${document.rendering}">${document.root.map(renderNode).join("")}</div>${hydration}<script type="module" async src="${entry}"></script></body></html>`;
+  return `<!doctype html><html lang="${escapeAttribute(document.language)}"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">${styles}${preloads}<title>${escapeText(document.title)}</title>${metadata}</head><body><div id="app" data-kit-rendering="${document.rendering}">${document.root.map(renderNode).join("")}</div>${hydration}<script type="module" async src="${entry}"></script></body></html>`;
 }
 
 /** Renders the public text representation from the same semantic document tree as HTML. */
@@ -1153,7 +1153,7 @@ export function renderWebDeferredFrame(frame: WebDeferredFrameIR): string {
   const boundary = escapeAttribute(frame.boundary);
   const field = escapeAttribute(frame.field);
   const state = escapeEmbeddedJson(JSON.stringify(frame.state));
-  return `<template data-poggers-deferred-frame="${boundary}" data-poggers-deferred-field="${field}">${frame.root.map(renderNode).join("")}</template><script type="application/json" data-poggers-deferred-state="${boundary}">${state}</script>`;
+  return `<template data-kit-deferred-frame="${boundary}" data-kit-deferred-field="${field}">${frame.root.map(renderNode).join("")}</template><script type="application/json" data-kit-deferred-state="${boundary}">${state}</script>`;
 }
 
 /** Applies the same route-owned head meaning to a live browser document. */
@@ -1168,13 +1168,13 @@ export function applyWebDocumentHead(
   validateMetadata(input.metadata);
   document.title = input.title;
   document.documentElement.lang = input.language;
-  for (const element of document.head.querySelectorAll("[data-poggers-route-head]")) {
+  for (const element of document.head.querySelectorAll("[data-kit-route-head]")) {
     element.remove();
   }
   for (const definition of metadataHeadElements(input.metadata, input.title)) {
     const element = document.createElement(definition.tag);
     for (const [name, value] of definition.attributes) element.setAttribute(name, value);
-    element.setAttribute("data-poggers-route-head", "");
+    element.setAttribute("data-kit-route-head", "");
     if (definition.content !== undefined) element.textContent = definition.content;
     document.head.append(element);
   }
@@ -1183,7 +1183,7 @@ export function applyWebDocumentHead(
 /** Reads and removes the inert request payload exactly once before browser Route startup. */
 export function consumeWebRouteHydration(): WebRouteHydrationIR | undefined {
   if (typeof document === "undefined") return undefined;
-  const element = document.getElementById("poggers-hydration");
+  const element = document.getElementById("kit-hydration");
   if (!element) return undefined;
   element.remove();
   let value: unknown;
@@ -1370,7 +1370,7 @@ function validateWebDocumentNodes(root: readonly WebDocumentNodeIR[], rootPrefix
       }
       attributes.add(attribute.name);
     }
-    const hydration = node.attributes.find(({ name }) => name === "data-poggers-h");
+    const hydration = node.attributes.find(({ name }) => name === "data-kit-h");
     if (hydration?.value !== node.hydration) {
       throw new TypeError(`Web element ${node.hydration} has a mismatched hydration attribute.`);
     }
@@ -1565,7 +1565,7 @@ function metadataHeadElements(
 }
 
 function renderHeadElement(element: WebHeadElement): string {
-  const attributes = [...element.attributes, ["data-poggers-route-head", ""] as const]
+  const attributes = [...element.attributes, ["data-kit-route-head", ""] as const]
     .map(([name, value]) => (value ? ` ${name}="${escapeAttribute(value)}"` : ` ${name}`))
     .join("");
   if (element.tag !== "script") return `<${element.tag}${attributes}>`;
@@ -1769,7 +1769,7 @@ function renderComponent(input: {
           ...(className ? { className } : {}),
           ...(style ? { style } : {}),
           ...(artifact?.image ? { src: artifact.image.source } : {}),
-          "data-poggers-element": `${input.name}/${name}`,
+          "data-kit-element": `${input.name}/${name}`,
         });
       },
     ]),
@@ -1846,7 +1846,7 @@ function lowerElement(
             : String(resolved),
     });
   }
-  attributes.push({ name: "data-poggers-h", value: hydration });
+  attributes.push({ name: "data-kit-h", value: hydration });
   attributes.sort((left, right) => left.name.localeCompare(right.name));
   const children = voidElements.has(value.tag) ? [] : lowerChildren(value.props.children, sequence);
   return Object.freeze({
@@ -1862,12 +1862,12 @@ function lowerElement(
 
 function renderNode(node: WebDocumentNodeIR): string {
   if (node.kind === "text") {
-    return `<!--poggers:${escapeComment(node.hydration)}-->${escapeText(node.value)}`;
+    return `<!--kit:${escapeComment(node.hydration)}-->${escapeText(node.value)}`;
   }
   if (node.kind === "boundary") {
     const boundary = escapeAttribute(node.boundary);
     const field = escapeAttribute(node.field);
-    return `<template data-poggers-boundary-start="${boundary}" data-poggers-deferred-field="${field}"></template>${node.children.map(renderNode).join("")}<template data-poggers-boundary-end="${boundary}"></template>`;
+    return `<template data-kit-boundary-start="${boundary}" data-kit-deferred-field="${field}"></template>${node.children.map(renderNode).join("")}<template data-kit-boundary-end="${boundary}"></template>`;
   }
   const attributes = node.attributes
     .map(({ name, value }) => (value ? ` ${name}="${escapeAttribute(value)}"` : ` ${name}`))

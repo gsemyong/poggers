@@ -1,4 +1,4 @@
-import type { ConfiguredWebPresentation, WebPresentation, WebStyle } from "@poggers/kit/web";
+import type { ConfiguredWebPresentation, WebPresentation, WebStyle } from "@duction/kit/web";
 
 import type { WorkspaceWeb } from "../apps/web";
 

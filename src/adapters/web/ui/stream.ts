@@ -9,7 +9,7 @@ type DeferredHub = {
   observer?: MutationObserver;
 };
 
-const hubKey = Symbol.for("poggers.web.deferred");
+const hubKey = Symbol.for("kit.web.deferred");
 const maximumRecordBytes = 8 * 1024 * 1024;
 
 /** Decodes newline-framed JSON independently of transport chunk boundaries. */
@@ -103,24 +103,24 @@ export function publishWebDeferredState(boundary: string, state: WebDeferredStat
 
 function processDeferredRecords(root: ParentNode, hub: DeferredHub): void {
   const records = root.querySelectorAll<HTMLScriptElement>(
-    'script[type="application/json"][data-poggers-deferred-state]',
+    'script[type="application/json"][data-kit-deferred-state]',
   );
   for (const record of records) {
-    const boundary = record.dataset.poggersDeferredState;
+    const boundary = record.dataset.kitDeferredState;
     if (!boundary) continue;
     try {
       assertBoundary(boundary);
       const state = JSON.parse(record.textContent ?? "") as WebDeferredState;
       validateState(state);
       const frame = document.querySelector<HTMLTemplateElement>(
-        `template[data-poggers-deferred-frame="${boundary}"]`,
+        `template[data-kit-deferred-frame="${boundary}"]`,
       );
       if (!hub.claims.has(boundary) && frame) applyDeferredFrame(boundary, frame);
       publishWebDeferredState(boundary, state);
       frame?.remove();
       record.remove();
     } catch (error) {
-      console.error("[poggers] invalid deferred completion", error);
+      console.error("[kit] invalid deferred completion", error);
       record.remove();
     }
   }
@@ -128,10 +128,10 @@ function processDeferredRecords(root: ParentNode, hub: DeferredHub): void {
 
 function applyDeferredFrame(boundary: string, frame: HTMLTemplateElement): void {
   const start = document.querySelector<HTMLTemplateElement>(
-    `template[data-poggers-boundary-start="${boundary}"]`,
+    `template[data-kit-boundary-start="${boundary}"]`,
   );
   const end = document.querySelector<HTMLTemplateElement>(
-    `template[data-poggers-boundary-end="${boundary}"]`,
+    `template[data-kit-boundary-end="${boundary}"]`,
   );
   if (!start || !end || start.parentNode !== end.parentNode) return;
   let current = start.nextSibling;

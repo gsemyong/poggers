@@ -203,13 +203,13 @@ async function assertServerEnvironment(): Promise<void> {
     resolve(distDir, "src/adapters/server/production/compiler.js"),
     "utf8",
   );
-  if (!production.includes("process.env.POGGERS_PRODUCTION_CACHE")) {
+  if (!production.includes("process.env.KIT_PRODUCTION_CACHE")) {
     throw new Error("The package build replaced the server environment with a client constant.");
   }
 }
 
 async function emitDeclarations(): Promise<number> {
-  const directory = await mkdtemp(resolve(tmpdir(), "poggers-declarations-"));
+  const directory = await mkdtemp(resolve(tmpdir(), "kit-declarations-"));
   try {
     const config = resolve(directory, "tsconfig.json");
     await writeFile(

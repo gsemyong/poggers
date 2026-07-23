@@ -123,7 +123,7 @@ export function readEventOccurrences(
   after = 0,
 ): Readonly<{ cursor: number; occurrences: readonly RuntimeEventEntry[] }> {
   const channel = runtimeEvents.get(event as object);
-  if (!channel) throw new TypeError("The value is not a Poggers Event.");
+  if (!channel) throw new TypeError("The value is not a Kit Event.");
   return Object.freeze({
     cursor: channel.sequence,
     occurrences: Object.freeze(channel.entries.filter(({ sequence }) => sequence > after)),
@@ -133,7 +133,7 @@ export function readEventOccurrences(
 /** Reads the current cursor without exposing Event history to authors. */
 export function eventCursor(event: Event<unknown>): number {
   const channel = runtimeEvents.get(event as object);
-  if (!channel) throw new TypeError("The value is not a Poggers Event.");
+  if (!channel) throw new TypeError("The value is not a Kit Event.");
   return channel.sequence;
 }
 

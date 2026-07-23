@@ -1,5 +1,5 @@
 [package]
-name = "poggers-server-runtime"
+name = "kit-server-runtime"
 version = "0.0.0"
 edition = "2024"
 

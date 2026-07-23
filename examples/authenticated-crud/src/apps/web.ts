@@ -1,5 +1,5 @@
-import type { PlatformInterfaceContract } from "@poggers/kit";
-import { createWebInterface, type WebPlatform } from "@poggers/kit/web";
+import type { PlatformInterfaceContract } from "@duction/kit";
+import { createWebInterface, type WebPlatform } from "@duction/kit/web";
 
 import { identityBrowser, type IdentityBrowserFeature } from "../features/identity";
 import { shell, type ShellFeature } from "../features/shell";

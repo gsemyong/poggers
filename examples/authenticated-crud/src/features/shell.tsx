@@ -1,5 +1,5 @@
-import type { Program } from "@poggers/kit";
-import type { BrowserMainThread, Child, Navigation, WebFeature, WebRoute } from "@poggers/kit/web";
+import type { Program } from "@duction/kit";
+import type { BrowserMainThread, Child, Navigation, WebFeature, WebRoute } from "@duction/kit/web";
 
 import type { WorkspaceWeb } from "../apps/web";
 import type { IdentityClient, Session } from "./identity";
@@ -275,7 +275,7 @@ export const shell: WebFeature<ShellFeature, WorkspaceWeb> = {
                       <Topbar>
                         <BrandGroup>
                           <Mark aria-hidden="true">P</Mark>
-                          <Brand>Poggers Operations</Brand>
+                          <Brand>Kit Operations</Brand>
                         </BrandGroup>
                         <Account>
                           <User>{() => feature.session?.user.email ?? ""}</User>

@@ -59,7 +59,7 @@ const reactiveComponentTransformer: ts.TransformerFactory<ts.SourceFile> = (cont
   let renderBindings = new Map<string, string>();
   let renderPartBindings = new Set<string>();
   let activeMethod: ts.MethodDeclaration | undefined;
-  let activeContextName = "__poggersView";
+  let activeContextName = "__kitView";
   let componentMethods = new Map<ts.MethodDeclaration, ComponentMethodKind>();
 
   const visit: ts.Visitor = (node) => {
@@ -137,7 +137,7 @@ const reactiveComponentTransformer: ts.TransformerFactory<ts.SourceFile> = (cont
       retained.push(element);
     }
 
-    const contextNameText = "__poggersView";
+    const contextNameText = "__kitView";
     const contextName = factory.createIdentifier(contextNameText);
     renderBindings = nextBindings;
     renderPartBindings = nextPartBindings;
@@ -251,7 +251,7 @@ const reactiveComponentTransformer: ts.TransformerFactory<ts.SourceFile> = (cont
     if (!parameter || !ts.isIdentifier(parameter.name)) return expression;
 
     const authoredName = parameter.name.text;
-    const reactiveIndex = factory.createUniqueName("__poggersForIndex");
+    const reactiveIndex = factory.createUniqueName("__kitForIndex");
     const replaceIndex: ts.Visitor = (node) => {
       if (
         ts.isShorthandPropertyAssignment(node) &&

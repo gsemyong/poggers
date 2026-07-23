@@ -171,7 +171,7 @@ describe("web compiler extension", () => {
 });
 
 async function fixture(source: string, name = "system.ts"): Promise<string> {
-  const directory = await mkdtemp(resolve(tmpdir(), "poggers-web-compiler-"));
+  const directory = await mkdtemp(resolve(tmpdir(), "kit-web-compiler-"));
   directories.push(directory);
   const entry = resolve(directory, name);
   await writeFile(entry, source);

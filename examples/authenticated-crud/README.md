@@ -20,13 +20,13 @@ Build and run the complete production System with:
 nub src/cli.ts build --dir examples/authenticated-crud
 cd examples/authenticated-crud
 PORT=3000 \
-POGGERS_DATABASE="$PWD/.data/production.sqlite" \
-POGGERS_WEB_ROOT="$PWD/dist/web" \
+KIT_DATABASE="$PWD/.data/production.sqlite" \
+KIT_WEB_ROOT="$PWD/dist/web" \
 ./dist/server/api
 ```
 
 Open `http://localhost:3000`. `dist/server/api` is the standalone optimized server artifact. When
-`POGGERS_WEB_ROOT` is set it serves the compiled web plan and browser assets; otherwise it exposes
+`KIT_WEB_ROOT` is set it serves the compiled web plan and browser assets; otherwise it exposes
 only the API. The authenticated Routes deliberately return private interface shells, then the
 browser owns session-aware content. Critical CSS is inline, the content-hashed module graph is
 preloaded, and immutable assets can be cached indefinitely. Route loaders receive validated address
@@ -118,7 +118,7 @@ const operations = createApp<{ Features: { web: OperationsWeb } }>({
 });
 
 export default createSystem({
-  metadata: { name: "Poggers Operations" },
+  metadata: { name: "Kit Operations" },
   features: { operations },
 });
 ```

@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 
-import { testSystem } from "@poggers/kit/testing";
+import { testSystem } from "@duction/kit/testing";
 import { expect } from "vitest";
 
 testSystem({

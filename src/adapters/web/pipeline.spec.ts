@@ -28,7 +28,7 @@ describe("web representation negotiation", () => {
     expect(negotiateWebRepresentation("*/*")).toBeUndefined();
     expect(negotiateWebRepresentation("text/html, text/markdown;q=0")).toBe("document");
     expect(negotiateWebRepresentation("text/markdown, text/html;q=0.8")).toBe("markdown");
-    expect(negotiateWebRepresentation("application/vnd.poggers.route+json")).toBe("route-data");
+    expect(negotiateWebRepresentation("application/vnd.kit.route+json")).toBe("route-data");
     expect(negotiateWebRepresentation("application/json")).toBeUndefined();
   });
 });
@@ -233,7 +233,7 @@ class TestResponse extends EventEmitter {
 
 describe("web asset manifest", () => {
   it("seals public files by content while keeping only proven hashed outputs immutable", async () => {
-    const directory = await mkdtemp(resolve(tmpdir(), "poggers-web-assets-"));
+    const directory = await mkdtemp(resolve(tmpdir(), "kit-web-assets-"));
     try {
       await mkdir(resolve(directory, "assets"));
       await mkdir(resolve(directory, "workers"));
@@ -270,7 +270,7 @@ describe("web asset manifest", () => {
   });
 
   it("emits byte-identical web artifacts from identical product meaning", async () => {
-    const directory = await mkdtemp(resolve(tmpdir(), "poggers-web-determinism-"));
+    const directory = await mkdtemp(resolve(tmpdir(), "kit-web-determinism-"));
     try {
       const application = resolve(import.meta.dirname, "fixtures/request-render");
       const ir = compileSystem(resolve(application, "src/system.ts"), [webCompilerExtension]);
@@ -322,18 +322,21 @@ describe("web asset manifest", () => {
           compilerOptions: {
             paths: {
               "@/*": ["./src/*"],
-              "@poggers/kit": [resolve(import.meta.dirname, "../../..", "dist/source/index.ts")],
-              "@poggers/kit/jsx-runtime": [
+              "@duction/kit": [resolve(import.meta.dirname, "../../..", "dist/source/index.ts")],
+              "@duction/kit/jsx-runtime": [
                 resolve(import.meta.dirname, "../../..", "dist/source/jsx/runtime.ts"),
               ],
-              "@poggers/kit/server": [
+              "@duction/kit/jsx-dev-runtime": [
+                resolve(import.meta.dirname, "../../..", "dist/source/jsx/development.ts"),
+              ],
+              "@duction/kit/server": [
                 resolve(
                   import.meta.dirname,
                   "../../..",
                   "dist/source/platforms/server/platform.ts",
                 ),
               ],
-              "@poggers/kit/web": [
+              "@duction/kit/web": [
                 resolve(import.meta.dirname, "../../..", "dist/source/platforms/web/platform.ts"),
               ],
             },

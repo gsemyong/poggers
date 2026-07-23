@@ -8,10 +8,10 @@ import { platformAdapters } from "@/adapters/registry";
 import type { PlatformAdapterImplementation } from "@/contracts/platform";
 import { buildSystem, developSystem } from "@/realization";
 
-const valueFlags = new Set(["dir", "kit-version", "name", "outdir", "outfile"]);
+const valueFlags = new Set(["dir", "name", "outdir", "outfile", "package"]);
 const ignoredStarterEntries = new Set([
   ".data",
-  ".poggers",
+  ".kit",
   "coverage",
   "dist",
   "node_modules",
@@ -85,7 +85,7 @@ export async function createProject(arguments_: readonly string[]): Promise<void
   const target = resolve(positionalArguments(arguments_)[0] ?? "workspace");
   const force = arguments_.includes("--force");
   const install = !arguments_.includes("--no-install");
-  const version = readFlag(arguments_, "kit-version") ?? "latest";
+  const packageLocation = readFlag(arguments_, "package") ?? "latest";
   const name = normalizeName(readFlag(arguments_, "name") ?? basename(target));
 
   if (!name) throw new TypeError("Project name must contain a letter or number.");
@@ -105,7 +105,7 @@ export async function createProject(arguments_: readonly string[]): Promise<void
     const file = resolve(target, path);
     const contents = renderStarter(path, await readFile(resolve(source, path), "utf8"), {
       name,
-      version,
+      packageLocation,
     });
     await mkdir(dirname(file), { recursive: true });
     await writeFile(file, contents);
@@ -147,7 +147,7 @@ async function listFiles(directory: string, prefix = ""): Promise<string[]> {
 function renderStarter(
   path: string,
   contents: string,
-  values: { readonly name: string; readonly version: string },
+  values: { readonly name: string; readonly packageLocation: string },
 ): string {
   if (path === "package.json") {
     const manifest = JSON.parse(contents) as {
@@ -155,12 +155,12 @@ function renderStarter(
       dependencies: Record<string, string>;
     };
     manifest.name = values.name;
-    manifest.dependencies["@poggers/kit"] = values.version;
+    manifest.dependencies["@duction/kit"] = values.packageLocation;
     return `${JSON.stringify(manifest, undefined, 2)}\n`;
   }
   if (path === "tsconfig.json") {
     return `{
-  "extends": "@poggers/kit/tsconfig",
+  "extends": "@duction/kit/tsconfig",
   "compilerOptions": {
     "paths": {
       "@/*": ["\${configDir}/src/*"]

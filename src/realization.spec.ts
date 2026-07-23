@@ -267,7 +267,7 @@ function session(
 }
 
 async function fixture(): Promise<string> {
-  const directory = await mkdtemp(resolve(tmpdir(), "poggers-realization-"));
+  const directory = await mkdtemp(resolve(tmpdir(), "kit-realization-"));
   directories.push(directory);
   await mkdir(resolve(directory, "src"), { recursive: true });
   await writeFile(
@@ -330,7 +330,7 @@ async function incrementalFixture(): Promise<{
   sharedSource: string;
   operationsSource: string;
 }> {
-  const directory = await mkdtemp(resolve(tmpdir(), "poggers-incremental-"));
+  const directory = await mkdtemp(resolve(tmpdir(), "kit-incremental-"));
   directories.push(directory);
   const source = resolve(directory, "src");
   await mkdir(source, { recursive: true });

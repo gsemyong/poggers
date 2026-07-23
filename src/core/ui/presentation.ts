@@ -19,7 +19,7 @@ declare const animationBrand: unique symbol;
 declare const animatedBrand: unique symbol;
 declare const invocationBrand: unique symbol;
 
-const temporalValueBrand = Symbol("poggers.presentation.temporal-value");
+const temporalValueBrand = Symbol("kit.presentation.temporal-value");
 
 /** A read-only ordered semantic occurrence. Presentation cannot emit or subscribe to it. */
 export type Event<Payload = void> = Readonly<{ readonly [eventBrand]: Payload }>;
@@ -235,7 +235,7 @@ export type PresentationElement<
 > = Readonly<
   {
     name: Name;
-    readonly "poggers.presentationElementOwner"?: Owner;
+    readonly "kit.presentationElementOwner"?: Owner;
   } & Observation
 >;
 

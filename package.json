@@ -1,12 +1,17 @@
 {
-  "name": "@poggers/kit",
+  "name": "@duction/kit",
   "version": "0.0.0",
+  "private": true,
   "description": "A portable TypeScript product language for programs, dependencies, and user interfaces.",
   "bin": {
-    "poggers": "./dist/src/cli.js"
+    "kit": "./dist/src/cli.js"
   },
   "files": [
     "dist",
+    "CHANGELOG.md",
+    "docs/compatibility.md",
+    "docs/features.md",
+    "docs/migrations",
     "examples/basic",
     "examples/basic/.gitignore",
     "tsconfig.json"
@@ -15,70 +20,73 @@
   "types": "./dist/src/index.d.ts",
   "exports": {
     ".": {
-      "poggers-source": "./dist/source/index.ts",
+      "source": "./dist/source/index.ts",
       "types": "./dist/src/index.d.ts",
       "default": "./dist/src/index.js"
     },
+    "./ui": {
+      "source": "./dist/source/ui.ts",
+      "types": "./dist/src/ui.d.ts",
+      "default": "./dist/src/ui.js"
+    },
     "./jsx-dev-runtime": {
-      "poggers-source": "./dist/source/jsx/development.ts",
+      "source": "./dist/source/jsx/development.ts",
       "types": "./dist/src/jsx/development.d.ts",
       "default": "./dist/src/jsx/development.js"
     },
     "./jsx-runtime": {
-      "poggers-source": "./dist/source/jsx/runtime.ts",
+      "source": "./dist/source/jsx/runtime.ts",
       "types": "./dist/src/jsx/runtime.d.ts",
       "default": "./dist/src/jsx/runtime.js"
     },
     "./web": {
-      "poggers-source": "./dist/source/platforms/web/platform.ts",
+      "source": "./dist/source/platforms/web/platform.ts",
       "types": "./dist/src/platforms/web/platform.d.ts",
       "default": "./dist/src/platforms/web/platform.js"
     },
     "./adapters/web": {
-      "poggers-source": "./dist/source/adapters/web/adapter.ts",
+      "source": "./dist/source/adapters/web/adapter.ts",
       "types": "./dist/src/adapters/web/adapter.d.ts",
       "default": "./dist/src/adapters/web/adapter.js"
     },
     "./server": {
-      "poggers-source": "./dist/source/platforms/server/platform.ts",
+      "source": "./dist/source/platforms/server/platform.ts",
       "types": "./dist/src/platforms/server/platform.d.ts",
       "default": "./dist/src/platforms/server/platform.js"
     },
     "./testing": {
-      "poggers-source": "./dist/source/testing.ts",
+      "source": "./dist/source/testing.ts",
       "types": "./dist/src/testing.d.ts",
       "default": "./dist/src/testing.js"
     },
     "./adapter": {
-      "poggers-source": "./dist/source/contracts/platform.ts",
+      "source": "./dist/source/contracts/platform.ts",
       "types": "./dist/src/contracts/platform.d.ts",
       "default": "./dist/src/contracts/platform.js"
     },
     "./adapters/server": {
-      "poggers-source": "./dist/source/adapters/server/adapter.ts",
+      "source": "./dist/source/adapters/server/adapter.ts",
       "types": "./dist/src/adapters/server/adapter.d.ts",
       "default": "./dist/src/adapters/server/adapter.js"
     },
     "./cli": {
-      "poggers-source": "./dist/source/cli.ts",
+      "source": "./dist/source/cli.ts",
       "types": "./dist/src/cli.d.ts",
       "default": "./dist/src/cli.js"
     },
     "./tsconfig": "./tsconfig.json"
   },
-  "publishConfig": {
-    "access": "public"
-  },
   "scripts": {
+    "api:check": "nub scripts/api.ts",
+    "api:update": "nub run build && nub scripts/api.ts --write",
     "build": "nub scripts/build.ts",
-    "benchmark": "nub scripts/benchmark.ts",
     "dev:crud": "nub src/cli.ts dev --dir examples/authenticated-crud",
     "dev:example": "nub src/cli.ts dev --dir playground",
     "typecheck": "tsc --noEmit && tsc -p src/adapters/web/fixtures/request-render/tsconfig.json && tsc -p examples/basic/tsconfig.json && tsc -p examples/authenticated-crud/tsconfig.json && tsc -p playground/tsconfig.json",
     "fmt": "oxfmt",
     "fmt:check": "oxfmt --check",
     "lint": "oxlint --disable-nested-config src scripts examples playground vitest.config.ts",
-    "test": "nub run build && vitest run && cargo test --manifest-path src/adapters/server/production/Cargo.toml --workspace",
+    "test": "nub run build && nub run api:check && vitest run && cargo test --manifest-path src/adapters/server/production/Cargo.toml --workspace",
     "check": "nub run typecheck && nub run lint && nub run fmt:check && nub run test"
   },
   "dependencies": {

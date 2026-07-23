@@ -59,7 +59,7 @@ export function testSystem(definition: SystemTestDefinition): void {
 
 async function verifyDevelopment(definition: SystemTestDefinition): Promise<void> {
   const directory = resolve(definition.directory ?? process.cwd());
-  const temporary = await mkdtemp(resolve(tmpdir(), "poggers-system-development-"));
+  const temporary = await mkdtemp(resolve(tmpdir(), "kit-system-development-"));
   const database = resolve(temporary, "system.sqlite");
   let system: RunningSystem | undefined;
   let allocation: Readonly<{ serverPort: number; webPort: number }> | undefined;
@@ -117,7 +117,7 @@ async function verifyDevelopment(definition: SystemTestDefinition): Promise<void
 
 async function verifyProduction(definition: SystemTestDefinition): Promise<void> {
   const directory = resolve(definition.directory ?? process.cwd());
-  const temporary = await mkdtemp(resolve(tmpdir(), "poggers-system-production-"));
+  const temporary = await mkdtemp(resolve(tmpdir(), "kit-system-production-"));
   const database = resolve(temporary, "system.sqlite");
   const output = resolve(temporary, "dist");
   let running: ProductionSystem | undefined;
@@ -193,7 +193,7 @@ function testAdapters(input: {
       developmentHost: {
         database: input.database,
         host: "localhost",
-        secret: "poggers-system-test-secret",
+        secret: "kit-system-test-secret",
         shutdownTimeout: 500,
       },
       webOrigin,
@@ -276,17 +276,15 @@ async function startProductionSystem(
         startProcess(artifact.path, directory, {
           HOST: "127.0.0.1",
           PORT: String(port),
-          POGGERS_DATABASE: database,
-          POGGERS_HTTP_BODY_LIMIT: "1024",
-          POGGERS_HTTP_TIMEOUT_MS: "2000",
-          POGGERS_HTTP_SHUTDOWN_TIMEOUT_MS: "500",
-          POGGERS_WEB_ORIGIN: interfaceOrigins.values().next().value ?? origin,
+          KIT_DATABASE: database,
+          KIT_HTTP_BODY_LIMIT: "1024",
+          KIT_HTTP_TIMEOUT_MS: "2000",
+          KIT_HTTP_SHUTDOWN_TIMEOUT_MS: "500",
+          KIT_WEB_ORIGIN: interfaceOrigins.values().next().value ?? origin,
           ...(http && interfaceArtifacts.length === 1
-            ? { POGGERS_WEB_ROOT: interfaceArtifacts[0]!.path }
+            ? { KIT_WEB_ROOT: interfaceArtifacts[0]!.path }
             : {}),
-          ...(http && interfaceArtifacts.length > 1
-            ? { POGGERS_WEB_INTERFACES: webInterfaces }
-            : {}),
+          ...(http && interfaceArtifacts.length > 1 ? { KIT_WEB_INTERFACES: webInterfaces } : {}),
         }),
       );
     }

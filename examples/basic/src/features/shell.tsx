@@ -1,5 +1,5 @@
-import type { Feature, Program } from "@poggers/kit";
-import type { BrowserMainThread } from "@poggers/kit/web";
+import type { Feature, Program } from "@duction/kit";
+import type { BrowserMainThread } from "@duction/kit/web";
 
 export type ShellFeature = {
   Programs: {

@@ -48,7 +48,7 @@ describe("web installation planning", () => {
     expect(plan.assets).toEqual(["/assets/app-a1b2c3d4.js"]);
     expect(plan.documents).toEqual(["/auth", "/tasks"]);
     expect(source.match(/^import /gm)).toHaveLength(2);
-    expect(source).toContain('event.data === "poggers:activate"');
+    expect(source).toContain('event.data === "kit:activate"');
     expect(source).toContain("navigationPreload?.enable()");
     expect(source).not.toContain("clients.claim()");
     expect(source).not.toContain('"install", (event) => event.waitUntil(self.skipWaiting())');

@@ -1,6 +1,6 @@
 /** Opaque result of one platform-native JSX expression. It has no runtime form. */
 export interface JSXElement {
-  readonly __poggersJSXElement: true;
+  readonly __kitJSXElement: true;
 }
 
 /** One Element's platform-specific structural contract. */

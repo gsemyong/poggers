@@ -715,6 +715,95 @@ dependencies = [
 ]
 
 [[package]]
+name = "kit-server-authentication"
+version = "0.0.0"
+dependencies = [
+ "argon2",
+ "kit-server-runtime",
+ "rusqlite",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "kit-server-clock"
+version = "0.0.0"
+dependencies = [
+ "kit-server-runtime",
+ "tokio",
+]
+
+[[package]]
+name = "kit-server-events"
+version = "0.0.0"
+dependencies = [
+ "async-stream",
+ "kit-server-runtime",
+ "rusqlite",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "kit-server-events-jetstream"
+version = "0.0.0"
+dependencies = [
+ "async-nats",
+ "async-stream",
+ "base64",
+ "futures-util",
+ "kit-server-runtime",
+ "serde_json",
+]
+
+[[package]]
+name = "kit-server-http"
+version = "0.0.0"
+dependencies = [
+ "async-stream",
+ "axum",
+ "bytes",
+ "kit-server-runtime",
+ "mime_guess",
+ "percent-encoding",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tower",
+ "tower-http",
+ "url",
+]
+
+[[package]]
+name = "kit-server-identifiers"
+version = "0.0.0"
+dependencies = [
+ "kit-server-runtime",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "kit-server-recorder"
+version = "0.0.0"
+dependencies = [
+ "kit-server-runtime",
+ "serde_json",
+]
+
+[[package]]
+name = "kit-server-runtime"
+version = "0.0.0"
+dependencies = [
+ "async-stream",
+ "futures-util",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -891,95 +980,6 @@ name = "pkg-config"
 version = "0.3.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
-
-[[package]]
-name = "poggers-server-authentication"
-version = "0.0.0"
-dependencies = [
- "argon2",
- "poggers-server-runtime",
- "rusqlite",
- "serde_json",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "poggers-server-clock"
-version = "0.0.0"
-dependencies = [
- "poggers-server-runtime",
- "tokio",
-]
-
-[[package]]
-name = "poggers-server-events"
-version = "0.0.0"
-dependencies = [
- "async-stream",
- "poggers-server-runtime",
- "rusqlite",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "poggers-server-events-jetstream"
-version = "0.0.0"
-dependencies = [
- "async-nats",
- "async-stream",
- "base64",
- "futures-util",
- "poggers-server-runtime",
- "serde_json",
-]
-
-[[package]]
-name = "poggers-server-http"
-version = "0.0.0"
-dependencies = [
- "async-stream",
- "axum",
- "bytes",
- "mime_guess",
- "percent-encoding",
- "poggers-server-runtime",
- "serde",
- "serde_json",
- "sha2",
- "tokio",
- "tower",
- "tower-http",
- "url",
-]
-
-[[package]]
-name = "poggers-server-identifiers"
-version = "0.0.0"
-dependencies = [
- "poggers-server-runtime",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "poggers-server-recorder"
-version = "0.0.0"
-dependencies = [
- "poggers-server-runtime",
- "serde_json",
-]
-
-[[package]]
-name = "poggers-server-runtime"
-version = "0.0.0"
-dependencies = [
- "async-stream",
- "futures-util",
- "serde_json",
- "tokio",
-]
 
 [[package]]
 name = "portable-atomic"

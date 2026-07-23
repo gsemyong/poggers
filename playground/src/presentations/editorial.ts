@@ -1,4 +1,4 @@
-import { animate, settled, velocity } from "@poggers/kit";
+import { animate, settled, velocity } from "@duction/kit/ui";
 import {
   createAudioAsset,
   createImageAsset,
@@ -9,7 +9,7 @@ import {
   type WebColor,
   type WebPresentation,
   type WebStyle,
-} from "@poggers/kit/web";
+} from "@duction/kit/web";
 
 import type { Web } from "../apps/main/app";
 import type { SheetState } from "../features/dashboard";

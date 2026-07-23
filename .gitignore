@@ -4,7 +4,7 @@ coverage/
 target/
 Cargo.lock
 !src/adapters/server/production/Cargo.lock
-.poggers/
+.kit/
 .data/
 .DS_Store
 .env

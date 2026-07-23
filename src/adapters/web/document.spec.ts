@@ -87,7 +87,7 @@ describe("web document IR", () => {
       },
     });
     expect(renderWebDocument(prepared.document)).toContain(
-      '<template data-poggers-boundary-start="d0" data-poggers-deferred-field="activity"></template>',
+      '<template data-kit-boundary-start="d0" data-kit-deferred-field="activity"></template>',
     );
 
     const iterator = prepared.frames[Symbol.asyncIterator]();
@@ -333,7 +333,7 @@ describe("web document IR", () => {
         hydration: "e0",
         attributes: expect.arrayContaining([
           {
-            name: "data-poggers-element",
+            name: "data-kit-element",
             value: "@feature/tasks/component/Card/Root",
           },
         ]),
@@ -353,7 +353,7 @@ describe("web document IR", () => {
     ]);
     const html = renderWebDocument(document);
     expect(html).toContain("&lt;/script&gt;&lt;script&gt;bad()&lt;/script&gt;");
-    expect(html).toContain('<script id="poggers-hydration" type="application/json">');
+    expect(html).toContain('<script id="kit-hydration" type="application/json">');
     expect(html).not.toContain("</script><script>bad()");
     expect(html).toContain('"title":"\\u003c/script>\\u003cscript>bad()\\u003c/script>"');
   });
@@ -364,7 +364,7 @@ describe("web document IR", () => {
       metadata: { description: "Escaped <private> workspace" },
     });
     const html = renderWebDocument(document);
-    expect(html).toContain('<div id="app" data-poggers-rendering="client"></div>');
+    expect(html).toContain('<div id="app" data-kit-rendering="client"></div>');
     expect(html).toContain('<meta name="description" content="Escaped &lt;private&gt; workspace"');
     expect(() =>
       validateWebDocument({
@@ -397,20 +397,20 @@ describe("web document IR", () => {
           kind: "element" as const,
           hydration: "e0",
           tag: "main",
-          attributes: [{ name: "data-poggers-h", value: "e0" }],
+          attributes: [{ name: "data-kit-h", value: "e0" }],
           children: [
             {
               kind: "element" as const,
               hydration: "e1",
               tag: "h1",
-              attributes: [{ name: "data-poggers-h", value: "e1" }],
+              attributes: [{ name: "data-kit-h", value: "e1" }],
               children: [{ kind: "text" as const, hydration: "t0", value: "Build *well*" }],
             },
             {
               kind: "element" as const,
               hydration: "e2",
               tag: "p",
-              attributes: [{ name: "data-poggers-h", value: "e2" }],
+              attributes: [{ name: "data-kit-h", value: "e2" }],
               children: [
                 { kind: "text" as const, hydration: "t1", value: "Read " },
                 {
@@ -418,7 +418,7 @@ describe("web document IR", () => {
                   hydration: "e3",
                   tag: "a",
                   attributes: [
-                    { name: "data-poggers-h", value: "e3" },
+                    { name: "data-kit-h", value: "e3" },
                     { name: "href", value: "/reference" },
                   ],
                   children: [{ kind: "text" as const, hydration: "t2", value: "the reference" }],
@@ -547,7 +547,7 @@ Read [the reference](/reference).
     expect(html).toContain("&lt;script&gt;bad()&lt;/script&gt;");
     expect(html).not.toContain("<script>bad()");
     expect(html).toContain('value="quoted &quot;value&quot;"');
-    expect(html).toContain('data-poggers-rendering="hydrate"');
+    expect(html).toContain('data-kit-rendering="hydrate"');
     expect(html).toContain('<link rel="modulepreload" href="/app.js">');
     expect(first.root[0]).toMatchObject({ kind: "element", hydration: "e0" });
   });
@@ -745,7 +745,7 @@ Read [the reference](/reference).
               tag: "main",
               attributes: [
                 { name: "data-label", value: attribute },
-                { name: "data-poggers-h", value: "e0" },
+                { name: "data-kit-h", value: "e0" },
               ],
               children: [{ kind: "text" as const, hydration: "t0", value: text }],
             },
@@ -775,7 +775,7 @@ Read [the reference](/reference).
           kind: "element" as const,
           hydration: "e0",
           tag: "main",
-          attributes: [{ name: "data-poggers-h", value: "e0" }],
+          attributes: [{ name: "data-kit-h", value: "e0" }],
           children: [] as const,
         },
       ],
@@ -790,8 +790,8 @@ Read [the reference](/reference).
           {
             ...document.root[0]!,
             attributes: [
-              { name: "data-poggers-h", value: "e0" },
-              { name: "data-poggers-h", value: "e0" },
+              { name: "data-kit-h", value: "e0" },
+              { name: "data-kit-h", value: "e0" },
             ],
           },
         ],
@@ -800,7 +800,7 @@ Read [the reference](/reference).
     expect(() =>
       validateWebDocument({
         ...document,
-        root: [{ ...document.root[0]!, attributes: [{ name: "data-poggers-h", value: "e1" }] }],
+        root: [{ ...document.root[0]!, attributes: [{ name: "data-kit-h", value: "e1" }] }],
       }),
     ).toThrow("mismatched hydration");
   });
@@ -878,8 +878,8 @@ function fakeDocument(): Readonly<{
       },
       querySelector: select,
       querySelectorAll(selector: string) {
-        return selector === "[data-poggers-route-head]"
-          ? nodes.filter(({ attributes }) => "data-poggers-route-head" in attributes)
+        return selector === "[data-kit-route-head]"
+          ? nodes.filter(({ attributes }) => "data-kit-route-head" in attributes)
           : [];
       },
     },
@@ -904,7 +904,7 @@ function fakeDocument(): Readonly<{
     attributes(selector) {
       const attributes = select(selector)?.attributes;
       if (!attributes) return undefined;
-      const { "data-poggers-route-head": _marker, ...semantic } = attributes;
+      const { "data-kit-route-head": _marker, ...semantic } = attributes;
       return semantic;
     },
   };

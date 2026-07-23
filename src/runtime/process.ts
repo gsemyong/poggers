@@ -13,7 +13,7 @@ import { createActionEventLedger } from "@/runtime/presentation";
 import { createReactiveState } from "@/runtime/state";
 
 /** Internal protocol for a host Dependency whose API is scoped to one Feature contribution. */
-export const dependencyScope: unique symbol = Symbol("poggers.dependency.scope");
+export const dependencyScope: unique symbol = Symbol("kit.dependency.scope");
 
 export type DependencyScope = Readonly<{ program: string; feature: string }>;
 

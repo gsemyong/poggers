@@ -23,7 +23,7 @@ describe("component compiler", () => {
     );
 
     expect(output).toContain("state: { count: 0 }");
-    expect(output).toContain("() => __poggersView.state.count");
+    expect(output).toContain("() => __kitView.state.count");
     expect(output).not.toContain("presentations:");
   });
 
