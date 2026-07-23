@@ -15,6 +15,7 @@ import {
   inspectClientManifest,
   negotiateWebRepresentation,
   validateProductionWebRoute,
+  webDevelopmentWorkspace,
   writeDevelopmentWebStream,
 } from "@/adapters/web/pipeline";
 import type { WebRouteIR } from "@/adapters/web/routing";
@@ -29,6 +30,15 @@ describe("web representation negotiation", () => {
     expect(negotiateWebRepresentation("text/markdown, text/html;q=0.8")).toBe("markdown");
     expect(negotiateWebRepresentation("application/vnd.poggers.route+json")).toBe("route-data");
     expect(negotiateWebRepresentation("application/json")).toBeUndefined();
+  });
+});
+
+describe("web development workspace", () => {
+  it("keeps a stable isolated cache for each interface", () => {
+    const first = webDevelopmentWorkspace("/tmp/company", "interface/operations.web");
+    expect(webDevelopmentWorkspace("/tmp/company", "interface/operations.web")).toBe(first);
+    expect(webDevelopmentWorkspace("/tmp/company", "interface/customer.web")).not.toBe(first);
+    expect(first).toContain("/node_modules/.cache/kit/web/interface-operations-web-");
   });
 });
 

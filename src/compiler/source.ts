@@ -1,4 +1,4 @@
-import { statSync } from "node:fs";
+import { realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 
 import * as ts from "@typescript/typescript6";
@@ -48,9 +48,12 @@ export type SystemPaths = Readonly<{
   system: string;
 }>;
 
+export type SystemOutputSources = Readonly<Record<string, readonly string[]>>;
+
 export type SystemCompilation = Readonly<{
   ir: SystemIR;
   presentationSources: ReadonlySet<string>;
+  outputSources: SystemOutputSources;
 }>;
 
 export type SystemCompiler = Readonly<{
@@ -237,7 +240,7 @@ function compileSystemProgram(
       strict: true,
       target: ts.ScriptTarget.ESNext,
     },
-    oldProgram: changedFile ? undefined : previous,
+    oldProgram: previous,
   });
   const changedSource = changedFile ? program.getSourceFile(resolve(changedFile)) : undefined;
   const diagnostics = changedSource
@@ -303,11 +306,13 @@ function compileSystemProgram(
 
   const platforms = [...new Set(programs.map(({ environment }) => environment.platform))].sort();
   const presentationSources = new Set<string>();
+  const interfaceSourceFiles = new Map<string, ReadonlySet<string>>();
   const presentationIR: InterfacePresentationIR[] = [];
   const interfaces: PlatformInterfaceIR[] = [];
   for (const item of interfaceSources.sort((left, right) => left.path.localeCompare(right.path))) {
     const sources = presentationImplementationSources(program, checker, item.implementation, root);
     sources.forEach((path) => presentationSources.add(path));
+    interfaceSourceFiles.set(item.path, sources);
     for (const path of sources) {
       const implementation = program.getSourceFile(path);
       if (!implementation) throw new Error(`Cannot read Presentation source ${path}.`);
@@ -363,6 +368,15 @@ function compileSystemProgram(
     compilation: {
       ir,
       presentationSources,
+      outputSources: collectSystemOutputSources({
+        checker,
+        entry: file,
+        interfaceSourceFiles,
+        interfaces,
+        program,
+        programs,
+        root,
+      }),
     },
     program,
   };
@@ -448,30 +462,34 @@ function presentationImplementationSources(
 ): ReadonlySet<string> {
   const presentation = objectMember(checker, interfaceImplementation, "presentation");
   if (!presentation) return new Set();
+  return transitiveLocalSources(
+    program,
+    checker,
+    root,
+    expressionDeclarations(checker, presentation).map((declaration) => declaration.getSourceFile()),
+  );
+}
+
+function transitiveLocalSources(
+  program: ts.Program,
+  checker: ts.TypeChecker,
+  root: string,
+  initial: Iterable<ts.SourceFile | string>,
+): ReadonlySet<string> {
   const sources = new Set<string>();
-  const pending: ts.SourceFile[] = [];
-
-  for (const declaration of expressionDeclarations(checker, presentation)) {
-    const source = declaration.getSourceFile();
-    if (source.isDeclarationFile || !inside(root, source.fileName)) continue;
-    pending.push(source);
-  }
-
+  const pending = [...initial].flatMap((value): ts.SourceFile[] => {
+    const source = typeof value === "string" ? program.getSourceFile(resolve(value)) : value;
+    return source && !source.isDeclarationFile && inside(root, source.fileName) ? [source] : [];
+  });
   while (pending.length) {
     const source = pending.pop()!;
     const file = resolve(source.fileName);
     if (sources.has(file)) continue;
     sources.add(file);
     for (const statement of source.statements) {
-      if (!ts.isImportDeclaration(statement) || statement.importClause?.isTypeOnly) continue;
-      if (
-        statement.importClause?.namedBindings &&
-        ts.isNamedImports(statement.importClause.namedBindings) &&
-        statement.importClause.namedBindings.elements.every((element) => element.isTypeOnly)
-      ) {
-        continue;
-      }
-      const symbol = checker.getSymbolAtLocation(statement.moduleSpecifier);
+      const specifier = runtimeModuleSpecifier(statement);
+      if (!specifier) continue;
+      const symbol = checker.getSymbolAtLocation(specifier);
       for (const declaration of symbol?.declarations ?? []) {
         const imported = declaration.getSourceFile();
         if (!imported.isDeclarationFile && inside(root, imported.fileName)) pending.push(imported);
@@ -482,6 +500,89 @@ function presentationImplementationSources(
   // Keep only files TypeScript actually included in this Program.
   const included = new Set(program.getSourceFiles().map((source) => resolve(source.fileName)));
   return new Set([...sources].filter((source) => included.has(source)));
+}
+
+function runtimeModuleSpecifier(statement: ts.Statement): ts.Expression | undefined {
+  if (ts.isImportDeclaration(statement)) {
+    if (statement.importClause?.isTypeOnly) return undefined;
+    if (
+      statement.importClause?.namedBindings &&
+      ts.isNamedImports(statement.importClause.namedBindings) &&
+      statement.importClause.namedBindings.elements.every((element) => element.isTypeOnly)
+    ) {
+      return undefined;
+    }
+    return statement.moduleSpecifier;
+  }
+  return ts.isExportDeclaration(statement) && !statement.isTypeOnly
+    ? statement.moduleSpecifier
+    : undefined;
+}
+
+function collectSystemOutputSources(input: {
+  checker: ts.TypeChecker;
+  entry: string;
+  interfaceSourceFiles: ReadonlyMap<string, ReadonlySet<string>>;
+  interfaces: readonly PlatformInterfaceIR[];
+  program: ts.Program;
+  programs: readonly ProgramIR[];
+  root: string;
+}): SystemOutputSources {
+  const output = new Map<string, ReadonlySet<string>>();
+  for (const program of input.programs) {
+    output.set(
+      program.id,
+      new Set([
+        canonicalSourceFile(input.entry),
+        ...transitiveLocalSources(
+          input.program,
+          input.checker,
+          input.root,
+          program.contributions.flatMap(({ implementation }) =>
+            programImplementationSourceFiles(implementation),
+          ),
+        ),
+      ]),
+    );
+  }
+  for (const interface_ of input.interfaces) {
+    output.set(
+      interface_.id,
+      new Set([
+        canonicalSourceFile(input.entry),
+        ...(input.interfaceSourceFiles.get(interface_.feature) ?? []),
+        ...input.programs
+          .filter(({ interface: owner }) => owner === interface_.feature)
+          .flatMap(({ id }) => [...(output.get(id) ?? [])]),
+      ]),
+    );
+  }
+  return Object.freeze(
+    Object.fromEntries(
+      [...output]
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([id, sources]) => [
+          id,
+          Object.freeze([...new Set([...sources].map(canonicalSourceFile))].sort()),
+        ]),
+    ),
+  );
+}
+
+function programImplementationSourceFiles(
+  implementation: ProgramContributionIR["implementation"],
+): readonly string[] {
+  if (implementation.kind === "none") return [];
+  if (implementation.kind === "source") return [implementation.span.file];
+  return [implementation.start.span.file, ...implementation.functions.map(({ span }) => span.file)];
+}
+
+function canonicalSourceFile(path: string): string {
+  try {
+    return realpathSync.native(path);
+  } catch {
+    return resolve(path);
+  }
 }
 
 function expressionDeclarations(
@@ -765,7 +866,7 @@ function extractProgram(
     start,
     Boolean(state || actions || components),
     factory && !expandedProgram,
-    location,
+    readableValue ?? location,
     expandedStart?.bindings,
     expandedStart?.types,
   );
@@ -996,17 +1097,13 @@ function lowerType(
             ? lowerType(checker, defined[0]!, at, active, path, substitutions)
             : {
                 kind: "union",
-                variants: defined.map((item, index) =>
-                  lowerType(checker, item, at, active, `${path}[${index}]`, substitutions),
-                ),
+                variants: lowerUnionVariants(checker, defined, at, active, path, substitutions),
               },
       };
     }
     return {
       kind: "union",
-      variants: type.types.map((item, index) =>
-        lowerType(checker, item, at, active, `${path}[${index}]`, substitutions),
-      ),
+      variants: lowerUnionVariants(checker, type.types, at, active, path, substitutions),
     };
   }
   if (active.has(type))
@@ -1123,6 +1220,19 @@ function lowerType(
   } finally {
     active.delete(type);
   }
+}
+
+function lowerUnionVariants(
+  checker: ts.TypeChecker,
+  types: readonly ts.Type[],
+  at: ts.Node,
+  active: Set<ts.Type>,
+  path: string,
+  substitutions: ReadonlyMap<ts.Type, ts.Type>,
+): readonly TypeIR[] {
+  return types
+    .map((item, index) => lowerType(checker, item, at, active, `${path}[${index}]`, substitutions))
+    .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
 }
 
 function isErrorType(type: ts.Type): boolean {

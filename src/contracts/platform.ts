@@ -1,5 +1,6 @@
 import type { SourceCompilerExtension } from "@/compiler/extension";
 import type { PlatformInterfaceIR, ProgramIR, SystemIR } from "@/compiler/ir";
+import type { SystemOutputSources } from "@/compiler/source";
 import type { PlatformContract } from "@/core/program";
 import type { UIChild, UIContract, UIDefinition, UITarget } from "@/core/ui/language";
 import type {
@@ -18,9 +19,16 @@ export type PlatformInput<Platform extends PlatformContract = PlatformContract> 
   platform: Platform["Name"];
 }>;
 
+export type SystemCompilationChange = Readonly<{
+  source: string;
+  outputs: readonly string[];
+}>;
+
 export type SystemCompilationRevision = Readonly<{
   ir: SystemIR;
   presentationSources: ReadonlySet<string>;
+  outputSources: SystemOutputSources;
+  change?: SystemCompilationChange;
 }>;
 
 /** The one incremental semantic compiler shared by every development adapter. */

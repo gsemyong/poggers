@@ -1,7 +1,7 @@
 import { realpathSync, statSync } from "node:fs";
-import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { isAbsolute, relative, resolve } from "node:path";
 
-import { createServer, defaultServerConditions, type Plugin, type ViteDevServer } from "vite";
+import { createServer, defaultServerConditions, type Plugin } from "vite";
 
 import {
   planWebRouteLoaders,
@@ -87,22 +87,20 @@ export async function developServerPrograms(
     if (fileRevision && observedRevisions.get(path) === fileRevision) return;
     if (fileRevision) observedRevisions.set(path, fileRevision);
     reload = reload.then(async () => {
-      const affectedFiles = affectedModuleFiles(vite, file);
       let nextPrograms: readonly ProgramIR[];
       let candidate: System<SystemContract>;
       try {
-        const nextIR = input.revisions.compile(file).ir;
+        const compilation = input.revisions.compile(file);
+        const nextIR = compilation.ir;
         nextPrograms = selectSystemOutputs(nextIR, input.app).programs.filter(
           ({ environment }) => environment.platform === "server",
         );
         const affected = affectedProgramNames(
           activePrograms,
           nextPrograms,
-          affectedFiles,
-          input.directory,
-          input.system,
           nextIR.system.name,
           nextIR,
+          new Set(compilation.change?.outputs ?? []),
         );
         if (!affected.size) return;
         vite.config.logger.info(
@@ -297,11 +295,9 @@ async function replaceDevelopmentPrograms(input: {
 function affectedProgramNames(
   active: ReadonlyMap<string, ActiveServerProgram>,
   programs: readonly ProgramIR[],
-  affectedFiles: ReadonlySet<string>,
-  directory: string,
-  system: string,
   appName: string,
   ir: SystemIR,
+  affectedOutputs: ReadonlySet<string>,
 ): ReadonlySet<string> {
   const previousNames = programNames([...active.values()].map(({ program }) => program));
   const nextNames = programNames(programs);
@@ -319,6 +315,7 @@ function affectedProgramNames(
     const after = next.get(name)!;
     if (
       !before ||
+      affectedOutputs.has(after.id) ||
       JSON.stringify(before) !== JSON.stringify(after) ||
       JSON.stringify(active.get(name)?.loaderPlan) !==
         JSON.stringify(planWebRouteLoaders(after, ir))
@@ -326,38 +323,8 @@ function affectedProgramNames(
       affected.add(name);
       continue;
     }
-    if (
-      after.contributions.some(({ span }) =>
-        spanFileCandidates(directory, system, span.file).some((file) => affectedFiles.has(file)),
-      )
-    ) {
-      affected.add(name);
-    }
   }
   return affected;
-}
-
-function spanFileCandidates(directory: string, system: string, file: string): readonly string[] {
-  return unique([
-    canonicalPath(resolve(directory, file)),
-    canonicalPath(resolve(dirname(system), file)),
-  ]);
-}
-
-function affectedModuleFiles(vite: ViteDevServer, changed: string): ReadonlySet<string> {
-  const files = new Set<string>([canonicalPath(changed)]);
-  const pending = [...(vite.moduleGraph.getModulesByFile(changed) ?? [])];
-  const visited = new Set(pending);
-  while (pending.length) {
-    const module = pending.pop()!;
-    if (module.file) files.add(canonicalPath(module.file));
-    for (const importer of module.importers) {
-      if (visited.has(importer)) continue;
-      visited.add(importer);
-      pending.push(importer);
-    }
-  }
-  return files;
 }
 
 function canonicalPath(file: string): string {

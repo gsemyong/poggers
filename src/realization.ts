@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 
 import {
@@ -14,6 +14,7 @@ import {
   type DevelopmentSession,
   type PlatformAdapterImplementation,
   type ProductionArtifacts,
+  type SystemCompilationRevision,
   type SystemRevisionSource,
 } from "@/contracts/platform";
 
@@ -115,12 +116,13 @@ export async function developSystem<Adapter extends PlatformAdapterImplementatio
   };
 }
 
-function createSystemRevisionSource(
+/** @internal Retains one compiler and identifies the exact outputs affected by each edit. */
+export function createSystemRevisionSource(
   system: string,
   extensions: Parameters<typeof createSystemCompiler>[1],
 ): SystemRevisionSource {
   const compiler = createSystemCompiler(system, extensions);
-  let current = compiler.compile();
+  let current: SystemCompilationRevision = compiler.compile();
   const signatures = new Map<string, string>();
   return {
     get current() {
@@ -134,11 +136,73 @@ function createSystemRevisionSource(
         signature = "<missing>";
       }
       if (signatures.get(changedFile) === signature) return current;
-      current = compiler.compile(changedFile);
+      const previous = current;
+      const compiled = compiler.compile(changedFile);
+      current = {
+        ...compiled,
+        change: {
+          source: canonicalSourceFile(changedFile),
+          outputs: affectedOutputs(previous, compiled, changedFile),
+        },
+      };
       signatures.set(changedFile, signature);
       return current;
     },
   };
+}
+
+function affectedOutputs(
+  previous: SystemCompilationRevision,
+  current: SystemCompilationRevision,
+  changedFile: string,
+): readonly string[] {
+  const source = canonicalSourceFile(changedFile);
+  const identities = new Set([
+    ...Object.keys(previous.outputSources),
+    ...Object.keys(current.outputSources),
+  ]);
+  const affected = new Set<string>();
+  for (const identity of identities) {
+    if (
+      previous.outputSources[identity]?.includes(source) ||
+      current.outputSources[identity]?.includes(source) ||
+      outputMeaning(previous.ir, identity) !== outputMeaning(current.ir, identity)
+    ) {
+      affected.add(identity);
+    }
+  }
+  if (JSON.stringify(previous.ir.system) !== JSON.stringify(current.ir.system)) {
+    identities.forEach((identity) => affected.add(identity));
+  }
+  const programs = new Set([...affected].filter((identity) => identity.startsWith("program/")));
+  for (const ir of [previous.ir, current.ir]) {
+    for (const program of ir.programs) {
+      if (!programs.has(program.id) || !program.interface) continue;
+      const interface_ = ir.interfaces.find(({ feature }) => feature === program.interface);
+      if (interface_) affected.add(interface_.id);
+    }
+  }
+  return Object.freeze([...affected].sort());
+}
+
+function outputMeaning(ir: SystemIR, identity: string): string {
+  if (identity.startsWith("program/")) {
+    return JSON.stringify(ir.programs.find(({ id }) => id === identity));
+  }
+  const interface_ = ir.interfaces.find(({ id }) => id === identity);
+  if (!interface_) return "undefined";
+  return JSON.stringify({
+    interface: interface_,
+    presentations: ir.presentations.filter(({ interface: owner }) => owner === interface_.feature),
+  });
+}
+
+function canonicalSourceFile(path: string): string {
+  try {
+    return realpathSync.native(path);
+  } catch {
+    return resolve(path);
+  }
 }
 
 /** Builds every required Platform through the canonical production path. */

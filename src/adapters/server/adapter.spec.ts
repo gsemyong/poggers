@@ -7,7 +7,8 @@ import { resolve } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 
 import { createServerPlatformAdapter } from "@/adapters/server/adapter";
-import { createSystemCompiler, compileSystem } from "@/compiler/source";
+import { compileSystem } from "@/compiler/source";
+import { createSystemRevisionSource } from "@/realization";
 
 const temporaryDirectories: string[] = [];
 
@@ -168,17 +169,7 @@ async function createSplitFixture() {
 }
 
 function revisionSource(system: string) {
-  const compiler = createSystemCompiler(system);
-  let current = compiler.compile();
-  return {
-    get current() {
-      return current;
-    },
-    compile(changedFile: string) {
-      current = compiler.compile(changedFile);
-      return current;
-    },
-  };
+  return createSystemRevisionSource(system, []);
 }
 
 function twoProgramSource(): string {

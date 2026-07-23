@@ -4,14 +4,21 @@ import { resolve } from "node:path";
 
 import { afterEach, describe, expect, test } from "vitest";
 
+import { webCompilerExtension } from "@/adapters/web/compiler";
 import type { SourceCompilerExtension } from "@/compiler/extension";
+import { serializeSystemIR } from "@/compiler/ir";
 import { linkProgram } from "@/compiler/linker";
 import type {
   PlatformDevelopmentInput,
   PlatformProductionInput,
   PlatformAdapterImplementation,
 } from "@/contracts/platform";
-import { buildSystem, developSystem, resolveSystemRealization } from "@/realization";
+import {
+  buildSystem,
+  createSystemRevisionSource,
+  developSystem,
+  resolveSystemRealization,
+} from "@/realization";
 
 const directories: string[] = [];
 
@@ -112,6 +119,58 @@ describe("System realization", () => {
     await running[Symbol.asyncDispose]();
     expect(events.slice(-2)).toEqual(["dispose:web", "dispose:server"]);
   });
+
+  test("identifies exact shared and App-private outputs from one retained graph", async () => {
+    const fixture = await incrementalFixture();
+    const revisions = createSystemRevisionSource(fixture.system, []);
+
+    expect(
+      revisions.current.outputSources["interface/operations.web"]?.some((path) =>
+        path.endsWith("/shared-ui.ts"),
+      ),
+    ).toBe(true);
+    expect(
+      revisions.current.outputSources["interface/operations.web"]?.some((path) =>
+        path.endsWith("/customer.ts"),
+      ),
+    ).toBe(false);
+
+    await writeFile(
+      fixture.operations,
+      fixture.operationsSource.replace('label: "operations"', 'label: "operations-2"'),
+    );
+    expect(revisions.compile(fixture.operations).change?.outputs).toEqual([
+      "interface/operations.web",
+      "program/operations.web.operations.web.browser",
+    ]);
+
+    await writeFile(fixture.sharedUI, 'export const marker = "shared-2";\n');
+    expect(revisions.compile(fixture.sharedUI).change?.outputs).toEqual([
+      "interface/customer.web",
+      "interface/operations.web",
+      "program/customer.web.customer.web.browser",
+      "program/operations.web.operations.web.browser",
+    ]);
+
+    await writeFile(
+      fixture.shared,
+      fixture.sharedSource.replace('label: "shared"', 'label: "shared-2"'),
+    );
+    expect(revisions.compile(fixture.shared).change?.outputs).toEqual(["program/api"]);
+  });
+
+  test("keeps unchanged multi-App meaning stable across retained compilations", () => {
+    const system = resolve(import.meta.dirname, "../examples/authenticated-crud/src/system.ts");
+    const revisions = createSystemRevisionSource(system, [webCompilerExtension]);
+    const initial = serializeSystemIR(revisions.current.ir);
+
+    const revision = revisions.compile(
+      resolve(import.meta.dirname, "../examples/authenticated-crud/src/apps/operations/app.tsx"),
+    );
+
+    expect(serializeSystemIR(revision.ir)).toBe(initial);
+    expect(revision.change?.outputs).toEqual([]);
+  }, 30_000);
 
   test("disposes every successful owner once when concurrent startup fails", async () => {
     const directory = await fixture();
@@ -260,4 +319,85 @@ export default createSystem({
 `,
   );
   return directory;
+}
+
+async function incrementalFixture(): Promise<{
+  system: string;
+  shared: string;
+  sharedUI: string;
+  operations: string;
+  customer: string;
+  sharedSource: string;
+  operationsSource: string;
+}> {
+  const directory = await mkdtemp(resolve(tmpdir(), "poggers-incremental-"));
+  directories.push(directory);
+  const source = resolve(directory, "src");
+  await mkdir(source, { recursive: true });
+  const contracts = `
+export declare const featureContract: unique symbol;
+export type Feature<Contract> = Readonly<{ readonly [featureContract]?: Contract }>;
+export function createFeature<Contract>(definition: object): Feature<Contract> {
+  return definition as Feature<Contract>;
+}
+export function createSystem(definition: object): object {
+  return definition;
+}
+export type Program<Environment, Contract extends object = {}> = Readonly<
+  Contract & { Environment: Environment }
+>;
+export type Server = { Name: "server"; Platform: { Name: "server" } };
+export type Browser = { Name: "browser-main"; Platform: { Name: "web" } };
+`;
+  const sharedSource = `
+import { createFeature, type Program, type Server } from "./contracts";
+type Shared = { Programs: { api: Program<Server, { State: { label: "shared" } }> } };
+export const shared = createFeature<Shared>({ programs: { api: {} } });
+`;
+  const appSource = (name: "operations" | "customer") => `
+import { createFeature, type Browser, type Program } from "./contracts";
+import { marker } from "./shared-ui";
+void marker;
+type Web = {
+  Interface: { Platform: { Name: "web" } };
+  Programs: {
+    "${name}.web.browser": Program<Browser, { State: { label: "${name}" } }>;
+  };
+};
+type App = { App: true; Features: { web: Web } };
+const web = createFeature<Web>({
+  programs: { "${name}.web.browser": {} },
+  presentation: { parameters: {}, create() { return {}; } },
+});
+export const ${name} = createFeature<App>({ features: { web } });
+`;
+  const operationsSource = appSource("operations");
+  const files = {
+    system: resolve(source, "system.ts"),
+    shared: resolve(source, "shared.ts"),
+    sharedUI: resolve(source, "shared-ui.ts"),
+    operations: resolve(source, "operations.ts"),
+    customer: resolve(source, "customer.ts"),
+  };
+  await Promise.all([
+    writeFile(resolve(source, "contracts.ts"), contracts),
+    writeFile(files.shared, sharedSource),
+    writeFile(files.sharedUI, 'export const marker = "shared";\n'),
+    writeFile(files.operations, operationsSource),
+    writeFile(files.customer, appSource("customer")),
+    writeFile(
+      files.system,
+      `
+import { createSystem } from "./contracts";
+import { customer } from "./customer";
+import { operations } from "./operations";
+import { shared } from "./shared";
+export default createSystem({
+  metadata: { name: "Company" },
+  features: { shared, operations, customer },
+});
+`,
+    ),
+  ]);
+  return { ...files, sharedSource, operationsSource };
 }

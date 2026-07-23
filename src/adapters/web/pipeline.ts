@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
 import { createHash, randomUUID } from "node:crypto";
-import { realpathSync, rmSync } from "node:fs";
+import { realpathSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import type { ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
@@ -278,7 +278,7 @@ export async function buildWebInterface(options: {
       work,
       options.interface,
       options.development ?? false,
-      { ir: options.ir, presentationSources: new Set() },
+      { ir: options.ir, presentationSources: new Set(), outputSources: {} },
     );
     const contract = webInterfaceContract(prepared.ir, prepared.interface);
     const compiledComponents = collectCompiledWebComponents(prepared.ir, contract.uiProgram);
@@ -512,7 +512,9 @@ export async function runWebInterface(options: {
   strictPort?: boolean;
 }): Promise<DevelopmentServer> {
   const paths = resolveSystem(options.directory);
-  const work = await realpath(await mkdtemp(resolve(tmpdir(), "poggers-web-dev-")));
+  const workspace = webDevelopmentWorkspace(paths.directory, options.interface);
+  await mkdir(workspace, { recursive: true });
+  const work = await realpath(workspace);
   const prepared = await prepareInterface(
     paths,
     work,
@@ -525,6 +527,7 @@ export async function runWebInterface(options: {
   );
   const interfaceState: PreparedInterfaceState = { current: prepared };
   await writeFile(resolve(work, "index.html"), htmlSource("/browser.generated.ts"));
+  await pruneGeneratedSources(work, prepared);
 
   const server = await createServer({
     ...viteConfiguration(paths, true, prepared.ir),
@@ -559,20 +562,57 @@ export async function runWebInterface(options: {
   ]);
   const address = server.httpServer?.address();
   const port = typeof address === "object" && address ? address.port : (options.port ?? 3000);
-  const cleanupOnExit = () => rmSync(work, { recursive: true, force: true });
-  process.once("exit", cleanupOnExit);
 
   return {
     port,
     async stop() {
-      process.off("exit", cleanupOnExit);
       if (server.httpServer && "closeAllConnections" in server.httpServer) {
         server.httpServer.closeAllConnections();
       }
       await server.close();
-      await removeWorkDirectory(work);
     },
   };
+}
+
+/** @internal Returns the stable generated-source and Vite cache owner for one interface. */
+export function webDevelopmentWorkspace(directory: string, interfaceId: string): string {
+  const root = canonicalSourcePath(directory);
+  const readable =
+    interfaceId
+      .toLowerCase()
+      .replaceAll(/[^a-z0-9]+/g, "-")
+      .replaceAll(/^-|-$/g, "")
+      .slice(0, 48) || "interface";
+  const identity = createHash("sha256")
+    .update(`${root}\0${interfaceId}`)
+    .digest("hex")
+    .slice(0, 12);
+  return resolve(root, "node_modules/.cache/kit/web", `${readable}-${identity}`);
+}
+
+async function pruneGeneratedSources(work: string, prepared: PreparedInterface): Promise<void> {
+  const retained = new Set(
+    [
+      prepared.candidate,
+      prepared.documentEvaluator,
+      prepared.entry,
+      prepared.serviceWorker,
+      ...prepared.routeEntries.map(({ source }) => source),
+      ...prepared.workers.map(({ source }) => source),
+    ]
+      .filter((path): path is string => Boolean(path))
+      .map((path) => resolve(path)),
+  );
+  await Promise.all(
+    (await readdir(work, { withFileTypes: true }))
+      .filter(
+        (entry) =>
+          entry.isFile() &&
+          entry.name.endsWith(".generated.ts") &&
+          !retained.has(resolve(work, entry.name)),
+      )
+      .map((entry) => rm(resolve(work, entry.name), { force: true })),
+  );
 }
 
 async function removeWorkDirectory(work: string): Promise<void> {
@@ -1182,6 +1222,10 @@ function presentationContractPlugin(
           ? "presentation"
           : "full";
         const compilation = revisions.compile(context.file);
+        if (!compilation.change?.outputs.includes(prepared.interface)) {
+          modules = [];
+          return;
+        }
         prepared = await prepareInterface(
           paths,
           work,

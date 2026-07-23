@@ -329,6 +329,21 @@ describe("System compiler", () => {
     expect(serializeSystemIR(second.ir)).toBe(serializeSystemIR(first.ir));
   });
 
+  test("reuses the semantic graph while reading an edited source file", async () => {
+    const source = callbackFactoryApplicationSource();
+    const entry = await fixture(source);
+    const compiler = createSystemCompiler(entry);
+    const first = compiler.compile();
+
+    await writeFile(
+      entry,
+      source.replace("defineServerFeature<Tasks>(0)", "defineServerFeature<Tasks>(1)"),
+    );
+    const second = compiler.compile(entry);
+
+    expect(serializeSystemIR(second.ir)).not.toBe(serializeSystemIR(first.ir));
+  });
+
   test("assigns compiled Presentation meaning to its exact interface output", async () => {
     const entry = await fixture(
       `import { clean } from "./presentation";\n${componentApplicationSource().replace(

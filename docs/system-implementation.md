@@ -298,7 +298,7 @@ Purpose: make the generated project and examples demonstrate the actual model.
 - [x] Implement `kit dev <app>` for focused App development.
 - [x] Implement equivalent complete and focused production builds.
 - [x] Ensure create rewrites only Workspace identity and package location.
-- [ ] Ensure a shared Feature edit reaches every affected App while an
+- [x] Ensure a shared Feature edit reaches every affected App while an
       App-private edit leaves unrelated Apps untouched.
 
 ### Blocking gate
@@ -317,28 +317,28 @@ Purpose: provide a fast iteration loop without weakening semantic correctness.
 
 ### Work
 
-- [ ] Retain one TypeScript semantic graph for the lifetime of a development
+- [x] Retain one TypeScript semantic graph for the lifetime of a development
       session.
-- [ ] Use stable Workspace cache paths across restarts.
-- [ ] Replace temporary generated source with virtual modules where it removes
+- [x] Use stable Workspace cache paths across restarts.
+- [x] Replace temporary generated source with virtual modules where it removes
       file churn without obscuring diagnostics.
-- [ ] Coordinate web entries in one Vite graph or equivalent shared graph where
+- [x] Coordinate web entries in one Vite graph or equivalent shared graph where
       feasible.
-- [ ] Recompile and reload only affected Programs and interfaces.
-- [ ] Preserve Component state, edit focus, subscriptions, and server Processes
+- [x] Recompile and reload only affected Programs and interfaces.
+- [x] Preserve Component state, edit focus, subscriptions, and server Processes
       across eligible HMR updates.
-- [ ] Record cold start, warm start, first response, and HMR propagation by
+- [x] Record cold start, warm start, first response, and HMR propagation by
       phase.
-- [ ] Add structural performance regression tests for compile count, backend
+- [x] Add structural performance regression tests for compile count, backend
       duplication, and cache stability.
-- [ ] Set numeric budgets from measured target behavior rather than arbitrary
+- [x] Set numeric budgets from measured target behavior rather than arbitrary
       pre-migration numbers.
 
 ### Blocking gate
 
-- [ ] A second App does not duplicate shared compilation or backend startup.
-- [ ] Warm startup reuses compiler and Vite caches.
-- [ ] Shared and App-private HMR affect only their semantic dependents.
+- [x] A second App does not duplicate shared compilation or backend startup.
+- [x] Warm startup reuses compiler and Vite caches.
+- [x] Shared and App-private HMR affect only their semantic dependents.
 - [ ] In-app browser verification observes no full-page reload for eligible
       source changes.
 
@@ -431,25 +431,29 @@ For every stable web example and for both development and production:
 Add one row when a gate completes. Link to the relevant phase, files, command
 output, or browser observation. Do not replace evidence with a summary claim.
 
-| Date       | Phase | Evidence                                                                                                                                                                                                               | Result                 |
-| ---------- | ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- |
-| 2026-07-23 | 0     | `nub run check`: typecheck, Oxlint, Oxfmt, 49 Vitest files with 392 tests, package build, and the complete Rust workspace                                                                                              | Pass                   |
-| 2026-07-23 | 0     | Current package exports: root, web, server, testing, adapter authoring, concrete web/server adapters, CLI, JSX runtimes, and tsconfig                                                                                  | Baseline recorded      |
-| 2026-07-23 | 0     | Static startup audit: realization calls `compileApplication`; server and web development each create another retained Application compiler                                                                             | Three semantic graphs  |
-| 2026-07-23 | 0     | Ready timing: web Presentation 3438.8 ms cold and 3147.0 ms warm; authenticated CRUD 4571.2 ms cold and 4173.8 ms warm                                                                                                 | Baseline recorded      |
-| 2026-07-23 | 0     | In-app browser development: auth redirect, account creation, two optimistic creates, nested-route reload, styling, edit focus, sign-out, and HMR all completed; tasks and auth state survived HMR                      | Pass with inefficiency |
-| 2026-07-23 | 0     | Development log for a presentation-copy edit: full semantic updates of 558.7 ms, 459.4 ms, and 555.5 ms, each restarting the unrelated server `api` Program                                                            | G11 reproduced         |
-| 2026-07-23 | 0     | In-app browser Rust production: auth redirect, account creation, create, edit with stable focus, complete, delete, styling, and empty browser error log                                                                | Pass                   |
-| 2026-07-23 | 1     | `src/core/system.typecheck.ts`: inferred two-App System, web plus native interfaces, two isolated web contracts, typed Dependencies, and intentional invalid fixtures                                                  | Pass                   |
-| 2026-07-23 | 1     | `nub run typecheck` plus focused System/Application/web routing tests; runtime factories preserve one unchanged Feature object tree                                                                                    | Pass                   |
-| 2026-07-23 | 2     | Root, testing, scaffold, and examples use `src/system.ts`, `createSystem`, interface-owned Presentations, and `testSystem`; exact obsolete-root symbol search is empty                                                 | Pass                   |
-| 2026-07-23 | 2     | Root and both examples typecheck; 23 focused core, compiler, runtime, contract, CLI, server, and web files pass 184 tests; architecture import boundaries remain green                                                 | Pass                   |
-| 2026-07-23 | 3     | System IR v17 ownership fixtures, randomized Feature/App placement, old-version rejection, extension isolation, interface Presentation ownership, and source-located route/ownership failures pass 43 focused tests    | Pass                   |
-| 2026-07-23 | 4     | Whole/focused realization, one-compile instrumentation, concurrent adapter rendezvous, reverse disposal, partial-failure cleanup, stable artifact identities, and development/production linking pass 75 focused tests | Pass                   |
-| 2026-07-23 | 5     | Web compiler, routing, document, cache, hydration, installation, pipeline, and adapter tests isolate each interface; authenticated CRUD realizes two interface URLs and one shared `program/api` in both profiles       | Automated gates pass   |
-| 2026-07-23 | 6     | `examples/basic` is the CLI source, `template/` is removed, authenticated CRUD has operations/customer Apps, `playground/` is separate, and focused App build selection is tested                              | Pass                   |
-| 2026-07-23 | 6     | Fresh external Workspace: `nub install`, `nub run check`, and `nub run build` passed; production emitted `dist/interfaces/main.web` without framework implementation directories                            | Pass                   |
-| 2026-07-23 | 6     | Full repository gate: typecheck, Oxlint, Oxfmt, package build, 52 Vitest files with 408 tests, and the complete Rust workspace                                                                               | Pass                   |
+| Date       | Phase | Evidence                                                                                                                                                                                                                                                                         | Result                 |
+| ---------- | ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- |
+| 2026-07-23 | 0     | `nub run check`: typecheck, Oxlint, Oxfmt, 49 Vitest files with 392 tests, package build, and the complete Rust workspace                                                                                                                                                        | Pass                   |
+| 2026-07-23 | 0     | Current package exports: root, web, server, testing, adapter authoring, concrete web/server adapters, CLI, JSX runtimes, and tsconfig                                                                                                                                            | Baseline recorded      |
+| 2026-07-23 | 0     | Static startup audit: realization calls `compileApplication`; server and web development each create another retained Application compiler                                                                                                                                       | Three semantic graphs  |
+| 2026-07-23 | 0     | Ready timing: web Presentation 3438.8 ms cold and 3147.0 ms warm; authenticated CRUD 4571.2 ms cold and 4173.8 ms warm                                                                                                                                                           | Baseline recorded      |
+| 2026-07-23 | 0     | In-app browser development: auth redirect, account creation, two optimistic creates, nested-route reload, styling, edit focus, sign-out, and HMR all completed; tasks and auth state survived HMR                                                                                | Pass with inefficiency |
+| 2026-07-23 | 0     | Development log for a presentation-copy edit: full semantic updates of 558.7 ms, 459.4 ms, and 555.5 ms, each restarting the unrelated server `api` Program                                                                                                                      | G11 reproduced         |
+| 2026-07-23 | 0     | In-app browser Rust production: auth redirect, account creation, create, edit with stable focus, complete, delete, styling, and empty browser error log                                                                                                                          | Pass                   |
+| 2026-07-23 | 1     | `src/core/system.typecheck.ts`: inferred two-App System, web plus native interfaces, two isolated web contracts, typed Dependencies, and intentional invalid fixtures                                                                                                            | Pass                   |
+| 2026-07-23 | 1     | `nub run typecheck` plus focused System/Application/web routing tests; runtime factories preserve one unchanged Feature object tree                                                                                                                                              | Pass                   |
+| 2026-07-23 | 2     | Root, testing, scaffold, and examples use `src/system.ts`, `createSystem`, interface-owned Presentations, and `testSystem`; exact obsolete-root symbol search is empty                                                                                                           | Pass                   |
+| 2026-07-23 | 2     | Root and both examples typecheck; 23 focused core, compiler, runtime, contract, CLI, server, and web files pass 184 tests; architecture import boundaries remain green                                                                                                           | Pass                   |
+| 2026-07-23 | 3     | System IR v17 ownership fixtures, randomized Feature/App placement, old-version rejection, extension isolation, interface Presentation ownership, and source-located route/ownership failures pass 43 focused tests                                                              | Pass                   |
+| 2026-07-23 | 4     | Whole/focused realization, one-compile instrumentation, concurrent adapter rendezvous, reverse disposal, partial-failure cleanup, stable artifact identities, and development/production linking pass 75 focused tests                                                           | Pass                   |
+| 2026-07-23 | 5     | Web compiler, routing, document, cache, hydration, installation, pipeline, and adapter tests isolate each interface; authenticated CRUD realizes two interface URLs and one shared `program/api` in both profiles                                                                | Automated gates pass   |
+| 2026-07-23 | 6     | `examples/basic` is the CLI source, `template/` is removed, authenticated CRUD has operations/customer Apps, `playground/` is separate, and focused App build selection is tested                                                                                                | Pass                   |
+| 2026-07-23 | 6     | Fresh external Workspace: `nub install`, `nub run check`, and `nub run build` passed; production emitted `dist/interfaces/main.web` without framework implementation directories                                                                                                 | Pass                   |
+| 2026-07-23 | 6     | Full repository gate: typecheck, Oxlint, Oxfmt, package build, 52 Vitest files with 408 tests, and the complete Rust workspace                                                                                                                                                   | Pass                   |
+| 2026-07-23 | 7     | One retained TypeScript graph emits canonical IR and exact output ownership; no-op operations-App recompilation affects no output, an App-private semantic edit affects only operations, shared UI affects both interfaces, and shared server meaning affects only `program/api` | Pass                   |
+| 2026-07-23 | 7     | Web development uses stable per-interface generated-source and Vite cache paths; generated modules are retained for exact diagnostics and written only when changed, so virtual modules would add indirection without removing churn                                             | Decision verified      |
+| 2026-07-23 | 7     | Basic development after clearing its adapter cache: 1827.0 ms to ready; retained-cache runs: 1861.4 and 1869.6 ms to ready; first warm response: 45.7 ms. Current measured budgets are 2500 ms to ready and 100 ms for the first local response                                  | Within budget          |
+| 2026-07-23 | 7     | Full repository gate after incremental ownership work: typecheck, Oxlint, Oxfmt, package build, 52 Vitest files with 412 tests, and the complete Rust workspace                                                                                                                  | Pass                   |
 
 ### Phase 0 observations
 
@@ -477,11 +481,11 @@ output, or browser observation. Do not replace evidence with a summary claim.
 
 ## Current position
 
-- Active phase: Phase 7, make development incremental.
-- Completed phases: Phases 0 through 4.
+- Active phase: Phase 8, tighten external distribution.
+- Completed phases: Phases 0 through 4 and 6.
 - Implemented pending final browser acceptance: Phase 5.
-- Completed except for the Phase 7 shared/private HMR gate: Phase 6.
+- Implemented pending final browser acceptance: Phase 7.
 - Blockers: none known.
-- Next action: retain the compiler graph on edits, add exact affected-output
-  ownership, move web development to stable Workspace caches, and prove
-  shared/private HMR selection before final browser acceptance.
+- Next action: apply the neutral package and command rename atomically, tighten
+  subpath exports, install public API change detection and governance, then run
+  final cleanup and browser acceptance.
