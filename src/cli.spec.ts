@@ -102,7 +102,7 @@ describe("project template", () => {
     ).toBe(0);
 
     const modules = resolve(target, "node_modules");
-    await mkdir(resolve(modules, "@duction"), { recursive: true });
+    await mkdir(modules, { recursive: true });
     await symlink(resolve(import.meta.dirname, ".."), resolve(modules, "kit"), "dir");
     await mkdir(resolve(modules, "@types"), { recursive: true });
     await symlink(
@@ -344,7 +344,7 @@ async function expectCanonicalSourceRoot(source: string): Promise<void> {
     if (file.endsWith(".spec.ts") && file !== "system.spec.ts") continue;
     const contents = await readFile(resolve(source, file), "utf8");
     expect(contents, `${file} imports private framework realization code`).not.toMatch(
-      /from\s+["'](?:@\/(?:adapters|contracts|core)\/|@duction\/kit\/adapters\/)/,
+      /from\s+["'](?:@\/(?:adapters|contracts|core)\/|kit\/adapters\/)/,
     );
     expect(contents, `${file} names a backend implementation detail`).not.toMatch(
       /\b(?:buildServerProgram|compileSystem|createNodeHost|startServerProgram)\b/,

@@ -448,26 +448,26 @@ function kitAliases() {
   const extension = import.meta.filename.endsWith(".ts") ? ".ts" : ".js";
   return [
     {
-      find: /^@duction\/kit\/jsx-dev-runtime$/,
+      find: /^kit\/jsx-dev-runtime$/,
       replacement: resolve(source, `jsx/development${extension}`),
     },
     {
-      find: /^@duction\/kit\/jsx-runtime$/,
+      find: /^kit\/jsx-runtime$/,
       replacement: resolve(source, `jsx/runtime${extension}`),
     },
     {
-      find: /^@duction\/kit\/adapters\/server$/,
+      find: /^kit\/adapters\/server$/,
       replacement: resolve(source, `adapters/server/adapter${extension}`),
     },
     {
-      find: /^@duction\/kit\/server$/,
+      find: /^kit\/server$/,
       replacement: resolve(source, `platforms/server/platform${extension}`),
     },
     {
-      find: /^@duction\/kit\/web$/,
+      find: /^kit\/web$/,
       replacement: resolve(source, `platforms/web/platform${extension}`),
     },
-    { find: /^@duction\/kit$/, replacement: resolve(source, `index${extension}`) },
+    { find: /^kit$/, replacement: resolve(source, `index${extension}`) },
   ];
 }
 

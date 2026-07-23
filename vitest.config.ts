@@ -29,43 +29,43 @@ export default defineConfig({
         replacement: `${resolve(import.meta.dirname, "src")}/$1`,
       },
       {
-        find: /^@duction\/kit\/adapter$/,
+        find: /^kit\/adapter$/,
         replacement: resolve(import.meta.dirname, "src/contracts/platform.ts"),
       },
       {
-        find: /^@duction\/kit\/adapters\/server$/,
+        find: /^kit\/adapters\/server$/,
         replacement: resolve(import.meta.dirname, "src/adapters/server/adapter.ts"),
       },
       {
-        find: /^@duction\/kit\/adapters\/web$/,
+        find: /^kit\/adapters\/web$/,
         replacement: resolve(import.meta.dirname, "src/adapters/web/adapter.ts"),
       },
       {
-        find: /^@duction\/kit\/server$/,
+        find: /^kit\/server$/,
         replacement: resolve(import.meta.dirname, "src/platforms/server/platform.ts"),
       },
       {
-        find: /^@duction\/kit\/testing$/,
+        find: /^kit\/testing$/,
         replacement: resolve(import.meta.dirname, "src/testing.ts"),
       },
       {
-        find: /^@duction\/kit\/web$/,
+        find: /^kit\/web$/,
         replacement: resolve(import.meta.dirname, "src/platforms/web/platform.ts"),
       },
       {
-        find: /^@duction\/kit\/ui$/,
+        find: /^kit\/ui$/,
         replacement: resolve(import.meta.dirname, "src/ui.ts"),
       },
       {
-        find: /^@duction\/kit\/jsx-dev-runtime$/,
+        find: /^kit\/jsx-dev-runtime$/,
         replacement: resolve(import.meta.dirname, "src/jsx/development.ts"),
       },
       {
-        find: /^@duction\/kit\/jsx-runtime$/,
+        find: /^kit\/jsx-runtime$/,
         replacement: resolve(import.meta.dirname, "src/jsx/runtime.ts"),
       },
       {
-        find: /^@duction\/kit$/,
+        find: /^kit$/,
         replacement: resolve(import.meta.dirname, "src/index.ts"),
       },
     ],

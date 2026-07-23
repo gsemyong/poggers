@@ -816,18 +816,18 @@ function kitAliases() {
   const extension = moduleExtension();
   return [
     {
-      find: /^@duction\/kit\/jsx-dev-runtime$/,
+      find: /^kit\/jsx-dev-runtime$/,
       replacement: resolve(kit, `jsx/development${extension}`),
     },
     {
-      find: /^@duction\/kit\/jsx-runtime$/,
+      find: /^kit\/jsx-runtime$/,
       replacement: resolve(kit, `jsx/runtime${extension}`),
     },
     {
-      find: /^@duction\/kit\/web$/,
+      find: /^kit\/web$/,
       replacement: resolve(kit, `platforms/web/platform${extension}`),
     },
-    { find: /^@duction\/kit$/, replacement: resolve(kit, `index${extension}`) },
+    { find: /^kit$/, replacement: resolve(kit, `index${extension}`) },
   ];
 }
 
