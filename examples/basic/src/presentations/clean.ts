@@ -1,4 +1,4 @@
-import type { ConfiguredWebPresentation, WebPresentation, WebStyle } from "@duction/kit/web";
+import type { ConfiguredWebPresentation, WebPresentation, WebStyle } from "kit/web";
 
 import type { Web } from "@/apps/main/app";
 

@@ -1,5 +1,5 @@
 {
-  "name": "@duction/kit",
+  "name": "kit",
   "version": "0.0.0",
   "private": true,
   "description": "A portable TypeScript product language for programs, dependencies, and user interfaces.",
@@ -90,6 +90,7 @@
     "fmt": "oxfmt",
     "fmt:check": "oxfmt --check",
     "lint": "oxlint --disable-nested-config src scripts examples playground vitest.config.ts",
+    "release": "nub scripts/release.ts",
     "test": "nub run build && nub run api:check && vitest run && cargo test --manifest-path src/adapters/server/production/Cargo.toml --workspace",
     "check": "nub run typecheck && nub run lint && nub run fmt:check && nub run test"
   },

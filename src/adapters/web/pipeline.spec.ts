@@ -348,21 +348,21 @@ describe("web asset manifest", () => {
           compilerOptions: {
             paths: {
               "@/*": ["./src/*"],
-              "@duction/kit": [resolve(import.meta.dirname, "../../..", "dist/source/index.ts")],
-              "@duction/kit/jsx-runtime": [
+              kit: [resolve(import.meta.dirname, "../../..", "dist/source/index.ts")],
+              "kit/jsx-runtime": [
                 resolve(import.meta.dirname, "../../..", "dist/source/jsx/runtime.ts"),
               ],
-              "@duction/kit/jsx-dev-runtime": [
+              "kit/jsx-dev-runtime": [
                 resolve(import.meta.dirname, "../../..", "dist/source/jsx/development.ts"),
               ],
-              "@duction/kit/server": [
+              "kit/server": [
                 resolve(
                   import.meta.dirname,
                   "../../..",
                   "dist/source/platforms/server/platform.ts",
                 ),
               ],
-              "@duction/kit/web": [
+              "kit/web": [
                 resolve(import.meta.dirname, "../../..", "dist/source/platforms/web/platform.ts"),
               ],
             },

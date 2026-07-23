@@ -12,7 +12,7 @@ from a GitHub release:
 ```sh
 mise use -g github:nubjs/nub@0.4.13
 version=0.1.0
-package="https://github.com/gsemyong/poggers/releases/download/v${version}/duction-kit-${version}.tgz"
+package="https://github.com/gsemyong/poggers/releases/download/v${version}/kit-${version}.tgz"
 nubx -y -p "$package" kit create my-system --package "$package"
 cd my-system
 mise install
@@ -50,6 +50,13 @@ mise install
 nub install
 nub run check
 nub run build
+```
+
+Verify or publish a release from a clean, pushed commit:
+
+```sh
+nub run release -- 0.1.0 --dry-run
+nub run release -- 0.1.0
 ```
 
 Run the presentation lab or the multi-App authenticated example:

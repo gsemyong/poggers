@@ -4,8 +4,8 @@ import {
   type Feature,
   type PlatformInterfaceContract,
   type Program,
-} from "@duction/kit";
-import type { HttpServer, ServerProcess } from "@duction/kit/server";
+} from "kit";
+import type { HttpServer, ServerProcess } from "kit/server";
 import {
   Await,
   type BrowserMainThread,
@@ -18,7 +18,7 @@ import {
   type WebRoute,
   type WebServiceWorkerRuntime,
   createWebInterface,
-} from "@duction/kit/web";
+} from "kit/web";
 
 type GreetingRoutes = {
   greeting: WebRoute<{

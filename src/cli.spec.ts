@@ -81,7 +81,7 @@ describe("project template", () => {
       "fmt:check",
       "check",
     ]);
-    expect(packageJson.dependencies).toEqual({ "@duction/kit": "latest" });
+    expect(packageJson.dependencies).toEqual({ kit: "latest" });
     expect(packageJson.devDependencies["@types/node"]).toBe("^26.1.1");
     expect(packageJson.engines.node).toBe(">=26.0.0");
     expect(packageJson.packageManager).toBe("nub@0.4.13");
@@ -103,7 +103,7 @@ describe("project template", () => {
 
     const modules = resolve(target, "node_modules");
     await mkdir(resolve(modules, "@duction"), { recursive: true });
-    await symlink(resolve(import.meta.dirname, ".."), resolve(modules, "@duction/kit"), "dir");
+    await symlink(resolve(import.meta.dirname, ".."), resolve(modules, "kit"), "dir");
     await mkdir(resolve(modules, "@types"), { recursive: true });
     await symlink(
       resolve(import.meta.dirname, "../node_modules/@types/node"),
@@ -188,11 +188,9 @@ describe("project template", () => {
       dependencies: Record<string, string>;
     };
     expect(manifest.dependencies).toEqual({
-      "@duction/kit": "git+ssh://example.test/kit.git",
+      kit: "git+ssh://example.test/kit.git",
     });
-    expect(await readFile(resolve(target, "src/system.ts"), "utf8")).toContain(
-      'from "@duction/kit"',
-    );
+    expect(await readFile(resolve(target, "src/system.ts"), "utf8")).toContain('from "kit"');
   });
 
   test("keeps every executable System on the canonical source convention", async () => {

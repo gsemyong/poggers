@@ -1,5 +1,5 @@
-import type { Program } from "@duction/kit";
-import type { BrowserMainThread, Child, Navigation, WebFeature, WebRoute } from "@duction/kit/web";
+import type { Program } from "kit";
+import type { BrowserMainThread, Child, Navigation, WebFeature, WebRoute } from "kit/web";
 
 import type { WorkspaceWeb } from "../apps/web";
 import type { IdentityClient, Session } from "./identity";

@@ -6,7 +6,7 @@ import {
   type IdentityClient as FeatureIdentityClient,
   type IdentityModel,
   type IdentitySession,
-} from "@duction/kit";
+} from "kit";
 
 export type User = Readonly<{ id: string; name: string; email: string }>;
 

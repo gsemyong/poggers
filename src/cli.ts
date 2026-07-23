@@ -155,12 +155,12 @@ function renderStarter(
       dependencies: Record<string, string>;
     };
     manifest.name = values.name;
-    manifest.dependencies["@duction/kit"] = values.packageLocation;
+    manifest.dependencies["kit"] = values.packageLocation;
     return `${JSON.stringify(manifest, undefined, 2)}\n`;
   }
   if (path === "tsconfig.json") {
     return `{
-  "extends": "@duction/kit/tsconfig",
+  "extends": "kit/tsconfig",
   "compilerOptions": {
     "paths": {
       "@/*": ["\${configDir}/src/*"]

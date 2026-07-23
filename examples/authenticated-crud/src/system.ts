@@ -1,4 +1,4 @@
-import { createSystem } from "@duction/kit";
+import { createSystem } from "kit";
 
 import { customer } from "./apps/customer/app";
 import { operations } from "./apps/operations/app";

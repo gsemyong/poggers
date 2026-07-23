@@ -13,7 +13,7 @@
     "check": "kit check"
   },
   "dependencies": {
-    "@duction/kit": "file:../.."
+    "kit": "file:../.."
   },
   "devDependencies": {
     "@types/node": "^26.1.1",

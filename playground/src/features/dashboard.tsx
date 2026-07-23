@@ -1,5 +1,5 @@
-import type { Feature, Program } from "@duction/kit";
-import { createPress, For, mountDialog, mountDrag, type BrowserMainThread } from "@duction/kit/web";
+import type { Feature, Program } from "kit";
+import { createPress, For, mountDialog, mountDrag, type BrowserMainThread } from "kit/web";
 
 type SheetView = "summary" | "detail";
 

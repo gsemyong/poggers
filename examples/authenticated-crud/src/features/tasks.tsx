@@ -4,7 +4,7 @@ import {
   type FeatureContractOf,
   placePrograms,
   type Program,
-} from "@duction/kit";
+} from "kit";
 import {
   For,
   type BrowserMainThread,
@@ -15,7 +15,7 @@ import {
   type WebFeature,
   type WebRoute,
   mountFeature,
-} from "@duction/kit/web";
+} from "kit/web";
 
 import type { WorkspaceWeb } from "../apps/web";
 import type { User } from "./identity";

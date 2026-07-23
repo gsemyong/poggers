@@ -1,5 +1,5 @@
-import type { Feature, Program } from "@duction/kit";
-import type { BrowserMainThread } from "@duction/kit/web";
+import type { Feature, Program } from "kit";
+import type { BrowserMainThread } from "kit/web";
 
 export type ShellFeature = {
   Programs: {

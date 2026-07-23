@@ -2,9 +2,9 @@
 
 ## Imports
 
-Replace the former package locator with `@duction/kit`. Use the root for
+Replace the former package locator with `kit`. Use the root for
 Systems, Features, Programs, Dependencies, and shipped semantic factories.
-Import generic UI authoring from `@duction/kit/ui`; import platform contracts
+Import generic UI authoring from `kit/ui`; import platform contracts
 from their explicit platform subpaths.
 
 ## Composition

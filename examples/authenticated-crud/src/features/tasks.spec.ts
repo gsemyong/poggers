@@ -1,4 +1,4 @@
-import { createEntityFixture } from "@duction/kit/testing";
+import { createEntityFixture } from "kit/testing";
 import { describe, expect, test } from "vitest";
 
 import { taskEntity } from "./tasks";

@@ -8,6 +8,6 @@ file.
 
 - Replaced the single-Application model with one System containing reusable
   Feature-composed Apps and platform interfaces.
-- Renamed the private logical package to `@duction/kit` and the command to
+- Renamed the private logical package to `kit` and the command to
   `kit`.
-- Isolated generic UI authoring under `@duction/kit/ui`.
+- Isolated generic UI authoring under `kit/ui`.

@@ -1,4 +1,4 @@
-import { createApp } from "@duction/kit";
+import { createApp } from "kit";
 
 import { createWorkspaceWeb, type WorkspaceWeb } from "../web";
 

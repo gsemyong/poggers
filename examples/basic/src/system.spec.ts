@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 
-import { testSystem } from "@duction/kit/testing";
+import { testSystem } from "kit/testing";
 import { expect } from "vitest";
 
 testSystem({

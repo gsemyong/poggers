@@ -3,12 +3,12 @@
   "compilerOptions": {
     "paths": {
       "@/*": ["./src/*"],
-      "@duction/kit": ["../../../../../dist/source/index.ts"],
-      "@duction/kit/jsx-dev-runtime": ["../../../../../dist/source/jsx/development.ts"],
-      "@duction/kit/jsx-runtime": ["../../../../../dist/source/jsx/runtime.ts"],
-      "@duction/kit/server": ["../../../../../dist/source/platforms/server/platform.ts"],
-      "@duction/kit/testing": ["../../../../../dist/source/testing.ts"],
-      "@duction/kit/web": ["../../../../../dist/source/platforms/web/platform.ts"]
+      "kit": ["../../../../../dist/source/index.ts"],
+      "kit/jsx-dev-runtime": ["../../../../../dist/source/jsx/development.ts"],
+      "kit/jsx-runtime": ["../../../../../dist/source/jsx/runtime.ts"],
+      "kit/server": ["../../../../../dist/source/platforms/server/platform.ts"],
+      "kit/testing": ["../../../../../dist/source/testing.ts"],
+      "kit/web": ["../../../../../dist/source/platforms/web/platform.ts"]
     },
     "types": ["node"]
   },

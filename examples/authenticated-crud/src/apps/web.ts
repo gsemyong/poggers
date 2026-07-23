@@ -1,5 +1,5 @@
-import type { PlatformInterfaceContract } from "@duction/kit";
-import { createWebInterface, type WebPlatform } from "@duction/kit/web";
+import type { PlatformInterfaceContract } from "kit";
+import { createWebInterface, type WebPlatform } from "kit/web";
 
 import { identityBrowser, type IdentityBrowserFeature } from "../features/identity";
 import { createShell, type ShellFeature } from "../features/shell";

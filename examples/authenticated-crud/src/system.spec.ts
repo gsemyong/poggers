@@ -1,8 +1,8 @@
 import { createConnection } from "node:net";
 import { resolve } from "node:path";
 
-import type { EntitySnapshot } from "@duction/kit";
-import { testSystem } from "@duction/kit/testing";
+import type { EntitySnapshot } from "kit";
+import { testSystem } from "kit/testing";
 import { expect } from "vitest";
 
 import type { Task } from "./features/tasks";

@@ -1,4 +1,4 @@
-import { testSystem } from "@duction/kit/testing";
+import { testSystem } from "kit/testing";
 import { expect } from "vitest";
 
 const referenceDocuments = new Map<string, string>();

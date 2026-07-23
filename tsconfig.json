@@ -5,38 +5,29 @@
     "module": "Preserve",
     "moduleDetection": "force",
     "jsx": "react-jsx",
-    "jsxImportSource": "@duction/kit",
+    "jsxImportSource": "kit",
     "allowImportingTsExtensions": true,
     "types": [],
     "moduleResolution": "bundler",
     "customConditions": ["source"],
     "paths": {
       "@/*": ["./src/*"],
-      "@duction/kit": ["./src/index.ts", "./dist/source/index.ts"],
-      "@duction/kit/ui": ["./src/ui.ts", "./dist/source/ui.ts"],
-      "@duction/kit/jsx-dev-runtime": [
-        "./src/jsx/development.ts",
-        "./dist/source/jsx/development.ts"
-      ],
-      "@duction/kit/jsx-runtime": ["./src/jsx/runtime.ts", "./dist/source/jsx/runtime.ts"],
-      "@duction/kit/web": [
-        "./src/platforms/web/platform.ts",
-        "./dist/source/platforms/web/platform.ts"
-      ],
-      "@duction/kit/adapters/web": [
+      "kit": ["./src/index.ts", "./dist/source/index.ts"],
+      "kit/ui": ["./src/ui.ts", "./dist/source/ui.ts"],
+      "kit/jsx-dev-runtime": ["./src/jsx/development.ts", "./dist/source/jsx/development.ts"],
+      "kit/jsx-runtime": ["./src/jsx/runtime.ts", "./dist/source/jsx/runtime.ts"],
+      "kit/web": ["./src/platforms/web/platform.ts", "./dist/source/platforms/web/platform.ts"],
+      "kit/adapters/web": [
         "./src/adapters/web/adapter.ts",
         "./dist/source/adapters/web/adapter.ts"
       ],
-      "@duction/kit/server": [
+      "kit/server": [
         "./src/platforms/server/platform.ts",
         "./dist/source/platforms/server/platform.ts"
       ],
-      "@duction/kit/testing": ["./src/testing.ts", "./dist/src/testing.d.ts"],
-      "@duction/kit/adapter": [
-        "./src/contracts/platform.ts",
-        "./dist/source/contracts/platform.ts"
-      ],
-      "@duction/kit/adapters/server": [
+      "kit/testing": ["./src/testing.ts", "./dist/src/testing.d.ts"],
+      "kit/adapter": ["./src/contracts/platform.ts", "./dist/source/contracts/platform.ts"],
+      "kit/adapters/server": [
         "./src/adapters/server/adapter.ts",
         "./dist/source/adapters/server/adapter.ts"
       ]

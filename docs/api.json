@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "package": "@duction/kit",
-  "intent": "changes/incremental-system-revisions.md",
+  "package": "kit",
+  "intent": "changes/kit-package-name.md",
   "bin": {
     "kit": "./dist/src/cli.js"
   },
@@ -420,5 +420,5 @@
     "dist/src/testing.d.ts": "7f950e9e4554cb79d7d66c62a36dcb8ad306121dc5c0f31afefa4d1722032b75",
     "dist/src/ui.d.ts": "bd6b75357c993a1c5e252f12810a65ccafa68164ce116f6b83b39e037fa2d54f"
   },
-  "fingerprint": "5a622d52b7683941ba024cc2426009554e8262f1b8a843fe8cd471ab39f57419"
+  "fingerprint": "d7509ebb21c130c562dd5fa1d112a14022cb524fc5af2a727c61d23489808f3d"
 }

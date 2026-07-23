@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 
-import { createPresentationFrame, createUIContributionInstance } from "@duction/kit/testing";
 import fc from "fast-check";
+import { createPresentationFrame, createUIContributionInstance } from "kit/testing";
 import { describe, expect, it } from "vitest";
 
 import {

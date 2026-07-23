@@ -3,11 +3,11 @@
   "compilerOptions": {
     "paths": {
       "@/*": ["${configDir}/src/*"],
-      "@duction/kit": ["${configDir}/../../dist/source/index.ts"],
-      "@duction/kit/jsx-dev-runtime": ["${configDir}/../../dist/source/jsx/development.ts"],
-      "@duction/kit/jsx-runtime": ["${configDir}/../../dist/source/jsx/runtime.ts"],
-      "@duction/kit/testing": ["${configDir}/../../dist/source/testing.ts"],
-      "@duction/kit/web": ["${configDir}/../../dist/source/platforms/web/platform.ts"]
+      "kit": ["${configDir}/../../dist/source/index.ts"],
+      "kit/jsx-dev-runtime": ["${configDir}/../../dist/source/jsx/development.ts"],
+      "kit/jsx-runtime": ["${configDir}/../../dist/source/jsx/runtime.ts"],
+      "kit/testing": ["${configDir}/../../dist/source/testing.ts"],
+      "kit/web": ["${configDir}/../../dist/source/platforms/web/platform.ts"]
     },
     "types": ["node"]
   }

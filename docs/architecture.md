@@ -787,7 +787,7 @@ behavior.
 
 ## External identity
 
-The neutral package locator is `@duction/kit`, the CLI command is `kit`, and the
+The neutral package locator is `kit`, the CLI command is `kit`, and the
 private cache namespace is `.kit`. External naming is now governed like every
 other public change: it requires an explicit change record and migration
 guidance when compatibility is affected. It does not alter semantic
