@@ -219,6 +219,33 @@ This model supports:
 - focused development or build of one App while preserving its shared
   dependencies.
 
+The settled composition syntax is:
+
+```ts
+const shared = createFeature<SharedContract>({ programs: { api: {} } });
+
+const web = createWebInterface<WebContract>({
+  programs: { browser: webProgram },
+  presentation,
+  installation,
+});
+
+const operations = createApp<OperationsContract>({
+  features: { web },
+});
+
+export default createSystem({
+  metadata: { name: "Company" },
+  features: { shared, operations },
+});
+```
+
+`createFeature` retains the contract that `satisfies` can validate but cannot
+preserve in an inferred value. `createApp` and `createWebInterface` only enrich
+that same Feature contract with type-level ownership. `createSystem` infers the
+complete root contract from those values, so the Feature map is never repeated
+as a root generic type argument.
+
 ### Cross-Feature communication
 
 Reusable Feature factories expose an ideal domain API and lower it to the core
@@ -276,8 +303,11 @@ Presentation reuse has three explicit levels:
 
 A concrete Presentation is directly reusable only when the Component contract
 is compatible. Different trees reuse parameters, recipes, or a generic factory.
-Composition is explicit; there is no implicit inheritance, cascade, or
-last-writer-wins override rule.
+Factories and recipes are ordinary typed pure functions. Object literals
+assemble their results. A duplicate direct property is a TypeScript error;
+object spread is the sole explicit override mechanism, and its source order
+states precedence. Core adds no implicit inheritance, cascade, deep merge, or
+last-writer-wins registry.
 
 The existing generic Presentation type is a strong foundation: it already
 binds a Presentation to the exact Component hierarchy, props, state, events,
@@ -777,19 +807,15 @@ behavior.
 - Documentation, public API manifests, changelog, and migration records match
   the shipped package.
 
-## Deliberately open API decisions
+## Deliberately open API decision
 
-The architecture is settled without pretending that every spelling is settled.
-Three API design tasks remain:
+The architecture and composition syntax are settled without pretending that
+branding is settled. The final neutral package locator and CLI name remain
+open.
 
-1. the exact generic and inference syntax of the reusable App Feature factory;
-2. the exact explicit composition syntax for Presentation factories and
-   recipes;
-3. the final neutral package locator and CLI name.
-
-These decisions may change names and ergonomics. They must not introduce a
-second composition unit, global Presentation ownership, implicit dependency
-lookup, or adapter concerns in core.
+That decision must not change semantic identifiers or introduce a second
+composition unit, global Presentation ownership, implicit dependency lookup, or
+adapter concerns in core.
 
 ## Definition of done
 

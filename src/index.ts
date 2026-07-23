@@ -18,7 +18,18 @@ export type {
   UIContributionAPI,
   UIState,
 } from "@/core/application";
-export { placePrograms } from "@/core/application";
+export { createFeature, placePrograms } from "@/core/application";
+export type {
+  AppFeature,
+  AppFeatureContract,
+  PlatformInterfaceContract,
+  PlatformInterfaceFeature,
+  System,
+  SystemContract,
+  SystemContractOf,
+  SystemMetadata,
+} from "@/core/system";
+export { createApp, createSystem } from "@/core/system";
 export type {
   EnvironmentContract,
   EnvironmentDefinition,
@@ -92,7 +103,9 @@ export type {
   PresentationComponentTree,
   PresentationDefinition,
   PresentationElement,
+  PresentationFactory,
   PresentationLanguage,
+  PresentationRecipe,
 } from "@/core/ui/presentation";
 export { animate, settled, velocity } from "@/core/ui/presentation";
 export { bindEntityPrincipal, createEntity, EntityFailure } from "@/features/entity";

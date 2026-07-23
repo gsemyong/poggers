@@ -143,7 +143,7 @@ export type {
   ShortcutBinding,
   VirtualForOptions,
 } from "@/platforms/web/ui";
-export { mountFeature } from "@/platforms/web/routing";
+export { createWebInterface, mountFeature } from "@/platforms/web/routing";
 export type {
   ApplicationWebRoutes,
   Deferred,
@@ -159,6 +159,7 @@ export type {
   WebFeature,
   WebInstallation,
   WebInstallationIcon,
+  WebInterfaceFeature,
   WebJSON,
   WebNavigation,
   WebRoute,

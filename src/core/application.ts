@@ -237,6 +237,13 @@ export type Feature<
     }
 >;
 
+/** Validates one Feature implementation and retains its exact semantic contract. */
+export function createFeature<Contract extends FeatureContract>(
+  definition: Feature<Contract>,
+): Feature<Contract> {
+  return definition;
+}
+
 export type PresentationName<Contract extends ApplicationContract> = Contract extends {
   Presentations: infer Presentations;
 }
@@ -398,13 +405,14 @@ type IsUnion<Value, Whole = Value> = Value extends Whole
     : true
   : never;
 
-type EnvironmentConflictIn<Owner extends FeatureContract> = string extends keyof FeaturesOf<Owner>
-  ? never
-  : {
-      [Name in ProgramNamesIn<Owner>]: true extends IsUnion<EnvironmentIdentitiesFor<Owner, Name>>
-        ? Name
-        : never;
-    }[ProgramNamesIn<Owner>];
+export type FeatureEnvironmentConflict<Owner extends FeatureContract> =
+  string extends keyof FeaturesOf<Owner>
+    ? never
+    : {
+        [Name in ProgramNamesIn<Owner>]: true extends IsUnion<EnvironmentIdentitiesFor<Owner, Name>>
+          ? Name
+          : never;
+      }[ProgramNamesIn<Owner>];
 
 type ApplicationDefinition<Contract extends ApplicationContract> = Readonly<
   {
@@ -418,7 +426,7 @@ export type Application<Contract extends ApplicationContract> = Contract extends
   Programs: Record<string, ProgramContract>;
 }
   ? never
-  : [EnvironmentConflictIn<Contract>] extends [never]
+  : [FeatureEnvironmentConflict<Contract>] extends [never]
     ? ApplicationDefinition<Contract>
     : never;
 

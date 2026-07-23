@@ -124,32 +124,32 @@ runtime code.
 
 ### Work
 
-- [ ] Add a type fixture for one System containing shared identity and task
+- [x] Add a type fixture for one System containing shared identity and task
       Features plus operations and customer App Features.
-- [ ] Add a type fixture for one App containing web and native
+- [x] Add a type fixture for one App containing web and native
       platform-interface Features.
-- [ ] Add a type fixture for two web interfaces with independent route,
+- [x] Add a type fixture for two web interfaces with independent route,
       Presentation, installation, and output identities.
-- [ ] Define the inferred App Feature factory contract. It may enrich or mark a
+- [x] Define the inferred App Feature factory contract. It may enrich or mark a
       Feature but may not create a second core composition primitive.
-- [ ] Define the platform-interface Feature marker required by compiler and
+- [x] Define the platform-interface Feature marker required by compiler and
       adapter ownership.
-- [ ] Define the explicit Presentation factory and recipe composition
+- [x] Define the explicit Presentation factory and recipe composition
       contract, including collision and override behavior.
-- [ ] Prove a reusable ordinary Feature has no ambient knowledge of its
+- [x] Prove a reusable ordinary Feature has no ambient knowledge of its
       consuming System.
-- [ ] Prove shared semantic APIs and separately realized communication use
+- [x] Prove shared semantic APIs and separately realized communication use
       typed Dependencies with no service locator.
-- [ ] Add negative type fixtures for duplicate App identities, duplicate
+- [x] Add negative type fixtures for duplicate App identities, duplicate
       interface identities, incompatible Presentations, and invalid Program
       placement.
 
 ### Blocking gate
 
-- [ ] The target two-App and multi-interface source shapes typecheck without
+- [x] The target two-App and multi-interface source shapes typecheck without
       casts.
-- [ ] Every invalid fixture fails for the intended semantic reason.
-- [ ] The target API introduces no core concept beyond System, Feature, Program,
+- [x] Every invalid fixture fails for the intended semantic reason.
+- [x] The target API introduces no core concept beyond System, Feature, Program,
       Process, Environment, Platform, Dependency, Component, Presentation, and
       Adapter.
 
@@ -440,6 +440,8 @@ output, or browser observation. Do not replace evidence with a summary claim.
 | 2026-07-23 | 0     | In-app browser development: auth redirect, account creation, two optimistic creates, nested-route reload, styling, edit focus, sign-out, and HMR all completed; tasks and auth state survived HMR | Pass with inefficiency |
 | 2026-07-23 | 0     | Development log for a presentation-copy edit: full semantic updates of 558.7 ms, 459.4 ms, and 555.5 ms, each restarting the unrelated server `api` Program                                       | G11 reproduced         |
 | 2026-07-23 | 0     | In-app browser Rust production: auth redirect, account creation, create, edit with stable focus, complete, delete, styling, and empty browser error log                                           | Pass                   |
+| 2026-07-23 | 1     | `src/core/system.typecheck.ts`: inferred two-App System, web plus native interfaces, two isolated web contracts, typed Dependencies, and intentional invalid fixtures                             | Pass                   |
+| 2026-07-23 | 1     | `nub run typecheck` plus focused System/Application/web routing tests; runtime factories preserve one unchanged Feature object tree                                                               | Pass                   |
 
 ### Phase 0 observations
 
@@ -467,8 +469,9 @@ output, or browser observation. Do not replace evidence with a summary claim.
 
 ## Current position
 
-- Active phase: Phase 1, make the target contract executable.
-- Completed phases: Phase 0.
+- Active phase: Phase 2, cut over Application to System.
+- Completed phases: Phases 0 and 1.
 - Blockers: none known.
-- Next action: implement the smallest type-level System, App Feature, and
-  platform-interface contracts and their positive and negative fixtures.
+- Next action: rename the root responsibility and compiler entry to System,
+  remove root Presentation ownership, and migrate every current consumer
+  without retaining Application aliases.

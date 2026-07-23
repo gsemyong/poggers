@@ -10,7 +10,11 @@ import type {
   UIContributionAPI,
 } from "@/core/application";
 import type { ProgramContract } from "@/core/program";
+import type { PlatformInterfaceContract, PlatformInterfaceFeature } from "@/core/system";
 import type { ComponentComposition, ComponentUI } from "@/core/ui/component";
+import type { ConfiguredPresentationFor } from "@/core/ui/presentation";
+import type { WebPlatform } from "@/platforms/web/platform";
+import type { WebPresentationLanguage } from "@/platforms/web/presentation";
 
 declare const validation: unique symbol;
 declare const deferred: unique symbol;
@@ -107,6 +111,31 @@ export type WebInstallation<Contract extends ApplicationContract> = Readonly<{
     fallback: WebDestination<ApplicationWebRoutes<Contract>>;
   }>;
 }>;
+
+type WebInterfaceContract<Contract extends FeatureContract> = PlatformInterfaceContract<
+  Contract,
+  WebPlatform
+>;
+
+/** One independently addressable web interface, represented by an ordinary Feature. */
+export type WebInterfaceFeature<Contract extends FeatureContract> = WebFeature<
+  WebInterfaceContract<Contract>,
+  WebInterfaceContract<Contract>
+> &
+  Readonly<{
+    presentation: ConfiguredPresentationFor<
+      WebInterfaceContract<Contract>,
+      WebPresentationLanguage
+    >;
+    installation?: WebInstallation<WebInterfaceContract<Contract>>;
+  }>;
+
+/** Adds web-interface ownership without creating a second composition tree. */
+export function createWebInterface<Contract extends FeatureContract>(
+  feature: WebInterfaceFeature<Contract>,
+): PlatformInterfaceFeature<Contract, WebPlatform> & WebInterfaceFeature<Contract> {
+  return feature as PlatformInterfaceFeature<Contract, WebPlatform> & WebInterfaceFeature<Contract>;
+}
 
 /** The ordinary Application refined only by web-adapter-owned product meaning. */
 export type WebApplication<Contract extends ApplicationContract> = Application<Contract> &

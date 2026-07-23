@@ -366,3 +366,29 @@ export type ConfiguredPresentation<
   parameters: Readonly<Parameters>;
   create: Presentation<Root, Language, Parameters>;
 }>;
+
+/** Creates one reusable Presentation selection from explicit parameters. */
+export type PresentationFactory<
+  Root extends ComponentOwner,
+  Language extends PresentationLanguage,
+  Parameters extends object = Empty,
+> = (parameters: Readonly<Parameters>) => ConfiguredPresentation<Root, Language, Parameters>;
+
+/**
+ * A configured Presentation with any concrete parameter contract.
+ *
+ * This existential view lets a platform interface validate exact Component
+ * ownership without erasing the parameters retained by the concrete value.
+ */
+export type ConfiguredPresentationFor<
+  Root extends ComponentOwner,
+  Language extends PresentationLanguage,
+> = Readonly<{
+  parameters: object;
+  create: Presentation<Root, Language, never>;
+}>;
+
+/** A reusable pure declaration constructor. */
+export type PresentationRecipe<Input, Declaration> = (
+  input: Readonly<Input>,
+) => Readonly<Declaration>;
