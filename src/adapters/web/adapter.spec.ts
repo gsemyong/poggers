@@ -92,7 +92,15 @@ describe("web Platform Adapter", () => {
       ["program/product.web.offline", "program", "browser-service-worker"],
     ]);
     await Promise.all(result.entries.map(({ path }) => access(path)));
-    const interfaceRoot = result.entries.find(({ kind }) => kind === "interface")!.path;
+    const interfaceArtifact = result.entries.find(({ kind }) => kind === "interface")!;
+    const interfaceRoot = interfaceArtifact.path;
+    expect(interfaceArtifact.entrypoint).toBe(resolve(interfaceRoot, "index.html"));
+    for (const artifact of result.entries.filter(({ kind }) => kind === "program")) {
+      expect(artifact.entrypoint).toBe(artifact.path);
+      expect(artifact.dependencies).toEqual(
+        artifact.environment === "browser-worker" ? ["http"] : [],
+      );
+    }
     expect(
       JSON.parse(await readFile(resolve(interfaceRoot, "assets.ir.json"), "utf8")),
     ).toMatchObject({

@@ -93,6 +93,7 @@ export type WebServiceWorkerPlan = Readonly<{
   version: string;
   caching: "always" | "preview";
   assets: readonly string[];
+  precache: readonly string[];
   documents: readonly string[];
   fallback?: string;
   modules: readonly string[];
@@ -101,11 +102,19 @@ export type WebServiceWorkerPlan = Readonly<{
 export function createWebServiceWorkerPlan(input: {
   installation?: WebInstallationPlan;
   assets: readonly string[];
+  precache?: readonly string[];
   routes: readonly WebRouteIR[];
   modules?: readonly string[];
   caching?: "always" | "preview";
 }): WebServiceWorkerPlan {
   const assets = uniquePaths(input.assets);
+  const precache = uniquePaths(input.precache ?? assets);
+  const available = new Set(assets);
+  for (const path of precache) {
+    if (!available.has(path)) {
+      throw new Error(`Precached web asset ${JSON.stringify(path)} is not cacheable.`);
+    }
+  }
   const cacheable = input.routes.filter(
     (route) =>
       !route.params.length &&
@@ -133,6 +142,7 @@ export function createWebServiceWorkerPlan(input: {
     .update(
       JSON.stringify({
         assets,
+        precache,
         documents,
         fallback: input.installation?.offline.fallback,
         modules,
@@ -145,6 +155,7 @@ export function createWebServiceWorkerPlan(input: {
     version,
     caching,
     assets: Object.freeze(assets),
+    precache: Object.freeze(precache),
     documents: Object.freeze(documents),
     ...(input.installation ? { fallback: input.installation.offline.fallback } : {}),
     modules: Object.freeze(modules),
@@ -160,6 +171,7 @@ const PROGRAMS = self.__kitServiceWorkerPrograms ?? [];
 const ASSET_CACHE = "kit-assets-" + VERSION;
 const DOCUMENT_CACHE = "kit-documents-" + VERSION;
 const ASSETS = ${JSON.stringify(plan.assets)};
+const PRECACHE = ${JSON.stringify(plan.precache)};
 const DOCUMENTS = ${JSON.stringify(plan.documents)};
 const FALLBACK = ${JSON.stringify(plan.fallback ?? null)};
 
@@ -167,7 +179,7 @@ self.addEventListener("install", (event) => {
   event.waitUntil(Promise.all([
     Promise.all(PROGRAMS),
     ...(CACHE_ENABLED ? [
-      caches.open(ASSET_CACHE).then((cache) => cache.addAll(ASSETS)),
+      caches.open(ASSET_CACHE).then((cache) => cache.addAll(PRECACHE)),
       caches.open(DOCUMENT_CACHE).then((cache) => cache.addAll(DOCUMENTS)),
     ] : []),
   ]));
@@ -214,7 +226,11 @@ self.addEventListener("fetch", (event) => {
   if (!ASSETS.includes(url.pathname)) return;
   event.respondWith((async () => {
     const assets = await caches.open(ASSET_CACHE);
-    return await assets.match(request, { ignoreVary: true }) || fetch(request);
+    const cached = await assets.match(request, { ignoreVary: true });
+    if (cached) return cached;
+    const response = await fetch(request);
+    if (response.ok) event.waitUntil(assets.put(request, response.clone()));
+    return response;
   })());
 });
 `;

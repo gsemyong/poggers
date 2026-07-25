@@ -11,6 +11,21 @@ export type ServerProductionConfiguration = Readonly<{
   environment: string;
   required?: true;
   default?: string;
+  allocation?:
+    | Readonly<{ kind: "port" }>
+    | Readonly<{
+        kind: "storage";
+        name: string;
+        scope: "deployment" | "process";
+        type: "directory" | "file";
+      }>;
+  source?:
+    | Readonly<{ kind: "process-location" }>
+    | Readonly<{
+        kind: "assets";
+        platform?: string;
+        format: "single" | "interfaces";
+      }>;
 }>;
 
 /**
@@ -103,7 +118,18 @@ export const synchronizationDependency = defineServerProductionDependency({
 export const telemetryDependency = defineServerProductionDependency({
   name: "telemetry",
   dependency: "telemetry",
-  configuration: [{ name: "file", environment: "KIT_TELEMETRY_FILE" }],
+  configuration: [
+    {
+      name: "file",
+      environment: "KIT_TELEMETRY_FILE",
+      allocation: {
+        kind: "storage",
+        name: "telemetry.jsonl",
+        scope: "process",
+        type: "file",
+      },
+    },
+  ],
   crate: {
     package: "kit-server-telemetry",
     directory: dependencyDirectory("telemetry"),
@@ -122,6 +148,12 @@ export const dataDependency = defineServerProductionDependency({
       name: "database",
       environment: "KIT_DATA_DATABASE",
       default: ".data/data.turso",
+      allocation: {
+        kind: "storage",
+        name: "data.turso",
+        scope: "deployment",
+        type: "file",
+      },
     },
   ],
   crate: { package: "kit-server-data", directory: dependencyDirectory("data") },
@@ -144,6 +176,12 @@ export const eventsDependency = defineServerProductionDependency({
       name: "database",
       environment: "KIT_DATABASE",
       default: ".data/system.sqlite",
+      allocation: {
+        kind: "storage",
+        name: "system.sqlite",
+        scope: "deployment",
+        type: "file",
+      },
     },
   ],
   crate: {
@@ -178,6 +216,12 @@ export const authenticationDependency = defineServerProductionDependency({
       name: "database",
       environment: "KIT_DATABASE",
       default: ".data/system.sqlite",
+      allocation: {
+        kind: "storage",
+        name: "system.sqlite",
+        scope: "deployment",
+        type: "file",
+      },
     },
   ],
   crate: {
@@ -195,7 +239,12 @@ export const httpDependency = defineServerProductionDependency({
   dependency: "http",
   configuration: [
     { name: "host", environment: "HOST", default: "127.0.0.1" },
-    { name: "port", environment: "PORT", default: "3010" },
+    {
+      name: "port",
+      environment: "PORT",
+      default: "3010",
+      allocation: { kind: "port" },
+    },
     {
       name: "bodyLimit",
       environment: "KIT_HTTP_BODY_LIMIT",
@@ -230,9 +279,18 @@ export const httpDependency = defineServerProductionDependency({
       name: "webOrigin",
       environment: "KIT_WEB_ORIGIN",
       default: "http://localhost:3000",
+      source: { kind: "process-location" },
     },
-    { name: "webRoot", environment: "KIT_WEB_ROOT" },
-    { name: "webInterfaces", environment: "KIT_WEB_INTERFACES" },
+    {
+      name: "webRoot",
+      environment: "KIT_WEB_ROOT",
+      source: { kind: "assets", platform: "web", format: "single" },
+    },
+    {
+      name: "webInterfaces",
+      environment: "KIT_WEB_INTERFACES",
+      source: { kind: "assets", platform: "web", format: "interfaces" },
+    },
   ],
   crate: { package: "kit-server-http", directory: dependencyDirectory("http") },
   rust: { type: "kit_server_http::Http", constructor: "kit_server_http::create" },

@@ -20,6 +20,7 @@ import {
   resolveServerProductionDependencies,
   serverProductionDependencies,
   type ResolvedServerProductionDependency,
+  type ServerProductionConfiguration,
   type ServerProductionDependency,
 } from "@/adapters/server/production/dependencies";
 import {
@@ -53,6 +54,13 @@ export type ServerProductionBuild = Readonly<{
   workspace: string;
   compiledCrates: readonly string[];
   durationMs: number;
+  requirements: readonly ServerProductionRequirement[];
+}>;
+
+export type ServerProductionRequirement = Readonly<{
+  dependency: string;
+  implementation: string;
+  configuration: readonly ServerProductionConfiguration[];
 }>;
 
 export type ServerProductionProfile = "debug" | "release";
@@ -87,6 +95,11 @@ export async function buildServerProgram(input: {
       ...(input.dependencies ?? []),
     ],
   });
+  const requirements = dependencies.map(({ dependency, implementation }) => ({
+    dependency: dependency.name,
+    implementation: implementation.name,
+    configuration: implementation.configuration,
+  }));
   const seed = await generateRustWorkspace(
     linked,
     dependencies,
@@ -134,7 +147,7 @@ export async function buildServerProgram(input: {
     await touch(cached);
     await touch(workspace);
     await copyExecutable(cached, input.output);
-    return result("hit", [], started, input.output, semanticHash, profile, workspace);
+    return result("hit", [], started, input.output, semanticHash, profile, workspace, requirements);
   }
 
   const dependencyGraphHash = digest(
@@ -171,7 +184,7 @@ export async function buildServerProgram(input: {
   }
   if (artifactCached) {
     await copyExecutable(cached, input.output);
-    return result("hit", [], started, input.output, semanticHash, profile, workspace);
+    return result("hit", [], started, input.output, semanticHash, profile, workspace, requirements);
   }
   const buildArguments = ["build", "--message-format=json"];
   if (profile === "release") buildArguments.splice(1, 0, "--release");
@@ -202,6 +215,7 @@ export async function buildServerProgram(input: {
     semanticHash,
     profile,
     workspace,
+    requirements,
   );
   await removeLegacyWorkspaceCaches(resolve(cacheRoot, "workspaces"));
   await retainCache(cacheRoot, workspace, semanticHash);
@@ -496,9 +510,25 @@ mod program;
 
 #[tokio::main]
 async fn main() {
+    write_process_status("starting");
     if let Err(error) = run().await {
+        write_process_status("failed");
         eprintln!("{error}");
         std::process::exit(1);
+    }
+}
+
+fn write_process_status(status: &str) {
+    let Ok(path) = std::env::var("KIT_PROCESS_STATUS_FILE") else {
+        return;
+    };
+    let temporary = format!("{path}.{}.tmp", std::process::id());
+    let contents = format!(
+        r#"{{"status":"{status}","pid":{}}}"#,
+        std::process::id(),
+    );
+    if std::fs::write(&temporary, contents).is_ok() {
+        let _ = std::fs::rename(temporary, path);
     }
 }
 
@@ -531,12 +561,18 @@ async fn run() -> NativeResult<()> {
         return Err(error);
     }
     ${distributed}
+    write_process_status("ready");
     if engine.has_live_resources() {
         tokio::signal::ctrl_c()
             .await
             .map_err(|error| NativeError::new("SignalFailure", error.to_string()))?;
     }
-    engine.shutdown().await
+    write_process_status("draining");
+    let result = engine.shutdown().await;
+    if result.is_ok() {
+        write_process_status("stopped");
+    }
+    result
 }
 `;
 }
@@ -666,6 +702,7 @@ function result(
   semanticHash: string,
   profile: ServerProductionProfile,
   workspace: string,
+  requirements: readonly ServerProductionRequirement[],
 ): ServerProductionBuild {
   return {
     executable,
@@ -675,6 +712,7 @@ function result(
     workspace,
     compiledCrates: compiled,
     durationMs: Math.round(performance.now() - started),
+    requirements,
   };
 }
 

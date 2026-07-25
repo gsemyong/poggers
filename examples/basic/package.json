@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "kit dev",
     "build": "kit build --outdir dist",
+    "deploy": "kit deploy",
     "typecheck": "kit typecheck",
     "test": "kit test",
     "lint": "oxlint src",

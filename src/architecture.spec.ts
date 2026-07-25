@@ -28,6 +28,10 @@ const boundaries: readonly Boundary[] = [
     imports: ["adapters/data", "features"],
   },
   {
+    directory: "adapters/deployment",
+    imports: ["adapters/deployment", "contracts"],
+  },
+  {
     directory: "adapters/server",
     imports: [
       "adapters/data",
@@ -61,14 +65,16 @@ const boundaries: readonly Boundary[] = [
 ] as const;
 
 const modules: readonly ModuleBoundary[] = [
-  { file: "index.ts", imports: ["core", "features"] },
+  { file: "index.ts", imports: ["contracts", "core", "features"] },
   { file: "ui.ts", imports: ["core"] },
-  { file: "realization.ts", imports: ["compiler", "contracts"] },
+  { file: "deployment.ts", imports: ["contracts", "core"] },
+  { file: "realization.ts", imports: ["compiler", "contracts", "deployment"] },
   {
     file: "testing.ts",
     imports: ["adapters", "compiler", "contracts", "features", "realization", "runtime"],
   },
-  { file: "cli.ts", imports: ["adapters", "contracts", "realization"] },
+  { file: "cli.ts", imports: ["adapters", "contracts", "core", "deployment", "realization"] },
+  { file: "adapter.ts", imports: ["compiler", "contracts", "deployment"] },
   {
     file: "adapters/registry.ts",
     imports: ["adapters/server", "adapters/web", "adapters/web-server", "contracts", "platforms"],
@@ -133,7 +139,7 @@ describe("architecture import graph", () => {
     expect(violations).toEqual([]);
   });
 
-  test("keeps generic portable lowering free of product Feature vocabulary", async () => {
+  test("keeps generic portable lowering free of Feature and deployment vocabulary", async () => {
     const source = import.meta.dirname;
     const typescript = [
       ...(await sourceFiles(resolve(source, "compiler"))).filter(
@@ -149,13 +155,13 @@ describe("architecture import graph", () => {
     ];
     const violations: string[] = [];
     for (const file of typescript) {
-      if (/\b(?:actor|workflow)\b/i.test(await readFile(file, "utf8"))) {
+      if (/\b(?:actor|workflow|deployment|oci|nats)\b/i.test(await readFile(file, "utf8"))) {
         violations.push(file.slice(source.length + 1));
       }
     }
     for (const file of rust) {
       const implementation = (await readFile(file, "utf8")).split("\n#[cfg(test)]")[0]!;
-      if (/\b(?:actor|workflow)\b/i.test(implementation)) {
+      if (/\b(?:actor|workflow|deployment|oci|nats)\b/i.test(implementation)) {
         violations.push(file.slice(source.length + 1));
       }
     }

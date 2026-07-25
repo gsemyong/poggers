@@ -1,6 +1,11 @@
 import type { SourceCompilerExtension } from "@/compiler/extension";
 import type { PlatformInterfaceIR, ProgramIR, SystemIR } from "@/compiler/ir";
 import type { SystemOutputSources } from "@/compiler/source";
+import type {
+  ProductionConfiguration,
+  ProductionLifecycle,
+  ProductionTarget,
+} from "@/contracts/production";
 import type { PlatformContract } from "@/core/program";
 import type { UIChild, UIContract, UIDefinition, UITarget } from "@/core/ui/language";
 import type {
@@ -8,6 +13,12 @@ import type {
   PresentationElement,
   PresentationLanguage,
 } from "@/core/ui/presentation";
+
+export type {
+  ProductionConfiguration,
+  ProductionLifecycle,
+  ProductionTarget,
+} from "@/contracts/production";
 
 export type PlatformInput<Platform extends PlatformContract = PlatformContract> = Readonly<{
   directory: string;
@@ -53,8 +64,14 @@ export type DevelopmentSession = AsyncDisposable &
 export type ProductionArtifact = Readonly<{
   identity: string;
   kind: "interface" | "program";
+  deployment: "asset" | "process";
   environment: string;
   path: string;
+  entrypoint?: string;
+  dependencies?: readonly string[];
+  configuration?: readonly ProductionConfiguration[];
+  lifecycle?: ProductionLifecycle;
+  target?: ProductionTarget;
 }>;
 
 /** Deterministic files emitted by one Platform Adapter. */

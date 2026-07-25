@@ -9,6 +9,7 @@ import {
   type SystemIR,
 } from "@/compiler/ir";
 import { createSystemCompiler, resolveSystem } from "@/compiler/source";
+import type { Release } from "@/contracts/deployment";
 import {
   selectPlatformAdapters,
   type DevelopmentSession,
@@ -17,6 +18,7 @@ import {
   type SystemCompilationRevision,
   type SystemRevisionSource,
 } from "@/contracts/platform";
+import { createRelease } from "@/deployment";
 
 export type SystemRealization<Adapter extends PlatformAdapterImplementation> = Readonly<{
   directory: string;
@@ -41,6 +43,7 @@ export type BuiltSystem = Readonly<{
   ir: SystemIR;
   directory: string;
   artifacts: Readonly<Record<string, ProductionArtifacts>>;
+  release: Release;
 }>;
 
 /** Resolves one authored System into the Platform implementations it requires. */
@@ -249,10 +252,18 @@ export async function buildSystem(
       return [adapter.name, artifacts] as const;
     }),
   );
+  const artifacts = Object.freeze(Object.fromEntries(results));
+  const release = await createRelease({
+    directory: output,
+    system: realization.ir.system.name,
+    ...(realization.app ? { app: realization.app } : {}),
+    artifacts,
+  });
   return {
     ir: realization.ir,
     directory: output,
-    artifacts: Object.freeze(Object.fromEntries(results)),
+    artifacts,
+    release,
   };
 }
 

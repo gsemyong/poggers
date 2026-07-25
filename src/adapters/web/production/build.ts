@@ -2,6 +2,7 @@ import { mkdir, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import { buildWebInterface } from "@/adapters/web/pipeline";
+import { linkProgram } from "@/compiler/linker";
 import type { PlatformProductionInput, ProductionArtifacts } from "@/contracts/platform";
 import type { WebPlatform } from "@/platforms/web/platform";
 
@@ -24,6 +25,26 @@ export async function buildWebSystem(
   );
   return {
     directory: input.output,
-    entries: Object.freeze(builds.flatMap(({ entries }) => entries)),
+    entries: Object.freeze(
+      builds.flatMap(({ entries }) =>
+        entries.map((entry) => {
+          if (entry.kind !== "program") return entry;
+          const program = input.programs.find(({ id }) => id === entry.identity);
+          if (!program) {
+            throw new Error(
+              `Web production emitted unknown Program ${JSON.stringify(entry.identity)}.`,
+            );
+          }
+          return {
+            ...entry,
+            dependencies: Object.freeze(
+              linkProgram(program)
+                .external.map(({ name }) => name)
+                .sort(),
+            ),
+          };
+        }),
+      ),
+    ),
   };
 }

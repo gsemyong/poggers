@@ -1,14 +1,26 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
-import { basename, dirname, resolve } from "node:path";
+import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import process from "node:process";
 
+import { createServer, defaultServerConditions, type Plugin } from "vite";
+
 import { platformAdapters } from "@/adapters/registry";
+import { packageSourceAliases } from "@/adapters/source";
+import type { DeploymentAdapter } from "@/contracts/deployment";
 import type { PlatformAdapterImplementation } from "@/contracts/platform";
+import type { System, SystemContract } from "@/core/system";
+import {
+  applyDeployment,
+  inspectDeployment,
+  planDeployment,
+  removeDeployment,
+  type Deployment,
+} from "@/deployment";
 import { buildSystem, developSystem, resolveSystemRealization } from "@/realization";
 
-const valueFlags = new Set(["dir", "name", "outdir", "outfile", "package"]);
+const valueFlags = new Set(["deployment", "dir", "name", "outdir", "outfile", "package"]);
 const ignoredStarterEntries = new Set([
   ".data",
   ".kit",
@@ -24,7 +36,7 @@ export async function runCli(
   adapters: Readonly<Record<string, PlatformAdapterImplementation>> = platformAdapters,
 ): Promise<void> {
   const [command = "dev", ...commandArguments] = arguments_;
-  const directory = readFlag(commandArguments, "dir") ?? process.cwd();
+  const directory = resolve(readFlag(commandArguments, "dir") ?? process.cwd());
   const app = positionalArguments(commandArguments)[0];
 
   if (command === "create") {
@@ -49,6 +61,8 @@ export async function runCli(
     for (const artifacts of Object.values(system.artifacts)) {
       console.log(`built ${artifacts.directory}`);
     }
+  } else if (command === "deploy") {
+    await runDeploymentCli(directory, commandArguments, adapters, app);
   } else if (command === "typecheck") {
     const code = await run(
       [resolve(directory, "node_modules/.bin/tsc"), "-p", "tsconfig.json"],
@@ -79,9 +93,117 @@ export async function runCli(
     }
     resolveSystemRealization(directory, adapters, app ? { app } : {});
   } else {
-    console.error("Usage: kit <dev [app]|build [app]|typecheck|test|check|create>");
+    console.error(
+      "Usage: kit <dev [app]|build [app]|deploy [app] [--plan|--status|--remove]|typecheck|test|check|create>",
+    );
     process.exitCode = 1;
   }
+}
+
+async function runDeploymentCli(
+  directory: string,
+  arguments_: readonly string[],
+  adapters: Readonly<Record<string, PlatformAdapterImplementation>>,
+  app: string | undefined,
+): Promise<void> {
+  const actions = (["plan", "status", "remove"] as const).filter((name) =>
+    arguments_.includes(`--${name}`),
+  );
+  if (actions.length > 1) {
+    throw new TypeError("Select at most one of --plan, --status, or --remove.");
+  }
+  const deployment = await loadDeployment(
+    directory,
+    readFlag(arguments_, "deployment") ?? "src/deployment.ts",
+  );
+  const action = actions[0] ?? "apply";
+  if (action === "status") {
+    console.log(JSON.stringify((await inspectDeployment(deployment)) ?? null, undefined, 2));
+    return;
+  }
+  if (action === "remove") {
+    console.log(JSON.stringify(await removeDeployment(deployment), undefined, 2));
+    return;
+  }
+  const output = resolve(
+    directory,
+    readFlag(arguments_, "outdir") ?? readFlag(arguments_, "outfile") ?? "dist",
+  );
+  const built = await buildSystem(directory, output, adapters, app ? { app } : {});
+  if (action === "plan") {
+    const observed = await inspectDeployment(deployment);
+    console.log(JSON.stringify(planDeployment(deployment, built.release, observed), undefined, 2));
+    return;
+  }
+  const result = await applyDeployment(deployment, built.release);
+  console.log(JSON.stringify(result.state, undefined, 2));
+  if (!result.state.converged) process.exitCode = 1;
+}
+
+async function loadDeployment(
+  directory: string,
+  path: string,
+): Promise<Deployment<System<SystemContract>, DeploymentAdapter>> {
+  const source = resolve(directory, "src");
+  const framework = import.meta.dirname;
+  const vite = await createServer({
+    appType: "custom",
+    configFile: false,
+    plugins: [sourceAliasPlugin(source, framework)],
+    root: directory,
+    resolve: {
+      alias: packageSourceAliases(framework, moduleExtension()),
+      conditions: ["source", ...defaultServerConditions],
+    },
+    server: { middlewareMode: true, ws: false },
+  });
+  const workingDirectory = process.cwd();
+  try {
+    process.chdir(directory);
+    const module = (await vite.ssrLoadModule(resolve(directory, path))) as Readonly<
+      Record<string, unknown>
+    >;
+    const deployment = (module.default ?? module) as Partial<
+      Deployment<System<SystemContract>, DeploymentAdapter>
+    >;
+    if (
+      !deployment ||
+      typeof deployment !== "object" ||
+      !deployment.system ||
+      !deployment.adapter ||
+      typeof deployment.adapter.inspect !== "function" ||
+      typeof deployment.adapter.apply !== "function" ||
+      typeof deployment.adapter.remove !== "function"
+    ) {
+      throw new TypeError(`${path} must default-export one Deployment.`);
+    }
+    return deployment as Deployment<System<SystemContract>, DeploymentAdapter>;
+  } finally {
+    process.chdir(workingDirectory);
+    await vite.close();
+  }
+}
+
+function moduleExtension(): ".js" | ".ts" {
+  return import.meta.filename.endsWith(".ts") ? ".ts" : ".js";
+}
+
+function sourceAliasPlugin(project: string, framework: string): Plugin {
+  return {
+    name: "kit-deployment-source-alias",
+    enforce: "pre",
+    resolveId(id, importer) {
+      if (!id.startsWith("@/")) return;
+      const owner = importer?.split("?", 1)[0] ?? "";
+      const root = inside(framework, owner) ? framework : project;
+      return this.resolve(resolve(root, id.slice(2)), importer, { skipSelf: true });
+    },
+  };
+}
+
+function inside(directory: string, file: string): boolean {
+  const path = relative(directory, file);
+  return path === "" || (!path.startsWith("..") && !isAbsolute(path));
 }
 
 if (import.meta.main) await runCli();

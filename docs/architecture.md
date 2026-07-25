@@ -179,6 +179,12 @@ dependency bag, hidden event bus, or adapter import in product code.
 
 ## Source Layout
 
+The current physical tree is transitional. The target ownership convention,
+provider placement, Feature-factory surface, testing contract, and migration
+gates are recorded in [`features.md`](./features.md). In particular, the target
+does not retain global `contracts/`, `runtime/`, and `adapters/` buckets merely
+because several semantic owners happen to use those implementation roles.
+
 ```text
 src/
   core/         product-language contracts
@@ -202,6 +208,9 @@ Adapter implementations organize by Platform, then by lifecycle:
 
 ```text
 adapters/
+  deployment/
+    local.ts
+    oci.ts
   data/
   server/
     development/
@@ -225,6 +234,11 @@ Native-language code lives under the production profile that owns it.
 Dependency implementations group by semantic Dependency, adding a technology
 subdirectory only when several real implementations exist.
 
+Platform adapters turn Program meaning into development sessions or immutable
+production artifacts. Deployment adapters consume those artifacts and realize
+them on a target. Deployment is therefore separate from both product Features
+and Platform compilation; see [`deployment.md`](./deployment.md).
+
 ## Public Surface
 
 Ordinary product code uses:
@@ -243,6 +257,8 @@ Adapter authors use the explicit advanced entries:
 kit/adapter
 kit/adapters/web
 kit/adapters/server
+kit/adapters/deployment/local
+kit/adapters/deployment/oci
 ```
 
 Compiler and runtime implementation modules remain private. Public declarations

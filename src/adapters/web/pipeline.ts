@@ -73,7 +73,11 @@ import {
 import { collectProgramManifest, linkProgram } from "@/compiler/linker";
 import { compilePresentationSource } from "@/compiler/presentation";
 import { resolveSystem, type SystemPaths } from "@/compiler/source";
-import type { SystemCompilationRevision, SystemRevisionSource } from "@/contracts/platform";
+import type {
+  ProductionArtifact,
+  SystemCompilationRevision,
+  SystemRevisionSource,
+} from "@/contracts/platform";
 import type { WebRouteMetadataResult } from "@/platforms/web/routing";
 import { createHotReplacementManifest } from "@/runtime/interpreter";
 
@@ -121,12 +125,7 @@ type WebWorkerEntry = Readonly<{
 
 export type WebBuild = Readonly<{
   directory: string;
-  entries: readonly Readonly<{
-    identity: string;
-    kind: "interface" | "program";
-    environment: string;
-    path: string;
-  }>[];
+  entries: readonly ProductionArtifact[];
 }>;
 
 export const WEB_ROUTE_ARTIFACT_VERSION = 3 as const;
@@ -385,9 +384,16 @@ export async function buildWebInterface(options: {
     }
     if (contract.installation || serviceWorkerModules.length) {
       const assets = await createWebAssetManifest(outdir, crossOriginIsolated);
+      const cacheable = assets.assets.filter(({ immutable }) => immutable).map(({ path }) => path);
+      const eagerScripts = new Set([
+        client.entry,
+        ...client.preloads,
+        ...routeDocuments.flatMap(({ document }) => [document.entry, ...document.preloads]),
+      ]);
       const plan = createWebServiceWorkerPlan({
         installation: contract.installation,
-        assets: assets.assets.filter(({ immutable }) => immutable).map(({ path }) => path),
+        assets: cacheable,
+        precache: cacheable.filter((path) => !/\.(?:m?js)$/i.test(path) || eagerScripts.has(path)),
         routes: contract.routes,
         modules: serviceWorkerModules,
       });
@@ -414,14 +420,18 @@ export async function buildWebInterface(options: {
         {
           identity: contract.interface.id,
           kind: "interface" as const,
+          deployment: "asset" as const,
           environment: "browser-main",
           path: outdir,
+          entrypoint: resolve(outdir, "index.html"),
         },
         ...prepared.workers.map(({ identity, environment, output }) => ({
           identity,
           kind: "program" as const,
+          deployment: "asset" as const,
           environment,
           path: resolve(outdir, client.entries[output]!.slice(1)),
+          entrypoint: resolve(outdir, client.entries[output]!.slice(1)),
         })),
       ],
     };

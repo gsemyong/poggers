@@ -64,8 +64,36 @@ export function createServerPlatformAdapter(
         entries.push({
           identity: program.id,
           kind: "program" as const,
+          deployment: "process" as const,
           environment: program.environment.name,
           path,
+          entrypoint: path,
+          dependencies: Object.freeze(result.requirements.map(({ dependency }) => dependency)),
+          configuration: Object.freeze(
+            result.requirements.flatMap((requirement) =>
+              requirement.configuration.map((field) => ({
+                dependency: requirement.dependency,
+                implementation: requirement.implementation,
+                name: field.name,
+                binding: { kind: "environment" as const, name: field.environment },
+                required: field.required ?? false,
+                ...(field.default === undefined ? {} : { default: field.default }),
+                ...(field.allocation ? { allocation: field.allocation } : {}),
+                ...(field.source ? { source: field.source } : {}),
+              })),
+            ),
+          ),
+          lifecycle: {
+            shutdown: { kind: "signal" as const, signal: "SIGINT" as const },
+            status: {
+              kind: "file" as const,
+              environment: "KIT_PROCESS_STATUS_FILE",
+            },
+          },
+          target: {
+            operatingSystem: process.platform,
+            architecture: process.arch,
+          },
         });
         console.log(`[kit] production ${program.name}: cache ${result.cache}`);
       }

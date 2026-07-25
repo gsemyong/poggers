@@ -1,7 +1,7 @@
 {
   "version": 1,
   "package": "kit",
-  "intent": "changes/workflow-removal.md",
+  "intent": "changes/deployment.md",
   "bin": {
     "kit": "./dist/src/cli.js"
   },
@@ -44,6 +44,11 @@
         "type DependencyProviderInvocation",
         "type DependencyReference",
         "type DependencyReferenceDefinition",
+        "type Deployment",
+        "type DeploymentDefinition",
+        "type DeploymentDependencies",
+        "type DeploymentProgram",
+        "type DeploymentPrograms",
         "type EntityActions",
         "type EntityApi",
         "type EntityAuthorization",
@@ -78,6 +83,7 @@
         "type PlatformInterfaceContract",
         "type PortableLiteral",
         "type Program",
+        "type SecretReference",
         "type System",
         "type SystemContractOf",
         "type SystemMetadata",
@@ -90,12 +96,14 @@
         "value createActor",
         "value createApp",
         "value createData",
+        "value createDeployment",
         "value createEntity",
         "value createFeature",
         "value createIdentity",
         "value createSystem",
         "value mapStream",
         "value placePrograms",
+        "value secret",
         "value typeLiteral",
         "value typeSchema"
       ]
@@ -353,28 +361,47 @@
       ]
     },
     "./adapter": {
-      "target": "./dist/src/contracts/platform.js",
+      "target": "./dist/src/adapter.js",
       "symbols": [
         "type ComponentAdapter",
         "type ComponentAdapterSession",
+        "type DependencyBinding",
+        "type DeploymentAdapter",
+        "type DeploymentArtifactState",
+        "type DeploymentDependencyPlan",
+        "type DeploymentFailure",
+        "type DeploymentOperation",
+        "type DeploymentPlan",
+        "type DeploymentProcessState",
+        "type DeploymentState",
+        "type DeploymentTarget",
         "type DevelopmentSession",
         "type PlatformAdapter",
         "type PlatformAdapterImplementation",
         "type PlatformAdapters",
         "type PlatformDevelopmentInput",
-        "type PlatformInput",
         "type PlatformProductionInput",
         "type PresentationAdapter",
         "type PresentationAdapterInstance",
         "type PresentationAdapterSession",
-        "type PresentationElementResolver",
         "type ProductionArtifact",
         "type ProductionArtifacts",
-        "type SystemCompilationChange",
+        "type ProductionConfiguration",
+        "type Release",
+        "type ReleaseArtifact",
+        "type ReleaseFile",
+        "type ReplicaDecision",
+        "type ReplicaObservation",
+        "type ReplicaPolicy",
+        "type SourceCompilerExtension",
         "type SystemCompilationRevision",
         "type SystemRevisionSource",
         "type UIAdapter",
-        "value selectPlatformAdapters"
+        "value applyDeployment",
+        "value inspectDeployment",
+        "value planDeployment",
+        "value reconcileReplicas",
+        "value removeDeployment"
       ]
     },
     "./adapters/server": {
@@ -389,6 +416,19 @@
         "value jetStreamEventsDependency"
       ]
     },
+    "./adapters/deployment/local": {
+      "target": "./dist/src/adapters/deployment/local.js",
+      "symbols": [
+        "type LocalDeploymentAdapterOptions",
+        "type LocalDeploymentConfiguration",
+        "type LocalDeploymentState",
+        "value createLocalDeploymentAdapter"
+      ]
+    },
+    "./adapters/deployment/oci": {
+      "target": "./dist/src/adapters/deployment/oci.js",
+      "symbols": ["type OciDescriptor", "type OciImageLayout", "value packageOciRelease"]
+    },
     "./cli": {
       "target": "./dist/src/cli.js",
       "symbols": ["value createProject", "value runCli"]
@@ -399,10 +439,13 @@
     }
   },
   "declarations": {
+    "dist/src/adapter.d.ts": "db4d774dab95107b7af59806e2e5d94355049fc16b943700e995bcb33b69f2da",
+    "dist/src/adapters/deployment/local.d.ts": "96a19cd6f9dcf6c1bd57511d652c5fbb112894c891b20a6196a64877e282961e",
+    "dist/src/adapters/deployment/oci.d.ts": "2906afe0e75cddf3fbf5edc6e2c9311fe135dd3b14f99d5432593442917e9ffb",
     "dist/src/adapters/server/adapter.d.ts": "c191b3118e54218c68ac3196ff44e92a2b4168c38e495c2fa5e46fa795e46868",
     "dist/src/adapters/server/development/host.d.ts": "fecc009ab3464baa989cfe26433af69ba3332a4550cf756b593de5363c8279a5",
     "dist/src/adapters/server/development/session.d.ts": "c9245bf66ff5d49acdc405b1d9c1d2667a0a3a3e4774ffc0a31169fffe552183",
-    "dist/src/adapters/server/production/dependencies.d.ts": "7c981443369d65065803b7d7d4788ffa5549ae859dc847e02c75409ca2b53e6b",
+    "dist/src/adapters/server/production/dependencies.d.ts": "307f4c5d2f932aa2a0bcc1ea87ab7b95971a5f51803135d6a4e184885ed069e4",
     "dist/src/adapters/web-server.d.ts": "b97632b74b821fda20b3199f61ced138f3bab6118b1fabedf719bc30c659f7cf",
     "dist/src/adapters/web/adapter.d.ts": "778923bb7921939ec1db633e4b498e95cd6059a48004e3cecd7093207e5a5fe2",
     "dist/src/adapters/web/development/server.d.ts": "661823280752468b6b3130a3c92381425a32c08e363a583456e9ef784d683c2a",
@@ -422,7 +465,9 @@
     "dist/src/compiler/ir.d.ts": "5023adb6169cd46e51a14292dd53015c8e79a1dae42a96654493e2d82b9b78f3",
     "dist/src/compiler/presentation.d.ts": "e0a47347a6567d2f82fdb6845fe2e0b7c621529b6ab5f32fe5444acb0c9c2e5f",
     "dist/src/compiler/source.d.ts": "956ced65a84f484b52d742a92e5d54125c066f88515f25012c19c4ab9b0cf6e6",
-    "dist/src/contracts/platform.d.ts": "edda0991d7c2170b1f895688fecd5280bf58f08e6f57675d6a7cc725fa6d145a",
+    "dist/src/contracts/deployment.d.ts": "d600c7174eb524b4894354b38739b9a3181efb179fa9a312fb23ca27fc9c7470",
+    "dist/src/contracts/platform.d.ts": "d36f366d58c89b1f56a5e1ceb118717781d85e0aa1a665320c198a43db780279",
+    "dist/src/contracts/production.d.ts": "1e73bf3cc3a4aac59ff6a4cee4c22a49142514c1b62b9b5b8d4d020ba68a62e4",
     "dist/src/core/dependency.d.ts": "f9aabaa707e54b13c63ba6dec23cab72ea39a809fde0532e40207707e78ed633",
     "dist/src/core/feature.d.ts": "b0e1301afd1dd6e99cc5c49062a02827cbaad51babfd4061114b7a4e4c50824d",
     "dist/src/core/intrinsic.d.ts": "3836fa74cbbac2052440b526f4dff425ddaa0d281dacdbe0aa87dba5f27c5359",
@@ -432,13 +477,14 @@
     "dist/src/core/ui/component.d.ts": "aeaf8c882685857f05951a9c23d9e6221adf46ead32699d584f07bb8e5c44c06",
     "dist/src/core/ui/language.d.ts": "96f459c9eb6f01fa237d82eeef846dadadcf18832ba496d80d796463d9c18a3a",
     "dist/src/core/ui/presentation.d.ts": "18a3a292314dc73e61a8ad2816835e24379106c096478fad339d883604685872",
+    "dist/src/deployment.d.ts": "1edd41775d03db7baf04af9dab9764b750b6f20eadfef2ace3cbee9d45531eeb",
     "dist/src/features/actor.d.ts": "3e718d235db07216212f3c6d0c8aa3c391cbf764f01d5dc1db855d041074217f",
     "dist/src/features/data.d.ts": "327d9947dc5e9ccbd858d849cfb73803c271609bf795878efdab68804e86d0ef",
     "dist/src/features/data.testing.d.ts": "cb1d45d789f74107eac834134ea28d746310dce445d6a556f1284b37d51ce9d0",
     "dist/src/features/entity.d.ts": "89c45a3ea65cce8f497deb6c2e84a83316bcf926705f6224d26296fa9e6d938b",
     "dist/src/features/entity.testing.d.ts": "c4684752b4fbe44ccc8e5e93588733a2420cb2b6bc60f7e26ef64c7c7e34136b",
     "dist/src/features/identity.d.ts": "c1ccc8b9fb9e2166ccee6c29c52658048b2fa8b21ca000686bca031327528cfd",
-    "dist/src/index.d.ts": "f58980569be58d11378421a77f50435dd4771f5871101de5eb1b80cea0f58d61",
+    "dist/src/index.d.ts": "e2183b6d9037db5d117ab3803c6021801f2e56bc4790721865f8211fee9f39e6",
     "dist/src/jsx/development.d.ts": "7c0935fe320fe689f55c82a213e6f693fa8c197efe25e97509ca937b2fc1a3cc",
     "dist/src/jsx/runtime.d.ts": "7cb260ad612fda035c531c545cfcb68cd4e83a0ae807a363aca31c3ab0df0bde",
     "dist/src/platforms/server/platform.d.ts": "5844856ae4eee7ecd6358f187699718fadffdc8fd2b50f85f3eb45e9e3a551c3",
@@ -453,5 +499,5 @@
     "dist/src/testing.d.ts": "c13a1be2efbf1225b9cc7e31ec43b0834fb5db84736ca5429946d7404b725aa1",
     "dist/src/ui.d.ts": "bd6b75357c993a1c5e252f12810a65ccafa68164ce116f6b83b39e037fa2d54f"
   },
-  "fingerprint": "9a0a229f1f0aa13884d7364609d925484692906fd57a23ad605a66394c26d1fe"
+  "fingerprint": "dd674afe9ce9c093627472f22fa1784dd07eaf77762edbd6a547ad6a77cb17c3"
 }

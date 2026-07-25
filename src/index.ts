@@ -25,6 +25,15 @@ export type {
 export { createApp, createSystem } from "@/core/system";
 export type { EnvironmentContract, PlatformContract, Program } from "@/core/program";
 export { mapStream } from "@/core/stream";
+export type {
+  Deployment,
+  DeploymentDefinition,
+  DeploymentDependencies,
+  DeploymentProgram,
+  DeploymentPrograms,
+  SecretReference,
+} from "@/contracts/deployment";
+export { createDeployment, secret } from "@/contracts/deployment";
 export { ActorError, createActor } from "@/features/actor";
 export type {
   Actor,

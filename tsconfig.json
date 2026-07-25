@@ -26,7 +26,15 @@
         "./dist/source/platforms/server/platform.ts"
       ],
       "kit/testing": ["./src/testing.ts", "./dist/src/testing.d.ts"],
-      "kit/adapter": ["./src/contracts/platform.ts", "./dist/source/contracts/platform.ts"],
+      "kit/adapter": ["./src/adapter.ts", "./dist/source/adapter.ts"],
+      "kit/adapters/deployment/local": [
+        "./src/adapters/deployment/local.ts",
+        "./dist/source/adapters/deployment/local.ts"
+      ],
+      "kit/adapters/deployment/oci": [
+        "./src/adapters/deployment/oci.ts",
+        "./dist/source/adapters/deployment/oci.ts"
+      ],
       "kit/adapters/server": [
         "./src/adapters/server/adapter.ts",
         "./dist/source/adapters/server/adapter.ts"

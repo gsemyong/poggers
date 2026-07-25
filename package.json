@@ -16,6 +16,7 @@
     "docs/actors.md",
     "docs/compatibility.md",
     "docs/data.md",
+    "docs/deployment.md",
     "docs/features.md",
     "docs/migrations",
     "examples/basic",
@@ -66,14 +67,24 @@
       "default": "./dist/src/testing.js"
     },
     "./adapter": {
-      "source": "./dist/source/contracts/platform.ts",
-      "types": "./dist/src/contracts/platform.d.ts",
-      "default": "./dist/src/contracts/platform.js"
+      "source": "./dist/source/adapter.ts",
+      "types": "./dist/src/adapter.d.ts",
+      "default": "./dist/src/adapter.js"
     },
     "./adapters/server": {
       "source": "./dist/source/adapters/server/adapter.ts",
       "types": "./dist/src/adapters/server/adapter.d.ts",
       "default": "./dist/src/adapters/server/adapter.js"
+    },
+    "./adapters/deployment/local": {
+      "source": "./dist/source/adapters/deployment/local.ts",
+      "types": "./dist/src/adapters/deployment/local.d.ts",
+      "default": "./dist/src/adapters/deployment/local.js"
+    },
+    "./adapters/deployment/oci": {
+      "source": "./dist/source/adapters/deployment/oci.ts",
+      "types": "./dist/src/adapters/deployment/oci.d.ts",
+      "default": "./dist/src/adapters/deployment/oci.js"
     },
     "./cli": {
       "source": "./dist/source/cli.ts",

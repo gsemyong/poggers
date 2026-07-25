@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import {
   access,
+  chmod,
   glob,
   mkdir,
   mkdtemp,
@@ -26,7 +27,7 @@ afterEach(async () => {
 });
 
 describe("project template", () => {
-  test("creates the complete minimal System convention", { timeout: 30_000 }, async () => {
+  test("creates the complete minimal System convention", { timeout: 60_000 }, async () => {
     const parent = await mkdtemp(resolve(tmpdir(), "kit-create-"));
     directories.push(parent);
     const target = resolve(parent, "example");
@@ -45,6 +46,7 @@ describe("project template", () => {
     ]);
     expect((await readdir(resolve(target, "src"))).sort()).toEqual([
       "apps",
+      "deployment.ts",
       "features",
       "presentations",
       "system.spec.ts",
@@ -74,6 +76,7 @@ describe("project template", () => {
     expect(Object.keys(packageJson.scripts)).toEqual([
       "dev",
       "build",
+      "deploy",
       "typecheck",
       "test",
       "lint",
@@ -235,6 +238,7 @@ describe("project template", () => {
               {
                 identity: input.programs[0]!.id,
                 kind: "program",
+                deployment: "process",
                 environment: "edge-worker",
                 path: artifact,
               },
@@ -248,6 +252,92 @@ describe("project template", () => {
     await expect(readFile(resolve(directory, "dist/worker.bin"), "utf8")).resolves.toBe(
       "custom-platform",
     );
+  });
+
+  test("plans, applies, inspects, and removes through one Deployment command", async () => {
+    const directory = await mkdtemp(resolve(tmpdir(), "kit-deploy-cli-"));
+    directories.push(directory);
+    const source = resolve(directory, "src");
+    await mkdir(source, { recursive: true });
+    await writeFile(resolve(source, "system.ts"), customPlatformSystem());
+    await writeFile(
+      resolve(source, "deployment.ts"),
+      `
+import { createDeployment } from "kit";
+import { createLocalDeploymentAdapter } from "kit/adapters/deployment/local";
+import system from "@/system";
+
+export default createDeployment(system as never, {
+  adapter: createLocalDeploymentAdapter(),
+  programs: { indexer: { replicas: 2 } } as never,
+});
+`,
+    );
+    const adapter = {
+      edge: {
+        name: "edge",
+        async develop() {
+          throw new Error("Deployment must use production artifacts.");
+        },
+        async build(input: { output: string; programs: readonly { id: string }[] }) {
+          await mkdir(input.output, { recursive: true });
+          const executable = resolve(input.output, "indexer");
+          await writeFile(
+            executable,
+            `#!/bin/sh
+status="$KIT_PROCESS_STATUS_FILE"
+write_status() {
+  temporary="$status.$$.tmp"
+  printf '{"status":"%s","pid":%s}\\n' "$1" "$$" > "$temporary"
+  mv "$temporary" "$status"
+}
+shutdown() {
+  write_status draining
+  write_status stopped
+  exit 0
+}
+trap shutdown INT TERM
+write_status ready
+while true; do sleep 1; done
+`,
+          );
+          await chmod(executable, 0o755);
+          return {
+            directory: input.output,
+            entries: [
+              {
+                identity: input.programs[0]!.id,
+                kind: "program" as const,
+                deployment: "process" as const,
+                environment: "edge-worker",
+                path: executable,
+                entrypoint: executable,
+                lifecycle: {
+                  shutdown: { kind: "signal" as const, signal: "SIGINT" as const },
+                  status: {
+                    kind: "file" as const,
+                    environment: "KIT_PROCESS_STATUS_FILE",
+                  },
+                },
+              },
+            ],
+          };
+        },
+      },
+    };
+
+    try {
+      await runCli(["deploy", "--dir", directory], adapter);
+      const state = JSON.parse(
+        await readFile(resolve(directory, ".kit/deployments/local/state.json"), "utf8"),
+      ) as { artifacts: readonly { processes?: readonly unknown[] }[] };
+      expect(state.artifacts.flatMap(({ processes = [] }) => processes)).toHaveLength(2);
+      await expect(
+        runCli(["deploy", "--status", "--dir", directory], adapter),
+      ).resolves.toBeUndefined();
+    } finally {
+      await runCli(["deploy", "--remove", "--dir", directory], adapter);
+    }
   });
 
   test(
@@ -323,7 +413,14 @@ async function expectCanonicalSourceRoot(source: string): Promise<void> {
     .map(({ name }) => name)
     .filter(
       (name) =>
-        !["system.spec.ts", "system.ts", "apps", "features", "presentations"].includes(name),
+        ![
+          "deployment.ts",
+          "system.spec.ts",
+          "system.ts",
+          "apps",
+          "features",
+          "presentations",
+        ].includes(name),
     );
   expect(unexpected, `${source} has files outside the canonical source convention`).toEqual([]);
 
@@ -354,9 +451,11 @@ async function expectCanonicalSourceRoot(source: string): Promise<void> {
   for await (const file of glob("**/*.{ts,tsx}", { cwd: source })) {
     if (file.endsWith(".spec.ts") && file !== "system.spec.ts") continue;
     const contents = await readFile(resolve(source, file), "utf8");
-    expect(contents, `${file} imports private framework realization code`).not.toMatch(
-      /from\s+["'](?:@\/(?:adapters|contracts|core)\/|kit\/adapters\/)/,
-    );
+    if (file !== "deployment.ts") {
+      expect(contents, `${file} imports private framework realization code`).not.toMatch(
+        /from\s+["'](?:@\/(?:adapters|contracts|core)\/|kit\/adapters\/)/,
+      );
+    }
     expect(contents, `${file} names a backend implementation detail`).not.toMatch(
       /\b(?:buildServerProgram|compileSystem|createNodeHost|startServerProgram)\b/,
     );

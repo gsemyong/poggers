@@ -2,7 +2,9 @@ import { resolve } from "node:path";
 
 export const packageSources = {
   kit: "index",
-  "kit/adapter": "contracts/platform",
+  "kit/adapter": "adapter",
+  "kit/adapters/deployment/local": "adapters/deployment/local",
+  "kit/adapters/deployment/oci": "adapters/deployment/oci",
   "kit/adapters/server": "adapters/server/adapter",
   "kit/adapters/web": "adapters/web/adapter",
   "kit/cli": "cli",

@@ -56,6 +56,30 @@ describe("server Platform adapter", () => {
     ]);
     for (const artifact of result.entries) {
       await access(artifact.path);
+      expect(artifact.entrypoint).toBe(artifact.path);
+      expect(artifact.dependencies).toEqual(artifact.identity === "program/api" ? ["clock"] : []);
+      expect(artifact.configuration).toEqual(
+        artifact.identity === "program/api"
+          ? [
+              {
+                dependency: "clock",
+                implementation: "clock",
+                name: "offset",
+                binding: { kind: "environment", name: "KIT_CLOCK_OFFSET_MS" },
+                required: false,
+                default: "0",
+              },
+            ]
+          : [],
+      );
+      expect(artifact.target).toEqual({
+        operatingSystem: process.platform,
+        architecture: process.arch,
+      });
+      expect(artifact.lifecycle).toEqual({
+        shutdown: { kind: "signal", signal: "SIGINT" },
+        status: { kind: "file", environment: "KIT_PROCESS_STATUS_FILE" },
+      });
       await expect(run(artifact.path)).resolves.toBe(0);
     }
   }, 120_000);
@@ -190,7 +214,7 @@ function revisionSource(system: string) {
 function twoProgramSource(): string {
   return `${types()}
 type Root = { Features: {
-  api: { Programs: { api: Program<Server> } };
+  api: { Programs: { api: Program<Server, { Requires: { clock: Clock } }> } };
   worker: { Programs: { worker: Program<Server> } };
 } };
 const api = createFeature<Root["Features"]["api"]>({ programs: { api: {} } });
@@ -310,6 +334,7 @@ function createSystem(definition: object): object {
 }
 type HttpResponse = { status: number; headers: readonly { name: string; value: string }[]; body: string | undefined; stream: AsyncIterable<string> | undefined };
 type Http = { route(input: { path: string; handle(request: { method: string; path: string; query: readonly { name: string; value: string }[]; headers: readonly { name: string; value: string }[]; body: string }): Promise<HttpResponse> }): Disposable };
+type Clock = { now(input: {}): number };
 `;
 }
 

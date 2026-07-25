@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
@@ -236,13 +236,21 @@ describe("System realization", () => {
         },
         async build(input) {
           production.push(...semantic(input.programs));
+          await mkdir(input.output, { recursive: true });
+          await Promise.all(
+            input.programs.map((program) =>
+              writeFile(resolve(input.output, program.name), program.id),
+            ),
+          );
           return {
             directory: input.output,
             entries: input.programs.map((program) => ({
               identity: program.id,
               kind: "program" as const,
+              deployment: "process" as const,
               environment: program.environment.name,
               path: resolve(input.output, program.name),
+              entrypoint: resolve(input.output, program.name),
             })),
           };
         },
@@ -262,6 +270,21 @@ describe("System realization", () => {
     expect(built.artifacts.server?.entries.map(({ identity }) => identity)).toEqual([
       "program/api",
     ]);
+    expect(built.release).toMatchObject({
+      version: 1,
+      system: "Company",
+      app: "operations",
+      artifacts: [
+        {
+          identity: "program/api",
+          platform: "server",
+          entrypoint: "server/api",
+        },
+      ],
+    });
+    await expect(readFile(resolve(directory, "dist/release.json"), "utf8")).resolves.toContain(
+      built.release.digest,
+    );
   });
 });
 
