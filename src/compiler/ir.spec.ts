@@ -4,7 +4,9 @@ import { expect, test } from "vitest";
 import {
   SYSTEM_IR_VERSION,
   assertSystemIRVersion,
+  dependencyOperationIdentity,
   serializeSystemIR,
+  typeIdentity,
   type SystemIR,
   type DependencyIR,
   type ProgramContributionIR,
@@ -149,6 +151,22 @@ test("rejects duplicate providers and incompatible contracts while linking provi
       ]),
     ),
   ).toThrow(/incompatible contracts/);
+  expect(() =>
+    linkProgram(
+      fixtureProgram([
+        contribution("consumer", [
+          {
+            ...repository,
+            failures: {
+              kind: "record",
+              fields: [{ name: "missing", optional: false, type: textType }],
+            },
+          },
+        ]),
+        contribution("provider", [], [repository]),
+      ]),
+    ),
+  ).toThrow(/incompatible contracts/);
 
   const linked = linkProgram(
     fixtureProgram([
@@ -168,6 +186,45 @@ test("rejects duplicate providers and incompatible contracts while linking provi
     "left",
     "right",
   ]);
+});
+
+test("derives collision-free Dependency operation identities from canonical meaning", () => {
+  const first: TypeIR = {
+    kind: "record",
+    fields: [
+      { name: "a,b", optional: false, type: textType },
+      { name: "c", optional: true, type: numberType },
+    ],
+  };
+  const reordered: TypeIR = {
+    kind: "record",
+    fields: [...first.fields].reverse(),
+  };
+  const ambiguousUnderDelimiters: TypeIR = {
+    kind: "record",
+    fields: [
+      { name: "a", optional: false, type: textType },
+      { name: "b,c", optional: true, type: numberType },
+    ],
+  };
+  expect(typeIdentity(reordered)).toBe(typeIdentity(first));
+  expect(typeIdentity(ambiguousUnderDelimiters)).not.toBe(typeIdentity(first));
+
+  const operation = {
+    name: "read",
+    mode: "asynchronous" as const,
+    input: first,
+    output: textType,
+  };
+  expect(dependencyOperationIdentity({ ...operation, input: reordered })).toBe(
+    dependencyOperationIdentity(operation),
+  );
+  expect(
+    dependencyOperationIdentity({
+      ...operation,
+      heartbeat: { kind: "record", fields: [] },
+    }),
+  ).not.toBe(dependencyOperationIdentity(operation));
 });
 
 test("treats function parameter names as documentation rather than contract identity", () => {

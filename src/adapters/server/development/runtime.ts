@@ -1,8 +1,10 @@
+import { bindNodeAlarmDispatcher } from "@/adapters/server/development/host";
 import type { ProgramIR, ProgramManifest } from "@/compiler/ir";
 import { collectProgramManifest, linkProgram } from "@/compiler/linker";
+import { invokeDependency } from "@/core/dependency";
 import type { System, SystemContract } from "@/core/system";
 import { executeLinkedProgramIR, type DependencyImplementations } from "@/runtime/interpreter";
-import { assembleProgram } from "@/runtime/process";
+import { assembleProgram, type ProgramDistributionFactory } from "@/runtime/process";
 
 type ProgramHostFactory = (input: {
   readonly program: string;
@@ -22,12 +24,28 @@ export async function startServerProgramInstance<Contract extends SystemContract
   system: System<Contract>,
   program: ProgramIR,
   dependencies: Readonly<Record<string, unknown>>,
+  distribute?: ProgramDistributionFactory,
 ): Promise<RunningServerProgram> {
   if (isPortableProgram(program)) {
     const execution = await executeLinkedProgramIR(
       linkProgram(program),
       dependencies as DependencyImplementations,
+      { distribute },
     );
+    const alarm = bindNodeAlarmDispatcher(dependencies, async ({ id, at, attempt, target }) => {
+      const dependency = execution.dependencies[target.dependency];
+      if (!dependency || (typeof dependency !== "object" && typeof dependency !== "function")) {
+        throw new Error(
+          `Alarm ${JSON.stringify(id)} targets unavailable Dependency ${JSON.stringify(target.dependency)}.`,
+        );
+      }
+      await invokeDependency(dependency as object, target.operation, target.input, {
+        id: `alarm:${id}`,
+        attempt,
+        scheduledAt: at,
+        startedAt: Date.now(),
+      });
+    });
     let disposed = false;
     return {
       name: program.name,
@@ -36,6 +54,7 @@ export async function startServerProgramInstance<Contract extends SystemContract
       async [Symbol.asyncDispose]() {
         if (disposed) return;
         disposed = true;
+        alarm[Symbol.dispose]();
         await execution[Symbol.asyncDispose]();
       },
     };
@@ -47,6 +66,21 @@ export async function startServerProgramInstance<Contract extends SystemContract
     dependencies,
     manifest,
     ownDependencies: false,
+    distribute,
+  });
+  const alarm = bindNodeAlarmDispatcher(dependencies, async ({ id, at, attempt, target }) => {
+    const dependency = process.dependencies[target.dependency];
+    if (!dependency || (typeof dependency !== "object" && typeof dependency !== "function")) {
+      throw new Error(
+        `Alarm ${JSON.stringify(id)} targets unavailable Dependency ${JSON.stringify(target.dependency)}.`,
+      );
+    }
+    await invokeDependency(dependency as object, target.operation, target.input, {
+      id: `alarm:${id}`,
+      attempt,
+      scheduledAt: at,
+      startedAt: Date.now(),
+    });
   });
   let disposed = false;
   return {
@@ -56,6 +90,7 @@ export async function startServerProgramInstance<Contract extends SystemContract
     async [Symbol.asyncDispose]() {
       if (disposed) return;
       disposed = true;
+      alarm[Symbol.dispose]();
       await process.dispose();
     },
   };
@@ -67,6 +102,7 @@ export async function startServerProgram<Contract extends SystemContract>(
   program: ProgramIR,
   createHost: ProgramHostFactory,
   profile: "development" | "production",
+  distribute?: ProgramDistributionFactory,
 ): Promise<RunningServerProgram> {
   const manifest = collectProgramManifest(program);
   const dependencies = await createHost({ program: program.name, profile, manifest });
@@ -75,7 +111,7 @@ export async function startServerProgram<Contract extends SystemContract>(
   }
   let instance: RunningServerProgram;
   try {
-    instance = await startServerProgramInstance(system, program, dependencies);
+    instance = await startServerProgramInstance(system, program, dependencies, distribute);
   } catch (error) {
     await disposeServerDependencies(dependencies);
     throw error;
@@ -146,11 +182,14 @@ export async function startServerPrograms<Contract extends SystemContract>(
   programs: readonly ProgramIR[],
   createHost: ProgramHostFactory,
   profile: "development" | "production",
+  distribute?: (program: ProgramIR) => ProgramDistributionFactory | undefined,
 ): Promise<AsyncDisposable & Readonly<{ locations: readonly string[] }>> {
   const running: RunningServerProgram[] = [];
   try {
     for (const program of programs) {
-      running.push(await startServerProgram(system, program, createHost, profile));
+      running.push(
+        await startServerProgram(system, program, createHost, profile, distribute?.(program)),
+      );
     }
   } catch (error) {
     await disposeServerPrograms(running);

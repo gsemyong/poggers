@@ -2,6 +2,7 @@ import {
   assertSystemIRVersion,
   collectDependencyOperations,
   orderDependencyGraph,
+  typeIdentity,
   type SystemIR,
   type DependencyIR,
   type LinkedDependencyIR,
@@ -69,7 +70,10 @@ export function linkProgram(program: ProgramIR): LinkedProgramIR {
     for (const consumer of consumers) {
       if (
         canonical.binding !== consumer.dependency.binding ||
-        !sameType(canonical.type, consumer.dependency.type)
+        !sameType(canonical.type, consumer.dependency.type) ||
+        !sameOptionalType(canonical.failures, consumer.dependency.failures) ||
+        !sameHeartbeats(canonical.heartbeats, consumer.dependency.heartbeats) ||
+        !sameReference(canonical.reference, consumer.dependency.reference)
       ) {
         throw new ProgramLinkError(
           `Program ${JSON.stringify(program.name)} has incompatible contracts for Dependency ` +
@@ -86,7 +90,10 @@ export function linkProgram(program: ProgramIR): LinkedProgramIR {
     linkedDependencies.push({
       name,
       type: canonical.type,
+      ...(canonical.failures ? { failures: canonical.failures } : {}),
+      ...(canonical.heartbeats ? { heartbeats: canonical.heartbeats } : {}),
       ...(canonical.binding ? { binding: canonical.binding } : {}),
+      ...(canonical.reference ? { reference: canonical.reference } : {}),
       consumers: consumers.map(({ feature }) => feature),
       ...(provider ? { provider: provider.feature } : {}),
     });
@@ -126,6 +133,7 @@ export function collectProgramManifest(program: ProgramIR): ProgramManifest {
         name: dependency.name,
         binding: "envelope",
         operations: collectDependencyOperations(dependency),
+        ...(dependency.reference ? { reference: dependency.reference } : {}),
       })),
     contributions: linked.contributions.map(({ contribution }) => ({
       feature: contribution.feature,
@@ -153,32 +161,32 @@ function sameType(left: TypeIR, right: TypeIR): boolean {
   return typeIdentity(left) === typeIdentity(right);
 }
 
-function typeIdentity(type: TypeIR): string {
-  switch (type.kind) {
-    case "primitive":
-    case "opaque":
-      return `${type.kind}:${type.name}`;
-    case "literal":
-      return `literal:${JSON.stringify(type.value)}`;
-    case "array":
-      return `array:${typeIdentity(type.element)}`;
-    case "tuple":
-      return `tuple:${type.elements.map(typeIdentity).join(",")}`;
-    case "option":
-    case "promise":
-      return `${type.kind}:${typeIdentity(type.value)}`;
-    case "union":
-      return `union:${type.variants.map(typeIdentity).sort().join("|")}`;
-    case "record":
-      return `record:${[...type.fields]
-        .sort((left, right) => left.name.localeCompare(right.name))
-        .map(({ name, optional, type: value }) => `${name}:${optional}:${typeIdentity(value)}`)
-        .join(",")}`;
-    case "stream":
-      return `stream:${typeIdentity(type.element)}`;
-    case "function":
-      return `function:${type.parameters
-        .map(({ optional, type: value }) => `${optional}:${typeIdentity(value)}`)
-        .join(",")}=>${typeIdentity(type.result)}`;
-  }
+function sameOptionalType(left: TypeIR | undefined, right: TypeIR | undefined): boolean {
+  return left && right ? sameType(left, right) : left === right;
+}
+
+function sameHeartbeats(
+  left: DependencyIR["heartbeats"],
+  right: DependencyIR["heartbeats"],
+): boolean {
+  if (!left || !right) return left === right;
+  return (
+    [...left]
+      .sort((first, second) => first.operation.localeCompare(second.operation))
+      .map(({ operation, type }) => `${operation}:${typeIdentity(type)}`)
+      .join("\n") ===
+    [...right]
+      .sort((first, second) => first.operation.localeCompare(second.operation))
+      .map(({ operation, type }) => `${operation}:${typeIdentity(type)}`)
+      .join("\n")
+  );
+}
+
+function sameReference(left: DependencyIR["reference"], right: DependencyIR["reference"]): boolean {
+  if (!left || !right) return left === right;
+  return (
+    left.name === right.name &&
+    left.argument === right.argument &&
+    [...left.inputs].sort().join("\n") === [...right.inputs].sort().join("\n")
+  );
 }

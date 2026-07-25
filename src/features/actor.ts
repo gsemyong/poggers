@@ -1,6 +1,12 @@
-import { dependencyInvocation, type Dependency, type DependencyContract } from "@/core/dependency";
+import {
+  dependencyInvocation,
+  type Dependency,
+  type DependencyContract,
+  type DependencyInvocationAuthority,
+  type DependencyReference,
+} from "@/core/dependency";
 import type { Feature } from "@/core/feature";
-import { typeLiteral } from "@/core/intrinsic";
+import { typeLiteral, typeSchema, type TypeSchema } from "@/core/intrinsic";
 import type { Program } from "@/core/program";
 import type {
   Alarm,
@@ -10,20 +16,33 @@ import type {
   Identifiers,
   ServerProcess,
   Synchronization,
+  Telemetry,
   Timer,
 } from "@/platforms/server/platform";
 
+type MaybePromise<Value> = Value | PromiseLike<Value>;
 type Procedure = (context: never) => object | PromiseLike<object>;
-type Procedures = Readonly<Record<string, Procedure>>;
 declare const actorModel: unique symbol;
 declare const actorDefinition: unique symbol;
 declare const actorCommandModel: unique symbol;
+declare const actorMethod: unique symbol;
+
+type ActorMethodMode = "write" | "read";
+
+export type ActorMethodDefinition = Readonly<{
+  Mode: ActorMethodMode;
+  Input: object | undefined;
+  Result: object;
+  Failures: Readonly<Record<string, object>>;
+  readonly [actorMethod]?: never;
+}>;
 
 export type ActorModelDefinition = Readonly<{
   Name: string;
   Key: string;
   State: object;
   Dependencies?: Readonly<Record<string, DependencyContract>>;
+  Methods: Readonly<Record<string, ActorMethodDefinition>>;
 }>;
 
 /** The complete semantic model of one durable Actor type. */
@@ -50,7 +69,7 @@ export type ActorInfrastructureFailure =
   | Readonly<{ type: "poisoned"; invocation: string; attempts: number }>
   | Readonly<{ type: "result-expired"; invocation: string }>;
 
-/** An operational Actor failure, separate from a command's declared product failures. */
+/** An operational Actor failure, separate from a method's declared product failures. */
 export class ActorError extends Error {
   override readonly name = "ActorError";
 
@@ -71,10 +90,10 @@ type OperationInput<Input> = [Input] extends [undefined]
   ? Readonly<{ input?: never }>
   : Readonly<{ input: Input }>;
 
-type CompletedCommandRequest<Input> = OperationInput<Input> &
+type CompletedMethodRequest<Input> = OperationInput<Input> &
   Readonly<{ wait?: "completed"; idempotencyKey?: string }>;
 
-type AcceptedCommandRequest<Input> = OperationInput<Input> &
+type AcceptedMethodRequest<Input> = OperationInput<Input> &
   Readonly<{ wait: "accepted"; idempotencyKey?: string }>;
 
 type ActorInitialContext<Model extends ActorModelDefinition> = Readonly<{
@@ -88,18 +107,7 @@ type HandlerContext<Handler> = Handler extends (context: infer Context) => unkno
 
 type HandlerInput<Handler> = HandlerContext<Handler> extends { input: infer Input } ? Input : never;
 
-type HandlerFailure<Handler> =
-  HandlerContext<Handler> extends {
-    fail(failure: infer Failure): never;
-  }
-    ? Failure
-    : never;
-
-type HandlerResult<Handler> = Handler extends (...arguments_: never[]) => infer Result
-  ? Awaited<Result>
-  : never;
-
-type ActorCommandContext<
+type ActorWriteContext<
   Model extends ActorModelDefinition,
   Input extends object | undefined,
   Failures extends Readonly<Record<string, object>> = Record<never, never>,
@@ -111,7 +119,7 @@ type ActorCommandContext<
   dependencies: DependenciesOf<Model>;
   invocation: Readonly<{ id: string }>;
   fail(failure: FailureOf<Failures>): never;
-  timers: Readonly<{
+  reminders: Readonly<{
     schedule<Handler extends Procedure>(
       request: HandlerContext<Handler> extends {
         readonly [actorCommandModel]?: infer Target extends ActorModelDefinition;
@@ -121,7 +129,7 @@ type ActorCommandContext<
             ? Readonly<{
                 id: string;
                 at: number;
-                command: Handler;
+                method: Handler;
                 input: HandlerInput<Handler>;
               }>
             : never
@@ -132,7 +140,7 @@ type ActorCommandContext<
   }>;
 }>;
 
-type ActorQueryContext<
+type ActorReadContext<
   Model extends ActorModelDefinition,
   Input extends object | undefined,
 > = Readonly<{
@@ -141,185 +149,233 @@ type ActorQueryContext<
   input: Input;
 }>;
 
-type ActorCommandProcedure<Model extends ActorModelDefinition> = (
-  context: ActorCommandContext<Model, never>,
-) => unknown;
-
-type ActorQueryProcedure<Model extends ActorModelDefinition> = (
-  context: ActorQueryContext<Model, never>,
-) => unknown;
-
 type ActorMigrationProcedure = (context: never) => object;
 
-type ActorMigrations = Readonly<{
+type ActorMigrations<Model extends ActorModelDefinition> = Readonly<{
   state?: readonly ActorMigrationProcedure[];
-  commands?: Readonly<Record<string, readonly ActorMigrationProcedure[]>>;
+  methods?: Readonly<
+    Partial<Record<Extract<keyof Model["Methods"], string>, readonly ActorMigrationProcedure[]>>
+  >;
 }>;
+
+type InputOfMethod<Method extends ActorMethodDefinition> = Method["Input"];
+type ResultOfMethod<Method extends ActorMethodDefinition> = Method["Result"];
+type FailuresOfMethod<Method extends ActorMethodDefinition> = Method["Failures"];
+
+type ActorMethodProcedure<
+  Model extends ActorModelDefinition,
+  Method extends ActorMethodDefinition,
+> = Method["Mode"] extends "read"
+  ? (
+      context: ActorReadContext<Model, InputOfMethod<Method>>,
+    ) => MaybePromise<ResultOfMethod<Method>>
+  : (
+      context: ActorWriteContext<Model, InputOfMethod<Method>, FailuresOfMethod<Method>>,
+    ) => MaybePromise<ResultOfMethod<Method>>;
 
 type ActorImplementation<Model extends ActorModelDefinition> = Readonly<{
   state(context: ActorInitialContext<Model>): Model["State"];
-  commands: Readonly<Record<string, ActorCommandProcedure<Model>>>;
-  queries: Readonly<Record<string, ActorQueryProcedure<Model>>>;
-  migrations?: ActorMigrations;
+  methods: Readonly<{
+    [Name in keyof Model["Methods"]]: ActorMethodProcedure<Model, Model["Methods"][Name]>;
+  }>;
+  migrations?: ActorMigrations<Model>;
 }>;
 
-type GenericActorImplementation = Readonly<{
-  state: Procedure;
-  commands: Procedures;
-  queries: Procedures;
-  migrations?: ActorMigrations;
+type ValidActorImplementation<Model extends ActorModelDefinition> =
+  Extract<keyof Model["Methods"], "then" | "$wake"> extends never
+    ? ActorImplementation<Model>
+    : never;
+
+type ActorReferenceDefinition = Readonly<{
+  Key: string;
+  Methods: Readonly<Record<string, ActorMethodDefinition>>;
 }>;
 
-type ActorKey<Definition extends GenericActorImplementation> = Parameters<
-  Definition["state"]
->[0] extends { key: infer Key }
-  ? Key
-  : never;
+type WriteMethodName<Model extends ActorReferenceDefinition> = {
+  [Name in keyof Model["Methods"]]: Model["Methods"][Name]["Mode"] extends "write" ? Name : never;
+}[keyof Model["Methods"]];
 
-type ActorOperations<Definition extends GenericActorImplementation> = Readonly<
-  {
-    readonly [Name in keyof Definition["commands"]]: {
-      (
-        request: Readonly<{ key: ActorKey<Definition> }> &
-          CompletedCommandRequest<HandlerInput<Definition["commands"][Name]>>,
-      ): Promise<
-        ActorOutcome<
-          HandlerResult<Definition["commands"][Name]>,
-          HandlerFailure<Definition["commands"][Name]>
-        >
-      >;
-      (
-        request: Readonly<{ key: ActorKey<Definition> }> &
-          AcceptedCommandRequest<HandlerInput<Definition["commands"][Name]>>,
-      ): Promise<ActorInvocation>;
-    };
-  } & {
-    readonly [Name in keyof Definition["queries"]]: (
-      request: Readonly<{ key: ActorKey<Definition> }> &
-        OperationInput<HandlerInput<Definition["queries"][Name]>>,
-    ) => Promise<HandlerResult<Definition["queries"][Name]>>;
-  }
->;
+type ReadMethodName<Model extends ActorReferenceDefinition> = {
+  [Name in keyof Model["Methods"]]: Model["Methods"][Name]["Mode"] extends "read" ? Name : never;
+}[keyof Model["Methods"]];
 
-type ActorWireOperations<
-  Definition extends GenericActorImplementation,
-  Model extends ActorModelDefinition,
-> = Readonly<
+const actorWakeOperation = "$wake";
+
+type ActorWireOperations<Model extends ActorReferenceDefinition> = Readonly<
   {
-    readonly [Name in keyof Definition["commands"]]: (
+    readonly [Name in WriteMethodName<Model>]: (
       request: Readonly<{ key: Model["Key"] }> &
         (
-          | CompletedCommandRequest<HandlerInput<Definition["commands"][Name]>>
-          | AcceptedCommandRequest<HandlerInput<Definition["commands"][Name]>>
+          | CompletedMethodRequest<InputOfMethod<Model["Methods"][Name]>>
+          | AcceptedMethodRequest<InputOfMethod<Model["Methods"][Name]>>
         ),
     ) => Promise<
       | ActorOutcome<
-          HandlerResult<Definition["commands"][Name]>,
-          HandlerFailure<Definition["commands"][Name]>
+          ResultOfMethod<Model["Methods"][Name]>,
+          FailureOf<FailuresOfMethod<Model["Methods"][Name]>>
         >
       | ActorInvocation
     >;
   } & {
-    readonly [Name in keyof Definition["queries"]]: (
+    readonly [Name in ReadMethodName<Model>]: (
       request: Readonly<{ key: Model["Key"] }> &
-        OperationInput<HandlerInput<Definition["queries"][Name]>>,
-    ) => Promise<HandlerResult<Definition["queries"][Name]>>;
+        OperationInput<InputOfMethod<Model["Methods"][Name]>>,
+    ) => Promise<ResultOfMethod<Model["Methods"][Name]>>;
+  } & {
+    readonly $wake: (
+      request: Readonly<{ key: Model["Key"]; dueAt: number }>,
+    ) => Promise<Record<never, never>>;
   }
 >;
 
-type ActorDependency<
-  Definition extends GenericActorImplementation,
-  Model extends ActorModelDefinition = ActorModelOf<Definition>,
-> = Dependency<{ Operations: ActorWireOperations<Definition, Model> }, ActorOperations<Definition>>;
-
-type ActorModelOf<Definition extends GenericActorImplementation> =
-  HandlerContext<Definition["state"]> extends {
-    readonly [actorModel]?: infer Model extends ActorModelDefinition;
-  }
-    ? Model
-    : never;
-
-type ActorProvision<
-  Definition extends GenericActorImplementation,
-  Model extends ActorModelDefinition = ActorModelOf<Definition>,
-> = Readonly<{
-  [Name in Model["Name"]]: ActorDependency<Definition, Model>;
+type CompletedActorCallOptions = Readonly<{
+  wait?: "completed";
+  idempotencyKey?: string;
 }>;
 
-type ActorFeatureContract<
-  Definition extends GenericActorImplementation,
-  Model extends ActorModelDefinition = ActorModelOf<Definition>,
-> = Readonly<{
+type AcceptedActorCallOptions = Readonly<{
+  wait: "accepted";
+  idempotencyKey?: string;
+}>;
+
+type ActorBoundWriteMethod<Method extends ActorMethodDefinition> =
+  InputOfMethod<Method> extends undefined
+    ? {
+        (
+          options?: CompletedActorCallOptions,
+        ): Promise<ActorOutcome<ResultOfMethod<Method>, FailureOf<FailuresOfMethod<Method>>>>;
+        (options: AcceptedActorCallOptions): Promise<ActorInvocation>;
+      }
+    : {
+        (
+          input: InputOfMethod<Method>,
+          options?: CompletedActorCallOptions,
+        ): Promise<ActorOutcome<ResultOfMethod<Method>, FailureOf<FailuresOfMethod<Method>>>>;
+        (input: InputOfMethod<Method>, options: AcceptedActorCallOptions): Promise<ActorInvocation>;
+      };
+
+type ActorBoundOperations<Model extends ActorReferenceDefinition> = Readonly<
+  {
+    readonly [Name in WriteMethodName<Model>]: ActorBoundWriteMethod<Model["Methods"][Name]>;
+  } & {
+    readonly [Name in ReadMethodName<Model>]: InputOfMethod<
+      Model["Methods"][Name]
+    > extends undefined
+      ? () => Promise<ResultOfMethod<Model["Methods"][Name]>>
+      : (
+          input: InputOfMethod<Model["Methods"][Name]>,
+        ) => Promise<ResultOfMethod<Model["Methods"][Name]>>;
+  }
+>;
+
+type ActorReferenceProjection<Model extends ActorReferenceDefinition> = Readonly<{
+  Name: "get";
+  Binding: Readonly<{ key: Model["Key"] }>;
+  Inputs: Readonly<{
+    [Name in keyof Model["Methods"]]: InputOfMethod<Model["Methods"][Name]>;
+  }>;
+  Argument: "input";
+}>;
+
+type ActorInstance<Model extends ActorReferenceDefinition> = DependencyReference<
+  ActorReferenceProjection<Model>,
+  ActorBoundOperations<Model>
+>;
+
+type ActorReferenceFactory<Model extends ActorReferenceDefinition> = Readonly<{
+  get(input: Readonly<{ key: Model["Key"] }>): ActorInstance<Model>;
+}>;
+
+type ActorDependency<Model extends ActorReferenceDefinition> = Dependency<
+  {
+    Operations: ActorWireOperations<Model>;
+    Reference: ActorReferenceProjection<Model>;
+  },
+  ActorReferenceFactory<Model>
+>;
+
+type ActorProvision<Model extends ActorModelDefinition> = Readonly<{
+  [Name in Model["Name"]]: ActorDependency<Model>;
+}>;
+
+type ActorFeatureContract<Model extends ActorModelDefinition> = Readonly<{
   Programs: {
     server: Program<
       ServerProcess,
       {
         Requires: ActorRequirements<Model>;
-        Provides: ActorProvision<Definition, Model>;
+        Provides: ActorProvision<Model>;
       }
     >;
   };
 }>;
 
 /** A directly mountable Actor Feature with no public placement or transport controls. */
-export type DefinedActor<
-  Definition extends GenericActorImplementation,
-  Model extends ActorModelDefinition = ActorModelOf<Definition>,
-> = Feature<ActorFeatureContract<Definition, Model>> &
+export type DefinedActor<Model extends ActorModelDefinition> = Feature<
+  ActorFeatureContract<Model>
+> &
   Readonly<{
     readonly [actorDefinition]?: Readonly<{
       Model: Model;
-      Definition: Definition;
     }>;
   }>;
 
-type ActorDependencyOf<Definition> =
-  Definition extends Readonly<{
-    readonly [actorDefinition]?: Readonly<{
-      Model: infer Model extends ActorModelDefinition;
-      Definition: infer Implementation extends GenericActorImplementation;
-    }>;
-  }>
-    ? ActorDependency<Implementation, Model>
+type ActorModelOf<Definition> = Definition extends ActorReferenceDefinition
+  ? Definition
+  : Definition extends Readonly<{
+        readonly [actorDefinition]?: Readonly<{
+          Model: infer Model extends ActorModelDefinition;
+        }>;
+      }>
+    ? Model
     : never;
 
-type UnknownMigrationCommand<Definition extends GenericActorImplementation> = Definition extends {
-  migrations: { commands: infer Commands extends object };
-}
-  ? Exclude<keyof Commands, keyof Definition["commands"]>
-  : never;
-
-type ActorOperationCollision<Definition extends GenericActorImplementation> = Extract<
-  keyof Definition["commands"],
-  keyof Definition["queries"]
->;
-
-type ActorDefinitionConstraint<Definition extends GenericActorImplementation> = [
-  UnknownMigrationCommand<Definition> | ActorOperationCollision<Definition>,
-] extends [never]
-  ? unknown
-  : never;
+type ActorDependencyOf<Definition> =
+  ActorModelOf<Definition> extends infer Model extends ActorReferenceDefinition
+    ? ActorDependency<Model>
+    : never;
 
 export namespace Actor {
-  export type Initial<Model extends ActorModelDefinition> = ActorInitialContext<Model>;
-  export type Command<
-    Model extends ActorModelDefinition,
+  export type Method<
     Input extends object | undefined = undefined,
+    Result extends object = Record<never, never>,
     Failures extends Readonly<Record<string, object>> = Record<never, never>,
-  > = ActorCommandContext<Model, Input, Failures>;
-  export type Query<
-    Model extends ActorModelDefinition,
+  > = Readonly<{
+    Mode: "write";
+    Input: Input;
+    Result: Result;
+    Failures: Failures;
+    readonly [actorMethod]?: never;
+  }>;
+  export type Read<
     Input extends object | undefined = undefined,
-  > = ActorQueryContext<Model, Input>;
+    Result extends object = Record<never, never>,
+  > = Readonly<{
+    Mode: "read";
+    Input: Input;
+    Result: Result;
+    Failures: Record<never, never>;
+    readonly [actorMethod]?: never;
+  }>;
+  export type Initial<Model extends ActorModelDefinition> = ActorInitialContext<Model>;
+  export type Methods<Model extends ActorModelDefinition> = ActorImplementation<Model>["methods"];
+  export type Handler<
+    Model extends ActorModelDefinition,
+    Name extends keyof Model["Methods"],
+  > = ActorMethodProcedure<Model, Model["Methods"][Name]>;
   export type Definition<Model extends ActorModelDefinition> = ActorImplementation<Model>;
   export type Reference<Definition> = ActorDependencyOf<Definition>;
+  export type Instance<Definition> =
+    ActorModelOf<Definition> extends infer Model extends ActorReferenceDefinition
+      ? ActorInstance<Model>
+      : never;
   export type Error = ActorError;
   export type Failure = ActorInfrastructureFailure;
   export type Outcome<Result, Failure = never> = ActorOutcome<Result, Failure>;
   export type StateMigration<Previous extends object, Next extends object> = (
     context: Readonly<{ state: Readonly<Previous> }>,
   ) => Next;
-  export type CommandMigration<Previous extends object, Next extends object> = (
+  export type MethodMigration<Previous extends object, Next extends object> = (
     context: Readonly<{ input: Previous }>,
   ) => Next;
 }
@@ -328,17 +384,19 @@ export namespace Actor {
  * Defines one Actor type as a reusable Feature that contributes an ordinary
  * portable Program and a semantic Dependency API.
  */
-export function createActor<
-  const Model extends ActorModelDefinition,
-  const Definition extends GenericActorImplementation,
->(
-  definition: Definition & ActorImplementation<Model> & ActorDefinitionConstraint<Definition>,
-): DefinedActor<Definition, Model> {
-  return createActorFeature<Model, Definition>(definition, () => typeLiteral<Model["Name"]>());
+export function createActor<const Model extends ActorModelDefinition>(
+  definition: ValidActorImplementation<Model>,
+): DefinedActor<Model> {
+  return createActorFeature<Model>(
+    definition,
+    () => typeLiteral<Model["Name"]>(),
+    () => typeSchema<Model["Methods"]>(),
+  );
 }
 
 type RuntimeRequest<Model extends ActorModelDefinition> = Readonly<{
   key: Model["Key"];
+  dueAt?: number;
   input?: object;
   wait?: "accepted" | "completed";
   idempotencyKey?: string;
@@ -349,7 +407,14 @@ type RuntimeInvocation = Readonly<{
   attempt: number;
   scheduledAt: number;
   startedAt: number;
+  authority?: DependencyInvocationAuthority;
 }>;
+
+async function assertActorAuthority(
+  authority: DependencyInvocationAuthority | undefined,
+): Promise<void> {
+  if (authority?.assert !== undefined) await authority.assert();
+}
 
 type RuntimeCommandContext<Model extends ActorModelDefinition> = Readonly<{
   key: Model["Key"];
@@ -358,10 +423,8 @@ type RuntimeCommandContext<Model extends ActorModelDefinition> = Readonly<{
   dependencies: DependenciesOf<Model>;
   invocation: Readonly<{ id: string }>;
   fail(failure: object): never;
-  timers: Readonly<{
-    schedule(
-      request: Readonly<{ id: string; at: number; command: Procedure; input: object }>,
-    ): void;
+  reminders: Readonly<{
+    schedule(request: Readonly<{ id: string; at: number; method: Procedure; input: object }>): void;
     cancel(request: Readonly<{ id: string }>): void;
   }>;
 }>;
@@ -475,6 +538,7 @@ type ActorRequirements<Model extends ActorModelDefinition> = DependenciesOf<Mode
     executionContext: ExecutionContext;
     identifiers: Identifiers;
     synchronization: Synchronization;
+    telemetry: Telemetry;
     timer: Timer;
   }>;
 
@@ -482,13 +546,31 @@ type RuntimeActorRequirements<Model extends ActorModelDefinition> = Omit<
   ActorRequirements<Model>,
   "events"
 > &
-  Readonly<{ events: EventStore<ActorJournalEvent<Model>> }>;
+  Readonly<{
+    events: EventStore<ActorJournalEvent<Model>, ActorJournalSnapshot<Model>>;
+  }>;
 
 type ActorJournal<Model extends ActorModelDefinition> = Readonly<{
   revision: number;
+  snapshotRevision: number;
   state: Model["State"];
   accepted: readonly ActorJournalAccepted[];
+  expired: readonly ActorJournalAccepted[];
   pending: readonly ActorJournalAccepted[];
+  claims: readonly ActorJournalClaimed[];
+  failed: readonly ActorJournalFailed[];
+  poisoned: readonly ActorJournalPoisoned[];
+  completed: readonly ActorJournalCompleted<Model>[];
+  timers: readonly ActorJournalTimerEvent[];
+}>;
+
+type ActorJournalSnapshot<Model extends ActorModelDefinition> = Readonly<{
+  format: "kit.actor";
+  version: 1;
+  state: Model["State"];
+  stateVersion: number;
+  accepted: readonly ActorJournalAccepted[];
+  expired: readonly ActorJournalAccepted[];
   claims: readonly ActorJournalClaimed[];
   failed: readonly ActorJournalFailed[];
   poisoned: readonly ActorJournalPoisoned[];
@@ -507,9 +589,19 @@ type ActorRegistrationCache = {
   keys: Partial<Record<string, true>>;
 };
 
-type ActorJournalCache<Model extends ActorModelDefinition> = Partial<
-  Record<string, ActorJournal<Model>>
->;
+type ActorActivationPhase = "activating" | "active" | "idle" | "failed";
+
+type ActorActivation<Model extends ActorModelDefinition> = {
+  epoch: number;
+  phase: ActorActivationPhase;
+  touchedAt: number;
+  journal?: ActorJournal<Model>;
+};
+
+type ActorActivationCache<Model extends ActorModelDefinition> = {
+  epoch: number;
+  entries: Partial<Record<string, ActorActivation<Model>>>;
+};
 
 type ActorExecutionScope = Readonly<{
   kind: "actor";
@@ -518,6 +610,41 @@ type ActorExecutionScope = Readonly<{
 }>;
 
 const actorResultRetention = 1_024;
+const actorInvocationTombstoneRetention = 1_024;
+const actorActivationCapacity = 256;
+const actorActivationIdle = 300_000;
+const actorSnapshotInterval = 256;
+const actorRegistryBatchSize = 256;
+
+function recordActorMetric(
+  telemetry: Telemetry,
+  actor: string,
+  instrument: "counter" | "gauge" | "histogram",
+  name: string,
+  value: number,
+): void {
+  telemetry.record({
+    instrument,
+    name,
+    value,
+    attributes: [{ name: "actor", value: actor }],
+  });
+}
+
+function actorCacheMetrics<Model extends ActorModelDefinition>(
+  cache: ActorActivationCache<Model>,
+): Readonly<{ activations: number; entries: number }> {
+  let activations = 0;
+  let entries = 0;
+  for (const stream of Object.keys(cache.entries)) {
+    const activation = cache.entries[stream];
+    if (activation !== undefined) {
+      entries += 1;
+      if (activation.phase === "active") activations += 1;
+    }
+  }
+  return { activations, entries };
+}
 
 type ActorCommandExecution<Model extends ActorModelDefinition> = Readonly<{
   state: Model["State"];
@@ -576,6 +703,10 @@ function actorAlarm(stream: string): string {
   return `actor-alarm:${stream.length}:${stream}`;
 }
 
+function actorAdmission(stream: string): string {
+  return `actor-admission:${stream.length}:${stream}`;
+}
+
 function actorRegistrationKey(key: string): string {
   return `${key.length}:${key}`;
 }
@@ -592,86 +723,378 @@ function resolveActorExecutionSlot(slots: ActorExecutionSlots, stream: string): 
   return created;
 }
 
-async function readActorJournal<Model extends ActorModelDefinition>(
-  events: EventStore<ActorJournalEvent<Model>>,
+function createActorActivationCache<
+  Model extends ActorModelDefinition,
+>(): ActorActivationCache<Model> {
+  return { epoch: 0, entries: {} };
+}
+
+function beginActorActivation<Model extends ActorModelDefinition>(
+  cache: ActorActivationCache<Model>,
   stream: string,
-  key: Model["Key"],
-  initialize: (context: ActorInitialContext<Model>) => Model["State"],
-  stateMigrations: readonly RuntimeStateMigration[],
-  cache: ActorJournalCache<Model>,
-): Promise<ActorJournal<Model>> {
-  const cached = cache[stream];
-  const stored = await events.read({
-    stream,
-    ...(cached === undefined ? {} : { after: cached.revision }),
-  });
-  let revision = cached?.revision ?? 0;
-  let state = cached?.state ?? initialize({ key });
-  const accepted: ActorJournalAccepted[] = [];
-  const pendingCandidates: ActorJournalAccepted[] = [];
-  const claims: ActorJournalClaimed[] = [];
-  const failed: ActorJournalFailed[] = [];
-  const poisoned: ActorJournalPoisoned[] = [];
-  const completed: ActorJournalCompleted<Model>[] = [];
-  const timers: ActorJournalTimerEvent[] = [];
-  if (cached !== undefined) {
-    for (const acceptedEvent of cached.accepted) {
-      accepted.push(acceptedEvent);
-      pendingCandidates.push(acceptedEvent);
-    }
-    for (const claimEvent of cached.claims) claims.push(claimEvent);
-    for (const failureEvent of cached.failed) failed.push(failureEvent);
-    for (const poisonEvent of cached.poisoned) poisoned.push(poisonEvent);
-    for (const completionEvent of cached.completed) completed.push(completionEvent);
-    for (const timerEvent of cached.timers) timers.push(timerEvent);
+  at: number,
+): ActorActivation<Model> {
+  const current = cache.entries[stream];
+  if (current !== undefined) {
+    current.phase = "activating";
+    current.touchedAt = at;
+    return current;
   }
-  for (const entry of stored) {
-    revision = entry.revision;
-    const event = entry.event;
-    if (event.type === "actor.command.accepted") {
-      accepted.push(event);
-      pendingCandidates.push(event);
-    } else if (event.type === "actor.command.claimed") {
-      claims.push(event);
-    } else if (event.type === "actor.command.failed") {
-      failed.push(event);
-    } else if (event.type === "actor.command.poisoned") {
-      poisoned.push(event);
-    } else if (event.type === "actor.timer.scheduled") {
-      timers.push(event);
-    } else if (event.type === "actor.timer.cancelled") {
-      timers.push(event);
-    } else if (event.type === "actor.timer.fired") {
-      timers.push(event);
-    } else if (event.type === "actor.command.completed") {
-      completed.push(event);
-      state = migrateActorState(event.state, event.stateVersion ?? 0, stateMigrations);
+  cache.epoch += 1;
+  const activation = {
+    epoch: cache.epoch,
+    phase: "activating" as const,
+    touchedAt: at,
+  };
+  cache.entries[stream] = activation;
+  return activation;
+}
+
+function evictActorActivations<Model extends ActorModelDefinition>(
+  cache: ActorActivationCache<Model>,
+  at: number,
+): void {
+  let retained = 0;
+  for (const stream of Object.keys(cache.entries)) {
+    const activation = cache.entries[stream];
+    if (activation !== undefined) {
+      const pending = activation.journal?.pending.length ?? 0;
+      if (
+        pending === 0 &&
+        (activation.phase === "failed" ||
+          (activation.phase === "idle" && at - activation.touchedAt >= actorActivationIdle))
+      ) {
+        cache.entries[stream] = undefined;
+      } else {
+        retained += 1;
+      }
     }
   }
+  while (retained > actorActivationCapacity) {
+    let oldestStream: string | undefined;
+    let oldestAt = at;
+    let oldestEpoch = cache.epoch + 1;
+    for (const candidateStream of Object.keys(cache.entries)) {
+      const candidate = cache.entries[candidateStream];
+      if (
+        candidate !== undefined &&
+        candidate.phase === "idle" &&
+        (candidate.journal?.pending.length ?? 0) === 0 &&
+        (candidate.touchedAt < oldestAt ||
+          (candidate.touchedAt === oldestAt && candidate.epoch < oldestEpoch))
+      ) {
+        oldestStream = candidateStream;
+        oldestAt = candidate.touchedAt;
+        oldestEpoch = candidate.epoch;
+      }
+    }
+    if (oldestStream === undefined) return;
+    cache.entries[oldestStream] = undefined;
+    retained -= 1;
+  }
+}
+
+function idleActorActivation<Model extends ActorModelDefinition>(
+  cache: ActorActivationCache<Model>,
+  stream: string,
+  at: number,
+): void {
+  const activation = cache.entries[stream];
+  if (activation === undefined || activation.phase === "failed") return;
+  activation.phase = "idle";
+  activation.touchedAt = at;
+  evictActorActivations(cache, at);
+}
+
+type ActorInvocationIndex = Partial<Record<string, true>>;
+
+function actorInvocationKey(invocation: string): string {
+  return JSON.stringify(invocation);
+}
+
+function settledActorInvocationIndex<Model extends ActorModelDefinition>(
+  completed: readonly ActorJournalCompleted<Model>[],
+  failed: readonly ActorJournalFailed[],
+  poisoned: readonly ActorJournalPoisoned[],
+): ActorInvocationIndex {
+  const settled: ActorInvocationIndex = {};
+  for (const completedInvocation of completed) {
+    settled[actorInvocationKey(completedInvocation.invocation)] = true;
+  }
+  for (const failedInvocation of failed) {
+    settled[actorInvocationKey(failedInvocation.invocation)] = true;
+  }
+  for (const poisonedInvocation of poisoned) {
+    settled[actorInvocationKey(poisonedInvocation.invocation)] = true;
+  }
+  return settled;
+}
+
+function pendingActorInvocations<Model extends ActorModelDefinition>(
+  accepted: readonly ActorJournalAccepted[],
+  completed: readonly ActorJournalCompleted<Model>[],
+  failed: readonly ActorJournalFailed[],
+  poisoned: readonly ActorJournalPoisoned[],
+): ActorJournalAccepted[] {
+  const settled = settledActorInvocationIndex(completed, failed, poisoned);
   const pending: ActorJournalAccepted[] = [];
-  const settledCount = completed.length + failed.length + poisoned.length;
-  for (let index = settledCount; index < pendingCandidates.length; index += 1) {
-    const pendingCandidate = pendingCandidates[index];
-    if (pendingCandidate !== undefined) pending.push(pendingCandidate);
+  for (const candidate of accepted) {
+    if (settled[actorInvocationKey(candidate.invocation)] === undefined) {
+      pending.push(candidate);
+    }
   }
-  const journal = {
-    revision,
-    state,
+  return pending;
+}
+
+function compactActorTimers(timers: readonly ActorJournalTimerEvent[]): ActorJournalTimerEvent[] {
+  const compacted: ActorJournalTimerEvent[] = [];
+  for (const event of timers) {
+    let index = 0;
+    while (index < compacted.length && compacted[index]?.timer !== event.timer) {
+      index += 1;
+    }
+    if (index === compacted.length) compacted.push(event);
+    else compacted[index] = event;
+  }
+  return compacted;
+}
+
+function actorJournalSnapshot<Model extends ActorModelDefinition>(
+  journal: ActorJournal<Model>,
+  stateVersion: number,
+): ActorJournalSnapshot<Model> {
+  const settledIndex = settledActorInvocationIndex(
+    journal.completed,
+    journal.failed,
+    journal.poisoned,
+  );
+  const pending = pendingActorInvocations(
+    journal.accepted,
+    journal.completed,
+    journal.failed,
+    journal.poisoned,
+  );
+  const settled: string[] = [];
+  for (const candidate of journal.accepted) {
+    if (settledIndex[actorInvocationKey(candidate.invocation)] !== undefined) {
+      settled.push(candidate.invocation);
+    }
+  }
+  const retained: string[] = [];
+  let retainedIndex =
+    settled.length > actorResultRetention ? settled.length - actorResultRetention : 0;
+  while (retainedIndex < settled.length) {
+    const invocation = settled[retainedIndex];
+    if (invocation !== undefined) retained.push(invocation);
+    retainedIndex += 1;
+  }
+  const retainedInvocations: ActorInvocationIndex = {};
+  for (const retainedInvocation of retained) {
+    retainedInvocations[actorInvocationKey(retainedInvocation)] = true;
+  }
+  const pendingInvocations: ActorInvocationIndex = {};
+  for (const pendingInvocation of pending) {
+    pendingInvocations[actorInvocationKey(pendingInvocation.invocation)] = true;
+  }
+  const accepted: ActorJournalAccepted[] = [];
+  for (const acceptedCandidate of journal.accepted) {
+    if (
+      retainedInvocations[actorInvocationKey(acceptedCandidate.invocation)] !== undefined ||
+      pendingInvocations[actorInvocationKey(acceptedCandidate.invocation)] !== undefined
+    ) {
+      accepted.push(acceptedCandidate);
+    }
+  }
+  const expiredCandidates: ActorJournalAccepted[] = [];
+  for (const previousExpired of journal.expired) expiredCandidates.push(previousExpired);
+  for (const acceptedCandidateForExpiry of journal.accepted) {
+    if (
+      settledIndex[actorInvocationKey(acceptedCandidateForExpiry.invocation)] !== undefined &&
+      retainedInvocations[actorInvocationKey(acceptedCandidateForExpiry.invocation)] === undefined
+    ) {
+      expiredCandidates.push(acceptedCandidateForExpiry);
+    }
+  }
+  const expired: ActorJournalAccepted[] = [];
+  let expiredIndex =
+    expiredCandidates.length > actorInvocationTombstoneRetention
+      ? expiredCandidates.length - actorInvocationTombstoneRetention
+      : 0;
+  while (expiredIndex < expiredCandidates.length) {
+    const expiredCandidate = expiredCandidates[expiredIndex];
+    if (expiredCandidate !== undefined) expired.push(expiredCandidate);
+    expiredIndex += 1;
+  }
+  const claims: ActorJournalClaimed[] = [];
+  for (const claimCandidate of journal.claims) {
+    if (pendingInvocations[actorInvocationKey(claimCandidate.invocation)] !== undefined) {
+      claims.push(claimCandidate);
+    }
+  }
+  const failed: ActorJournalFailed[] = [];
+  for (const failedCandidate of journal.failed) {
+    if (retainedInvocations[actorInvocationKey(failedCandidate.invocation)] !== undefined) {
+      failed.push(failedCandidate);
+    }
+  }
+  const poisoned: ActorJournalPoisoned[] = [];
+  for (const poisonedCandidate of journal.poisoned) {
+    if (retainedInvocations[actorInvocationKey(poisonedCandidate.invocation)] !== undefined) {
+      poisoned.push(poisonedCandidate);
+    }
+  }
+  const completed: ActorJournalCompleted<Model>[] = [];
+  for (const completedCandidate of journal.completed) {
+    if (retainedInvocations[actorInvocationKey(completedCandidate.invocation)] !== undefined) {
+      completed.push(completedCandidate);
+    }
+  }
+  return {
+    format: "kit.actor",
+    version: 1,
+    state: journal.state,
+    stateVersion,
     accepted,
-    pending,
+    expired,
     claims,
     failed,
     poisoned,
     completed,
-    timers,
+    timers: compactActorTimers(journal.timers),
   };
-  const current = cache[stream];
-  if (current === undefined || current.revision <= revision) cache[stream] = journal;
-  return journal;
+}
+
+function restoreActorSnapshot<Model extends ActorModelDefinition>(
+  revision: number,
+  snapshot: ActorJournalSnapshot<Model>,
+  stateMigrations: readonly RuntimeStateMigration[],
+): ActorJournal<Model> {
+  if (snapshot.format !== "kit.actor" || snapshot.version !== 1) {
+    throw new ActorError({ type: "incompatible", schema: "snapshot" });
+  }
+  const state = migrateActorState(snapshot.state, snapshot.stateVersion, stateMigrations);
+  return {
+    revision,
+    snapshotRevision: revision,
+    state,
+    accepted: snapshot.accepted,
+    expired: snapshot.expired,
+    pending: pendingActorInvocations(
+      snapshot.accepted,
+      snapshot.completed,
+      snapshot.failed,
+      snapshot.poisoned,
+    ),
+    claims: snapshot.claims,
+    failed: snapshot.failed,
+    poisoned: snapshot.poisoned,
+    completed: snapshot.completed,
+    timers: snapshot.timers,
+  };
+}
+
+async function readActorJournal<Model extends ActorModelDefinition>(
+  events: EventStore<ActorJournalEvent<Model>, ActorJournalSnapshot<Model>>,
+  stream: string,
+  key: Model["Key"],
+  initialize: (context: ActorInitialContext<Model>) => Model["State"],
+  stateMigrations: readonly RuntimeStateMigration[],
+  cache: ActorActivationCache<Model>,
+  at: number,
+): Promise<ActorJournal<Model>> {
+  const activation = beginActorActivation(cache, stream, at);
+  let cached = activation.journal;
+  try {
+    if (cached === undefined) {
+      const snapshot = await events.loadSnapshot({ stream });
+      if (snapshot !== undefined) {
+        cached = restoreActorSnapshot(snapshot.revision, snapshot.snapshot, stateMigrations);
+      }
+    }
+    const stored = await events.read({
+      stream,
+      ...(cached === undefined ? {} : { after: cached.revision }),
+    });
+    let revision = cached?.revision ?? 0;
+    let state = cached?.state ?? initialize({ key });
+    const accepted: ActorJournalAccepted[] = [];
+    const expired: ActorJournalAccepted[] = [];
+    const pendingCandidates: ActorJournalAccepted[] = [];
+    const claims: ActorJournalClaimed[] = [];
+    const failed: ActorJournalFailed[] = [];
+    const poisoned: ActorJournalPoisoned[] = [];
+    const completed: ActorJournalCompleted<Model>[] = [];
+    const timers: ActorJournalTimerEvent[] = [];
+    if (cached !== undefined) {
+      for (const acceptedEvent of cached.accepted) {
+        accepted.push(acceptedEvent);
+        pendingCandidates.push(acceptedEvent);
+      }
+      for (const expiredEvent of cached.expired) expired.push(expiredEvent);
+      for (const claimEvent of cached.claims) claims.push(claimEvent);
+      for (const failureEvent of cached.failed) failed.push(failureEvent);
+      for (const poisonEvent of cached.poisoned) poisoned.push(poisonEvent);
+      for (const completionEvent of cached.completed) completed.push(completionEvent);
+      for (const timerEvent of cached.timers) timers.push(timerEvent);
+    }
+    for (const entry of stored) {
+      revision = entry.revision;
+      const event = entry.event;
+      if (event.type === "actor.command.accepted") {
+        accepted.push(event);
+        pendingCandidates.push(event);
+      } else if (event.type === "actor.command.claimed") {
+        claims.push(event);
+      } else if (event.type === "actor.command.failed") {
+        failed.push(event);
+      } else if (event.type === "actor.command.poisoned") {
+        poisoned.push(event);
+      } else if (event.type === "actor.timer.scheduled") {
+        timers.push(event);
+      } else if (event.type === "actor.timer.cancelled") {
+        timers.push(event);
+      } else if (event.type === "actor.timer.fired") {
+        timers.push(event);
+      } else if (event.type === "actor.command.completed") {
+        completed.push(event);
+        state = migrateActorState(event.state, event.stateVersion ?? 0, stateMigrations);
+      }
+    }
+    const pending = pendingActorInvocations(pendingCandidates, completed, failed, poisoned);
+    const journal = {
+      revision,
+      snapshotRevision: cached?.snapshotRevision ?? 0,
+      state,
+      accepted,
+      expired,
+      pending,
+      claims,
+      failed,
+      poisoned,
+      completed,
+      timers,
+    };
+    const current = cache.entries[stream];
+    if (
+      current === undefined ||
+      current.journal === undefined ||
+      current.journal.revision <= revision
+    ) {
+      activation.journal = journal;
+    }
+    activation.phase = "active";
+    activation.touchedAt = at;
+    return activation.journal ?? journal;
+  } catch (error) {
+    activation.journal = undefined;
+    activation.phase = "failed";
+    activation.touchedAt = at;
+    throw error;
+  }
 }
 
 async function registerActor<Model extends ActorModelDefinition>(
-  events: EventStore<ActorJournalEvent<Model>>,
+  events: EventStore<ActorJournalEvent<Model>, ActorJournalSnapshot<Model>>,
   registry: string,
   key: Model["Key"],
   at: number,
@@ -680,7 +1103,11 @@ async function registerActor<Model extends ActorModelDefinition>(
   const registration = actorRegistrationKey(key);
   if (cache.keys[registration] === true) return;
   for (let attempt = 0; attempt < 128; attempt += 1) {
-    const stored = await events.read({ stream: registry, after: cache.revision });
+    const stored = await events.read({
+      stream: registry,
+      after: cache.revision,
+      limit: actorRegistryBatchSize,
+    });
     let revision = cache.revision;
     for (const entry of stored) {
       revision = entry.revision;
@@ -706,20 +1133,33 @@ async function registerActor<Model extends ActorModelDefinition>(
 }
 
 async function registeredActorKeys<Model extends ActorModelDefinition>(
-  events: EventStore<ActorJournalEvent<Model>>,
+  events: EventStore<ActorJournalEvent<Model>, ActorJournalSnapshot<Model>>,
   registry: string,
 ): Promise<Readonly<{ revision: number; keys: readonly Model["Key"][] }>> {
-  const stored = await events.read({ stream: registry });
   let revision = 0;
   const keys: Model["Key"][] = [];
-  for (const entry of stored) {
-    revision = entry.revision;
-    const event = entry.event;
-    if (
-      event.type === "actor.registered" &&
-      keys.find((candidate) => candidate === event.key) === undefined
-    ) {
-      keys.push(event.key);
+  const registered: Partial<Record<string, true>> = {};
+  let reading = true;
+  while (reading) {
+    const stored = await events.read({
+      stream: registry,
+      after: revision,
+      limit: actorRegistryBatchSize,
+    });
+    if (stored.length === 0) {
+      reading = false;
+    } else {
+      for (const entry of stored) {
+        revision = entry.revision;
+        const event = entry.event;
+        if (event.type === "actor.registered") {
+          const registration = actorRegistrationKey(event.key);
+          if (registered[registration] !== true) {
+            registered[registration] = true;
+            keys.push(event.key);
+          }
+        }
+      }
     }
   }
   return { revision, keys };
@@ -917,15 +1357,28 @@ function nextActorWake<Model extends ActorModelDefinition>(
   return wake;
 }
 
-function scheduleActorJournalWake<Model extends ActorModelDefinition>(
+async function scheduleActorJournalWake<Model extends ActorModelDefinition>(
   dependencies: RuntimeActorRequirements<Model>,
   stream: string,
+  name: Model["Name"],
+  key: Model["Key"],
   journal: ActorJournal<Model>,
-): void {
+): Promise<void> {
   const id = actorAlarm(stream);
   const at = nextActorWake(journal, dependencies.clock.now({}));
-  if (at === undefined) dependencies.alarm.cancel({ id });
-  else dependencies.alarm.schedule({ id, at });
+  if (at === undefined) {
+    await dependencies.alarm.cancel({ id });
+  } else {
+    await dependencies.alarm.schedule({
+      id,
+      at,
+      target: {
+        dependency: name,
+        operation: actorWakeOperation,
+        input: { key, dueAt: at },
+      },
+    });
+  }
 }
 
 function retainedActorCompletion<Model extends ActorModelDefinition>(
@@ -941,6 +1394,9 @@ function retainedActorCompletion<Model extends ActorModelDefinition>(
     if (completed?.invocation === invocation) return completed;
   }
   if (journal.completed.find((completed) => completed.invocation === invocation)) {
+    throw new ActorError({ type: "result-expired", invocation });
+  }
+  if (journal.expired.find((expired) => expired.invocation === invocation)) {
     throw new ActorError({ type: "result-expired", invocation });
   }
   return undefined;
@@ -1015,13 +1471,13 @@ async function executeActorCommandInScope<Model extends ActorModelDefinition>(
       fail(failure: object): never {
         throw new ActorCommandFailure(failure);
       },
-      timers: {
+      reminders: {
         schedule(request): void {
           timers.push({
             type: "schedule",
             timer: request.id,
             dueAt: request.at,
-            command: request.command,
+            command: request.method,
             input: request.input,
           });
         },
@@ -1070,8 +1526,9 @@ async function admitActorCommand<Model extends ActorModelDefinition>(
   key: Model["Key"],
   initialize: (context: ActorInitialContext<Model>) => Model["State"],
   stateMigrations: readonly RuntimeStateMigration[],
-  cache: ActorJournalCache<Model>,
+  cache: ActorActivationCache<Model>,
   commandMigrations: Readonly<Partial<Record<string, readonly RuntimeCommandMigration[]>>>,
+  name: Model["Name"],
   operation: string,
   request: RuntimeRequest<Model>,
   invocation: RuntimeInvocation,
@@ -1086,11 +1543,17 @@ async function admitActorCommand<Model extends ActorModelDefinition>(
       initialize,
       stateMigrations,
       cache,
+      dependencies.clock.now({}),
     );
     const previous = journal.accepted.find((candidate) => candidate.invocation === invocationId);
     if (previous !== undefined) {
       assertMatchingActorInvocation(previous, operation, request.input, commandMigrations);
       return invocationId;
+    }
+    const expired = journal.expired.find((candidate) => candidate.invocation === invocationId);
+    if (expired !== undefined) {
+      assertMatchingActorInvocation(expired, operation, request.input, commandMigrations);
+      throw new ActorError({ type: "result-expired", invocation: invocationId });
     }
     if (pendingActorCommandCount(journal) >= 1_024) {
       throw new ActorError({
@@ -1112,9 +1575,63 @@ async function admitActorCommand<Model extends ActorModelDefinition>(
         },
       ],
     });
-    if (appended !== undefined) return invocationId;
+    if (appended !== undefined) {
+      recordActorMetric(
+        dependencies.telemetry,
+        name,
+        "gauge",
+        "actor.queue.depth",
+        pendingActorCommandCount(journal) + 1,
+      );
+      return invocationId;
+    }
   }
   throw new ActorError({ type: "overloaded" });
+}
+
+async function admitSerializedActorCommand<Model extends ActorModelDefinition>(
+  dependencies: RuntimeActorRequirements<Model>,
+  stream: string,
+  registry: string,
+  key: Model["Key"],
+  initialize: (context: ActorInitialContext<Model>) => Model["State"],
+  stateMigrations: readonly RuntimeStateMigration[],
+  cache: ActorActivationCache<Model>,
+  commandMigrations: Readonly<Partial<Record<string, readonly RuntimeCommandMigration[]>>>,
+  name: Model["Name"],
+  operation: string,
+  request: RuntimeRequest<Model>,
+  invocation: RuntimeInvocation,
+  registrations: ActorRegistrationCache,
+): Promise<string> {
+  const admitted = (await dependencies.synchronization.exclusive({
+    key: actorAdmission(stream),
+    async task() {
+      await registerActor(
+        dependencies.events,
+        registry,
+        key,
+        dependencies.clock.now({}),
+        registrations,
+      );
+      return {
+        invocation: await admitActorCommand(
+          dependencies,
+          stream,
+          key,
+          initialize,
+          stateMigrations,
+          cache,
+          commandMigrations,
+          name,
+          operation,
+          request,
+          invocation,
+        ),
+      };
+    },
+  })) as Readonly<{ invocation: string }>;
+  return admitted.invocation;
 }
 
 async function recordActorCommandFailure<Model extends ActorModelDefinition>(
@@ -1123,7 +1640,7 @@ async function recordActorCommandFailure<Model extends ActorModelDefinition>(
   key: Model["Key"],
   initialize: (context: ActorInitialContext<Model>) => Model["State"],
   stateMigrations: readonly RuntimeStateMigration[],
-  cache: ActorJournalCache<Model>,
+  cache: ActorActivationCache<Model>,
   invocation: string,
   owner: string,
   failure: ActorInfrastructureFailure,
@@ -1136,6 +1653,7 @@ async function recordActorCommandFailure<Model extends ActorModelDefinition>(
       initialize,
       stateMigrations,
       cache,
+      dependencies.clock.now({}),
     );
     if (journal.failed.find((candidate) => candidate.invocation === invocation) !== undefined) {
       return;
@@ -1168,7 +1686,7 @@ async function admitDueActorTimer<Model extends ActorModelDefinition>(
   key: Model["Key"],
   initialize: (context: ActorInitialContext<Model>) => Model["State"],
   stateMigrations: readonly RuntimeStateMigration[],
-  cache: ActorJournalCache<Model>,
+  cache: ActorActivationCache<Model>,
 ): Promise<boolean> {
   for (let attempt = 0; attempt < 128; attempt += 1) {
     const journal = await readActorJournal(
@@ -1178,6 +1696,7 @@ async function admitDueActorTimer<Model extends ActorModelDefinition>(
       initialize,
       stateMigrations,
       cache,
+      dependencies.clock.now({}),
     );
     const now = dependencies.clock.now({});
     const timer = activeActorTimers(journal).find((candidate) => candidate.dueAt <= now);
@@ -1210,6 +1729,40 @@ async function admitDueActorTimer<Model extends ActorModelDefinition>(
   throw new ActorError({ type: "overloaded" });
 }
 
+async function snapshotActorHistory<Model extends ActorModelDefinition>(
+  dependencies: RuntimeActorRequirements<Model>,
+  stream: string,
+  key: Model["Key"],
+  initialize: (context: ActorInitialContext<Model>) => Model["State"],
+  stateMigrations: readonly RuntimeStateMigration[],
+  cache: ActorActivationCache<Model>,
+): Promise<void> {
+  const journal = await readActorJournal(
+    dependencies.events,
+    stream,
+    key,
+    initialize,
+    stateMigrations,
+    cache,
+    dependencies.clock.now({}),
+  );
+  if (journal.revision - journal.snapshotRevision < actorSnapshotInterval) return;
+  const saved = await dependencies.events.saveSnapshot({
+    stream,
+    expectedRevision: journal.snapshotRevision,
+    revision: journal.revision,
+    snapshot: actorJournalSnapshot(journal, stateMigrations.length),
+  });
+  let through = journal.revision;
+  if (!saved) {
+    const current = await dependencies.events.loadSnapshot({ stream });
+    if (current === undefined || current.revision <= journal.snapshotRevision) return;
+    through = current.revision;
+  }
+  await dependencies.events.compact({ stream, through });
+  cache.entries[stream] = undefined;
+}
+
 async function drainActorCommands<Model extends ActorModelDefinition>(
   dependencies: RuntimeActorRequirements<Model>,
   stream: string,
@@ -1217,13 +1770,14 @@ async function drainActorCommands<Model extends ActorModelDefinition>(
   key: Model["Key"],
   initialize: (context: ActorInitialContext<Model>) => Model["State"],
   stateMigrations: readonly RuntimeStateMigration[],
-  cache: ActorJournalCache<Model>,
+  cache: ActorActivationCache<Model>,
   commandMigrations: Readonly<Partial<Record<string, readonly RuntimeCommandMigration[]>>>,
   commands: Readonly<Partial<Record<string, RuntimeCommandHandler<Model>>>>,
   commandNames: readonly string[],
   modelDependencies: DependenciesOf<Model>,
   owner: string,
   requestedInvocation: string | undefined,
+  authority?: DependencyInvocationAuthority,
 ): Promise<ActorJournalCompleted<Model> | undefined> {
   for (let executionAttempt = 0; executionAttempt < 2_048; executionAttempt += 1) {
     const admittedTimer = await admitDueActorTimer(
@@ -1242,11 +1796,12 @@ async function drainActorCommands<Model extends ActorModelDefinition>(
         initialize,
         stateMigrations,
         cache,
+        dependencies.clock.now({}),
       );
       if (requestedInvocation !== undefined) {
         const requestedCompletion = retainedActorCompletion(executionJournal, requestedInvocation);
         if (requestedCompletion !== undefined) {
-          scheduleActorJournalWake(dependencies, stream, executionJournal);
+          await scheduleActorJournalWake(dependencies, stream, name, key, executionJournal);
           return requestedCompletion;
         }
         const requestedFailure = executionJournal.failed.find(
@@ -1268,7 +1823,7 @@ async function drainActorCommands<Model extends ActorModelDefinition>(
       }
       const pending = pendingActorCommand(executionJournal);
       if (pending === undefined) {
-        scheduleActorJournalWake(dependencies, stream, executionJournal);
+        await scheduleActorJournalWake(dependencies, stream, name, key, executionJournal);
         return undefined;
       }
       const now = dependencies.clock.now({});
@@ -1288,7 +1843,8 @@ async function drainActorCommands<Model extends ActorModelDefinition>(
             ],
           });
         } else {
-          await dependencies.events.append({
+          const nextAttempt = (claim?.attempt ?? 0) + 1;
+          const claimed = await dependencies.events.append({
             stream,
             expectedRevision: executionJournal.revision,
             events: [
@@ -1296,12 +1852,15 @@ async function drainActorCommands<Model extends ActorModelDefinition>(
                 type: "actor.command.claimed",
                 invocation: pending.invocation,
                 owner,
-                attempt: (claim?.attempt ?? 0) + 1,
+                attempt: nextAttempt,
                 until: now + 30_000,
                 at: now,
               },
             ],
           });
+          if (claimed !== undefined && nextAttempt > 1) {
+            recordActorMetric(dependencies.telemetry, name, "counter", "actor.retries", 1);
+          }
         }
       } else if (claim.owner !== owner) {
         const poll = now + 10;
@@ -1311,6 +1870,7 @@ async function drainActorCommands<Model extends ActorModelDefinition>(
       } else {
         let execution: ActorCommandExecution<Model>;
         try {
+          await assertActorAuthority(authority);
           execution = await executeActorCommand(
             pending,
             executionJournal.state,
@@ -1321,6 +1881,9 @@ async function drainActorCommands<Model extends ActorModelDefinition>(
             commandMigrations,
             dependencies.executionContext,
           );
+          if (execution.outcome.status === "failed") {
+            recordActorMetric(dependencies.telemetry, name, "counter", "actor.failures", 1);
+          }
         } catch (error) {
           if (error instanceof ActorError && error.failure.type === "cycle") {
             await recordActorCommandFailure(
@@ -1347,6 +1910,7 @@ async function drainActorCommands<Model extends ActorModelDefinition>(
             initialize,
             stateMigrations,
             cache,
+            dependencies.clock.now({}),
           );
           const existingCompletion = completionJournal.completed.find(
             (candidate) => candidate.invocation === pending.invocation,
@@ -1363,6 +1927,7 @@ async function drainActorCommands<Model extends ActorModelDefinition>(
             ) {
               completionAttempt = 128;
             } else {
+              await assertActorAuthority(authority);
               const completionEvents: ActorJournalEvent<Model>[] = [
                 {
                   type: "actor.command.completed",
@@ -1387,7 +1952,21 @@ async function drainActorCommands<Model extends ActorModelDefinition>(
                 expectedRevision: completionJournal.revision,
                 events: completionEvents,
               });
-              if (appended !== undefined) committed = true;
+              if (appended !== undefined) {
+                committed = true;
+                try {
+                  await snapshotActorHistory(
+                    dependencies,
+                    stream,
+                    key,
+                    initialize,
+                    stateMigrations,
+                    cache,
+                  );
+                } catch {
+                  // Snapshotting is retried after later commits; journal state is authoritative.
+                }
+              }
             }
           }
           completionAttempt += 1;
@@ -1401,10 +1980,11 @@ async function drainActorCommands<Model extends ActorModelDefinition>(
 async function scheduleActorWake<Model extends ActorModelDefinition>(
   dependencies: RuntimeActorRequirements<Model>,
   stream: string,
+  name: Model["Name"],
   key: Model["Key"],
   initialize: (context: ActorInitialContext<Model>) => Model["State"],
   stateMigrations: readonly RuntimeStateMigration[],
-  cache: ActorJournalCache<Model>,
+  cache: ActorActivationCache<Model>,
 ): Promise<void> {
   const journal = await readActorJournal(
     dependencies.events,
@@ -1413,68 +1993,58 @@ async function scheduleActorWake<Model extends ActorModelDefinition>(
     initialize,
     stateMigrations,
     cache,
+    dependencies.clock.now({}),
   );
-  scheduleActorJournalWake(dependencies, stream, journal);
+  await scheduleActorJournalWake(dependencies, stream, name, key, journal);
 }
 
-function registerActorWake<Model extends ActorModelDefinition>(
-  dependencies: RuntimeActorRequirements<Model>,
-  stream: string,
-  name: Model["Name"],
-  key: Model["Key"],
-  initialize: (context: ActorInitialContext<Model>) => Model["State"],
-  stateMigrations: readonly RuntimeStateMigration[],
-  cache: ActorJournalCache<Model>,
-  commandMigrations: Readonly<Partial<Record<string, readonly RuntimeCommandMigration[]>>>,
-  commands: Readonly<Partial<Record<string, RuntimeCommandHandler<Model>>>>,
-  commandNames: readonly string[],
-  modelDependencies: DependenciesOf<Model>,
-  owner: string,
-  slot: ActorExecutionSlot,
-): void {
-  dependencies.alarm.register({
-    id: actorAlarm(stream),
-    async run() {
-      await dependencies.synchronization.exclusive({
-        key: stream,
-        async task() {
-          slot.active = true;
-          try {
-            await drainActorCommands(
-              dependencies,
-              stream,
-              name,
-              key,
-              initialize,
-              stateMigrations,
-              cache,
-              commandMigrations,
-              commands,
-              commandNames,
-              modelDependencies,
-              owner,
-              undefined,
-            );
-          } catch {
-            // Durable journal state determines the retry time below.
-          } finally {
-            slot.active = false;
-          }
-          return {};
-        },
-      });
-      await scheduleActorWake(dependencies, stream, key, initialize, stateMigrations, cache);
-    },
-  });
+type RuntimeMethodFieldSchema = Readonly<{
+  kind: string;
+  value?: string;
+  fields?: readonly Readonly<{
+    name: string;
+    type: Readonly<{ kind: string; value?: string }>;
+  }>[];
+}>;
+
+type RuntimeActorMethodsSchema = Readonly<{
+  kind: string;
+  fields?: readonly Readonly<{ name: string; type: RuntimeMethodFieldSchema }>[];
+}>;
+
+function actorMethodModes(schema: TypeSchema): Readonly<Record<string, ActorMethodMode>> {
+  const root = schema as unknown as RuntimeActorMethodsSchema;
+  if (root.kind !== "record" || root.fields === undefined) {
+    throw new Error("Actor Methods must materialize as a record.");
+  }
+  const modes: Partial<Record<string, ActorMethodMode>> = {};
+  for (const method of root.fields) {
+    if (method.type.kind !== "record" || method.type.fields === undefined) {
+      throw new Error(`Actor method ${method.name} has no semantic definition.`);
+    }
+    let mode: ActorMethodMode | undefined;
+    for (const field of method.type.fields) {
+      if (
+        field.name === "Mode" &&
+        field.type.kind === "literal" &&
+        (field.type.value === "write" || field.type.value === "read")
+      ) {
+        mode = field.type.value;
+      }
+    }
+    if (mode === undefined) {
+      throw new Error(`Actor method ${method.name} has no read/write mode.`);
+    }
+    modes[method.name] = mode;
+  }
+  return modes as Readonly<Record<string, ActorMethodMode>>;
 }
 
-function createActorFeature<
-  Model extends ActorModelDefinition,
-  Definition extends GenericActorImplementation,
->(
-  definition: Definition & ActorImplementation<Model> & ActorDefinitionConstraint<Definition>,
+function createActorFeature<Model extends ActorModelDefinition>(
+  definition: ActorImplementation<Model>,
   identify: () => Model["Name"],
-): DefinedActor<Definition, Model> {
+  describe: () => TypeSchema,
+): DefinedActor<Model> {
   const feature = {
     programs: {
       server: {
@@ -1483,20 +2053,32 @@ function createActorFeature<
           const registry = actorRegistryStream(name);
           const owner = dependencies.identifiers.create({});
           const slots: ActorExecutionSlots = {};
-          const cache: ActorJournalCache<Model> = {};
+          const cache = createActorActivationCache<Model>();
           const modelDependencies = dependencies as unknown as DependenciesOf<Model>;
           const initialize = definition.state as unknown as (
             context: ActorInitialContext<Model>,
           ) => Model["State"];
-          const commands = definition.commands as unknown as Readonly<
-            Partial<Record<string, RuntimeCommandHandler<Model>>>
+          const methods = definition.methods as unknown as Readonly<
+            Record<string, RuntimeCommandHandler<Model> | RuntimeQueryHandler<Model>>
           >;
-          const queries = definition.queries as unknown as Readonly<
-            Partial<Record<string, RuntimeQueryHandler<Model>>>
-          >;
+          const methodModes = actorMethodModes(describe());
+          const commands: Partial<Record<string, RuntimeCommandHandler<Model>>> = {};
+          const queries: Partial<Record<string, RuntimeQueryHandler<Model>>> = {};
+          for (const methodName of Object.keys(methods)) {
+            const method = methods[methodName];
+            const mode = methodModes[methodName];
+            if (method === undefined || mode === undefined) {
+              throw new Error(`Actor method ${methodName} has no semantic definition.`);
+            }
+            if (mode === "read") {
+              queries[methodName] = method as RuntimeQueryHandler<Model>;
+            } else {
+              commands[methodName] = method as RuntimeCommandHandler<Model>;
+            }
+          }
           const stateMigrations = (definition.migrations?.state ??
             []) as readonly RuntimeStateMigration[];
-          const commandMigrations = (definition.migrations?.commands ?? {}) as Readonly<
+          const commandMigrations = (definition.migrations?.methods ?? {}) as Readonly<
             Partial<Record<string, readonly RuntimeCommandMigration[]>>
           >;
           const commandNames = Object.keys(commands);
@@ -1508,8 +2090,8 @@ function createActorFeature<
           for (const key of registered.keys) {
             const stream = actorStream(name, key);
             registrations.keys[actorRegistrationKey(key)] = true;
-            const slot = resolveActorExecutionSlot(slots, stream);
-            registerActorWake(
+            resolveActorExecutionSlot(slots, stream);
+            await scheduleActorWake(
               dependencies,
               stream,
               name,
@@ -1517,14 +2099,8 @@ function createActorFeature<
               initialize,
               stateMigrations,
               cache,
-              commandMigrations,
-              commands,
-              commandNames,
-              modelDependencies,
-              owner,
-              slot,
             );
-            await scheduleActorWake(dependencies, stream, key, initialize, stateMigrations, cache);
+            idleActorActivation(cache, stream, dependencies.clock.now({}));
           }
           return {
             [name]: {
@@ -1535,67 +2111,61 @@ function createActorFeature<
               ) {
                 const query = queries[operation];
                 const stream = actorStream(name, request.key);
-                if (query === undefined && commands[operation] === undefined) {
+                recordActorMetric(dependencies.telemetry, name, "counter", "actor.calls", 1);
+                recordActorMetric(
+                  dependencies.telemetry,
+                  name,
+                  "counter",
+                  cache.entries[stream]?.journal === undefined
+                    ? "actor.cache.misses"
+                    : "actor.cache.hits",
+                  1,
+                );
+                if (invocation.attempt > 1) {
+                  recordActorMetric(dependencies.telemetry, name, "counter", "actor.retries", 1);
+                }
+                const cacheMetrics = actorCacheMetrics(cache);
+                recordActorMetric(
+                  dependencies.telemetry,
+                  name,
+                  "gauge",
+                  "actor.activations",
+                  cacheMetrics.activations,
+                );
+                recordActorMetric(
+                  dependencies.telemetry,
+                  name,
+                  "gauge",
+                  "actor.cache.entries",
+                  cacheMetrics.entries,
+                );
+                if (operation === actorWakeOperation && request.dueAt !== undefined) {
+                  const reminderLag = dependencies.clock.now({}) - request.dueAt;
+                  recordActorMetric(
+                    dependencies.telemetry,
+                    name,
+                    "histogram",
+                    "actor.reminder.lag",
+                    reminderLag < 0 ? 0 : reminderLag,
+                  );
+                }
+                if (
+                  operation !== actorWakeOperation &&
+                  query === undefined &&
+                  commands[operation] === undefined
+                ) {
                   throw new Error(`Unknown Actor operation ${operation}.`);
                 }
-                if (query === undefined) {
-                  if (request.wait !== "accepted") {
-                    assertNoActorCycle(dependencies.executionContext, name, request.key);
-                  }
-                  await registerActor(
-                    dependencies.events,
-                    registry,
-                    request.key,
-                    dependencies.clock.now({}),
-                    registrations,
-                  );
-                  registerActorWake(
-                    dependencies,
-                    stream,
-                    name,
-                    request.key,
-                    initialize,
-                    stateMigrations,
-                    cache,
-                    commandMigrations,
-                    commands,
-                    commandNames,
-                    modelDependencies,
-                    owner,
-                    resolveActorExecutionSlot(slots, stream),
-                  );
-                  const invocationId = await admitActorCommand(
-                    dependencies,
-                    stream,
-                    request.key,
-                    initialize,
-                    stateMigrations,
-                    cache,
-                    commandMigrations,
-                    operation,
-                    request,
-                    invocation,
-                  );
-                  if (request.wait === "accepted") {
-                    await scheduleActorWake(
-                      dependencies,
-                      stream,
-                      request.key,
-                      initialize,
-                      stateMigrations,
-                      cache,
-                    );
-                    return { id: invocationId };
-                  }
-
-                  try {
-                    const completed = (await dependencies.synchronization.exclusive({
+                try {
+                  if (operation === actorWakeOperation) {
+                    await assertActorAuthority(invocation.authority);
+                    return await dependencies.synchronization.exclusive({
                       key: stream,
                       async task() {
-                        const commandSlot = resolveActorExecutionSlot(slots, stream);
-                        commandSlot.active = true;
+                        const wakeSlot = resolveActorExecutionSlot(slots, stream);
+                        wakeSlot.active = true;
                         try {
-                          const result = await drainActorCommands(
+                          await drainActorCommands(
                             dependencies,
                             stream,
                             name,
@@ -1608,53 +2178,37 @@ function createActorFeature<
                             commandNames,
                             modelDependencies,
                             owner,
-                            invocationId,
+                            undefined,
+                            invocation.authority,
                           );
-                          if (result === undefined) {
-                            throw new ActorError({ type: "unavailable" });
-                          }
-                          return result;
+                          return {};
                         } finally {
-                          commandSlot.active = false;
+                          wakeSlot.active = false;
                         }
                       },
-                    })) as ActorJournalCompleted<Model>;
-                    return completed.outcome;
-                  } catch (error) {
-                    await scheduleActorWake(
-                      dependencies,
-                      stream,
-                      request.key,
-                      initialize,
-                      stateMigrations,
-                      cache,
-                    );
-                    throw error;
+                    });
                   }
-                }
-
-                const querySlot = resolveActorExecutionSlot(slots, stream);
-                if (querySlot.active) {
-                  const committedJournal = await readActorJournal(
-                    dependencies.events,
-                    stream,
-                    request.key,
-                    initialize,
-                    stateMigrations,
-                    cache,
-                  );
-                  return await query({
-                    key: request.key,
-                    state: committedJournal.state,
-                    input: request.input,
-                  });
-                }
-                return await dependencies.synchronization.exclusive({
-                  key: stream,
-                  async task() {
-                    querySlot.active = true;
-                    try {
-                      await drainActorCommands(
+                  if (query === undefined) {
+                    if (request.wait !== "accepted") {
+                      assertNoActorCycle(dependencies.executionContext, name, request.key);
+                    }
+                    if (request.wait === "accepted") {
+                      const invocationId = await admitSerializedActorCommand(
+                        dependencies,
+                        stream,
+                        registry,
+                        request.key,
+                        initialize,
+                        stateMigrations,
+                        cache,
+                        commandMigrations,
+                        name,
+                        operation,
+                        request,
+                        invocation,
+                        registrations,
+                      );
+                      await scheduleActorWake(
                         dependencies,
                         stream,
                         name,
@@ -1662,37 +2216,146 @@ function createActorFeature<
                         initialize,
                         stateMigrations,
                         cache,
-                        commandMigrations,
-                        commands,
-                        commandNames,
-                        modelDependencies,
-                        owner,
-                        undefined,
                       );
-                      const queryJournal = await readActorJournal(
-                        dependencies.events,
+                      return { id: invocationId };
+                    }
+
+                    try {
+                      const completed = (await dependencies.synchronization.exclusive({
+                        key: stream,
+                        async task() {
+                          const commandSlot = resolveActorExecutionSlot(slots, stream);
+                          commandSlot.active = true;
+                          try {
+                            const invocationId = await admitSerializedActorCommand(
+                              dependencies,
+                              stream,
+                              registry,
+                              request.key,
+                              initialize,
+                              stateMigrations,
+                              cache,
+                              commandMigrations,
+                              name,
+                              operation,
+                              request,
+                              invocation,
+                              registrations,
+                            );
+                            const result = await drainActorCommands(
+                              dependencies,
+                              stream,
+                              name,
+                              request.key,
+                              initialize,
+                              stateMigrations,
+                              cache,
+                              commandMigrations,
+                              commands,
+                              commandNames,
+                              modelDependencies,
+                              owner,
+                              invocationId,
+                              invocation.authority,
+                            );
+                            if (result === undefined) {
+                              throw new ActorError({ type: "unavailable" });
+                            }
+                            return result;
+                          } finally {
+                            commandSlot.active = false;
+                          }
+                        },
+                      })) as ActorJournalCompleted<Model>;
+                      return completed.outcome;
+                    } catch (error) {
+                      await scheduleActorWake(
+                        dependencies,
                         stream,
+                        name,
                         request.key,
                         initialize,
                         stateMigrations,
                         cache,
                       );
-                      return await query({
-                        key: request.key,
-                        state: queryJournal.state,
-                        input: request.input,
-                      });
-                    } finally {
-                      querySlot.active = false;
+                      throw error;
                     }
-                  },
-                });
+                  }
+
+                  const querySlot = resolveActorExecutionSlot(slots, stream);
+                  if (querySlot.active) {
+                    await assertActorAuthority(invocation.authority);
+                    const committedJournal = await readActorJournal(
+                      dependencies.events,
+                      stream,
+                      request.key,
+                      initialize,
+                      stateMigrations,
+                      cache,
+                      dependencies.clock.now({}),
+                    );
+                    return await query({
+                      key: request.key,
+                      state: committedJournal.state,
+                      input: request.input,
+                    });
+                  }
+                  return await dependencies.synchronization.exclusive({
+                    key: stream,
+                    async task() {
+                      querySlot.active = true;
+                      try {
+                        await drainActorCommands(
+                          dependencies,
+                          stream,
+                          name,
+                          request.key,
+                          initialize,
+                          stateMigrations,
+                          cache,
+                          commandMigrations,
+                          commands,
+                          commandNames,
+                          modelDependencies,
+                          owner,
+                          undefined,
+                          invocation.authority,
+                        );
+                        const queryJournal = await readActorJournal(
+                          dependencies.events,
+                          stream,
+                          request.key,
+                          initialize,
+                          stateMigrations,
+                          cache,
+                          dependencies.clock.now({}),
+                        );
+                        await assertActorAuthority(invocation.authority);
+                        return await query({
+                          key: request.key,
+                          state: queryJournal.state,
+                          input: request.input,
+                        });
+                      } finally {
+                        querySlot.active = false;
+                      }
+                    },
+                  });
+                } catch (cause) {
+                  recordActorMetric(dependencies.telemetry, name, "counter", "actor.failures", 1);
+                  throw cause;
+                } finally {
+                  const slot = slots[stream];
+                  if (slot === undefined || !slot.active) {
+                    idleActorActivation(cache, stream, dependencies.clock.now({}));
+                  }
+                }
               },
             },
-          } as unknown as ActorProvision<Definition, Model>;
+          } as unknown as ActorProvision<Model>;
         },
       },
     },
   };
-  return feature as unknown as DefinedActor<Definition, Model>;
+  return feature as unknown as DefinedActor<Model>;
 }

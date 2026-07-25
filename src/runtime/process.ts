@@ -42,6 +42,7 @@ export function scopeDependency(value: unknown, scope: DependencyScope): unknown
 export type DeferredDependencyBinding = Readonly<{
   dependency: object;
   bind(value: object): void;
+  replace(value: object): void;
 }>;
 
 /** Creates one lazily bound internal Dependency for a provider component. */
@@ -113,6 +114,12 @@ export function createDeferredDependencyBinding(name: string): DeferredDependenc
       }
       implementation = value;
     },
+    replace(value) {
+      if (!implementation) {
+        throw new Error(`Dependency ${JSON.stringify(name)} is not ready.`);
+      }
+      implementation = value;
+    },
   };
 }
 
@@ -168,6 +175,19 @@ function conformDependency(
     }
     assertDependencyInvocation(invocation, `${contract.name}.${operation}`);
     assertRuntimeType(input, contractOperation.input, `${contract.name}.${operation} input`);
+    const previousHeartbeat = invocation[dependencyInvocationControl]?.previousHeartbeat;
+    if (previousHeartbeat !== undefined) {
+      if (!contractOperation.heartbeat) {
+        throw new TypeError(
+          `Dependency ${contract.name}.${operation} does not declare heartbeat data.`,
+        );
+      }
+      assertRuntimeType(
+        previousHeartbeat,
+        contractOperation.heartbeat,
+        `${contract.name}.${operation} previous heartbeat`,
+      );
+    }
     const output =
       typeof dispatcher === "function"
         ? Reflect.apply(dispatcher, implementation, [operation, input, invocation])
@@ -175,7 +195,12 @@ function conformDependency(
             Reflect.get(implementation, operation) as (...values: unknown[]) => unknown,
             implementation,
             contract.binding === "envelope"
-              ? [{ input, invocation: providerInvocation(invocation) }]
+              ? [
+                  {
+                    input,
+                    invocation: providerInvocation(contract.name, contractOperation, invocation),
+                  },
+                ]
               : [input],
           );
     return conformDependencyOutput(contract.name, contractOperation, output);
@@ -201,15 +226,83 @@ function conformDependency(
     wrappers.set(operation.name, wrapper);
     return wrapper;
   };
+  const reference = contract.reference;
+  const referenceFactory = reference
+    ? (...arguments_: unknown[]) => {
+        if (arguments_.length !== 1 || !isObject(arguments_[0])) {
+          throw new TypeError(
+            `Dependency ${contract.name}.${reference.name} accepts one identity object.`,
+          );
+        }
+        const binding = arguments_[0];
+        const methods = Object.create(null) as Readonly<Record<string, unknown>>;
+        const bound: Readonly<Record<string, unknown>> = new Proxy(methods, {
+          get(_target, property) {
+            if (property === "then") return undefined;
+            if (typeof property !== "string") return undefined;
+            const operation = operations.get(property);
+            if (!operation) return undefined;
+            return (...methodArguments: unknown[]) => {
+              const acceptsInput = reference.inputs.includes(property);
+              const maximum = acceptsInput ? 2 : 1;
+              if (methodArguments.length > maximum || (acceptsInput && !methodArguments.length)) {
+                throw new TypeError(
+                  `Dependency reference ${contract.name}.${property} accepts ` +
+                    `${acceptsInput ? "one input object and optional call options" : "optional call options"}.`,
+                );
+              }
+              const input = acceptsInput ? methodArguments[0] : undefined;
+              const options = methodArguments[acceptsInput ? 1 : 0];
+              if (acceptsInput && !isObject(input)) {
+                throw new TypeError(
+                  `Dependency reference ${contract.name}.${property} input must be an object.`,
+                );
+              }
+              if (options !== undefined && !isObject(options)) {
+                throw new TypeError(
+                  `Dependency reference ${contract.name}.${property} call options must be an object.`,
+                );
+              }
+              return operationWrapper(operation)({
+                ...options,
+                ...binding,
+                ...(acceptsInput ? { [reference.argument]: input } : {}),
+              });
+            };
+          },
+          getOwnPropertyDescriptor(_target, property): PropertyDescriptor | undefined {
+            if (typeof property !== "string" || !operations.has(property)) return undefined;
+            return {
+              configurable: true,
+              enumerable: true,
+              value: Reflect.get(bound, property),
+              writable: false,
+            };
+          },
+          has: (_target, property) => typeof property === "string" && operations.has(property),
+          ownKeys: () => [...operations.keys()],
+        });
+        return bound;
+      }
+    : undefined;
   return new Proxy(facade, {
     get(_target, property) {
       if (property === dependencyInvocation) return invoke;
+      if (referenceFactory && property === reference?.name) return referenceFactory;
       if (typeof property !== "string") return Reflect.get(implementation, property);
       const operation = operations.get(property);
       if (!operation) return Reflect.get(implementation, property);
       return operationWrapper(operation);
     },
     getOwnPropertyDescriptor(_target, property) {
+      if (referenceFactory && property === reference?.name) {
+        return {
+          configurable: true,
+          enumerable: true,
+          value: referenceFactory,
+          writable: false,
+        };
+      }
       if (typeof property === "string") {
         const operation = operations.get(property);
         if (operation) {
@@ -227,10 +320,15 @@ function conformDependency(
     getPrototypeOf: () => Reflect.getPrototypeOf(implementation),
     has: (_target, property) =>
       property === dependencyInvocation ||
+      (referenceFactory !== undefined && property === reference?.name) ||
       (typeof property === "string" && operations.has(property)) ||
       Reflect.has(implementation, property),
     ownKeys: () => [
-      ...new Set<string | symbol>([...Reflect.ownKeys(implementation), ...operations.keys()]),
+      ...new Set<string | symbol>([
+        ...Reflect.ownKeys(implementation),
+        ...operations.keys(),
+        ...(reference ? [reference.name] : []),
+      ]),
     ],
     set: () => false,
     defineProperty: () => false,
@@ -238,7 +336,11 @@ function conformDependency(
   }) as Readonly<Record<string | symbol, unknown>>;
 }
 
-function providerInvocation(invocation: DependencyInvocation): DependencyProviderInvocation<
+function providerInvocation(
+  dependency: string,
+  operation: DependencyOperationIR,
+  invocation: DependencyInvocation,
+): DependencyProviderInvocation<
   Readonly<{
     type: string;
     data: unknown;
@@ -275,6 +377,16 @@ function providerInvocation(invocation: DependencyInvocation): DependencyProvide
       configurable: false,
       enumerable: false,
       value({ details }: Readonly<{ details: unknown }>): void {
+        if (!operation.heartbeat) {
+          throw new TypeError(
+            `Dependency ${dependency}.${operation.name} does not declare heartbeat data.`,
+          );
+        }
+        assertRuntimeType(
+          details,
+          operation.heartbeat,
+          `${dependency}.${operation.name} heartbeat`,
+        );
         control.heartbeat(details);
       },
       writable: false,
@@ -302,11 +414,38 @@ function providerInvocation(invocation: DependencyInvocation): DependencyProvide
         retry?: Readonly<{ delay: number }>;
       }>,
     ): never {
+      assertDependencyFailure(input, operation.failures, `${dependency}.${operation.name}`);
       throw new DependencyFailureError(input);
     },
     writable: false,
   });
   return Object.freeze(result);
+}
+
+/** @internal Validates a provider failure against compiler-derived meaning. */
+export function assertDependencyFailure(
+  failure: Readonly<{ type: string; data: unknown }> | undefined,
+  failures: TypeIR | undefined,
+  operation: string,
+): void {
+  if (
+    !failure ||
+    typeof failure !== "object" ||
+    typeof failure.type !== "string" ||
+    !failure.type
+  ) {
+    throw new TypeError(`Dependency ${operation} failure must have a non-empty type.`);
+  }
+  if (!failures || failures.kind !== "record") {
+    throw new TypeError(`Dependency ${operation} does not declare product failures.`);
+  }
+  const contract = failures.fields.find(({ name }) => name === failure.type);
+  if (!contract) {
+    throw new TypeError(
+      `Dependency ${operation} does not declare failure ${JSON.stringify(failure.type)}.`,
+    );
+  }
+  assertRuntimeType(failure.data, contract.type, `${operation} failure ${failure.type}`);
 }
 
 const directInvocationControl: DependencyInvocationControl = Object.freeze({
@@ -317,6 +456,7 @@ const directInvocationControl: DependencyInvocationControl = Object.freeze({
   cancellation: Object.freeze({
     requested: () => false,
     wait: () => new Promise<void>(() => {}),
+    subscribe: () => () => undefined,
   }),
 });
 
@@ -356,7 +496,11 @@ function assertDependencyInvocation(invocation: DependencyInvocation, operation:
     invocation.attempt < 1 ||
     !Number.isFinite(invocation.scheduledAt) ||
     !Number.isFinite(invocation.startedAt) ||
-    (invocation.deadline !== undefined && !Number.isFinite(invocation.deadline))
+    (invocation.deadline !== undefined && !Number.isFinite(invocation.deadline)) ||
+    (invocation.trace !== undefined &&
+      (!invocation.trace ||
+        typeof invocation.trace.traceparent !== "string" ||
+        !invocation.trace.traceparent))
   ) {
     throw new TypeError(`Dependency ${operation} received invalid invocation metadata.`);
   }
@@ -378,7 +522,8 @@ function conformStream(
   };
 }
 
-function assertRuntimeType(value: unknown, contract: TypeIR, path: string): void {
+/** @internal Validates a runtime value against canonical portable type meaning. */
+export function assertRuntimeType(value: unknown, contract: TypeIR, path: string): void {
   let valid = false;
   switch (contract.kind) {
     case "primitive":
@@ -873,9 +1018,47 @@ export type ProgramAssemblyOptions = Readonly<{
   dependencies: Readonly<Record<string, unknown>>;
   manifest: ProgramManifest;
   ownDependencies?: boolean;
+  distribute?: ProgramDistributionFactory;
   initialState?: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
   onActionEvent?: () => void;
 }>;
+
+export type ProgramDistribution = Readonly<{
+  dependency(contract: DependencyContractIR, local: object): unknown;
+  drain(): Promise<void>;
+}>;
+
+export type ProgramDistributionFactory = (
+  input: Readonly<{
+    program: string;
+    contracts: readonly DependencyContractIR[];
+    providers: Readonly<Record<string, unknown>>;
+  }>,
+) => Promise<ProgramDistribution>;
+
+/** @internal Applies one adapter-owned distribution session to ready providers. */
+export async function activateProgramDistribution(
+  factory: ProgramDistributionFactory | undefined,
+  program: string,
+  contracts: readonly DependencyContractIR[],
+  providers: Readonly<Record<string, unknown>>,
+  replace: (name: string, dependency: object) => void,
+): Promise<ProgramDistribution | undefined> {
+  if (!factory || !contracts.length) return undefined;
+  const distribution = await factory({ program, contracts, providers });
+  for (const contract of contracts) {
+    if (!contract.reference) continue;
+    const local = providers[contract.name];
+    if (!isObject(local)) {
+      await distribution.drain().catch(() => undefined);
+      throw new Error(
+        `Distributed Dependency ${JSON.stringify(contract.name)} has no local provider.`,
+      );
+    }
+    replace(contract.name, distribution.dependency(contract, local) as object);
+  }
+  return distribution;
+}
 
 /** One fully started Program and every Feature contribution assembled into it. */
 export type ProgramAssembly = Readonly<{
@@ -1073,6 +1256,7 @@ export async function assembleProgram(options: ProgramAssemblyOptions): Promise<
     return ui[path]!;
   };
 
+  let distribution: ProgramDistribution | undefined;
   try {
     for (const contribution of plan.contributions) instantiate(contribution.feature);
     for (const planned of plan.contributions) {
@@ -1090,7 +1274,23 @@ export async function assembleProgram(options: ProgramAssemblyOptions): Promise<
         deferredDependencies.get(name)?.bind(value as object);
       }
     }
+    if (options.distribute && providedNames.size) {
+      const contracts = plan.bindings.filter(({ name }) => providedNames.has(name));
+      const providers = Object.freeze(
+        Object.fromEntries(
+          [...instances.values()].flatMap((instance) => Object.entries(instance.provided)),
+        ),
+      );
+      distribution = await activateProgramDistribution(
+        options.distribute,
+        plan.name,
+        contracts,
+        providers,
+        (name, dependency) => deferredDependencies.get(name)?.replace(dependency),
+      );
+    }
   } catch (error) {
+    await distribution?.drain().catch(() => undefined);
     await disposeProgram([...instances.values()], externalScope).catch(() => undefined);
     throw error;
   }
@@ -1105,7 +1305,21 @@ export async function assembleProgram(options: ProgramAssemblyOptions): Promise<
     async dispose() {
       if (disposed) return;
       disposed = true;
-      await disposeProgram(contributions, externalScope);
+      const errors: unknown[] = [];
+      try {
+        await distribution?.drain();
+      } catch (error) {
+        errors.push(error);
+      }
+      try {
+        await disposeProgram(contributions, externalScope);
+      } catch (error) {
+        errors.push(error);
+      }
+      if (errors.length === 1) throw errors[0];
+      if (errors.length > 1) {
+        throw new AggregateError(errors, `Program "${plan.name}" disposal failed.`);
+      }
     },
   };
 }

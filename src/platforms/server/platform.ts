@@ -7,15 +7,33 @@ export type StoredEvent<Event = object> = Readonly<{
   event: Event;
 }>;
 
+export type StoredSnapshot<Snapshot = object> = Readonly<{
+  stream: string;
+  revision: number;
+  snapshot: Snapshot;
+}>;
+
 /** Durable append-only storage available to server Programs. */
-export type EventStore<Event = object> = Readonly<{
-  read(input: { stream: string; after?: number }): Promise<readonly StoredEvent<Event>[]>;
+export type EventStore<Event = object, Snapshot = object> = Readonly<{
+  read(input: {
+    stream: string;
+    after?: number;
+    limit?: number;
+  }): Promise<readonly StoredEvent<Event>[]>;
   append(input: {
     stream: string;
     expectedRevision: number;
     events: readonly Event[];
   }): Promise<readonly StoredEvent<Event>[] | undefined>;
   subscribe(input: { stream: string; after?: number }): AsyncIterable<StoredEvent<Event>>;
+  loadSnapshot(input: { stream: string }): Promise<StoredSnapshot<Snapshot> | undefined>;
+  saveSnapshot(input: {
+    stream: string;
+    expectedRevision: number;
+    revision: number;
+    snapshot: Snapshot;
+  }): Promise<boolean>;
+  compact(input: { stream: string; through: number }): Promise<void>;
 }>;
 
 /** Wall-clock observation available to server Programs. */
@@ -61,17 +79,23 @@ export type Timer = Readonly<{
   sleep(input: { until: number }): Promise<void>;
 }>;
 
+/** A future invocation routed through one Program's ordinary Dependency graph. */
+export type ScheduledDependencyTarget = Readonly<{
+  dependency: string;
+  operation: string;
+  input: object;
+}>;
+
 /**
- * Process wake-ups scheduled by server Programs.
+ * Replaceable future Dependency invocations scheduled by server Programs.
  *
- * Durable Features retain authoritative intent in their own storage and
- * reconstruct registrations after restart. Reusing an id replaces its
- * previous registration.
+ * Durable Features retain authoritative intent in their own storage. The
+ * adapter owns delivery, retries, and production persistence; reusing an id
+ * replaces the previous target.
  */
 export type Alarm = Readonly<{
-  register(input: { id: string; run(): Promise<void> }): void;
-  schedule(input: { id: string; at: number }): void;
-  cancel(input: { id: string }): void;
+  schedule(input: { id: string; at: number; target: ScheduledDependencyTarget }): Promise<void>;
+  cancel(input: { id: string }): Promise<void>;
 }>;
 
 /** Carries portable semantic scopes through asynchronous Program execution. */
@@ -83,6 +107,18 @@ export type ExecutionContext = Readonly<{
 /** Serializes tasks sharing a key within one Program instance. */
 export type Synchronization = Readonly<{
   exclusive(input: Readonly<{ key: string; task(): Promise<object> }>): Promise<object>;
+}>;
+
+/** Structured runtime measurement emitted by portable server Features. */
+export type Telemetry = Readonly<{
+  record(
+    input: Readonly<{
+      instrument: "counter" | "gauge" | "histogram";
+      name: string;
+      value: number;
+      attributes: readonly Readonly<{ name: string; value: string }>[];
+    }>,
+  ): void;
 }>;
 
 /** The default long-running server environment. */

@@ -13,9 +13,12 @@ import {
 } from "@/compiler/ir";
 import { dependencyInvocation, invokeDependency } from "@/core/dependency";
 import {
+  activateProgramDistribution,
   conformExternalDependencies,
   createDeferredDependencyBinding,
   type DeferredDependencyBinding,
+  type ProgramDistribution,
+  type ProgramDistributionFactory,
 } from "@/runtime/process";
 
 export type DependencyImplementations = Readonly<
@@ -157,6 +160,7 @@ export async function executePortableFunctionIR(
 export async function executeLinkedProgramIR(
   linked: LinkedProgramIR,
   external: DependencyImplementations,
+  options: Readonly<{ distribute?: ProgramDistributionFactory }> = {},
 ): Promise<LinkedProgramExecution> {
   const expected = linked.external.map(({ name }) => name).sort();
   const supplied = Object.keys(external).sort();
@@ -179,6 +183,8 @@ export async function executeLinkedProgramIR(
     dependencies[dependency.name] = binding.dependency;
   }
   const resources: unknown[] = [];
+  const providers: Record<string, unknown> = Object.create(null);
+  let distribution: ProgramDistribution | undefined;
   try {
     for (const { contribution } of linked.contributions) {
       if (contribution.implementation.kind === "none") continue;
@@ -219,10 +225,26 @@ export async function executeLinkedProgramIR(
       for (const name of declared) {
         const dependency = mounted[name] ?? execution.result[name];
         deferred.get(name)?.bind(dependency as object);
+        providers[name] = dependency;
         resources.push(dependency);
       }
     }
+    if (options.distribute) {
+      const contracts = projectDependencyContracts(
+        linked.dependencies.filter(
+          ({ provider, reference }) => provider !== undefined && reference !== undefined,
+        ),
+      );
+      distribution = await activateProgramDistribution(
+        options.distribute,
+        linked.program.name,
+        contracts,
+        Object.freeze({ ...providers }),
+        (name, dependency) => deferred.get(name)?.replace(dependency),
+      );
+    }
   } catch (error) {
+    await distribution?.drain().catch(() => undefined);
     await disposePortableResources(resources).catch(() => undefined);
     throw error;
   }
@@ -233,7 +255,24 @@ export async function executeLinkedProgramIR(
     async [Symbol.asyncDispose]() {
       if (disposed) return;
       disposed = true;
-      await disposePortableResources(resources);
+      const errors: unknown[] = [];
+      try {
+        await distribution?.drain();
+      } catch (error) {
+        errors.push(error);
+      }
+      try {
+        await disposePortableResources(resources);
+      } catch (error) {
+        errors.push(error);
+      }
+      if (errors.length === 1) throw errors[0];
+      if (errors.length > 1) {
+        throw new AggregateError(
+          errors,
+          `Portable Program ${JSON.stringify(linked.program.name)} disposal failed.`,
+        );
+      }
     },
   };
 }
@@ -321,6 +360,13 @@ function canonicalPortableValue(value: unknown): unknown {
 }
 
 const portableCalls = Symbol("kit.portable.calls");
+const portableDependencyReference = Symbol("kit.portable.dependency-reference");
+
+type PortableDependencyReference = Readonly<{
+  [portableDependencyReference]: true;
+  dependency: string;
+  binding: Readonly<Record<string, unknown>>;
+}>;
 
 class FixtureDependencyError extends Error {
   readonly data: unknown;
@@ -965,7 +1011,84 @@ async function evaluate(
       if (expression.awaited) return await result;
       return result;
     }
+    case "dependency-reference": {
+      const binding = await evaluate(expression.binding, locals, dependencies, calls, functions);
+      if (!isRecord(binding)) {
+        throw new TypeError("Dependency reference binding must be an object.");
+      }
+      return Object.freeze({
+        [portableDependencyReference]: true as const,
+        dependency: expression.dependency,
+        binding: Object.freeze({ ...binding }),
+      }) satisfies PortableDependencyReference;
+    }
+    case "dependency-reference-call": {
+      const reference = await evaluate(
+        expression.reference,
+        locals,
+        dependencies,
+        calls,
+        functions,
+      );
+      if (!isPortableDependencyReference(reference)) {
+        throw new TypeError("Referenced Dependency method requires a Dependency reference.");
+      }
+      const input = expression.input
+        ? await evaluate(expression.input, locals, dependencies, calls, functions)
+        : undefined;
+      const options = expression.options
+        ? await evaluate(expression.options, locals, dependencies, calls, functions)
+        : undefined;
+      if (input !== undefined && !isRecord(input)) {
+        throw new TypeError("Referenced Dependency product input must be an object.");
+      }
+      if (options !== undefined && !isRecord(options)) {
+        throw new TypeError("Referenced Dependency call options must be an object.");
+      }
+      const request = {
+        ...options,
+        ...reference.binding,
+        ...(input !== undefined && { [expression.argument]: input }),
+      };
+      const dependency = dependencies[reference.dependency];
+      if (!dependency) {
+        throw new Error(
+          `Missing Dependency operation ${reference.dependency}.${expression.operation}.`,
+        );
+      }
+      calls.push({
+        dependency: reference.dependency,
+        operation: expression.operation,
+        input: request,
+      });
+      const now = Date.now();
+      const result = invokeDependency(
+        dependency,
+        expression.operation,
+        materializeDependencyValue(request, dependencies, calls, functions),
+        {
+          id:
+            `direct:${reference.dependency}:${expression.operation}:` +
+            calls.filter(({ dependency: name }) => name === reference.dependency).length,
+          attempt: 1,
+          scheduledAt: now,
+          startedAt: now,
+        },
+      );
+      if (expression.awaited) return await result;
+      return result;
+    }
   }
+}
+
+function isPortableDependencyReference(value: unknown): value is PortableDependencyReference {
+  return Boolean(
+    value &&
+    typeof value === "object" &&
+    portableDependencyReference in value &&
+    typeof (value as Partial<PortableDependencyReference>).dependency === "string" &&
+    isRecord((value as Partial<PortableDependencyReference>).binding),
+  );
 }
 
 function materializeDependencyValue(

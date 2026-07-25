@@ -10,6 +10,8 @@ export type {
   DependencyImplementations,
   DependencyInvocation,
   DependencyProviderInvocation,
+  DependencyReference,
+  DependencyReferenceDefinition,
 } from "@/core/dependency";
 export { DependencyFailureError } from "@/core/dependency";
 export type { Feature, FeatureContract, FeatureContractOf, PlacedFeature } from "@/core/feature";
@@ -29,6 +31,7 @@ export type {
   Actor,
   ActorInfrastructureFailure,
   ActorInvocation,
+  ActorMethodDefinition,
   ActorModelDefinition,
   DefinedActor,
 } from "@/features/actor";

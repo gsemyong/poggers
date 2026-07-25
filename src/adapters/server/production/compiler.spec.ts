@@ -21,9 +21,10 @@ import { executeLinkedProgramIR } from "@/runtime/interpreter";
 
 const directories: string[] = [];
 const processes: ChildProcess[] = [];
+const processErrors = new WeakMap<ChildProcess, () => string>();
 
 afterEach(async () => {
-  await Promise.all(processes.splice(0).map(stopProcess));
+  for (const process of processes.splice(0).reverse()) await stopProcess(process);
   await Promise.all(
     directories.splice(0).map((directory) => rm(directory, { force: true, recursive: true })),
   );
@@ -202,9 +203,12 @@ test(
     });
     const generatedProgram = await readFile(resolve(build.workspace, "src/program.rs"), "utf8");
     const generatedMain = await readFile(resolve(build.workspace, "src/main.rs"), "utf8");
+    const generatedManifest = await readFile(resolve(build.workspace, "Cargo.toml"), "utf8");
     expect(generatedProgram).toContain("recorder");
     expect(generatedProgram).toContain("format");
     expect(generatedMain).toContain("program::start");
+    expect(generatedMain).not.toContain("kit_server_distribution");
+    expect(generatedManifest).not.toContain("kit-server-distribution");
     expect(generatedMain).not.toContain("program.json");
     await expect(access(resolve(build.workspace, "program.json"))).rejects.toMatchObject({
       code: "ENOENT",
@@ -270,41 +274,27 @@ test(
 
     await expect(access(build.executable)).resolves.toBeUndefined();
     const generated = await readFile(resolve(build.workspace, "src/program.rs"), "utf8");
+    const generatedMain = await readFile(resolve(build.workspace, "src/main.rs"), "utf8");
+    const generatedManifest = await readFile(resolve(build.workspace, "Cargo.toml"), "utf8");
     expect(generated).toContain('"counter"');
     expect(generated).not.toContain("ActorRuntime");
+    expect(generatedMain).toContain("kit_server_distribution::start");
+    expect(generatedMain).toContain('name: "counter"');
+    expect(generatedMain).toContain("DistributionOperationMode::Asynchronous");
+    expect(generatedManifest).toContain("kit-server-distribution");
 
     const runReference = async (input: Readonly<{ key: string; amount: number }>) => {
       const reference: unknown[] = [];
       let time = 0;
-      const alarmHandlers = new Map<string, () => Promise<void>>();
-      const alarmTasks = new Map<string, ReturnType<typeof setTimeout>>();
       await using _execution = await executeLinkedProgramIR(linkProgram(program), {
         alarm: {
-          register({ id, run }: Readonly<{ id: string; run(): Promise<void> }>) {
-            alarmHandlers.set(id, run);
-          },
-          schedule({ id }: Readonly<{ id: string; at: number }>) {
-            const previous = alarmTasks.get(id);
-            if (previous !== undefined) clearTimeout(previous);
-            const run = alarmHandlers.get(id);
-            if (run === undefined) throw new Error(`Alarm ${id} is not registered.`);
-            alarmTasks.set(
-              id,
-              setTimeout(() => {
-                alarmTasks.delete(id);
-                void run();
-              }, 0),
-            );
-          },
-          cancel({ id }: Readonly<{ id: string }>) {
-            const task = alarmTasks.get(id);
-            if (task !== undefined) clearTimeout(task);
-            alarmTasks.delete(id);
-          },
+          async schedule() {},
+          async cancel() {},
         },
         events: createMemoryEventStore(),
         executionContext: createTestExecutionContext(),
         synchronization: createTestSynchronization(),
+        telemetry: { record() {} },
         clock: { now: () => ++time },
         identifiers: { create: () => "reference-actor-worker" },
         timer: {
@@ -332,19 +322,21 @@ test(
     for (const [index, input] of corpus.entries()) {
       const reference = await runReference(input);
       const nativeDatabase = resolve(directory, `actor-${index}.sqlite`);
+      const telemetry = resolve(directory, `actor-${index}.telemetry.jsonl`);
       const native = await runNativeFixture(
         build.executable,
         resolve(directory, `native-actor-${index}.jsonl`),
         input,
-        { KIT_DATABASE: nativeDatabase },
+        { KIT_DATABASE: nativeDatabase, KIT_TELEMETRY_FILE: telemetry },
       );
       expect(native).toEqual(reference);
       if (index === 0) {
+        expect(await readFile(telemetry, "utf8")).toContain('"name":"actor.calls"');
         const restarted = await runNativeFixture(
           build.executable,
           resolve(directory, "native-actor-restarted.jsonl"),
           input,
-          { KIT_DATABASE: nativeDatabase },
+          { KIT_DATABASE: nativeDatabase, KIT_TELEMETRY_FILE: telemetry },
         );
         expect(restarted).toEqual(reference);
       }
@@ -429,6 +421,145 @@ test.skipIf(spawnSync("nats-server", ["--version"], { stdio: "ignore" }).status 
       revision: 3,
       event: { value: "live" },
     });
+  },
+);
+
+test.skipIf(spawnSync("nats-server", ["--version"], { stdio: "ignore" }).status !== 0)(
+  "routes one native Actor Program through scale, duplicates, latency, skew, mixed versions, drain, kill, and partition recovery",
+  { tags: ["native"], timeout: 240_000 },
+  async () => {
+    const directory = await temporaryDirectory();
+    const natsPort = await availablePort();
+    const natsDirectory = resolve(directory, "nats-actors");
+    let nats = await startNatsServer(natsDirectory, natsPort);
+    processes.push(nats);
+    const source = resolve(directory, "src/system.ts");
+    await mkdir(resolve(directory, "src"), { recursive: true });
+    await writeFile(
+      resolve(directory, "tsconfig.json"),
+      JSON.stringify({ extends: resolve(import.meta.dirname, "../../../../tsconfig.json") }),
+    );
+    await writeFile(source, clusteredActorSource());
+    const ir = compileSystem(source);
+    const program = ir.programs.find(({ name }) => name === "server");
+    if (!program) throw new Error("Cluster Actor fixture has no server Program.");
+    const executable = resolve(directory, "actor-cluster");
+    await buildServerProgram({
+      system: ir.system.name,
+      dependencies: [jetStreamEventsDependency, recorderDependency()],
+      directory,
+      output: executable,
+      program,
+    });
+    const environment = {
+      NATS_URL: `nats://127.0.0.1:${natsPort}`,
+      KIT_NATS_URL: `nats://127.0.0.1:${natsPort}`,
+      KIT_EVENT_STREAM: `KIT_NATIVE_ACTOR_EVENTS_${natsPort}`,
+      KIT_DISTRIBUTION_STREAM: `KIT_NATIVE_ACTOR_DIRECTORY_${natsPort}`,
+      KIT_PROCESS_CLUSTER: `native-actors-${natsPort}`,
+      KIT_PROCESS_MEMBERSHIP_LEASE_MS: "1000",
+      KIT_PROCESS_OWNERSHIP_LEASE_MS: "500",
+      KIT_PROCESS_PARTITIONS: "64",
+    };
+    const key = "shared-counter";
+    const replicas = new Map<string, ChildProcess>();
+    const output = resolve(directory, "cluster.jsonl");
+    const start = (
+      id: string,
+      input: Readonly<{
+        id: string;
+        key: string;
+        amount: number;
+        delay: number;
+        duplicateDelay?: number;
+        workDelay?: number;
+        nextAmount?: number;
+        nextDelay?: number;
+        disabled?: boolean;
+      }>,
+      processEnvironment: Readonly<Record<string, string>> = {},
+    ) => {
+      const child = startPersistentRecorderProgram(executable, output, input, {
+        ...environment,
+        KIT_PROCESS_ID: id,
+        ...processEnvironment,
+      });
+      processes.push(child);
+      replicas.set(id, child);
+      return child;
+    };
+
+    const p1 = start("p1", {
+      id: "first",
+      key,
+      amount: 1,
+      delay: 500,
+      duplicateDelay: 200,
+    });
+    await expect.poll(() => recordedActorValues(output, p1), { timeout: 15_000 }).toEqual([1, 1]);
+
+    start(
+      "p2",
+      { id: "second", key, amount: 2, delay: 1_500, workDelay: 100 },
+      { KIT_CLOCK_OFFSET_MS: "100" },
+    );
+    start("p3", { id: "third", key, amount: 3, delay: 1_500 });
+    await expect
+      .poll(
+        async () =>
+          (await recordedActorValues(output, undefined))
+            .toSorted((left, right) => left - right)
+            .join(","),
+        { timeout: 20_000 },
+      )
+      .toMatch(/^1,1,(?:3,6|4,6)$/);
+
+    const owner = nativeActorOwner(key, ["p1", "p2", "p3"], 64);
+    const failed = replicas.get(owner);
+    if (!failed) throw new Error(`Unable to find native Actor owner ${owner}.`);
+    await terminateProcess(failed, "SIGKILL");
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 1_200));
+
+    const p4 = start(
+      "p4",
+      {
+        id: "after-failover",
+        key,
+        amount: 4,
+        delay: 800,
+        nextAmount: 5,
+        nextDelay: 2_000,
+      },
+      { KIT_PROCESS_VERSION: "compatible-v2" },
+    );
+    await expect
+      .poll(async () => (await recordedActorValues(output, replicas.get("p4"))).includes(10), {
+        timeout: 20_000,
+      })
+      .toBe(true);
+
+    for (const [id, child] of replicas) {
+      if (id === owner || id === "p4") continue;
+      await terminateProcess(child, "SIGINT");
+    }
+    await terminateProcess(nats, "SIGKILL");
+    await terminateProcess(p4, "SIGKILL");
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 200));
+    nats = await startNatsServer(natsDirectory, natsPort);
+    processes.push(nats);
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 2_200));
+    const p5 = start("p5", {
+      id: "recovered-reminder",
+      key,
+      amount: 0,
+      delay: 60_000,
+      disabled: true,
+    });
+    await expect
+      .poll(async () => (await recordedActorValues(output, p5)).includes(15), {
+        timeout: 20_000,
+      })
+      .toBe(true);
   },
 );
 
@@ -698,7 +829,6 @@ import {
   createFeature,
   createSystem,
   type Actor,
-  type ActorInvocation,
   type Dependency,
   type Feature,
   type Program,
@@ -714,154 +844,134 @@ type Counter = Actor<{
   Name: "counter";
   Key: string;
   State: { value: number };
-}>;
-const counter = createActor({
-  state: (_context: Actor.Initial<Counter>): Counter["State"] => ({ value: 0 }),
-  commands: {
-    add({
-      state,
-      input,
-      fail,
-    }: Actor.Command<
-      Counter,
+  Methods: {
+    add: Actor.Method<
       { amount: number },
+      { value: number },
       { negative: { amount: number } }
-    >) {
+    >;
+    value: Actor.Read<undefined, { value: number }>;
+  };
+}>;
+const counter = createActor<Counter>({
+  state: (_context) => ({ value: 0 }),
+  methods: {
+    add({ state, input, fail }) {
       if (input.amount < 0) {
         fail({ type: "negative", data: { amount: input.amount } });
       }
       state.value += input.amount;
       return { value: state.value };
     },
-  },
-  queries: {
-    value({ state }: Actor.Query<Counter>) {
+    value({ state }) {
       return { value: state.value };
     },
   },
-} satisfies Actor.Definition<Counter>);
+});
 
+type FireInput = Readonly<{ at: number; remaining: number }>;
 type Reminder = Actor<{
   Name: "reminder";
   Key: string;
   State: { fired: number };
+  Methods: {
+    fire: Actor.Method<FireInput, Readonly<{ fired: number }>>;
+    schedule: Actor.Method<undefined, Readonly<{ scheduled: boolean }>>;
+    status: Actor.Read<undefined, Readonly<{ fired: number }>>;
+  };
 }>;
-type FireInput = Readonly<{ at: number; remaining: number }>;
-type FireReminder = (
-  context: Actor.Command<Reminder, FireInput>,
-) => Readonly<{ fired: number }>;
-const fireReminder: FireReminder = ({ state, input, timers }) => {
+const fireReminder: Actor.Handler<Reminder, "fire"> = ({ state, input, reminders }) => {
   state.fired += 1;
   if (input.remaining > 1) {
-    timers.schedule({
+    reminders.schedule({
       id: "fire",
       at: input.at,
-      command: fireReminder,
+      method: fireReminder,
       input: { at: input.at, remaining: input.remaining - 1 },
     });
   }
   return { fired: state.fired };
 };
-const reminder = createActor({
-  state: (_context: Actor.Initial<Reminder>): Reminder["State"] => ({ fired: 0 }),
-  commands: {
+const reminder = createActor<Reminder>({
+  state: (_context) => ({ fired: 0 }),
+  methods: {
     fire: fireReminder,
-    schedule({ timers }: Actor.Command<Reminder>) {
-      timers.schedule({
+    schedule({ reminders }) {
+      reminders.schedule({
         id: "fire",
         at: 0,
-        command: fireReminder,
+        method: fireReminder,
         input: { at: 0, remaining: 3 },
       });
       return { scheduled: true };
     },
-  },
-  queries: {
-    status({ state }: Actor.Query<Reminder>) {
+    status({ state }) {
       return { fired: state.fired };
     },
   },
-} satisfies Actor.Definition<Reminder>);
+});
 
-type CycleRequest = Readonly<{
-  key: string;
-  input?: Readonly<{}>;
-  idempotencyKey?: string;
-}> & (Readonly<{ wait?: "completed" }> | Readonly<{ wait: "accepted" }>);
-type CycleAReference = Dependency<{
-  Operations: {
-    ping(request: CycleRequest): Promise<
-      Actor.Outcome<Readonly<{ actor: "a" }>> | ActorInvocation
-    >;
-    pingAccepted(request: CycleRequest): Promise<
-      Actor.Outcome<Readonly<{ actor: "a" }>> | ActorInvocation
-    >;
-    finish(request: CycleRequest): Promise<
-      Actor.Outcome<Readonly<{ finished: number }>> | ActorInvocation
-    >;
-    status(
-      request: Readonly<{ key: string; input?: Readonly<{}> }>,
-    ): Promise<Readonly<{ finished: number }>>;
-  };
-}>;
-type CycleBReference = Dependency<{
-  Operations: {
-    ping(request: CycleRequest): Promise<
-      Actor.Outcome<Readonly<{ actor: "b" }>> | ActorInvocation
-    >;
-    pingAccepted(request: CycleRequest): Promise<
-      Actor.Outcome<Readonly<{ actor: "b" }>> | ActorInvocation
-    >;
-  };
-}>;
+type CycleAMethods = {
+  ping: Actor.Method<undefined, Readonly<{ actor: "a" }>>;
+  pingAccepted: Actor.Method<undefined, Readonly<{ actor: "a" }>>;
+  finish: Actor.Method<undefined, Readonly<{ finished: number }>>;
+  status: Actor.Read<undefined, Readonly<{ finished: number }>>;
+};
+type CycleBMethods = {
+  ping: Actor.Method<undefined, Readonly<{ actor: "b" }>>;
+  pingAccepted: Actor.Method<undefined, Readonly<{ actor: "b" }>>;
+};
 type CycleA = Actor<{
   Name: "cycleA";
   Key: string;
   State: { finished: number };
-  Dependencies: { cycleB: CycleBReference };
+  Dependencies: {
+    cycleB: Actor.Reference<{ Key: string; Methods: CycleBMethods }>;
+  };
+  Methods: CycleAMethods;
 }>;
 type CycleB = Actor<{
   Name: "cycleB";
   Key: string;
   State: Record<never, never>;
-  Dependencies: { cycleA: CycleAReference };
+  Dependencies: {
+    cycleA: Actor.Reference<{ Key: string; Methods: CycleAMethods }>;
+  };
+  Methods: CycleBMethods;
 }>;
-const cycleA = createActor({
-  state: (_context: Actor.Initial<CycleA>): CycleA["State"] => ({ finished: 0 }),
-  commands: {
-    async ping({ key, dependencies }: Actor.Command<CycleA>) {
-      await dependencies.cycleB.ping({ key });
+const cycleA = createActor<CycleA>({
+  state: (_context) => ({ finished: 0 }),
+  methods: {
+    async ping({ key, dependencies }) {
+      await dependencies.cycleB.get({ key }).ping();
       return { actor: "a" as const };
     },
-    async pingAccepted({ key, dependencies }: Actor.Command<CycleA>) {
-      await dependencies.cycleB.pingAccepted({ key });
+    async pingAccepted({ key, dependencies }) {
+      await dependencies.cycleB.get({ key }).pingAccepted();
       return { actor: "a" as const };
     },
-    finish({ state }: Actor.Command<CycleA>) {
+    finish({ state }) {
       state.finished += 1;
       return { finished: state.finished };
     },
-  },
-  queries: {
-    status({ state }: Actor.Query<CycleA>) {
+    status({ state }) {
       return { finished: state.finished };
     },
   },
-} satisfies Actor.Definition<CycleA>);
-const cycleB = createActor({
-  state: (_context: Actor.Initial<CycleB>): CycleB["State"] => ({}),
-  commands: {
-    async ping({ key, dependencies }: Actor.Command<CycleB>) {
-      await dependencies.cycleA.finish({ key });
+});
+const cycleB = createActor<CycleB>({
+  state: (_context) => ({}),
+  methods: {
+    async ping({ key, dependencies }) {
+      await dependencies.cycleA.get({ key }).finish();
       return { actor: "b" as const };
     },
-    async pingAccepted({ key, dependencies }: Actor.Command<CycleB>) {
-      await dependencies.cycleA.finish({ key, wait: "accepted" });
+    async pingAccepted({ key, dependencies }) {
+      await dependencies.cycleA.get({ key }).finish({ wait: "accepted" });
       return { actor: "b" as const };
     },
   },
-  queries: {},
-} satisfies Actor.Definition<CycleB>);
+});
 
 type Recorder = Dependency<{
   Operations: {
@@ -983,50 +1093,68 @@ const probe = createFeature<Probe>({
         };
       }) {
         const input = await dependencies.recorder.read({});
-        const first = await dependencies.counter.add({
-          key: input.key,
-          input: { amount: input.amount },
-          idempotencyKey: "same",
-        });
-        const duplicate = await dependencies.counter.add({
-          key: input.key,
-          input: { amount: input.amount },
-          idempotencyKey: "same",
-        });
-        const failed = await dependencies.counter.add({
-          key: input.key,
-          input: { amount: -1 },
-          idempotencyKey: "negative",
-        });
-        const accepted = await dependencies.counter.add({
-          key: input.key,
-          input: { amount: 1 },
-          idempotencyKey: "accepted",
-          wait: "accepted",
-        });
-        const afterAccepted = await dependencies.counter.value({ key: input.key });
-        const current = await dependencies.counter.value({ key: input.key });
-        await dependencies.reminder.schedule({
-          key: input.key,
+        const counter = dependencies.counter.get({ key: input.key });
+        const first = await counter.add(
+          { amount: input.amount },
+          {
+            idempotencyKey: "same",
+          },
+        );
+        const duplicate = await counter.add(
+          { amount: input.amount },
+          {
+            idempotencyKey: "same",
+          },
+        );
+        const concurrent = await Promise.all([
+          counter.add(
+            { amount: 2 },
+            {
+              idempotencyKey: "concurrent",
+            },
+          ),
+          counter.add(
+            { amount: 2 },
+            {
+              idempotencyKey: "concurrent",
+            },
+          ),
+        ]);
+        const failed = await counter.add(
+          { amount: -1 },
+          {
+            idempotencyKey: "negative",
+          },
+        );
+        const accepted = await counter.add(
+          { amount: 1 },
+          {
+            idempotencyKey: "accepted",
+            wait: "accepted",
+          },
+        );
+        await dependencies.timer.sleep({ until: dependencies.clock.now({}) + 10 });
+        const afterAccepted = await counter.value();
+        const current = await counter.value();
+        const reminderActor = dependencies.reminder.get({ key: input.key });
+        await reminderActor.schedule({
           idempotencyKey: "reminder",
         });
         await dependencies.timer.sleep({ until: dependencies.clock.now({}) + 10 });
-        const reminder = await dependencies.reminder.status({ key: input.key });
+        const reminder = await reminderActor.status();
         let cycleFailure: object = {};
         try {
-          await dependencies.cycleA.ping({
-            key: "synchronous-cycle",
+          await dependencies.cycleA.get({ key: "synchronous-cycle" }).ping({
             idempotencyKey: "cycle-failure",
           });
         } catch (error) {
           cycleFailure = (error as Actor.Error).failure;
         }
-        const acceptedCycle = await dependencies.cycleA.pingAccepted({
-          key: "accepted-cycle",
+        const acceptedCycle = await dependencies.cycleA.get({ key: "accepted-cycle" }).pingAccepted({
           idempotencyKey: "cycle-accepted",
         });
         await dependencies.timer.sleep({ until: dependencies.clock.now({}) + 10 });
-        const cycleStatus = await dependencies.cycleA.status({ key: "accepted-cycle" });
+        const cycleStatus = await dependencies.cycleA.get({ key: "accepted-cycle" }).status();
         const journals = {
           counter: await normalizedJournal(dependencies.events, "counter", input.key),
           reminder: await normalizedJournal(dependencies.events, "reminder", input.key),
@@ -1055,6 +1183,7 @@ const probe = createFeature<Probe>({
           value: \`native:\${JSON.stringify({
             first,
             duplicate,
+            concurrent,
             current,
             failed,
             accepted,
@@ -1078,6 +1207,166 @@ export default createSystem({
 `;
 }
 
+function clusteredActorSource(): string {
+  return `
+import {
+  createActor,
+  createFeature,
+  createSystem,
+  type Actor,
+  type Dependency,
+  type Program,
+} from "@/index";
+import type { Alarm, Clock, ServerProcess, Timer } from "@/platforms/server/platform";
+
+type ActorClock = Dependency<{ Operations: Clock }>;
+type ActorTimer = Dependency<{ Operations: Timer }>;
+
+type Counter = Actor<{
+  Name: "counter";
+  Key: string;
+  State: { value: number };
+  Dependencies: { clock: ActorClock; timer: ActorTimer };
+  Methods: {
+    add: Actor.Method<{ amount: number; workDelay?: number }, { value: number }>;
+  };
+}>;
+const counter = createActor<Counter>({
+  state: () => ({ value: 0 }),
+  methods: {
+    async add({ state, input, dependencies }) {
+      if (input.workDelay !== undefined) {
+        await dependencies.timer.sleep({
+          until: dependencies.clock.now({}) + input.workDelay,
+        });
+      }
+      state.value += input.amount;
+      return { value: state.value };
+    },
+  },
+});
+
+type Command = {
+  id: string;
+  key: string;
+  amount: number;
+  delay: number;
+  duplicateDelay?: number;
+  workDelay?: number;
+  nextAmount?: number;
+  nextDelay?: number;
+  disabled?: boolean;
+};
+type Recorder = Dependency<{
+  Operations: {
+    read(input: {}): Promise<Command>;
+    record(input: { value: string }): Promise<void>;
+  };
+}>;
+type Driver = Dependency<{
+  Operations: {
+    run(input: Command): Promise<void>;
+  };
+}>;
+type Probe = {
+  Programs: {
+    server: Program<
+      ServerProcess,
+      {
+        Requires: {
+          alarm: Alarm;
+          clock: ActorClock;
+          counter: Actor.Reference<typeof counter>;
+          recorder: Recorder;
+        };
+        Provides: { driver: Driver };
+      }
+    >;
+  };
+};
+const probe = createFeature<Probe>({
+  programs: {
+    server: {
+      async start({ dependencies }) {
+        const command = await dependencies.recorder.read({});
+        if (!command.disabled) {
+          await dependencies.alarm.schedule({
+            id: \`driver:${"${command.id}"}\`,
+            at: dependencies.clock.now({}) + command.delay,
+            target: {
+              dependency: "driver",
+              operation: "run",
+              input: command,
+            },
+          });
+        }
+        return {
+          driver: {
+            async run({ input }) {
+              const result = await dependencies.counter
+                .get({ key: input.key })
+                .add(
+                  { amount: input.amount, workDelay: input.workDelay },
+                  { idempotencyKey: input.id },
+                );
+              if (result.status !== "succeeded") {
+                throw new Error("Counter method failed.");
+              }
+              if (input.nextAmount !== undefined && input.nextDelay !== undefined) {
+                const next = {
+                  id: \`${"${input.id}"}:next\`,
+                  key: input.key,
+                  amount: input.nextAmount,
+                  delay: input.nextDelay,
+                };
+                await dependencies.alarm.schedule({
+                  id: \`driver:${"${next.id}"}\`,
+                  at: dependencies.clock.now({}) + input.nextDelay,
+                  target: {
+                    dependency: "driver",
+                    operation: "run",
+                    input: next,
+                  },
+                });
+              }
+              await dependencies.recorder.record({
+                value: \`native:\${JSON.stringify({
+                  id: input.id,
+                  value: result.value.value,
+                })}\`,
+              });
+              if (input.duplicateDelay !== undefined) {
+                await dependencies.alarm.schedule({
+                  id: \`driver:${"${input.id}"}:duplicate\`,
+                  at: dependencies.clock.now({}) + input.duplicateDelay,
+                  target: {
+                    dependency: "driver",
+                    operation: "run",
+                    input: {
+                      id: input.id,
+                      key: input.key,
+                      amount: input.amount,
+                      delay: 0,
+                      workDelay: input.workDelay,
+                    },
+                  },
+                });
+              }
+            },
+          },
+        };
+      },
+    },
+  },
+});
+
+export default createSystem({
+  metadata: { name: "Native clustered Actor fixture" },
+  features: { counter, probe },
+});
+`;
+}
+
 function networkFeatureSource(): string {
   return `
 type Platform = { readonly Name: "server" };
@@ -1086,7 +1375,11 @@ type Program<E extends Environment, C extends object = {}> = Readonly<C & { Envi
 ${compositionSource()}
 type StoredEvent = { stream: string; revision: number; event: { value: string } };
 type Events = {
-  read(input: { stream: string; after?: number }): Promise<readonly StoredEvent[]>;
+  read(input: {
+    stream: string;
+    after?: number;
+    limit?: number;
+  }): Promise<readonly StoredEvent[]>;
   append(input: { stream: string; expectedRevision: number; events: readonly { value: string }[] }): Promise<readonly StoredEvent[] | undefined>;
   subscribe(input: { stream: string; after?: number }): AsyncIterable<StoredEvent>;
 };
@@ -1181,6 +1474,79 @@ async function runNativeFixture(
     .split("\n")
     .filter(Boolean)
     .map((line) => JSON.parse(line) as unknown);
+}
+
+function startPersistentRecorderProgram(
+  executable: string,
+  output: string,
+  input: unknown,
+  environment: Readonly<Record<string, string>>,
+): ChildProcess {
+  const child = spawn(executable, [], {
+    env: {
+      ...process.env,
+      ...environment,
+      KIT_RECORDER_INPUT: JSON.stringify(input),
+      KIT_RECORDER_OUTPUT: output,
+    },
+    stdio: "pipe",
+  });
+  let error = "";
+  child.stderr.setEncoding("utf8").on("data", (value: string) => (error += value));
+  processErrors.set(child, () => error);
+  return child;
+}
+
+async function recordedActorValues(
+  output: string,
+  child: ChildProcess | undefined,
+): Promise<number[]> {
+  if (child && (child.exitCode !== null || child.signalCode !== null)) {
+    throw new Error(
+      processErrors.get(child)?.() ||
+        `Persistent native fixture exited ${child.exitCode ?? child.signalCode}.`,
+    );
+  }
+  const contents = await readFile(output, "utf8").catch(() => "");
+  return contents
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as { value?: unknown })
+    .flatMap((record) => {
+      if (typeof record.value !== "string" || !record.value.startsWith("native:")) return [];
+      const value = JSON.parse(record.value.slice("native:".length)) as { value?: unknown };
+      return typeof value.value === "number" ? [value.value] : [];
+    });
+}
+
+function nativeActorOwner(key: string, members: readonly string[], partitions: number): string {
+  const identity = JSON.stringify(["server", "counter", [["key", key]]]);
+  const partition = stableUtf16Hash(identity) % partitions;
+  const scope = JSON.stringify(["kit.process.partition", 1, "server", "counter", partition]);
+  return members.reduce((winner, candidate) => {
+    const score = stableUtf16Hash(`${scope}\u0000${candidate}\u0000${1}`);
+    const winnerScore = stableUtf16Hash(`${scope}\u0000${winner}\u0000${1}`);
+    return score > winnerScore || (score === winnerScore && candidate < winner)
+      ? candidate
+      : winner;
+  });
+}
+
+function stableUtf16Hash(value: string): number {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash;
+}
+
+async function terminateProcess(child: ChildProcess, signal: "SIGINT" | "SIGKILL"): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const exited = new Promise<void>((resolvePromise) => child.once("exit", () => resolvePromise()));
+  child.kill(signal);
+  await exited;
 }
 
 function startRecorderProgram(
@@ -1304,8 +1670,5 @@ function startNatsServer(directory: string, port: number): Promise<ChildProcess>
 }
 
 async function stopProcess(child: ChildProcess): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) return;
-  const exited = new Promise<void>((resolvePromise) => child.once("exit", () => resolvePromise()));
-  child.kill("SIGTERM");
-  await exited;
+  await terminateProcess(child, "SIGINT");
 }

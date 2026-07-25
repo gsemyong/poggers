@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
   "runtime",
+  "distribution",
   "dependencies/authentication",
   "dependencies/alarm",
   "dependencies/clock",
@@ -10,6 +11,7 @@ members = [
   "dependencies/events/jetstream",
   "dependencies/execution-context",
   "dependencies/synchronization",
+  "dependencies/telemetry",
   "dependencies/http",
   "dependencies/identifiers",
   "dependencies/timer",

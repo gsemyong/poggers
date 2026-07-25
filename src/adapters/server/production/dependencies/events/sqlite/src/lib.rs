@@ -9,7 +9,7 @@ use kit_server_runtime::{
     Dependency, DependencyContext, DependencyInvocation, Engine, NativeError, NativeFuture,
     NativeResult, Value,
 };
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value as JsonValue, json};
 use tokio::sync::broadcast;
 
@@ -41,6 +41,17 @@ pub async fn create(context: DependencyContext) -> NativeResult<Events> {
                revision INTEGER NOT NULL,
                event TEXT NOT NULL,
                PRIMARY KEY (stream, revision)
+             ) STRICT;
+             CREATE TABLE IF NOT EXISTS kit_event_streams (
+               stream TEXT PRIMARY KEY,
+               revision INTEGER NOT NULL
+             ) STRICT;
+             INSERT OR IGNORE INTO kit_event_streams (stream, revision)
+               SELECT stream, MAX(revision) FROM kit_events GROUP BY stream;
+             CREATE TABLE IF NOT EXISTS kit_event_snapshots (
+               stream TEXT PRIMARY KEY,
+               revision INTEGER NOT NULL,
+               snapshot TEXT NOT NULL
              ) STRICT;",
         )
         .map_err(|error| NativeError::new("EventStoreFailure", error.to_string()))?;
@@ -68,7 +79,14 @@ impl Dependency for Events {
                 "read" => {
                     let stream = string(&input, "stream")?;
                     let after = optional_integer(&input, "after")?.unwrap_or(0);
-                    let events = read_events(&state, stream, after)?;
+                    let limit = optional_integer(&input, "limit")?.unwrap_or(i64::MAX);
+                    if limit < 1 {
+                        return Err(NativeError::new(
+                            "InvalidInput",
+                            "EventStore read limit must be positive.",
+                        ));
+                    }
+                    let events = read_events(&state, stream, after, limit)?;
                     Ok(Value::from_json(&JsonValue::Array(events)))
                 }
                 "append" => append(&state, &input).map(|value| match value {
@@ -76,6 +94,14 @@ impl Dependency for Events {
                     None => Value::Undefined,
                 }),
                 "subscribe" => subscribe(state, input),
+                "loadSnapshot" => load_snapshot(&state, &input).map(|value| {
+                    value.map_or(Value::Undefined, |snapshot| Value::from_json(&snapshot))
+                }),
+                "saveSnapshot" => save_snapshot(&state, &input).map(Value::Boolean),
+                "compact" => {
+                    compact(&state, &input)?;
+                    Ok(Value::Undefined)
+                }
                 operation => Err(NativeError::new(
                     "UnknownOperation",
                     format!("Events has no operation {operation:?}."),
@@ -98,7 +124,10 @@ fn append(state: &State, input: &JsonValue) -> NativeResult<Option<Vec<JsonValue
         .map_err(|error| NativeError::new("EventStoreFailure", error.to_string()))?;
     let current: i64 = transaction
         .query_row(
-            "SELECT COALESCE(MAX(revision), 0) FROM kit_events WHERE stream = ?1",
+            "SELECT COALESCE(
+               (SELECT revision FROM kit_event_streams WHERE stream = ?1),
+               0
+             )",
             params![stream],
             |row| row.get(0),
         )
@@ -118,6 +147,13 @@ fn append(state: &State, input: &JsonValue) -> NativeResult<Option<Vec<JsonValue
         stored.push(json!({ "stream": stream, "revision": revision, "event": event }));
     }
     transaction
+        .execute(
+            "INSERT INTO kit_event_streams (stream, revision) VALUES (?1, ?2)
+             ON CONFLICT(stream) DO UPDATE SET revision = excluded.revision",
+            params![stream, expected + events.len() as i64],
+        )
+        .map_err(|error| NativeError::new("EventStoreFailure", error.to_string()))?;
+    transaction
         .commit()
         .map_err(|error| NativeError::new("EventStoreFailure", error.to_string()))?;
     drop(database);
@@ -129,11 +165,117 @@ fn append(state: &State, input: &JsonValue) -> NativeResult<Option<Vec<JsonValue
     Ok(Some(stored))
 }
 
+fn load_snapshot(state: &State, input: &JsonValue) -> NativeResult<Option<JsonValue>> {
+    let stream = string(input, "stream")?;
+    let database = lock(&state.database);
+    let stored = database
+        .query_row(
+            "SELECT revision, snapshot FROM kit_event_snapshots WHERE stream = ?1",
+            params![stream],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(|error| NativeError::new("EventStoreFailure", error.to_string()))?;
+    stored
+        .map(|(revision, snapshot)| {
+            let snapshot = serde_json::from_str::<JsonValue>(&snapshot)
+                .map_err(|error| NativeError::new("EventStoreFailure", error.to_string()))?;
+            Ok(json!({ "stream": stream, "revision": revision, "snapshot": snapshot }))
+        })
+        .transpose()
+}
+
+fn save_snapshot(state: &State, input: &JsonValue) -> NativeResult<bool> {
+    let stream = string(input, "stream")?;
+    let expected = integer(input, "expectedRevision")?;
+    let revision = integer(input, "revision")?;
+    let snapshot = input
+        .get("snapshot")
+        .ok_or_else(|| NativeError::new("InvalidInput", "snapshot is required."))?;
+    let mut database = lock(&state.database);
+    let transaction = database
+        .transaction()
+        .map_err(|error| NativeError::new("EventStoreFailure", error.to_string()))?;
+    let head: i64 = transaction
+        .query_row(
+            "SELECT COALESCE(
+               (SELECT revision FROM kit_event_streams WHERE stream = ?1),
+               0
+             )",
+            params![stream],
+            |row| row.get(0),
+        )
+        .map_err(|error| NativeError::new("EventStoreFailure", error.to_string()))?;
+    let current = transaction
+        .query_row(
+            "SELECT revision FROM kit_event_snapshots WHERE stream = ?1",
+            params![stream],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|error| NativeError::new("EventStoreFailure", error.to_string()))?
+        .unwrap_or(0);
+    if current != expected || revision > head {
+        return Ok(false);
+    }
+    transaction
+        .execute(
+            "INSERT INTO kit_event_snapshots (stream, revision, snapshot)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(stream) DO UPDATE SET
+               revision = excluded.revision,
+               snapshot = excluded.snapshot",
+            params![stream, revision, snapshot.to_string()],
+        )
+        .map_err(|error| NativeError::new("EventStoreFailure", error.to_string()))?;
+    transaction
+        .commit()
+        .map_err(|error| NativeError::new("EventStoreFailure", error.to_string()))?;
+    Ok(true)
+}
+
+fn compact(state: &State, input: &JsonValue) -> NativeResult<()> {
+    let stream = string(input, "stream")?;
+    let through = integer(input, "through")?;
+    if through == 0 {
+        return Ok(());
+    }
+    let mut database = lock(&state.database);
+    let transaction = database
+        .transaction()
+        .map_err(|error| NativeError::new("EventStoreFailure", error.to_string()))?;
+    let snapshot = transaction
+        .query_row(
+            "SELECT revision FROM kit_event_snapshots WHERE stream = ?1",
+            params![stream],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|error| NativeError::new("EventStoreFailure", error.to_string()))?
+        .unwrap_or(0);
+    if snapshot < through {
+        return Err(NativeError::new(
+            "UnsafeCompaction",
+            format!("EventStore stream {stream:?} has no safe snapshot."),
+        ));
+    }
+    transaction
+        .execute(
+            "DELETE FROM kit_events WHERE stream = ?1 AND revision <= ?2",
+            params![stream, through],
+        )
+        .map_err(|error| NativeError::new("EventStoreFailure", error.to_string()))?;
+    transaction
+        .commit()
+        .map_err(|error| NativeError::new("EventStoreFailure", error.to_string()))?;
+    Ok(())
+}
+
 fn subscribe(state: Arc<State>, input: JsonValue) -> NativeResult<Value> {
     let stream = string(&input, "stream")?.to_owned();
     let after = optional_integer(&input, "after")?.unwrap_or(0);
     let mut receiver = channel(&state, &stream).subscribe();
-    let initial = read_events(&state, &stream, after)?;
+    let initial = read_events(&state, &stream, after, i64::MAX)?;
     Ok(Value::stream(Box::pin(async_stream::try_stream! {
         let mut revision = after;
         for event in initial {
@@ -150,7 +292,7 @@ fn subscribe(state: Arc<State>, input: JsonValue) -> NativeResult<Value> {
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => {
-                    for event in read_events(&state, &stream, revision)? {
+                    for event in read_events(&state, &stream, revision, i64::MAX)? {
                         revision = event.get("revision").and_then(JsonValue::as_i64).unwrap_or(revision);
                         yield Value::from_json(&event);
                     }
@@ -161,16 +303,21 @@ fn subscribe(state: Arc<State>, input: JsonValue) -> NativeResult<Value> {
     })))
 }
 
-fn read_events(state: &State, stream: &str, after: i64) -> NativeResult<Vec<JsonValue>> {
+fn read_events(
+    state: &State,
+    stream: &str,
+    after: i64,
+    limit: i64,
+) -> NativeResult<Vec<JsonValue>> {
     let database = lock(&state.database);
     let mut statement = database
         .prepare(
             "SELECT revision, event FROM kit_events
-             WHERE stream = ?1 AND revision > ?2 ORDER BY revision",
+             WHERE stream = ?1 AND revision > ?2 ORDER BY revision LIMIT ?3",
         )
         .map_err(|error| NativeError::new("EventStoreFailure", error.to_string()))?;
     let rows = statement
-        .query_map(params![stream, after], |row| {
+        .query_map(params![stream, after, limit], |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
         })
         .map_err(|error| NativeError::new("EventStoreFailure", error.to_string()))?;
@@ -326,6 +473,96 @@ mod tests {
             .expect("serialize read");
         assert_eq!(read.as_array().expect("event array").len(), 1);
         assert_eq!(read[0]["event"]["type"], "Renamed");
+    }
+
+    #[tokio::test]
+    async fn snapshots_and_compacts_without_resetting_the_stream_revision() {
+        let events = create(context(":memory:")).await.expect("create events");
+        call(
+            &events,
+            "append",
+            json!({
+                "stream": "account/1",
+                "expectedRevision": 0,
+                "events": [{ "balance": 1 }, { "balance": 2 }]
+            }),
+        )
+        .await
+        .expect("append");
+
+        let unsafe_compaction = call(
+            &events,
+            "compact",
+            json!({ "stream": "account/1", "through": 2 }),
+        )
+        .await
+        .expect_err("unsafe compaction");
+        assert_eq!(unsafe_compaction.name, "UnsafeCompaction");
+        assert!(matches!(
+            call(
+                &events,
+                "saveSnapshot",
+                json!({
+                    "stream": "account/1",
+                    "expectedRevision": 1,
+                    "revision": 2,
+                    "snapshot": { "balance": 2 }
+                }),
+            )
+            .await
+            .expect("snapshot conflict"),
+            Value::Boolean(false)
+        ));
+        assert!(matches!(
+            call(
+                &events,
+                "saveSnapshot",
+                json!({
+                    "stream": "account/1",
+                    "expectedRevision": 0,
+                    "revision": 2,
+                    "snapshot": { "balance": 2 }
+                }),
+            )
+            .await
+            .expect("save snapshot"),
+            Value::Boolean(true)
+        ));
+        call(
+            &events,
+            "compact",
+            json!({ "stream": "account/1", "through": 2 }),
+        )
+        .await
+        .expect("compact");
+
+        let compacted = call(&events, "read", json!({ "stream": "account/1" }))
+            .await
+            .expect("read compacted")
+            .to_json()
+            .expect("serialize compacted");
+        assert_eq!(compacted, json!([]));
+        let appended = call(
+            &events,
+            "append",
+            json!({
+                "stream": "account/1",
+                "expectedRevision": 2,
+                "events": [{ "balance": 3 }]
+            }),
+        )
+        .await
+        .expect("append after compaction")
+        .to_json()
+        .expect("serialize append");
+        assert_eq!(appended[0]["revision"], 3);
+        let snapshot = call(&events, "loadSnapshot", json!({ "stream": "account/1" }))
+            .await
+            .expect("load snapshot")
+            .to_json()
+            .expect("serialize snapshot");
+        assert_eq!(snapshot["revision"], 2);
+        assert_eq!(snapshot["snapshot"], json!({ "balance": 2 }));
     }
 
     #[tokio::test]

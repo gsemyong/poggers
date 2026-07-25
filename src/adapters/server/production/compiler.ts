@@ -27,10 +27,18 @@ import {
   type RustProgramFunctionExport,
 } from "@/adapters/server/production/program";
 import { planWebRouteLoaders, type WebRouteLoaderPlan } from "@/adapters/web-server";
-import type { SystemIR, LinkedProgramIR, ProgramIR, TypeIR } from "@/compiler/ir";
+import {
+  collectDependencyOperations,
+  dependencyOperationIdentity,
+  type DependencyOperationIR,
+  type LinkedProgramIR,
+  type ProgramIR,
+  type SystemIR,
+  type TypeIR,
+} from "@/compiler/ir";
 import { linkProgram } from "@/compiler/linker";
 
-const SERVER_PRODUCTION_VERSION = 10;
+const SERVER_PRODUCTION_VERSION = 11;
 const DEFAULT_CACHE_ENTRIES = 8;
 const MAX_CACHE_ENTRIES = 32;
 const DEFAULT_TARGET_CACHE_BYTES = 6 * 1024 * 1024 * 1024;
@@ -236,6 +244,12 @@ type RustWebLoaders = Readonly<{
   routes: readonly Readonly<{ id: string; function: string }>[];
 }>;
 
+type RustDistributionContract = Readonly<{
+  name: string;
+  bindings: readonly string[];
+  operations: readonly DependencyOperationIR[];
+}>;
+
 function rustWebLoaders(plan: WebRouteLoaderPlan): RustWebLoaders {
   return {
     contributions: plan.contributions,
@@ -260,8 +274,11 @@ async function generateRustWorkspace(
     "production Cargo package",
   );
   const runtimeDirectory = resolve(import.meta.dirname, "runtime");
+  const distributionDirectory = resolve(import.meta.dirname, "distribution");
+  const distribution = rustDistributionContracts(linked);
   const nativeInputs = [
     ...(await crateFiles(runtimeDirectory, "native/runtime")),
+    ...(distribution.length ? await crateFiles(distributionDirectory, "native/distribution") : []),
     ...(
       await Promise.all(
         dependencies.map(({ implementation }) =>
@@ -276,11 +293,16 @@ async function generateRustWorkspace(
   const files: GeneratedFile[] = [
     {
       path: "Cargo.toml",
-      source: cargoManifest(binary, runtimeDirectory, dependencies),
+      source: cargoManifest(
+        binary,
+        runtimeDirectory,
+        distribution.length ? distributionDirectory : undefined,
+        dependencies,
+      ),
     },
     {
       path: "src/main.rs",
-      source: rustMain(dependencies, web.routes.length > 0),
+      source: rustMain(linked.program.name, dependencies, distribution, web.routes.length > 0),
     },
     {
       path: "src/program.rs",
@@ -294,9 +316,31 @@ async function generateRustWorkspace(
     packages: [
       binary,
       "kit-server-runtime",
+      ...(distribution.length ? ["kit-server-distribution"] : []),
       ...dependencies.map(({ implementation }) => implementation.crate.package),
     ],
   };
+}
+
+function rustDistributionContracts(linked: LinkedProgramIR): readonly RustDistributionContract[] {
+  return linked.dependencies
+    .filter((dependency) => dependency.provider !== undefined && dependency.reference !== undefined)
+    .map((dependency) => {
+      const operations = collectDependencyOperations(dependency);
+      const synchronous = operations.find(({ mode }) => mode === "synchronous");
+      if (synchronous) {
+        throw new Error(
+          `Identity-bound Dependency ${JSON.stringify(dependency.name)} operation ` +
+            `${JSON.stringify(synchronous.name)} is synchronous and cannot cross a Process boundary.`,
+        );
+      }
+      return {
+        name: dependency.name,
+        bindings: dependency.reference!.bindings,
+        operations,
+      };
+    })
+    .sort((left, right) => left.name.localeCompare(right.name));
 }
 
 function canonicalGeneratedInputs(files: readonly GeneratedFile[]): readonly GeneratedFile[] {
@@ -335,6 +379,7 @@ async function crateFiles(directory: string, destination: string): Promise<Gener
 function cargoManifest(
   binary: string,
   runtimeDirectory: string,
+  distributionDirectory: string | undefined,
   dependencies: readonly ResolvedServerProductionDependency[],
 ): string {
   const cargoDependencies = dependencies
@@ -355,7 +400,7 @@ debug = 0
 
 [dependencies]
 kit-server-runtime = { path = ${JSON.stringify(resolve(runtimeDirectory))} }
-serde_json = "1.0.145"
+${distributionDirectory ? `kit-server-distribution = { path = ${JSON.stringify(resolve(distributionDirectory))} }\n` : ""}serde_json = "1.0.145"
 tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread", "signal"] }
 ${cargoDependencies}${cargoDependencies ? "\n" : ""}`;
 }
@@ -374,7 +419,9 @@ function productionDependencyDestination(implementation: ServerProductionDepende
 }
 
 function rustMain(
+  program: string,
   dependencies: readonly ResolvedServerProductionDependency[],
+  distribution: readonly RustDistributionContract[],
   webLoaders: boolean,
 ): string {
   const wiring = dependencies
@@ -424,14 +471,25 @@ ${operations.map((operation) => `            ${rustOperationContract(operation)}
     bindings.insert(${rustString(dependency.name)}.to_owned(), dependency_${index});`;
     })
     .join("\n\n    ");
+  const distributed = distribution.length
+    ? `kit_server_distribution::start(
+        engine.clone(),
+        ${rustString(program)},
+        &std::env::var("KIT_PROCESS_VERSION")
+            .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_owned()),
+        vec![
+${distribution.map((contract) => rustDistributionContract(contract)).join("\n")}
+        ],
+    ).await?;`
+    : "";
   return `use std::{collections::BTreeMap, sync::Arc};
 
 use kit_server_runtime::{
     Dependency, DependencyContext, Engine, NativeError, NativeResult${
-      dependencies.length
-        ? ", ContractDependency, FieldContract, OperationContract, TypeContract"
-        : ""
-    }${webLoaders ? ", NativeFunction, Value" : ""},
+      dependencies.length ? ", ContractDependency, OperationContract" : ""
+    }${dependencies.length || distribution.length ? ", FieldContract, TypeContract" : ""}${
+      webLoaders ? ", NativeFunction, Value" : ""
+    },
 };
 
 mod program;
@@ -464,10 +522,15 @@ async fn run() -> NativeResult<()> {
         : ""
     }
 
+    if let Err(error) = engine.start_dependencies().await {
+        let _ = engine.shutdown().await;
+        return Err(error);
+    }
     if let Err(error) = program::start(engine.clone()).await {
         let _ = engine.shutdown().await;
         return Err(error);
     }
+    ${distributed}
     if engine.has_live_resources() {
         tokio::signal::ctrl_c()
             .await
@@ -476,6 +539,45 @@ async fn run() -> NativeResult<()> {
     engine.shutdown().await
 }
 `;
+}
+
+function rustDistributionContract(contract: RustDistributionContract): string {
+  return `            kit_server_distribution::DistributionContract {
+                name: ${rustString(contract.name)},
+                bindings: vec![${contract.bindings.map(rustString).join(", ")}],
+                operations: vec![
+${contract.operations
+  .map(
+    (operation) => `                    kit_server_distribution::DistributionOperation {
+                        name: ${rustString(operation.name)},
+                        identity: ${rustString(dependencyOperationIdentity(operation))},
+                        mode: kit_server_distribution::DistributionOperationMode::${
+                          operation.mode === "stream" ? "Stream" : "Asynchronous"
+                        },
+                        input: ${rustTypeContract(operation.input)},
+                        output: ${rustTypeContract(operation.output)},
+                        heartbeat: ${
+                          operation.heartbeat
+                            ? `Some(${rustTypeContract(operation.heartbeat)})`
+                            : "None"
+                        },
+                        failures: ${rustFailureContracts(operation.failures)},
+                    },`,
+  )
+  .join("\n")}
+                ],
+            },`;
+}
+
+function rustFailureContracts(type: TypeIR | undefined): string {
+  if (!type) return "BTreeMap::new()";
+  if (type.kind !== "record") {
+    throw new Error("Dependency failures must be a record of named failures.");
+  }
+  return `BTreeMap::from([${[...type.fields]
+    .sort((left, right) => left.name.localeCompare(right.name))
+    .map(({ name, type: failure }) => `(${rustString(name)}, ${rustTypeContract(failure)})`)
+    .join(", ")}])`;
 }
 
 function rustWebLoaderDispatch(

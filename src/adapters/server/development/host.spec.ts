@@ -8,6 +8,7 @@ import { afterEach, describe, expect, test } from "vitest";
 
 import {
   beginNodeHostReplacement,
+  bindNodeAlarmDispatcher,
   createNodeHost,
   createSqliteEventStore,
 } from "@/adapters/server/development/host";
@@ -46,32 +47,42 @@ describe("server Platform host", () => {
     ).rejects.toThrow('Server Platform does not implement host Dependency "unknown".');
   });
 
-  test("registers, replaces, cancels, and disposes process alarms", async () => {
+  test("dispatches, replaces, cancels, and disposes scheduled Dependency targets", async () => {
     const host = await createNodeHost({ dependencies: [alarmDependency] });
     const calls: string[] = [];
-    host.alarm.register({
+    using _binding = bindNodeAlarmDispatcher(host, async ({ target }) => {
+      calls.push(target.operation);
+    });
+    await host.alarm.schedule({
       id: "replacement",
-      async run() {
-        calls.push("first");
+      at: 0,
+      target: {
+        dependency: "counter",
+        operation: "first",
+        input: {},
       },
     });
-    host.alarm.register({
+    await host.alarm.schedule({
       id: "replacement",
-      async run() {
-        calls.push("second");
+      at: 0,
+      target: {
+        dependency: "counter",
+        operation: "second",
+        input: {},
       },
     });
-    host.alarm.schedule({ id: "replacement", at: 0 });
-    host.alarm.register({
+    await host.alarm.schedule({
       id: "cancelled",
-      async run() {
-        calls.push("cancelled");
+      at: 0,
+      target: {
+        dependency: "counter",
+        operation: "cancelled",
+        input: {},
       },
     });
-    host.alarm.schedule({ id: "cancelled", at: 0 });
-    host.alarm.cancel({ id: "cancelled" });
+    await host.alarm.cancel({ id: "cancelled" });
 
-    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
     expect(calls).toEqual(["second"]);
     host.alarm[Symbol.dispose]();
   });
@@ -134,6 +145,65 @@ describe("server Platform host", () => {
       second: 2,
     });
     expect(await events.read({ stream: "canonical" })).toEqual(appended);
+    expect(await events.read({ stream: "canonical", limit: 1 })).toEqual(appended?.slice(0, 1));
+  });
+
+  test("snapshots and compacts SQLite streams without resetting their revision", async () => {
+    using events = createSqliteEventStore<Record<string, unknown>>(new DatabaseSync(":memory:"));
+    await events.append({
+      stream: "compacted",
+      expectedRevision: 0,
+      events: [{ value: 1 }, { value: 2 }],
+    });
+
+    await expect(events.compact({ stream: "compacted", through: 2 })).rejects.toThrow(
+      "has no safe snapshot",
+    );
+    await expect(
+      events.saveSnapshot({
+        stream: "compacted",
+        expectedRevision: 1,
+        revision: 2,
+        snapshot: { value: 2 },
+      }),
+    ).resolves.toBe(false);
+    await expect(
+      events.saveSnapshot({
+        stream: "compacted",
+        expectedRevision: 0,
+        revision: 2,
+        snapshot: { value: 2 },
+      }),
+    ).resolves.toBe(true);
+    await expect(
+      events.saveSnapshot({
+        stream: "compacted",
+        expectedRevision: 0,
+        revision: 2,
+        snapshot: { value: 3 },
+      }),
+    ).resolves.toBe(false);
+
+    await events.compact({ stream: "compacted", through: 2 });
+    await expect(events.read({ stream: "compacted" })).resolves.toEqual([]);
+    await expect(
+      events.append({
+        stream: "compacted",
+        expectedRevision: 2,
+        events: [{ value: 3 }],
+      }),
+    ).resolves.toEqual([
+      {
+        stream: "compacted",
+        revision: 3,
+        event: { value: 3 },
+      },
+    ]);
+    await expect(events.loadSnapshot({ stream: "compacted" })).resolves.toEqual({
+      stream: "compacted",
+      revision: 2,
+      snapshot: { value: 2 },
+    });
   });
 
   test("allows browser commands from every declared interface origin", async () => {
@@ -249,9 +319,9 @@ const httpDependency = dependency("http", "route", {
 });
 const alarmDependency = {
   name: "alarm",
-  operations: ["register", "schedule", "cancel"].map((name) => ({
+  operations: ["schedule", "cancel"].map((name) => ({
     name,
-    mode: "synchronous" as const,
+    mode: "asynchronous" as const,
     input: { kind: "opaque" as const, name: "Input" },
     output: { kind: "primitive" as const, name: "void" as const },
   })),

@@ -433,6 +433,23 @@ ${expression.entries
         return `engine.method(${this.#expression(contribution, expression.receiver)}, ${rustString(expression.method)}, vec![${expression.arguments.map((argument) => this.#expression(contribution, argument)).join(", ")}]).await?`;
       case "dependency-call":
         return `engine.call_dependency_scoped(${rustString(contribution)}, ${rustString(expression.dependency)}, ${rustString(expression.operation)}, ${expression.arguments[0] ? this.#expression(contribution, expression.arguments[0]) : "Value::Undefined"}).await?`;
+      case "dependency-reference":
+        return `Value::mutable_record([
+            ("__kit_dependency".to_owned(), Value::String(${rustString(expression.dependency)}.to_owned())),
+            ("__kit_binding".to_owned(), ${this.#expression(contribution, expression.binding)}),
+        ])`;
+      case "dependency-reference-call": {
+        const reference = this.#temporaryName("reference");
+        const request = this.#temporaryName("request");
+        const dependency = this.#temporaryName("dependency");
+        return `{
+            let ${reference} = ${this.#expression(contribution, expression.reference)};
+            let ${dependency} = ${reference}.property("__kit_dependency", false)?.string()?;
+            let mut ${request} = BTreeMap::new();
+${expression.options ? `            ${request}.extend(${this.#expression(contribution, expression.options)}.as_record()?.iter().map(|(name, value)| (name.clone(), value.clone())));\n` : ""}            ${request}.extend(${reference}.property("__kit_binding", false)?.as_record()?.iter().map(|(name, value)| (name.clone(), value.clone())));
+${expression.input ? `            ${request}.insert(${rustString(expression.argument)}.to_owned(), ${this.#expression(contribution, expression.input)});\n` : ""}            engine.call_dependency_scoped(${rustString(contribution)}, &${dependency}, ${rustString(expression.operation)}, Value::mutable_record(${request})).await?
+        }`;
+      }
       case "conditional":
         return `if ${this.#expression(contribution, expression.condition)}.truthy() { ${this.#expression(contribution, expression.consequent)} } else { ${this.#expression(contribution, expression.alternate)} }`;
       case "concurrent": {
@@ -530,6 +547,20 @@ ${declarations}            Value::Function(${function_})
             let ${input} = ${expression.arguments[0] ? this.#expression(contribution, expression.arguments[0]) : "Value::Undefined"};
             Box::pin(async move {
                 ${engine}.call_dependency_scoped(${rustString(contribution)}, ${rustString(expression.dependency)}, ${rustString(expression.operation)}, ${input}).await
+            })
+        }`;
+    } else if (expression.kind === "dependency-reference-call") {
+      const engine = this.#temporaryName("engine");
+      const reference = this.#temporaryName("reference");
+      const request = this.#temporaryName("request");
+      future = `{
+            let ${engine} = engine.clone();
+            let ${reference} = ${this.#expression(contribution, expression.reference)};
+            let mut ${request} = BTreeMap::new();
+${expression.options ? `            ${request}.extend(${this.#expression(contribution, expression.options)}.as_record()?.iter().map(|(name, value)| (name.clone(), value.clone())));\n` : ""}            ${request}.extend(${reference}.property("__kit_binding", false)?.as_record()?.iter().map(|(name, value)| (name.clone(), value.clone())));
+${expression.input ? `            ${request}.insert(${rustString(expression.argument)}.to_owned(), ${this.#expression(contribution, expression.input)});\n` : ""}            let dependency = ${reference}.property("__kit_dependency", false)?.string()?;
+            Box::pin(async move {
+                ${engine}.call_dependency_scoped(${rustString(contribution)}, &dependency, ${rustString(expression.operation)}, Value::mutable_record(${request})).await
             })
         }`;
     } else if (expression.kind === "method-call") {

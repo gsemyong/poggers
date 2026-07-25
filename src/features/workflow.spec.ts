@@ -423,11 +423,7 @@ describe("semantic workflow Feature", () => {
       let runtimeInput: Record<string, unknown> | undefined;
       await executeProgramIR(ir, contributions[0]!.id, {
         clock: { now: () => 0 },
-        events: {
-          append: async () => 0,
-          read: async () => [],
-          subscribe: async function* () {},
-        },
+        events: createMemoryEventStore(),
         identifiers: { create: () => "worker" },
         timer: { sleep: async () => undefined },
         workflowRuntime: {
@@ -1652,6 +1648,16 @@ describe("semantic workflow Feature", () => {
                   },
                 ],
               },
+              heartbeat: {
+                kind: "record",
+                fields: [
+                  {
+                    name: "progress",
+                    optional: false,
+                    type: { kind: "primitive", name: "number" },
+                  },
+                ],
+              },
             },
           ],
         },
@@ -2098,6 +2104,16 @@ describe("semantic workflow Feature", () => {
                   },
                 ],
               },
+              heartbeat: {
+                kind: "record",
+                fields: [
+                  {
+                    name: "completed",
+                    optional: false,
+                    type: { kind: "primitive", name: "number" },
+                  },
+                ],
+              },
             },
           ],
         },
@@ -2404,6 +2420,25 @@ describe("semantic workflow Feature", () => {
                     name: "receipt",
                     optional: false,
                     type: { kind: "primitive", name: "string" },
+                  },
+                ],
+              },
+              failures: {
+                kind: "record",
+                fields: [
+                  {
+                    name: "declined",
+                    optional: false,
+                    type: {
+                      kind: "record",
+                      fields: [
+                        {
+                          name: "code",
+                          optional: false,
+                          type: { kind: "primitive", name: "number" },
+                        },
+                      ],
+                    },
                   },
                 ],
               },

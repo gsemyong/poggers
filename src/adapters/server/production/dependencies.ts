@@ -40,7 +40,12 @@ const dependencyDirectory = (name: string): string =>
 export const alarmDependency = defineServerProductionDependency({
   name: "alarm",
   dependency: "alarm",
-  configuration: [],
+  configuration: [
+    { name: "servers", environment: "KIT_NATS_URL" },
+    { name: "stream", environment: "KIT_ALARM_STREAM", default: "KIT_ALARMS" },
+    { name: "state", environment: "KIT_ALARM_STATE", default: "KIT_ALARM_STATE" },
+    { name: "replicas", environment: "KIT_ALARM_REPLICAS", default: "1" },
+  ],
   crate: { package: "kit-server-alarm", directory: dependencyDirectory("alarm") },
   rust: { type: "kit_server_alarm::Alarm", constructor: "kit_server_alarm::create" },
 });
@@ -48,7 +53,7 @@ export const alarmDependency = defineServerProductionDependency({
 export const clockDependency = defineServerProductionDependency({
   name: "clock",
   dependency: "clock",
-  configuration: [],
+  configuration: [{ name: "offset", environment: "KIT_CLOCK_OFFSET_MS", default: "0" }],
   crate: { package: "kit-server-clock", directory: dependencyDirectory("clock") },
   rust: { type: "kit_server_clock::Clock", constructor: "kit_server_clock::create" },
 });
@@ -92,6 +97,20 @@ export const synchronizationDependency = defineServerProductionDependency({
   rust: {
     type: "kit_server_synchronization::Synchronization",
     constructor: "kit_server_synchronization::create",
+  },
+});
+
+export const telemetryDependency = defineServerProductionDependency({
+  name: "telemetry",
+  dependency: "telemetry",
+  configuration: [{ name: "file", environment: "KIT_TELEMETRY_FILE" }],
+  crate: {
+    package: "kit-server-telemetry",
+    directory: dependencyDirectory("telemetry"),
+  },
+  rust: {
+    type: "kit_server_telemetry::Telemetry",
+    constructor: "kit_server_telemetry::create",
   },
 });
 
@@ -244,6 +263,7 @@ export const serverProductionDependencies: readonly ServerProductionDependency[]
   httpDependency,
   identifiersDependency,
   synchronizationDependency,
+  telemetryDependency,
   timerDependency,
   workflowRuntimeDependency,
 ]);

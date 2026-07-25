@@ -1,6 +1,6 @@
 import type { PresentationSourceIR } from "@/compiler/presentation";
 
-export const SYSTEM_IR_VERSION = 23 as const;
+export const SYSTEM_IR_VERSION = 26 as const;
 
 /**
  * Orders providers before consumers while retaining mutually dependent
@@ -185,6 +185,20 @@ export type ExpressionValueIR =
       operation: string;
       arguments: readonly ExpressionIR[];
       awaited: boolean;
+    }>
+  | Readonly<{
+      kind: "dependency-reference";
+      dependency: string;
+      binding: ExpressionIR;
+    }>
+  | Readonly<{
+      kind: "dependency-reference-call";
+      reference: ExpressionIR;
+      operation: string;
+      input?: ExpressionIR;
+      options?: ExpressionIR;
+      argument: string;
+      awaited: boolean;
     }>;
 
 /** A typed executable value with an exact authoring location. */
@@ -297,8 +311,19 @@ export type ProgramImplementationIR =
 export type DependencyIR = Readonly<{
   name: string;
   type: TypeIR;
+  failures?: TypeIR;
+  heartbeats?: readonly Readonly<{ operation: string; type: TypeIR }>[];
   /** Absent only for pre-migration input-shaped providers. */
   binding?: "envelope";
+  reference?: DependencyReferenceIR;
+}>;
+
+export type DependencyReferenceIR = Readonly<{
+  name: string;
+  argument: string;
+  /** Fields whose canonical values identify the logical referenced instance. */
+  bindings: readonly string[];
+  inputs: readonly string[];
 }>;
 
 export type DependencyOperationIR = Readonly<{
@@ -306,6 +331,8 @@ export type DependencyOperationIR = Readonly<{
   mode: "asynchronous" | "stream" | "synchronous";
   input: TypeIR;
   output: TypeIR;
+  failures?: TypeIR;
+  heartbeat?: TypeIR;
 }>;
 
 /** Minimal compiler-derived contract required by a running host binding. */
@@ -314,6 +341,7 @@ export type DependencyContractIR = Readonly<{
   operations: readonly DependencyOperationIR[];
   /** Absent only for pre-migration input-shaped providers. */
   binding?: "envelope";
+  reference?: DependencyReferenceIR;
 }>;
 
 export type ComponentIR = Readonly<{
@@ -365,8 +393,11 @@ export type LinkedProgramContributionIR = Readonly<{
 export type LinkedDependencyIR = Readonly<{
   name: string;
   type: TypeIR;
+  failures?: TypeIR;
+  heartbeats?: readonly Readonly<{ operation: string; type: TypeIR }>[];
   /** Absent only for pre-migration input-shaped providers. */
   binding?: "envelope";
+  reference?: DependencyReferenceIR;
   consumers: readonly string[];
   provider?: string;
 }>;
@@ -431,6 +462,13 @@ export function collectDependencyOperations(
             : field.type.result.kind === "stream"
               ? field.type.result.element
               : field.type.result,
+        ...(dependency.failures ? { failures: dependency.failures } : {}),
+        ...(dependency.heartbeats?.find(({ operation }) => operation === field.name)
+          ? {
+              heartbeat: dependency.heartbeats.find(({ operation }) => operation === field.name)!
+                .type,
+            }
+          : {}),
       };
     })
     .sort((left, right) => left.name.localeCompare(right.name));
@@ -444,7 +482,60 @@ export function projectDependencyContracts(
     name: dependency.name,
     operations: collectDependencyOperations(dependency),
     ...(dependency.binding ? { binding: dependency.binding } : {}),
+    ...(dependency.reference ? { reference: dependency.reference } : {}),
   }));
+}
+
+/** Stable semantic identity used to negotiate one Dependency operation. */
+export function dependencyOperationIdentity(operation: DependencyOperationIR): string {
+  return JSON.stringify([
+    "kit.dependency.operation",
+    1,
+    operation.mode,
+    typeIdentity(operation.input),
+    typeIdentity(operation.output),
+    operation.failures ? typeIdentity(operation.failures) : null,
+    operation.heartbeat ? typeIdentity(operation.heartbeat) : null,
+  ]);
+}
+
+/** Stable identity for canonical portable type meaning. */
+export function typeIdentity(type: TypeIR): string {
+  return JSON.stringify(canonicalTypeMeaning(type));
+}
+
+function canonicalTypeMeaning(type: TypeIR): unknown {
+  switch (type.kind) {
+    case "primitive":
+    case "opaque":
+      return [type.kind, type.name];
+    case "literal":
+      return ["literal", type.value];
+    case "array":
+      return ["array", canonicalTypeMeaning(type.element)];
+    case "tuple":
+      return ["tuple", type.elements.map(canonicalTypeMeaning)];
+    case "option":
+    case "promise":
+      return [type.kind, canonicalTypeMeaning(type.value)];
+    case "union":
+      return ["union", type.variants.map(typeIdentity).sort()];
+    case "record":
+      return [
+        "record",
+        [...type.fields]
+          .sort((left, right) => left.name.localeCompare(right.name))
+          .map(({ name, optional, type: value }) => [name, optional, canonicalTypeMeaning(value)]),
+      ];
+    case "stream":
+      return ["stream", canonicalTypeMeaning(type.element)];
+    case "function":
+      return [
+        "function",
+        type.parameters.map(({ optional, type: value }) => [optional, canonicalTypeMeaning(value)]),
+        canonicalTypeMeaning(type.result),
+      ];
+  }
 }
 
 export type FeatureIR = Readonly<{

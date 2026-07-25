@@ -518,6 +518,40 @@ type Numbers = Dependency<{
     expect(numbers).toEqual({
       name: "numbers",
       binding: "envelope",
+      failures: {
+        kind: "record",
+        fields: [
+          {
+            name: "unavailable",
+            optional: false,
+            type: {
+              kind: "record",
+              fields: [
+                {
+                  name: "retryAt",
+                  optional: false,
+                  type: numberType(),
+                },
+              ],
+            },
+          },
+        ],
+      },
+      heartbeats: [
+        {
+          operation: "read",
+          type: {
+            kind: "record",
+            fields: [
+              {
+                name: "received",
+                optional: false,
+                type: numberType(),
+              },
+            ],
+          },
+        },
+      ],
       type: {
         kind: "record",
         fields: [
@@ -563,6 +597,8 @@ type Numbers = Dependency<{
           expect.objectContaining({
             name: "read",
             mode: "asynchronous",
+            failures: numbers?.failures,
+            heartbeat: numbers?.heartbeats?.[0]?.type,
           }),
         ],
       },
@@ -1114,6 +1150,74 @@ const child = createFeature<Child>`,
     );
   });
 
+  test("uses a contextually typed callback's own Dependency binding", async () => {
+    const ir = compileSystem(await fixture(contextualCallbackFactorySystemSource()));
+    const contribution = programContribution(ir, "feature/worker/program/server");
+    if (contribution?.implementation.kind !== "portable") {
+      throw new Error("Expected portable contextual callback fixture.");
+    }
+    const expressions = [
+      ...collectExpressions(contribution.implementation.start.body),
+      ...contribution.implementation.functions.flatMap(({ body }) => collectExpressions(body)),
+    ];
+    expect(
+      expressions
+        .filter((expression) => expression.kind === "dependency-call")
+        .map(({ dependency, operation }) => `${dependency}.${operation}`),
+    ).toEqual(["output.write"]);
+
+    const writes: unknown[] = [];
+    await executeProgramIR(ir, contribution.id, {
+      output: {
+        async write({ input }) {
+          writes.push(input);
+        },
+      },
+    });
+    expect(writes).toEqual([{ value: "ready" }]);
+  });
+
+  test("lowers a generic local Dependency reference to serializable operations", async () => {
+    const ir = compileSystem(await projectFixture(dependencyReferenceSystemSource()));
+    const contribution = programContribution(ir, "feature/worker/program/server");
+    if (contribution?.implementation.kind !== "portable") {
+      throw new Error("Expected portable Dependency reference fixture.");
+    }
+    const expressions = [
+      ...collectExpressions(contribution.implementation.start.body),
+      ...contribution.implementation.functions.flatMap(({ body }) => collectExpressions(body)),
+    ];
+
+    expect(
+      expressions
+        .filter((expression) => expression.kind === "dependency-reference")
+        .map(({ dependency }) => dependency),
+    ).toEqual(["counter"]);
+    expect(
+      expressions
+        .filter((expression) => expression.kind === "dependency-reference-call")
+        .map(({ operation }) => operation),
+    ).toEqual(["add", "read"]);
+
+    const requests: unknown[] = [];
+    await executeProgramIR(ir, contribution.id, {
+      counter: {
+        async add({ input }) {
+          requests.push(input);
+          return 2;
+        },
+        async read({ input }) {
+          requests.push(input);
+          return 2;
+        },
+      },
+    });
+    expect(requests).toEqual([
+      { idempotencyKey: "add-1", key: "counter-1", input: { value: 2 } },
+      { key: "counter-1" },
+    ]);
+  });
+
   test("respects lexical shadowing of the Program Dependency binding in closures", async () => {
     const ir = compileSystem(await fixture(shadowedDependencySystemSource()));
     const contribution = programContribution(ir, "feature/worker/program/server");
@@ -1137,7 +1241,11 @@ const child = createFeature<Child>`,
 
     const writes: unknown[] = [];
     await executeProgramIR(ir, contribution.id, {
-      output: { write: async (input) => writes.push(input) },
+      output: {
+        async write({ input }) {
+          writes.push(input);
+        },
+      },
     });
     expect(writes).toEqual([{ value: "local" }]);
   });
@@ -1820,7 +1928,13 @@ type Environment = { readonly Name: "server"; readonly Platform: Platform };
 type Program<E extends Environment, C extends object = {}> = Readonly<C & { Environment: E }>;
 ${compositionTypes()}
 
-type Output = { write(input: { value: string }): Promise<void> };
+declare const dependencyDefinition: unique symbol;
+type Dependency<Definition extends { Operations: object }> = Readonly<
+  Definition["Operations"] & { readonly [dependencyDefinition]: Definition }
+>;
+type Output = Dependency<{
+  Operations: { write(input: { value: string }): Promise<void> };
+}>;
 type Worker = {
   Programs: {
     server: Program<Environment, { Requires: { output: Output } }>;
@@ -2308,6 +2422,113 @@ function defineServerFeature<Contract>(threshold: number): Feature<Tasks> {
 const tasks = defineServerFeature<Tasks>(0);
 
 export default createSystem({ features: { tasks } });
+`;
+}
+
+function contextualCallbackFactorySystemSource(): string {
+  return `
+type Platform = { readonly Name: "server" };
+type Environment = { readonly Name: "server"; readonly Platform: Platform };
+type Program<E extends Environment, C extends object = {}> = Readonly<C & { Environment: E }>;
+${compositionTypes()}
+
+declare const dependencyDefinition: unique symbol;
+type Dependency<Definition extends { Operations: object }> = Readonly<
+  Definition["Operations"] & { readonly [dependencyDefinition]: Definition }
+>;
+type Output = Dependency<{
+  Operations: { write(input: { value: string }): Promise<void> };
+}>;
+type Handler = (
+  context: { dependencies: { output: Output } },
+  input: { value: string },
+) => Promise<void>;
+type Handlers = { emit: Handler };
+type Worker = {
+  Programs: {
+    server: Program<Environment, { Requires: { output: Output } }>;
+  };
+};
+
+function defineWorker(handlers: Handlers): Feature<Worker> {
+  return {
+    programs: {
+      server: {
+        async start({ dependencies }: { dependencies: { output: Output } }) {
+          await handlers.emit({ dependencies }, { value: "ready" });
+        },
+      },
+    },
+  } as Feature<Worker>;
+}
+
+const worker = defineWorker({
+  async emit({ dependencies }, input) {
+    await dependencies.output.write(input);
+  },
+});
+
+export default createSystem({ features: { worker } });
+`;
+}
+
+function dependencyReferenceSystemSource(): string {
+  return `
+import {
+  createFeature,
+  createSystem,
+  type Dependency,
+  type DependencyReference,
+  type Program,
+} from "@/index";
+
+type Server = { Name: "server"; Platform: { Name: "server" } };
+type CounterReference = {
+  Name: "get";
+  Binding: { key: string };
+  Inputs: { add: { value: number }; read: undefined };
+  Argument: "input";
+};
+type CounterInstance = DependencyReference<
+  CounterReference,
+  {
+    add(input: { value: number }, options?: { idempotencyKey?: string }): Promise<number>;
+    read(): Promise<number>;
+  }
+>;
+type Counter = Dependency<
+  {
+    Operations: {
+      add(input: {
+        key: string;
+        input: { value: number };
+        idempotencyKey?: string;
+      }): Promise<number>;
+      read(input: { key: string }): Promise<number>;
+    };
+    Reference: CounterReference;
+  },
+  { get(input: { key: string }): CounterInstance }
+>;
+type Worker = {
+  Programs: {
+    server: Program<Server, { Requires: { counter: Counter } }>;
+  };
+};
+
+const worker = createFeature<Worker>({
+  programs: {
+    server: {
+      async start({ dependencies }) {
+        const counter = dependencies.counter.get({ key: "counter-1" });
+        await counter.add({ value: 2 }, { idempotencyKey: "add-1" });
+        await counter.read();
+      },
+    },
+  },
+});
+
+export default createSystem({ features: { worker } });
 `;
 }
 

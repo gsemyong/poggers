@@ -3,12 +3,25 @@ import { resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { linkProgram } from "@/compiler/linker";
+import { dependencyOperationIdentity } from "@/compiler/ir";
+import { collectProgramManifest, linkProgram } from "@/compiler/linker";
 import { compileSystem } from "@/compiler/source";
+import { invokeDependency } from "@/core/dependency";
 import { placePrograms } from "@/core/feature";
 import { ActorError, createActor, type Actor } from "@/features/actor";
 import { createMemoryEventStore } from "@/features/entity.testing";
+import {
+  createMemoryProcessDirectory,
+  processPartition,
+  startProcessDistribution,
+  StaleProcessAuthorityError,
+} from "@/runtime/distribution";
 import { executeLinkedProgramIR } from "@/runtime/interpreter";
+import {
+  createDependencyRequestHandler,
+  createMemoryDependencyTransport,
+  createRemoteDependency,
+} from "@/runtime/transport";
 
 let actorWorkerIdentity = 0;
 let compiledActorFixture: ReturnType<typeof compileSystem> | undefined;
@@ -30,19 +43,21 @@ describe("Actor", () => {
       Name: "counter";
       Key: string;
       State: { value: number };
+      Methods: {
+        increment: Actor.Method<undefined, Readonly<{ value: number }>>;
+      };
     }>;
     const definition = {
       state: (_context: Actor.Initial<Counter>): Counter["State"] => ({ value: 0 }),
-      commands: {
-        increment({ state }: Actor.Command<Counter>) {
+      methods: {
+        increment({ state }) {
           state.value += 1;
           return { value: state.value };
         },
       },
-      queries: {},
     } satisfies Actor.Definition<Counter>;
 
-    const feature = createActor(definition);
+    const feature = createActor<Counter>(definition);
 
     expect(Object.keys(feature)).toEqual(["programs"]);
     expect(typeof feature.programs.server.start).toBe("function");
@@ -65,12 +80,12 @@ describe("Actor", () => {
       Name: "counter";
       Key: string;
       State: { value: number };
+      Methods: Record<never, never>;
     }>;
-    const counter = createActor({
-      state: (_context: Actor.Initial<Counter>): Counter["State"] => ({ value: 0 }),
-      commands: {},
-      queries: {},
-    } satisfies Actor.Definition<Counter>);
+    const counter = createActor<Counter>({
+      state: (_context) => ({ value: 0 }),
+      methods: {},
+    });
 
     const placed = placePrograms(counter, { server: "workers" });
 
@@ -96,18 +111,28 @@ describe("Actor", () => {
       { kind: "portable" },
       { kind: "portable" },
       { kind: "portable" },
+      { kind: "portable" },
+      { kind: "portable" },
+      { kind: "portable" },
+      { kind: "portable" },
+      { kind: "portable" },
     ]);
     expect(
       server?.contributions.flatMap(({ provides }) => provides.map(({ name }) => name)).sort(),
     ).toEqual([
       "account",
       "agent",
+      "auction",
       "cycleA",
       "cycleB",
+      "deviceSession",
       "document",
+      "gameRoom",
       "inventory",
       "ledger",
+      "rateLimit",
       "reminder",
+      "scheduledAgent",
     ]);
     expect(JSON.stringify(ir)).not.toContain('"kind":"actor"');
   });
@@ -124,64 +149,441 @@ describe("Actor", () => {
       },
     });
     const inventory = execution.dependencies.inventory as Readonly<{
-      reserve(request: Readonly<{ key: string; input: { quantity: number } }>): Promise<{
-        status: "succeeded";
-        value: { remaining: number };
+      get(identity: { key: string }): Readonly<{
+        reserve(
+          input: { quantity: number },
+          options?: { idempotencyKey?: string },
+        ): Promise<
+          | {
+              status: "succeeded";
+              value: { remaining: number };
+            }
+          | {
+              status: "failed";
+              failure: { type: "unavailable"; data: { available: number } };
+            }
+        >;
+        availability(): Promise<{ available: number }>;
       }>;
-      availability(request: Readonly<{ key: string }>): Promise<{ available: number }>;
     }>;
     const account = execution.dependencies.account as Readonly<{
-      deposit(request: Readonly<{ key: string; input: { amount: number } }>): Promise<{
-        status: "succeeded";
-        value: { balance: number };
-      }>;
-      purchase(
-        request: Readonly<{
-          key: string;
-          input: { item: string; quantity: number; amount: number };
-        }>,
-      ): Promise<{
-        status: "succeeded";
-        value: { balance: number; reservation: string };
+      get(identity: { key: string }): Readonly<{
+        deposit(input: { amount: number }): Promise<{
+          status: "succeeded";
+          value: { balance: number };
+        }>;
+        purchase(input: { item: string; quantity: number; amount: number }): Promise<{
+          status: "succeeded";
+          value: { balance: number; reservation: string };
+        }>;
       }>;
     }>;
+    const item = inventory.get({ key: "item-1" });
+    const customer = account.get({ key: "account-1" });
 
-    await expect(inventory.availability({ key: "item-1" })).resolves.toEqual({
+    await expect(item.availability()).resolves.toEqual({
       available: 10,
     });
-    await expect(inventory.reserve({ key: "item-1", input: { quantity: 20 } })).resolves.toEqual({
+    await expect(item.reserve({ quantity: 20 })).resolves.toEqual({
       status: "failed",
       failure: { type: "unavailable", data: { available: 10 } },
     });
-    await expect(inventory.availability({ key: "item-1" })).resolves.toEqual({
+    await expect(item.availability()).resolves.toEqual({
       available: 10,
     });
-    await expect(inventory.reserve({ key: "item-1", input: { quantity: 3 } })).resolves.toEqual({
+    await expect(item.reserve({ quantity: 3 })).resolves.toEqual({
       status: "succeeded",
       value: { remaining: 7 },
     });
-    await expect(inventory.availability({ key: "item-1" })).resolves.toEqual({
+    await expect(item.availability()).resolves.toEqual({
       available: 7,
     });
-    await expect(account.deposit({ key: "account-1", input: { amount: 10 } })).resolves.toEqual({
+    await expect(customer.deposit({ amount: 10 })).resolves.toEqual({
       status: "succeeded",
       value: { balance: 10 },
     });
-    await expect(
-      account.purchase({
-        key: "account-1",
-        input: { item: "item-1", quantity: 2, amount: 4 },
-      }),
-    ).resolves.toEqual({
+    await expect(customer.purchase({ item: "item-1", quantity: 2, amount: 4 })).resolves.toEqual({
       status: "succeeded",
       value: {
         balance: 6,
         reservation: expect.any(String),
       },
     });
-    await expect(inventory.availability({ key: "item-1" })).resolves.toEqual({
+    await expect(item.availability()).resolves.toEqual({
       available: 5,
     });
+  });
+
+  it("emits semantic runtime measurements through the Telemetry Dependency", async () => {
+    const measurements: {
+      instrument: string;
+      name: string;
+      value: number;
+      attributes: readonly Readonly<{ name: string; value: string }>[];
+    }[] = [];
+    await using execution = await executeLinkedProgramIR(linkProgram(actorFixtureServer()), {
+      ...createActorHost(),
+      telemetry: {
+        record(measurement) {
+          measurements.push(measurement);
+        },
+      },
+      payments: {
+        async charge({ input }: { input: Readonly<{ account: string; amount: number }> }) {
+          return { receipt: `${input.account}:${input.amount}` };
+        },
+      },
+    });
+    const inventory = execution.dependencies.inventory as Readonly<{
+      get(identity: { key: string }): Readonly<{
+        reserve(input: { quantity: number }): Promise<object>;
+        availability(): Promise<object>;
+      }>;
+    }>;
+
+    await inventory.get({ key: "measured" }).reserve({ quantity: 1 });
+    await inventory.get({ key: "measured" }).availability();
+
+    expect(new Set(measurements.map(({ name }) => name))).toEqual(
+      new Set([
+        "actor.activations",
+        "actor.cache.entries",
+        "actor.cache.hits",
+        "actor.cache.misses",
+        "actor.calls",
+        "actor.queue.depth",
+      ]),
+    );
+    expect(
+      measurements.every(({ attributes }) =>
+        attributes.some(({ name, value }) => name === "actor" && value === "inventory"),
+      ),
+    ).toBe(true);
+  });
+
+  it("routes Actor references through the generic remote Dependency boundary", async () => {
+    const server = actorFixtureServer();
+    await using execution = await executeLinkedProgramIR(linkProgram(server), {
+      ...createActorHost(),
+      payments: {
+        async charge() {
+          return { receipt: "unused" };
+        },
+      },
+    });
+    const contract = collectProgramManifest(server).bindings.find(
+      ({ name }) => name === "inventory",
+    );
+    if (!contract) throw new Error("Actor fixture has no inventory contract.");
+    const network = createMemoryDependencyTransport();
+    network.bind(
+      "actor-worker",
+      createDependencyRequestHandler([contract], {
+        inventory: execution.dependencies.inventory,
+      }),
+    );
+    const inventory = createRemoteDependency(contract, "actor-worker", network) as Readonly<{
+      get(identity: { key: string }): Readonly<{
+        reserve(
+          input: { quantity: number },
+          options?: { idempotencyKey?: string },
+        ): Promise<
+          | {
+              status: "succeeded";
+              value: { remaining: number };
+            }
+          | {
+              status: "failed";
+              failure: { type: "unavailable"; data: { available: number } };
+            }
+        >;
+        availability(): Promise<{ available: number }>;
+      }>;
+    }>;
+    const item = inventory.get({ key: "remote-item" });
+
+    await expect(
+      item.reserve({ quantity: 3 }, { idempotencyKey: "remote-reserve" }),
+    ).resolves.toEqual({
+      status: "succeeded",
+      value: { remaining: 7 },
+    });
+    await expect(
+      item.reserve({ quantity: 3 }, { idempotencyKey: "remote-reserve" }),
+    ).resolves.toEqual({
+      status: "succeeded",
+      value: { remaining: 7 },
+    });
+    await expect(item.availability()).resolves.toEqual({ available: 7 });
+  });
+
+  it("automatically partitions Actor identities across changing Process membership", async () => {
+    const server = actorFixtureServer();
+    const linked = linkProgram(server);
+    const events = createMemoryEventStore<object>();
+    const directory = createMemoryProcessDirectory();
+    const network = createMemoryDependencyTransport();
+    const replicas: {
+      id: string;
+      execution: Awaited<ReturnType<typeof executeLinkedProgramIR>>;
+    }[] = [];
+    const start = async (id: string) => {
+      const execution = await executeLinkedProgramIR(
+        linked,
+        {
+          ...createActorHost(events),
+          payments: {
+            async charge() {
+              return { receipt: "unused" };
+            },
+          },
+        },
+        {
+          distribute: ({ program, contracts, providers }) =>
+            startProcessDistribution(program, contracts, providers, {
+              id,
+              target: `memory://actor-${id}`,
+              version: "v1",
+              directory,
+              network,
+              partitionCount: 64,
+              membershipLease: 1_000,
+              ownershipLease: 100,
+              now: () => 0,
+            }),
+        },
+      );
+      const replica = { id, execution };
+      replicas.push(replica);
+      return replica;
+    };
+    const accountContract = collectProgramManifest(server).bindings.find(
+      ({ name }) => name === "account",
+    );
+    if (!accountContract) throw new Error("Actor fixture has no account contract.");
+    const balanceOperation = accountContract.operations.find(({ name }) => name === "balance");
+    if (!balanceOperation) throw new Error("Actor fixture has no account balance operation.");
+    type Account = Readonly<{
+      get(input: Readonly<{ key: string }>): Readonly<{
+        deposit(
+          input: Readonly<{ amount: number }>,
+          options?: Readonly<{
+            idempotencyKey?: string;
+            wait?: "accepted" | "completed";
+          }>,
+        ): Promise<
+          | Readonly<{ id: string }>
+          | Readonly<{ status: "succeeded"; value: Readonly<{ balance: number }> }>
+        >;
+        balance(): Promise<Readonly<{ balance: number }>>;
+      }>;
+    }>;
+
+    try {
+      const first = await start("one");
+      const firstAccount = first.execution.dependencies.account as Account;
+      await expect(
+        firstAccount
+          .get({ key: "distributed" })
+          .deposit({ amount: 2 }, { idempotencyKey: "initial" }),
+      ).resolves.toMatchObject({ status: "succeeded", value: { balance: 2 } });
+
+      await start("two");
+      await start("three");
+      const APIs = replicas.map(({ execution }) => execution.dependencies.account as Account);
+      for (let index = 0; index < 24; index += 1) {
+        await APIs[index % APIs.length]!.get({ key: `partitioned-${index}` }).deposit(
+          { amount: 1 },
+          { idempotencyKey: `partitioned-${index}` },
+        );
+      }
+      await APIs[1]!
+        .get({ key: "distributed" })
+        .deposit({ amount: 3 }, { idempotencyKey: "accepted", wait: "accepted" });
+
+      const partition = processPartition("server", accountContract, { key: "distributed" }, 64);
+      const owner = await directory.locate({
+        partition,
+        operation: "balance",
+        contract: dependencyOperationIdentity(balanceOperation),
+        now: 0,
+        leaseDuration: 100,
+      });
+      const departed = replicas.find(({ id }) => id === owner.owner);
+      if (!departed) throw new Error("Actor partition owner is not a running replica.");
+      await departed.execution[Symbol.asyncDispose]();
+      replicas.splice(replicas.indexOf(departed), 1);
+
+      const survivor = replicas[0]!.execution.dependencies.account as Account;
+      await expect(survivor.get({ key: "distributed" }).balance()).resolves.toEqual({
+        balance: 5,
+      });
+
+      const scaledIn = replicas.pop()!;
+      await scaledIn.execution[Symbol.asyncDispose]();
+      const final = replicas[0]!.execution.dependencies.account as Account;
+      await expect(final.get({ key: "distributed" }).balance()).resolves.toEqual({
+        balance: 5,
+      });
+    } finally {
+      await Promise.all(replicas.map(({ execution }) => execution[Symbol.asyncDispose]()));
+    }
+  });
+
+  it("routes duplicate durable reminder delivery to the current owner after relocation", async () => {
+    const server = actorFixtureServer();
+    const linked = linkProgram(server);
+    const events = createMemoryEventStore<object>();
+    const directory = createMemoryProcessDirectory();
+    const network = createMemoryDependencyTransport();
+    const alarm = createManualAlarm();
+    const replicas: {
+      id: string;
+      execution: Awaited<ReturnType<typeof executeLinkedProgramIR>>;
+    }[] = [];
+    let now = 100;
+    const start = async (id: string) => {
+      const execution = await executeLinkedProgramIR(
+        linked,
+        {
+          ...createActorHost(events),
+          alarm: alarm.dependency,
+          clock: { now: () => now },
+          payments: {
+            async charge() {
+              return { receipt: "unused" };
+            },
+          },
+        },
+        {
+          distribute: ({ program, contracts, providers }) =>
+            startProcessDistribution(program, contracts, providers, {
+              id,
+              target: `memory://reminder-${id}`,
+              version: "v1",
+              directory,
+              network,
+              partitionCount: 64,
+              membershipLease: 1_000,
+              ownershipLease: 100,
+              now: () => now,
+            }),
+        },
+      );
+      const replica = { id, execution };
+      replicas.push(replica);
+      return replica;
+    };
+
+    try {
+      const first = await start("one");
+      const reminder = first.execution.dependencies.reminder as ReminderApi;
+      const key = "distributed-reminder";
+      await reminder.schedule({ key, input: { at: 500, generation: 1 } });
+      await start("two");
+      await start("three");
+
+      const reminderContract = collectProgramManifest(server).bindings.find(
+        ({ name }) => name === "reminder",
+      );
+      if (!reminderContract) throw new Error("Actor fixture has no reminder contract.");
+      const wake = reminderContract.operations.find(({ name }) => name === "$wake");
+      if (!wake) throw new Error("Actor fixture has no internal reminder wake operation.");
+      const partition = processPartition("server", reminderContract, { key }, 64);
+      const owner = await directory.locate({
+        partition,
+        operation: wake.name,
+        contract: dependencyOperationIdentity(wake),
+        now,
+        leaseDuration: 100,
+      });
+      const departed = replicas.find(({ id }) => id === owner.owner);
+      if (!departed) throw new Error("Reminder owner is not a running replica.");
+      await departed.execution[Symbol.asyncDispose]();
+      replicas.splice(replicas.indexOf(departed), 1);
+
+      now = 500;
+      const survivingDependencies = replicas[0]!.execution.dependencies;
+      await alarm.deliverNext(now, survivingDependencies, false);
+      await alarm.replayLast(now, survivingDependencies);
+      const relocated = replicas[1]!.execution.dependencies.reminder as ReminderApi;
+      await expect(relocated.status({ key })).resolves.toEqual({ due: null, fired: 1 });
+      const history = await events.read({ stream: actorStream("reminder", key) });
+      expect(
+        history.filter(({ event }) => (event as { type?: string }).type === "actor.timer.fired"),
+      ).toHaveLength(1);
+
+      await Promise.all(
+        replicas.splice(0).map(({ execution }) => execution[Symbol.asyncDispose]()),
+      );
+      const restarted = await start("restarted");
+      await (restarted.execution.dependencies.reminder as ReminderApi).schedule({
+        key,
+        input: { at: 700, generation: 2 },
+      });
+      await restarted.execution[Symbol.asyncDispose]();
+      replicas.splice(replicas.indexOf(restarted), 1);
+
+      now = 800;
+      const recovered = await start("recovered");
+      await alarm.runDue(now, recovered.execution.dependencies);
+      await expect(
+        (recovered.execution.dependencies.reminder as ReminderApi).status({ key }),
+      ).resolves.toEqual({ due: null, fired: 2 });
+    } finally {
+      await Promise.all(replicas.map(({ execution }) => execution[Symbol.asyncDispose]()));
+    }
+  });
+
+  it("revalidates routed ownership before committing Actor state", async () => {
+    const events = createMemoryEventStore<object>();
+    await using execution = await executeLinkedProgramIR(linkProgram(actorFixtureServer()), {
+      ...createActorHost(events),
+      payments: {
+        async charge() {
+          return { receipt: "unused" };
+        },
+      },
+    });
+    const authority = {
+      scope: "actor-authority-test",
+      owner: "worker-1",
+      failureEpoch: 1,
+      epoch: 1,
+      expiresAt: Number.MAX_SAFE_INTEGER,
+    };
+    let assertions = 0;
+
+    await expect(
+      invokeDependency(
+        execution.dependencies.account as object,
+        "deposit",
+        {
+          key: "fenced-commit",
+          input: { amount: 4 },
+          idempotencyKey: "fenced-commit",
+        },
+        {
+          id: "authority:fenced-commit",
+          attempt: 1,
+          scheduledAt: 0,
+          startedAt: 0,
+          authority: {
+            ...authority,
+            assert() {
+              assertions += 1;
+              if (assertions > 1) throw new StaleProcessAuthorityError(authority);
+            },
+          },
+        },
+      ),
+    ).rejects.toBeInstanceOf(StaleProcessAuthorityError);
+
+    expect(assertions).toBe(2);
+    const history = await events.read({ stream: actorStream("account", "fenced-commit") });
+    expect(
+      history.some(({ event }) => (event as { type?: string }).type === "actor.command.completed"),
+    ).toBe(false);
   });
 
   it("rejects synchronous Actor call cycles and permits durable acceptance to break them", async () => {
@@ -310,6 +712,169 @@ describe("Actor", () => {
     });
   });
 
+  it("models a durable device session with explicit connection state", async () => {
+    await using execution = await executeLinkedProgramIR(linkProgram(actorFixtureServer()), {
+      ...createActorHost(),
+      payments: {
+        async charge() {
+          return { receipt: "unused" };
+        },
+      },
+    });
+    const sessions = execution.dependencies.deviceSession as DeviceSessionApi;
+    const key = "user-1/device-1";
+
+    await expect(sessions.heartbeat({ key, input: { at: 1 } })).resolves.toEqual({
+      status: "failed",
+      failure: { type: "offline", data: {} },
+    });
+    await expect(sessions.connect({ key, input: { device: "browser", at: 2 } })).resolves.toEqual({
+      status: "succeeded",
+      value: { revision: 1 },
+    });
+    await expect(sessions.heartbeat({ key, input: { at: 3 } })).resolves.toEqual({
+      status: "succeeded",
+      value: { lastSeen: 3 },
+    });
+    await expect(sessions.disconnect({ key })).resolves.toEqual({
+      status: "succeeded",
+      value: { revision: 2 },
+    });
+    await expect(sessions.status({ key })).resolves.toEqual({
+      connected: false,
+      device: undefined,
+      lastSeen: 3,
+      revision: 2,
+    });
+  });
+
+  it("serializes a hot rate-limit key without blocking independent keys", async () => {
+    await using execution = await executeLinkedProgramIR(linkProgram(actorFixtureServer()), {
+      ...createActorHost(),
+      payments: {
+        async charge() {
+          return { receipt: "unused" };
+        },
+      },
+    });
+    const limits = execution.dependencies.rateLimit as RateLimitApi;
+    const key = "api/user-1";
+    const outcomes = await Promise.all([
+      limits.take({ key, input: { amount: 1, now: 1 } }),
+      limits.take({ key, input: { amount: 1, now: 1 } }),
+      limits.take({ key, input: { amount: 1, now: 1 } }),
+      limits.take({ key: "api/user-2", input: { amount: 1, now: 1 } }),
+    ]);
+
+    expect(outcomes.filter(({ status }) => status === "succeeded")).toHaveLength(3);
+    expect(outcomes.filter(({ status }) => status === "failed")).toEqual([
+      {
+        status: "failed",
+        failure: { type: "limited", data: { retryAt: 1_000 } },
+      },
+    ]);
+    await expect(limits.take({ key, input: { amount: 1, now: 1_000 } })).resolves.toEqual({
+      status: "succeeded",
+      value: { remaining: 1 },
+    });
+  });
+
+  it("orders concurrent auction bids and closes the identity atomically", async () => {
+    await using execution = await executeLinkedProgramIR(linkProgram(actorFixtureServer()), {
+      ...createActorHost(),
+      payments: {
+        async charge() {
+          return { receipt: "unused" };
+        },
+      },
+    });
+    const auctions = execution.dependencies.auction as AuctionApi;
+    const key = "auction-1";
+    const bids = await Promise.all([
+      auctions.bid({ key, input: { bidder: "left", price: 10 } }),
+      auctions.bid({ key, input: { bidder: "right", price: 10 } }),
+    ]);
+
+    expect(bids.filter(({ status }) => status === "succeeded")).toHaveLength(1);
+    expect(bids.filter(({ status }) => status === "failed")).toEqual([
+      {
+        status: "failed",
+        failure: { type: "tooLow", data: { minimum: 11 } },
+      },
+    ]);
+    await expect(auctions.close({ key })).resolves.toMatchObject({
+      status: "succeeded",
+      value: { price: 10 },
+    });
+    await expect(auctions.bid({ key, input: { bidder: "late", price: 20 } })).resolves.toEqual({
+      status: "failed",
+      failure: { type: "closed", data: {} },
+    });
+  });
+
+  it("coordinates game-room membership and turn conflicts", async () => {
+    await using execution = await executeLinkedProgramIR(linkProgram(actorFixtureServer()), {
+      ...createActorHost(),
+      payments: {
+        async charge() {
+          return { receipt: "unused" };
+        },
+      },
+    });
+    const rooms = execution.dependencies.gameRoom as GameRoomApi;
+    const key = "room-1";
+
+    await rooms.join({ key, input: { player: "one" } });
+    await rooms.join({ key, input: { player: "two" } });
+    await expect(rooms.join({ key, input: { player: "three" } })).resolves.toEqual({
+      status: "failed",
+      failure: { type: "full", data: {} },
+    });
+    const moves = await Promise.all([
+      rooms.move({ key, input: { player: "one", action: "left", expectedTurn: 0 } }),
+      rooms.move({ key, input: { player: "two", action: "right", expectedTurn: 0 } }),
+    ]);
+    expect(moves.filter(({ status }) => status === "succeeded")).toHaveLength(1);
+    expect(moves.filter(({ status }) => status === "failed")).toEqual([
+      {
+        status: "failed",
+        failure: { type: "conflict", data: { actualTurn: 1 } },
+      },
+    ]);
+    await expect(rooms.status({ key })).resolves.toMatchObject({
+      players: ["one", "two"],
+      turn: 1,
+    });
+  });
+
+  it("runs a scheduled agent through a durable reminder and ordinary Dependency", async () => {
+    const alarm = createManualAlarm();
+    await using execution = await executeLinkedProgramIR(linkProgram(actorFixtureServer()), {
+      ...createActorHost(),
+      alarm: alarm.dependency,
+      payments: {
+        async charge() {
+          return { receipt: "unused" };
+        },
+      },
+    });
+    const agents = execution.dependencies.scheduledAgent as ScheduledAgentApi;
+    const key = "scheduled-agent-1";
+
+    await expect(
+      agents.schedule({ key, input: { at: 500, prompt: "prepare report" } }),
+    ).resolves.toEqual({
+      status: "succeeded",
+      value: { due: 500 },
+    });
+    await alarm.runDue(500, execution.dependencies);
+    await expect(agents.status({ key })).resolves.toEqual({
+      due: null,
+      runs: 1,
+      text: "answer:prepare report",
+    });
+  });
+
   it("recovers committed state and deduplicates explicit invocations across restarts", async () => {
     const server = actorFixtureServer();
     const linked = linkProgram(server);
@@ -356,9 +921,20 @@ describe("Actor", () => {
 
   it("serializes concurrent commands for one Actor key", async () => {
     const server = actorFixtureServer();
+    const stored = createMemoryEventStore<object>();
+    const stream = actorStream("account", "concurrent-account");
+    let rejectedActorAppends = 0;
+    const events = {
+      ...stored,
+      async append(input: Parameters<typeof stored.append>[0]) {
+        const appended = await stored.append(input);
+        if (input.stream === stream && appended === undefined) rejectedActorAppends += 1;
+        return appended;
+      },
+    };
 
     await using execution = await executeLinkedProgramIR(linkProgram(server), {
-      ...createActorHost(),
+      ...createActorHost(events),
       payments: {
         async charge({ input }: { input: Readonly<{ account: string; amount: number }> }) {
           return { receipt: `${input.account}:${input.amount}` };
@@ -380,6 +956,7 @@ describe("Actor", () => {
     await expect(account.balance({ key: "concurrent-account" })).resolves.toEqual({
       balance: 20,
     });
+    expect(rejectedActorAppends).toBe(0);
   });
 
   it("keeps suspended command mutations invisible until commit", async () => {
@@ -536,7 +1113,78 @@ describe("Actor", () => {
     ).rejects.toMatchObject({ name: "ActorError" });
   });
 
-  it("retains the latest 1,024 command results and reports older results as expired", async () => {
+  it("bounds idle activations without evicting accepted work", async () => {
+    const stored = createMemoryEventStore<object>();
+    const fullReads = new Map<string, number>();
+    const events = {
+      ...stored,
+      read(input: { stream: string; after?: number }) {
+        if (input.after === undefined && input.stream.startsWith("actor:")) {
+          fullReads.set(input.stream, (fullReads.get(input.stream) ?? 0) + 1);
+        }
+        return stored.read(input);
+      },
+      append(input: Parameters<typeof stored.append>[0]) {
+        return stored.append(input);
+      },
+      subscribe(input: Parameters<typeof stored.subscribe>[0]) {
+        return stored.subscribe(input);
+      },
+    };
+    let now = 0;
+    await using execution = await executeLinkedProgramIR(linkProgram(actorFixtureServer()), {
+      ...createActorHost(events),
+      clock: { now: () => now },
+      payments: {
+        async charge() {
+          return { receipt: "unused" };
+        },
+      },
+    });
+    const account = execution.dependencies.account as Readonly<{
+      get(identity: { key: string }): Readonly<{
+        deposit(
+          input: { amount: number },
+          options?: { idempotencyKey?: string; wait?: "accepted" },
+        ): Promise<object>;
+        balance(): Promise<{ balance: number }>;
+      }>;
+    }>;
+    const pending = account.get({ key: "pending" });
+    await expect(
+      pending.deposit({ amount: 1 }, { idempotencyKey: "pending-deposit", wait: "accepted" }),
+    ).resolves.toEqual({ id: "idempotency:pending-deposit" });
+    const pendingStream = actorStream("account", "pending");
+    const pendingReads = fullReads.get(pendingStream);
+
+    for (let index = 0; index < 260; index += 1) {
+      now += 1;
+      await account.get({ key: `cold-${index}` }).balance();
+    }
+    const oldestStream = actorStream("account", "cold-0");
+    expect(fullReads.get(oldestStream)).toBe(1);
+    now += 1;
+    await account.get({ key: "cold-0" }).balance();
+    expect(fullReads.get(oldestStream)).toBe(2);
+
+    const recentStream = actorStream("account", "cold-259");
+    const recentReads = fullReads.get(recentStream);
+    now = 400_000;
+    await account.get({ key: "expiry-trigger" }).balance();
+    await account.get({ key: "cold-259" }).balance();
+    expect(fullReads.get(recentStream)).toBe((recentReads ?? 0) + 1);
+
+    await expect(
+      pending.deposit({ amount: 1 }, { idempotencyKey: "pending-deposit" }),
+    ).resolves.toEqual({
+      status: "succeeded",
+      value: { balance: 1 },
+    });
+    expect(fullReads.get(pendingStream)).toBe(pendingReads);
+    await expect(pending.balance()).resolves.toEqual({ balance: 1 });
+  });
+
+  it("bounds durable history while retaining outcomes and expiry tombstones", async () => {
     const server = actorFixtureServer();
     const events = createMemoryEventStore<object>();
     const key = "retained-account";
@@ -602,6 +1250,219 @@ describe("Actor", () => {
       value: { balance: 1_025 },
     });
     await expect(account.balance({ key })).resolves.toEqual({ balance: 1_025 });
+    await expect(
+      account.deposit({
+        key,
+        input: { amount: 1 },
+        idempotencyKey: "after-compaction",
+      }),
+    ).resolves.toEqual({
+      status: "succeeded",
+      value: { balance: 1_026 },
+    });
+    const stream = actorStream("account", key);
+    const storedSnapshot = await events.loadSnapshot({ stream });
+    expect(storedSnapshot).toMatchObject({
+      revision: 2_053,
+      snapshot: {
+        format: "kit.actor",
+        version: 1,
+        state: { balance: 1_026 },
+      },
+    });
+    if (!storedSnapshot) throw new Error("Actor snapshot was not persisted.");
+    const snapshot = storedSnapshot.snapshot as {
+      accepted: readonly object[];
+      expired: readonly object[];
+      completed: readonly object[];
+    };
+    expect(snapshot.accepted).toHaveLength(1_024);
+    expect(snapshot.expired).toHaveLength(2);
+    expect(snapshot.completed).toHaveLength(1_024);
+    await expect(events.read({ stream })).resolves.toEqual([]);
+    await execution[Symbol.asyncDispose]();
+
+    const recoveryReads: Array<number | undefined> = [];
+    const recoveredEvents = {
+      ...events,
+      read(input: Parameters<typeof events.read>[0]) {
+        if (input.stream === stream) recoveryReads.push(input.after);
+        return events.read(input);
+      },
+    };
+    await using restarted = await executeLinkedProgramIR(linkProgram(server), {
+      ...createActorHost(recoveredEvents),
+      payments: {
+        async charge() {
+          return { receipt: "unused" };
+        },
+      },
+    });
+    const recovered = restarted.dependencies.account as AccountApi;
+    await expect(
+      recovered.deposit({
+        key,
+        input: { amount: 1 },
+        idempotencyKey: "retained-0",
+      }),
+    ).rejects.toMatchObject({
+      failure: {
+        type: "result-expired",
+        invocation: "idempotency:retained-0",
+      },
+    });
+    await expect(
+      recovered.deposit({
+        key,
+        input: { amount: 1 },
+        idempotencyKey: "retained-1024",
+      }),
+    ).resolves.toEqual({
+      status: "succeeded",
+      value: { balance: 1_025 },
+    });
+    await expect(recovered.balance({ key })).resolves.toEqual({ balance: 1_026 });
+    expect(recoveryReads.length).toBeGreaterThan(0);
+    expect(recoveryReads.every((after) => after === 2_053)).toBe(true);
+  });
+
+  it("finishes safe compaction after a crash between snapshot and reclamation", async () => {
+    const server = actorFixtureServer();
+    const memory = createMemoryEventStore<object>();
+    const key = "snapshot-crash-account";
+    const stream = actorStream("account", key);
+    const history = Array.from({ length: 128 }, (_, index) => {
+      const invocation = `idempotency:before-snapshot-${index}`;
+      const balance = index + 1;
+      return [
+        {
+          type: "actor.command.accepted",
+          invocation,
+          operation: "deposit",
+          input: { amount: 1 },
+          commandVersion: 0,
+          at: balance * 2 - 1,
+        },
+        {
+          type: "actor.command.completed",
+          invocation,
+          state: { balance },
+          stateVersion: 0,
+          outcome: { status: "succeeded", value: { balance } },
+          at: balance * 2,
+        },
+      ];
+    }).flat();
+    await memory.append({ stream, expectedRevision: 0, events: history });
+    const snapshotSaves: boolean[] = [];
+    let compactions = 0;
+    const events = {
+      ...memory,
+      async saveSnapshot(input: Parameters<typeof memory.saveSnapshot>[0]) {
+        const saved = await memory.saveSnapshot(input);
+        snapshotSaves.push(saved);
+        return saved;
+      },
+      async compact(input: Parameters<typeof memory.compact>[0]) {
+        compactions += 1;
+        if (compactions === 1) throw new Error("crash after durable snapshot");
+        await memory.compact(input);
+      },
+    };
+
+    await using execution = await executeLinkedProgramIR(linkProgram(server), {
+      ...createActorHost(events),
+      payments: {
+        async charge() {
+          return { receipt: "unused" };
+        },
+      },
+    });
+    const account = execution.dependencies.account as AccountApi;
+    await account.deposit({
+      key,
+      input: { amount: 1 },
+      idempotencyKey: "snapshot-before-crash",
+    });
+    expect((await memory.read({ stream })).length).toBe(259);
+    await account.deposit({
+      key,
+      input: { amount: 1 },
+      idempotencyKey: "snapshot-after-crash",
+    });
+
+    expect(snapshotSaves).toEqual([true, false]);
+    expect(compactions).toBe(2);
+    await expect(memory.loadSnapshot({ stream })).resolves.toMatchObject({ revision: 259 });
+    await expect(memory.read({ stream })).resolves.toHaveLength(3);
+    await execution[Symbol.asyncDispose]();
+
+    await using restarted = await executeLinkedProgramIR(linkProgram(server), {
+      ...createActorHost(memory),
+      payments: {
+        async charge() {
+          return { receipt: "unused" };
+        },
+      },
+    });
+    const recovered = restarted.dependencies.account as AccountApi;
+    await expect(recovered.balance({ key })).resolves.toEqual({ balance: 130 });
+  });
+
+  it("recovers and migrates durably accepted work from an old compacted snapshot", async () => {
+    const server = actorFixtureServer();
+    const events = createMemoryEventStore<object>();
+    const key = "snapshot-pending-ledger";
+    const stream = actorStream("ledger", key);
+    const accepted = {
+      type: "actor.command.accepted",
+      invocation: "idempotency:pending-from-snapshot",
+      operation: "credit",
+      input: { amount: 5 },
+      commandVersion: 0,
+      at: 1,
+    };
+    await events.append({ stream, expectedRevision: 0, events: [accepted] });
+    await events.saveSnapshot({
+      stream,
+      expectedRevision: 0,
+      revision: 1,
+      snapshot: {
+        format: "kit.actor",
+        version: 1,
+        state: { balance: 0 },
+        stateVersion: 0,
+        accepted: [accepted],
+        expired: [],
+        claims: [],
+        failed: [],
+        poisoned: [],
+        completed: [],
+        timers: [],
+      },
+    });
+    await events.compact({ stream, through: 1 });
+
+    await using execution = await executeLinkedProgramIR(linkProgram(server), {
+      ...createActorHost(events),
+      payments: {
+        async charge() {
+          return { receipt: "unused" };
+        },
+      },
+    });
+    const ledger = execution.dependencies.ledger as LedgerApi;
+    await expect(
+      ledger.credit({
+        key,
+        input: { amount: 5, expectedRevision: 0 },
+        idempotencyKey: "pending-from-snapshot",
+      }),
+    ).resolves.toEqual({
+      status: "succeeded",
+      value: { balance: 5, revision: 1 },
+    });
+    await expect(ledger.snapshot({ key })).resolves.toEqual({ balance: 5, revision: 1 });
   });
 
   it("lets commands carry stable invocation identity into idempotent effects", async () => {
@@ -649,6 +1510,7 @@ describe("Actor", () => {
     const memory = createMemoryEventStore<object>();
     let failCompletion = true;
     const events = {
+      ...memory,
       read: memory.read,
       subscribe: memory.subscribe,
       async append(input: Parameters<typeof memory.append>[0]) {
@@ -727,6 +1589,7 @@ describe("Actor", () => {
       const memory = createMemoryEventStore<object>();
       let failed = false;
       const events = {
+        ...memory,
         subscribe: memory.subscribe,
         async read(input: Parameters<typeof memory.read>[0]) {
           if (!failed && boundary === "read" && input.stream.startsWith("actor:")) {
@@ -791,6 +1654,7 @@ describe("Actor", () => {
       const memory = createMemoryEventStore<object>();
       let conflicted = false;
       const events = {
+        ...memory,
         read: memory.read,
         subscribe: memory.subscribe,
         async append(input: Parameters<typeof memory.append>[0]) {
@@ -985,6 +1849,7 @@ describe("Actor", () => {
     const memory = createMemoryEventStore<object>();
     let partitioned = false;
     const partitionableEvents = {
+      ...memory,
       subscribe: memory.subscribe,
       async read(input: Parameters<typeof memory.read>[0]) {
         if (partitioned) throw new Error("storage partition");
@@ -1286,6 +2151,7 @@ describe("Actor", () => {
     const memory = createMemoryEventStore<object>();
     let poisonAttempt = 0;
     const events = {
+      ...memory,
       read: memory.read,
       subscribe: memory.subscribe,
       async append(input: Parameters<typeof memory.append>[0]) {
@@ -1403,7 +2269,7 @@ describe("Actor", () => {
       ),
     ).toBe(false);
 
-    await alarm.runDue(now);
+    await alarm.runDue(now, execution.dependencies);
     const completedHistory = await events.read({ stream: actorStream("account", key) });
     expect(
       completedHistory.some(
@@ -1413,7 +2279,47 @@ describe("Actor", () => {
     await expect(account.balance({ key })).resolves.toEqual({ balance: 4 });
   });
 
-  it("persists one-shot timers and fires them once after restart", async () => {
+  it("recovers registered Actors through bounded EventStore pages", async () => {
+    const memory = createMemoryEventStore<object>();
+    const registry = "actor-registry:8:reminder";
+    const registrations = Array.from({ length: 300 }, (_, index) => ({
+      type: "actor.registered",
+      key: `reminder-${index}`,
+      at: index,
+    }));
+    await memory.append({
+      stream: registry,
+      expectedRevision: 0,
+      events: registrations,
+    });
+    const registryReads: Readonly<{ after?: number; limit?: number }>[] = [];
+    const events = {
+      ...memory,
+      async read(input: Parameters<typeof memory.read>[0]) {
+        if (input.stream === registry) {
+          registryReads.push({ after: input.after, limit: input.limit });
+        }
+        return await memory.read(input);
+      },
+    };
+
+    await using _execution = await executeLinkedProgramIR(linkProgram(actorFixtureServer()), {
+      ...createActorHost(events),
+      payments: {
+        async charge({ input }: { input: Readonly<{ account: string; amount: number }> }) {
+          return { receipt: `${input.account}:${input.amount}` };
+        },
+      },
+    });
+
+    expect(registryReads).toEqual([
+      { after: 0, limit: 256 },
+      { after: 256, limit: 256 },
+      { after: 300, limit: 256 },
+    ]);
+  });
+
+  it("persists one-shot reminders and fires them once after restart", async () => {
     const server = actorFixtureServer();
     const linked = linkProgram(server);
     const events = createMemoryEventStore<object>();
@@ -1448,10 +2354,16 @@ describe("Actor", () => {
 
     now = 1_000;
     const secondAlarm = createManualAlarm();
+    const reminderMetrics: { name: string; value: number }[] = [];
     await using second = await executeLinkedProgramIR(linked, {
       ...createActorHost(events),
       alarm: secondAlarm.dependency,
       clock: { now: () => now },
+      telemetry: {
+        record({ name, value }) {
+          reminderMetrics.push({ name, value });
+        },
+      },
       payments: {
         async charge({ input }: { input: Readonly<{ account: string; amount: number }> }) {
           return { receipt: `${input.account}:${input.amount}` };
@@ -1459,7 +2371,7 @@ describe("Actor", () => {
       },
     });
     const secondReminder = second.dependencies.reminder as ReminderApi;
-    await secondAlarm.runDue(now);
+    await secondAlarm.runDue(now, second.dependencies);
     const autonomousHistory = await events.read({
       stream: actorStream("reminder", "restart-reminder"),
     });
@@ -1490,9 +2402,10 @@ describe("Actor", () => {
           (event as { type?: string }).type === "actor.command.completed",
       ),
     ).toHaveLength(1);
+    expect(reminderMetrics).toContainEqual({ name: "actor.reminder.lag", value: 0 });
   });
 
-  it("uses timer generations to fence rescheduling and cancellation", async () => {
+  it("uses reminder generations to fence rescheduling and cancellation", async () => {
     const server = actorFixtureServer();
     const events = createMemoryEventStore<object>();
     let now = 100;
@@ -1517,12 +2430,12 @@ describe("Actor", () => {
     await expect(reminder.status({ key })).resolves.toEqual({ due: 900, fired: 0 });
     await reminder.cancel({ key });
     now = 1_000;
-    await alarm.runDue(now);
+    await alarm.runDue(now, execution.dependencies);
     await expect(reminder.status({ key })).resolves.toEqual({ due: null, fired: 0 });
 
     await reminder.schedule({ key, input: { at: 1_100, generation: 3 } });
     now = 1_100;
-    await alarm.runDue(now);
+    await alarm.runDue(now, execution.dependencies);
     await expect(reminder.status({ key })).resolves.toEqual({ due: null, fired: 1 });
 
     const history = await events.read({ stream: actorStream("reminder", key) });
@@ -1537,12 +2450,72 @@ describe("Actor", () => {
     ).toEqual([1, 2, 3, 4]);
   });
 
-  it("recovers atomically from failures at every durable timer boundary", async () => {
+  it("recovers a due reminder from a compacted Actor snapshot", async () => {
+    const events = createMemoryEventStore<object>();
+    const key = "snapshot-reminder";
+    const stream = actorStream("reminder", key);
+    const scheduled = {
+      type: "actor.timer.scheduled",
+      timer: "wake",
+      generation: 1,
+      dueAt: 500,
+      operation: "wake",
+      input: { generation: 1, at: 500, interval: 0, remaining: 1 },
+      commandVersion: 0,
+      at: 100,
+    };
+    await events.append({ stream, expectedRevision: 0, events: [scheduled] });
+    await events.append({
+      stream: "actor-registry:8:reminder",
+      expectedRevision: 0,
+      events: [{ type: "actor.registered", key, at: 100 }],
+    });
+    await events.saveSnapshot({
+      stream,
+      expectedRevision: 0,
+      revision: 1,
+      snapshot: {
+        format: "kit.actor",
+        version: 1,
+        state: { due: 500, fired: 0 },
+        stateVersion: 0,
+        accepted: [],
+        expired: [],
+        claims: [],
+        failed: [],
+        poisoned: [],
+        completed: [],
+        timers: [scheduled],
+      },
+    });
+    await events.compact({ stream, through: 1 });
+    let now = 100;
+    const alarm = createManualAlarm();
+
+    await using execution = await executeLinkedProgramIR(linkProgram(actorFixtureServer()), {
+      ...createActorHost(events),
+      alarm: alarm.dependency,
+      clock: { now: () => now },
+      payments: {
+        async charge() {
+          return { receipt: "unused" };
+        },
+      },
+    });
+    const reminder = execution.dependencies.reminder as ReminderApi;
+    await expect(reminder.status({ key })).resolves.toEqual({ due: 500, fired: 0 });
+    now = 500;
+    await alarm.runDue(now, execution.dependencies);
+    await expect(reminder.status({ key })).resolves.toEqual({ due: null, fired: 1 });
+  });
+
+  it("recovers atomically from failures at every durable reminder boundary", async () => {
     const memory = createMemoryEventStore<object>();
     let target: string | undefined;
     const failed = new Set<string>();
     const conflicted = new Set<string>();
     const events = {
+      ...memory,
       read: memory.read,
       subscribe: memory.subscribe,
       async append(input: Parameters<typeof memory.append>[0]) {
@@ -1610,7 +2583,7 @@ describe("Actor", () => {
     });
     target = "actor.timer.fired";
     now = 200;
-    await alarm.runDue(now);
+    await alarm.runDue(now, execution.dependencies);
     await expect(reminder.status({ key: "timer-fire-fault" })).resolves.toEqual({
       due: null,
       fired: 1,
@@ -1638,6 +2611,7 @@ describe("Actor", () => {
     const memory = createMemoryEventStore<object>();
     let failureAppendAttempt = 0;
     const events = {
+      ...memory,
       read: memory.read,
       subscribe: memory.subscribe,
       async append(input: Parameters<typeof memory.append>[0]) {
@@ -1679,7 +2653,7 @@ describe("Actor", () => {
     }
   });
 
-  it("self-reschedules through durable typed timer commands", async () => {
+  it("self-reschedules through durable typed reminder methods", async () => {
     const events = createMemoryEventStore<object>();
     let now = 100;
     const alarm = createManualAlarm();
@@ -1703,7 +2677,7 @@ describe("Actor", () => {
 
     for (const at of [200, 300, 400]) {
       now = at;
-      await alarm.runDue(now);
+      await alarm.runDue(now, execution.dependencies);
     }
 
     await expect(reminder.status({ key })).resolves.toEqual({ due: null, fired: 3 });
@@ -1960,17 +2934,119 @@ type DocumentApi = Readonly<{
   }>;
 }>;
 
+type DeviceSessionApi = Readonly<{
+  connect(request: Readonly<{ key: string; input: { device: string; at: number } }>): Promise<{
+    status: "succeeded";
+    value: { revision: number };
+  }>;
+  heartbeat(
+    request: Readonly<{ key: string; input: { at: number } }>,
+  ): Promise<
+    | Readonly<{ status: "succeeded"; value: { lastSeen: number } }>
+    | Readonly<{ status: "failed"; failure: { type: "offline"; data: Record<never, never> } }>
+  >;
+  disconnect(request: Readonly<{ key: string }>): Promise<{
+    status: "succeeded";
+    value: { revision: number };
+  }>;
+  status(request: Readonly<{ key: string }>): Promise<{
+    connected: boolean;
+    device?: string;
+    lastSeen: number;
+    revision: number;
+  }>;
+}>;
+
+type RateLimitApi = Readonly<{
+  take(
+    request: Readonly<{ key: string; input: { amount: number; now: number } }>,
+  ): Promise<
+    | Readonly<{ status: "succeeded"; value: { remaining: number } }>
+    | Readonly<{ status: "failed"; failure: { type: "limited"; data: { retryAt: number } } }>
+  >;
+  status(request: Readonly<{ key: string }>): Promise<{
+    capacity: number;
+    remaining: number;
+    resetAt: number;
+  }>;
+}>;
+
+type AuctionApi = Readonly<{
+  bid(request: Readonly<{ key: string; input: { bidder: string; price: number } }>): Promise<
+    | Readonly<{ status: "succeeded"; value: { bidder: string; price: number } }>
+    | Readonly<{
+        status: "failed";
+        failure:
+          | Readonly<{ type: "closed"; data: Record<never, never> }>
+          | Readonly<{ type: "tooLow"; data: { minimum: number } }>;
+      }>
+  >;
+  close(request: Readonly<{ key: string }>): Promise<{
+    status: "succeeded";
+    value: { bidder?: string; price: number };
+  }>;
+  status(request: Readonly<{ key: string }>): Promise<{
+    closed: boolean;
+    bidder?: string;
+    price: number;
+  }>;
+}>;
+
+type GameRoomApi = Readonly<{
+  join(
+    request: Readonly<{ key: string; input: { player: string } }>,
+  ): Promise<
+    | Readonly<{ status: "succeeded"; value: { players: number } }>
+    | Readonly<{ status: "failed"; failure: { type: "full"; data: Record<never, never> } }>
+  >;
+  move(
+    request: Readonly<{
+      key: string;
+      input: { player: string; action: string; expectedTurn: number };
+    }>,
+  ): Promise<
+    | Readonly<{ status: "succeeded"; value: { turn: number } }>
+    | Readonly<{
+        status: "failed";
+        failure:
+          | Readonly<{ type: "notJoined"; data: Record<never, never> }>
+          | Readonly<{ type: "conflict"; data: { actualTurn: number } }>;
+      }>
+  >;
+  status(request: Readonly<{ key: string }>): Promise<{
+    players: readonly string[];
+    moves: readonly string[];
+    turn: number;
+  }>;
+}>;
+
+type ScheduledAgentApi = Readonly<{
+  schedule(request: Readonly<{ key: string; input: { at: number; prompt: string } }>): Promise<{
+    status: "succeeded";
+    value: { due: number | null };
+  }>;
+  cancel(request: Readonly<{ key: string }>): Promise<{
+    status: "succeeded";
+    value: { cancelled: boolean };
+  }>;
+  status(request: Readonly<{ key: string }>): Promise<{
+    due: number | null;
+    runs: number;
+    text: string;
+  }>;
+}>;
+
 function createActorHost(events = createMemoryEventStore<object>()) {
   let time = 0;
   return {
     alarm: {
-      register() {},
-      schedule() {},
-      cancel() {},
+      async schedule() {},
+      async cancel() {},
     },
     events,
     executionContext: createTestExecutionContext(),
     synchronization: createTestSynchronization(),
+    telemetry: { record() {} },
     clock: { now: () => ++time },
     identifiers: { create: () => `actor-worker-${++actorWorkerIdentity}` },
     timer: {
@@ -2036,34 +3112,88 @@ function createTestSynchronization() {
 }
 
 function createManualAlarm() {
-  const handlers = new Map<string, () => Promise<void>>();
-  const scheduled = new Map<string, number>();
+  type Scheduled = Readonly<{
+    at: number;
+    generation: number;
+    target: Readonly<{ dependency: string; operation: string; input: object }>;
+  }>;
+  const scheduled = new Map<string, Scheduled>();
+  const generations = new Map<string, number>();
+  const attempts = new Map<string, number>();
+  let lastDelivered: readonly [string, Scheduled] | undefined;
+  const deliver = async (
+    id: string,
+    entry: Scheduled,
+    now: number,
+    dependencies: Readonly<Record<string, unknown>>,
+    retain: boolean,
+  ): Promise<void> => {
+    lastDelivered = [id, entry];
+    const dependency = dependencies[entry.target.dependency];
+    if (!dependency || (typeof dependency !== "object" && typeof dependency !== "function")) {
+      throw new Error(`Alarm ${id} targets unavailable Dependency ${entry.target.dependency}.`);
+    }
+    const attempt = (attempts.get(id) ?? 0) + 1;
+    attempts.set(id, attempt);
+    await invokeDependency(dependency as object, entry.target.operation, entry.target.input, {
+      id: `alarm:${id}`,
+      attempt,
+      scheduledAt: entry.at,
+      startedAt: now,
+    });
+    if (!retain && scheduled.get(id)?.generation === entry.generation) scheduled.delete(id);
+  };
   return {
     dependency: {
-      register({ id, run }: Readonly<{ id: string; run(): Promise<void> }>) {
-        handlers.set(id, run);
+      async schedule({
+        id,
+        at,
+        target,
+      }: Readonly<{
+        id: string;
+        at: number;
+        target: Readonly<{ dependency: string; operation: string; input: object }>;
+      }>) {
+        const generation = (generations.get(id) ?? 0) + 1;
+        generations.set(id, generation);
+        scheduled.set(id, { at, generation, target });
       },
-      schedule({ id, at }: Readonly<{ id: string; at: number }>) {
-        if (!handlers.has(id)) throw new Error(`Alarm ${id} is not registered.`);
-        scheduled.set(id, at);
-      },
-      cancel({ id }: Readonly<{ id: string }>) {
+      async cancel({ id }: Readonly<{ id: string }>) {
+        generations.set(id, (generations.get(id) ?? 0) + 1);
         scheduled.delete(id);
       },
     },
-    async runDue(now: number) {
+    async deliverNext(
+      now: number,
+      dependencies: Readonly<Record<string, unknown>>,
+      retain: boolean,
+    ) {
+      const due = [...scheduled]
+        .filter(([, entry]) => entry.at <= now)
+        .sort(([leftId, left], [rightId, right]) =>
+          left.at === right.at ? leftId.localeCompare(rightId) : left.at - right.at,
+        )[0];
+      if (due === undefined) throw new Error("No Alarm is due.");
+      await deliver(due[0], due[1], now, dependencies, retain);
+    },
+    async replayLast(now: number, dependencies: Readonly<Record<string, unknown>>) {
+      if (lastDelivered === undefined) throw new Error("No Alarm delivery is available.");
+      await deliver(lastDelivered[0], lastDelivered[1], now, dependencies, true);
+    },
+    async runDue(now: number, dependencies: Readonly<Record<string, unknown>>) {
       for (let turn = 0; turn < 128; turn += 1) {
         const due = [...scheduled]
-          .filter(([, at]) => at <= now)
-          .sort(([leftId, leftAt], [rightId, rightAt]) =>
-            leftAt === rightAt ? leftId.localeCompare(rightId) : leftAt - rightAt,
+          .filter(([, entry]) => entry.at <= now)
+          .sort(([leftId, left], [rightId, right]) =>
+            left.at === right.at ? leftId.localeCompare(rightId) : left.at - right.at,
           )[0];
         if (due === undefined) return;
-        const [id] = due;
-        scheduled.delete(id);
-        const run = handlers.get(id);
-        if (run === undefined) throw new Error(`Alarm ${id} has no handler.`);
-        await run();
+        const [id, entry] = due;
+        try {
+          await deliver(id, entry, now, dependencies, false);
+        } catch {
+          // The retained target is retried with the same durable invocation id.
+        }
       }
       throw new Error("Manual Alarm exceeded its due-work limit.");
     },

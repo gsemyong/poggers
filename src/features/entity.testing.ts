@@ -12,28 +12,80 @@ import {
 import { createProgramContributionInstance } from "@/runtime/process";
 
 export function createMemoryEventStore<Event>(): EventStore<Event> {
-  const streams = new Map<string, StoredEvent<Event>[]>();
+  const streams = new Map<
+    string,
+    {
+      revision: number;
+      events: StoredEvent<Event>[];
+      snapshot?: { revision: number; snapshot: object };
+    }
+  >();
   const subscribers = new Map<string, Set<(event: StoredEvent<Event>) => void>>();
   return {
-    async read({ stream, after = 0 }) {
-      return (streams.get(stream) ?? []).slice(after);
+    async read({ stream, after = 0, limit = Number.MAX_SAFE_INTEGER }) {
+      return (streams.get(stream)?.events ?? [])
+        .filter(({ revision }) => revision > after)
+        .slice(0, limit);
     },
     async append({ stream, expectedRevision, events }) {
-      const current = streams.get(stream) ?? [];
-      if (current.length !== expectedRevision) return undefined;
+      const current = streams.get(stream) ?? { revision: 0, events: [] };
+      if (current.revision !== expectedRevision) return undefined;
       const appended = events.map((event, index) => ({
         stream,
         revision: expectedRevision + index + 1,
         event: cloneData(event, "EventStore event"),
       }));
-      streams.set(stream, [...current, ...appended]);
+      streams.set(stream, {
+        ...current,
+        revision: expectedRevision + appended.length,
+        events: [...current.events, ...appended],
+      });
       for (const stored of appended) {
         for (const publish of subscribers.get(stream) ?? []) publish(stored);
       }
       return appended;
     },
     subscribe({ stream, after = 0 }) {
-      return eventStream((streams.get(stream) ?? []).slice(after), subscribers, stream);
+      return eventStream(
+        (streams.get(stream)?.events ?? []).filter(({ revision }) => revision > after),
+        subscribers,
+        stream,
+      );
+    },
+    async loadSnapshot({ stream }) {
+      const stored = streams.get(stream)?.snapshot;
+      return stored === undefined
+        ? undefined
+        : {
+            stream,
+            revision: stored.revision,
+            snapshot: cloneData(stored.snapshot, "EventStore snapshot"),
+          };
+    },
+    async saveSnapshot({ stream, expectedRevision, revision, snapshot }) {
+      const current = streams.get(stream) ?? { revision: 0, events: [] };
+      if ((current.snapshot?.revision ?? 0) !== expectedRevision || revision > current.revision) {
+        return false;
+      }
+      streams.set(stream, {
+        ...current,
+        snapshot: {
+          revision,
+          snapshot: cloneData(snapshot, "EventStore snapshot"),
+        },
+      });
+      return true;
+    },
+    async compact({ stream, through }) {
+      const current = streams.get(stream);
+      if (!current || through === 0) return;
+      if ((current.snapshot?.revision ?? 0) < through) {
+        throw new Error(`EventStore stream ${JSON.stringify(stream)} has no safe snapshot.`);
+      }
+      streams.set(stream, {
+        ...current,
+        events: current.events.filter(({ revision }) => revision > through),
+      });
     },
   };
 }

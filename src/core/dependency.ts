@@ -11,6 +11,7 @@ type UnionToIntersection<Union> = (Union extends unknown ? (value: Union) => voi
   ? Intersection
   : never;
 declare const dependencyDefinition: unique symbol;
+declare const dependencyReferenceDefinition: unique symbol;
 export const dependencyInvocation: unique symbol = Symbol("kit.dependency.invocation");
 export const dependencyInvocationControl: unique symbol = Symbol(
   "kit.dependency.invocation.control",
@@ -24,7 +25,29 @@ export type DependencyDefinition = Readonly<{
   Operations: Procedures;
   Failures?: Readonly<Record<string, object>>;
   Heartbeats?: Readonly<Record<string, unknown>>;
+  Reference?: DependencyReferenceDefinition;
 }>;
+
+/**
+ * Describes one local identity-binding projection over serializable Dependency
+ * operations. The reference itself never crosses a Dependency boundary.
+ */
+export type DependencyReferenceDefinition = Readonly<{
+  Name: string;
+  Binding: object;
+  Inputs: Readonly<Record<string, object | undefined>>;
+  Argument: string;
+}>;
+
+/** A typed local reference whose calls lower to its Dependency's wire operations. */
+export type DependencyReference<
+  Definition extends DependencyReferenceDefinition,
+  API extends Procedures,
+> = Readonly<
+  API & {
+    readonly [dependencyReferenceDefinition]: Definition;
+  }
+>;
 
 /** The semantic API Programs consume. Its metadata is erased before runtime lowering. */
 export type Dependency<
@@ -79,7 +102,19 @@ export type DependencyInvocationControl = Readonly<{
   cancellation: Readonly<{
     requested(): boolean;
     wait(): Promise<void>;
+    subscribe(request: () => void): () => void;
   }>;
+}>;
+
+/** @internal One adapter-issued authority to execute a routed Dependency invocation. */
+export type DependencyInvocationAuthority = Readonly<{
+  scope: string;
+  owner: string;
+  failureEpoch: number;
+  epoch: number;
+  expiresAt: number;
+  /** Provider-side revalidation; never serialized across the wire. */
+  assert?(): void | PromiseLike<void>;
 }>;
 
 /**
@@ -94,6 +129,12 @@ export type DependencyInvocation = Readonly<{
   scheduledAt: number;
   startedAt: number;
   deadline?: number;
+  trace?: Readonly<{
+    traceparent: string;
+    tracestate?: string;
+    baggage?: string;
+  }>;
+  authority?: DependencyInvocationAuthority;
   readonly [dependencyInvocationControl]?: DependencyInvocationControl;
 }>;
 

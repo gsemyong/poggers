@@ -6,6 +6,7 @@ import type { ProgramManifest } from "@/compiler/ir";
 import {
   dependencyInvocation,
   dependencyInvocationControl,
+  DependencyFailureError,
   invokeDependency,
   type Dependency,
   type DependencyInvocation,
@@ -167,6 +168,105 @@ describe("Program runtime", () => {
     });
   });
 
+  test("binds local Dependency references to serializable wire operations", async () => {
+    const requests: unknown[] = [];
+    const dependencies = conformExternalDependencies(
+      [
+        {
+          name: "counter",
+          binding: "envelope",
+          reference: {
+            name: "get",
+            argument: "input",
+            bindings: ["key"],
+            inputs: ["add"],
+          },
+          operations: [
+            {
+              name: "add",
+              mode: "asynchronous",
+              input: {
+                kind: "record",
+                fields: [
+                  {
+                    name: "key",
+                    optional: false,
+                    type: { kind: "primitive", name: "string" },
+                  },
+                  {
+                    name: "input",
+                    optional: false,
+                    type: {
+                      kind: "record",
+                      fields: [
+                        {
+                          name: "value",
+                          optional: false,
+                          type: { kind: "primitive", name: "number" },
+                        },
+                      ],
+                    },
+                  },
+                  {
+                    name: "idempotencyKey",
+                    optional: true,
+                    type: { kind: "primitive", name: "string" },
+                  },
+                ],
+              },
+              output: { kind: "primitive", name: "number" },
+            },
+            {
+              name: "read",
+              mode: "asynchronous",
+              input: {
+                kind: "record",
+                fields: [
+                  {
+                    name: "key",
+                    optional: false,
+                    type: { kind: "primitive", name: "string" },
+                  },
+                ],
+              },
+              output: { kind: "primitive", name: "number" },
+            },
+          ],
+        },
+      ],
+      {
+        counter: {
+          async add({ input }: { input: unknown }) {
+            requests.push(input);
+            return 3;
+          },
+          async read({ input }: { input: unknown }) {
+            requests.push(input);
+            return 3;
+          },
+        },
+      },
+    );
+    const counter = dependencies.counter as Readonly<{
+      get(identity: { key: string }): Readonly<{
+        add(input: { value: number }, options?: { idempotencyKey?: string }): Promise<number>;
+        read(): Promise<number>;
+      }>;
+    }>;
+    const instance = counter.get({ key: "counter-1" });
+
+    await expect(instance.add({ value: 3 }, { idempotencyKey: "add-1" })).resolves.toBe(3);
+    await expect(instance.read()).resolves.toBe(3);
+    expect(requests).toEqual([
+      { idempotencyKey: "add-1", key: "counter-1", input: { value: 3 } },
+      { key: "counter-1" },
+    ]);
+    expect(() => counter.get("counter-1" as never)).toThrow("one identity object");
+    expect(() => (instance.add as (...arguments_: unknown[]) => unknown)()).toThrow(
+      "one input object",
+    );
+  });
+
   test("projects runtime heartbeat and cancellation controls into one provider envelope", async () => {
     const heartbeats: unknown[] = [];
     const dependencies = conformExternalDependencies(
@@ -180,6 +280,16 @@ describe("Program runtime", () => {
               mode: "asynchronous",
               input: { kind: "record", fields: [] },
               output: { kind: "primitive", name: "boolean" },
+              heartbeat: {
+                kind: "record",
+                fields: [
+                  {
+                    name: "completed",
+                    optional: false,
+                    type: { kind: "primitive", name: "number" },
+                  },
+                ],
+              },
             },
           ],
         },
@@ -223,12 +333,97 @@ describe("Program runtime", () => {
             cancellation: {
               requested: () => true,
               wait: () => Promise.resolve(),
+              subscribe: (request) => {
+                request();
+                return () => undefined;
+              },
             },
           },
         },
       ),
     ).resolves.toBe(true);
     expect(heartbeats).toEqual([{ completed: 3 }]);
+  });
+
+  test("enforces declared provider failures and heartbeat payloads at the generic boundary", async () => {
+    const contract = {
+      name: "service",
+      binding: "envelope" as const,
+      operations: [
+        {
+          name: "work",
+          mode: "asynchronous" as const,
+          input: { kind: "record" as const, fields: [] },
+          output: { kind: "primitive" as const, name: "boolean" as const },
+          failures: {
+            kind: "record" as const,
+            fields: [
+              {
+                name: "unavailable",
+                optional: false,
+                type: {
+                  kind: "record" as const,
+                  fields: [
+                    {
+                      name: "retryAt",
+                      optional: false,
+                      type: { kind: "primitive" as const, name: "number" as const },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+          heartbeat: {
+            kind: "record" as const,
+            fields: [
+              {
+                name: "completed",
+                optional: false,
+                type: { kind: "primitive" as const, name: "number" as const },
+              },
+            ],
+          },
+        },
+      ],
+    };
+    const implementation = (failure: unknown, heartbeat: unknown) =>
+      conformExternalDependencies([contract], {
+        service: {
+          async work({
+            invocation,
+          }: {
+            invocation: DependencyProviderInvocation<unknown, unknown>;
+          }) {
+            invocation.heartbeat({ details: heartbeat });
+            invocation.fail(failure);
+          },
+        },
+      }).service as { work(input: {}): Promise<boolean> };
+
+    const valid = implementation(
+      { type: "unavailable", data: { retryAt: 10 }, retry: { delay: 5 } },
+      { completed: 1 },
+    );
+    const validFailure = await valid.work({}).catch((error: unknown) => error);
+    expect(validFailure).toBeInstanceOf(DependencyFailureError);
+    expect(validFailure).toMatchObject({
+      name: "unavailable",
+      data: { retryAt: 10 },
+      retryDelay: 5,
+    });
+
+    await expect(
+      implementation({ type: "unknown", data: {} }, { completed: 1 }).work({}),
+    ).rejects.toThrow('does not declare failure "unknown"');
+    await expect(
+      implementation({ type: "unavailable", data: { retryAt: "later" } }, { completed: 1 }).work(
+        {},
+      ),
+    ).rejects.toThrow("failure unavailable.retryAt");
+    await expect(
+      implementation({ type: "unavailable", data: { retryAt: 10 } }, { completed: "one" }).work({}),
+    ).rejects.toThrow("heartbeat.completed");
   });
 
   test("disposes arbitrary owned resources once in reverse order", async () => {

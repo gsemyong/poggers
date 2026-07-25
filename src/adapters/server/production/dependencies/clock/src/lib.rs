@@ -5,10 +5,25 @@ use kit_server_runtime::{
     NativeResult, Value,
 };
 
-pub struct Clock;
+pub struct Clock {
+    offset: f64,
+}
 
-pub async fn create(_context: DependencyContext) -> NativeResult<Clock> {
-    Ok(Clock)
+pub async fn create(context: DependencyContext) -> NativeResult<Clock> {
+    let offset = context
+        .configuration
+        .get("offset")
+        .map(String::as_str)
+        .unwrap_or("0")
+        .parse::<f64>()
+        .map_err(|error| NativeError::new("InvalidConfiguration", error.to_string()))?;
+    if !offset.is_finite() {
+        return Err(NativeError::new(
+            "InvalidConfiguration",
+            "Clock offset must be finite.",
+        ));
+    }
+    Ok(Clock { offset })
 }
 
 impl Dependency for Clock {
@@ -22,7 +37,7 @@ impl Dependency for Clock {
         let result = match operation {
             "now" => SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .map(|duration| Value::Number(duration.as_millis() as f64))
+                .map(|duration| Value::Number(duration.as_millis() as f64 + self.offset))
                 .map_err(|error| NativeError::new("ClockFailure", error.to_string())),
             operation => Err(NativeError::new(
                 "UnknownOperation",
@@ -43,7 +58,7 @@ mod tests {
     async fn returns_unix_milliseconds() {
         let clock = create(DependencyContext {
             name: "clock".to_owned(),
-            configuration: BTreeMap::new(),
+            configuration: BTreeMap::from([("offset".to_owned(), "125".to_owned())]),
             dependencies: BTreeMap::new(),
         })
         .await
@@ -59,6 +74,11 @@ mod tests {
             .expect("read clock")
             .number()
             .expect("number");
-        assert!(value >= 1_700_000_000_000.0);
+        let system = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_millis() as f64;
+        assert!(value >= system + 100.0);
+        assert!(value <= system + 250.0);
     }
 }

@@ -36,6 +36,23 @@ const notes = createEntity<Notes>({
 });
 
 describe("semantic entity Feature", () => {
+  test("bounds in-memory EventStore reads without changing stream revisions", async () => {
+    const events = createMemoryEventStore<{ value: number }>();
+    await events.append({
+      stream: "bounded",
+      expectedRevision: 0,
+      events: [{ value: 1 }, { value: 2 }, { value: 3 }],
+    });
+
+    await expect(events.read({ stream: "bounded", limit: 2 })).resolves.toEqual([
+      { stream: "bounded", revision: 1, event: { value: 1 } },
+      { stream: "bounded", revision: 2, event: { value: 2 } },
+    ]);
+    await expect(events.read({ stream: "bounded", after: 2, limit: 1 })).resolves.toEqual([
+      { stream: "bounded", revision: 3, event: { value: 3 } },
+    ]);
+  });
+
   test("authorizes, filters, and streams committed revisions", async () => {
     await using fixture = await createFixture();
     const alice = fixture.api;

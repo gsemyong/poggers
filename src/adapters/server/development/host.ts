@@ -38,8 +38,10 @@ import type {
   HttpRequest,
   HttpResponse,
   HttpServer,
+  Telemetry,
   Synchronization,
   Timer,
+  ScheduledDependencyTarget,
 } from "@/platforms/server/platform";
 import { conformExternalDependencies } from "@/runtime/process";
 
@@ -68,8 +70,21 @@ type ReloadableHttpServer = HttpServer &
     [beginRouteReplacement](): Disposable;
   }>;
 
+type AlarmDelivery = Readonly<{
+  id: string;
+  at: number;
+  attempt: number;
+  target: ScheduledDependencyTarget;
+}>;
+
+type NodeAlarm = Alarm &
+  Disposable &
+  Readonly<{
+    bind(dispatch: (delivery: AlarmDelivery) => Promise<void>): Disposable;
+  }>;
+
 export type NodeHost<Event> = Readonly<{
-  alarm: Alarm & Disposable;
+  alarm: NodeAlarm;
   authentication: AuthenticationBackend;
   dataStore: DataStore & AsyncDisposable;
   events: HostedEventStore<Event>;
@@ -78,6 +93,7 @@ export type NodeHost<Event> = Readonly<{
   synchronization: Synchronization;
   clock: Clock;
   timer: Timer;
+  telemetry: Telemetry;
   workflowRuntime: WorkflowRuntime;
   http: HttpServer & AsyncDisposable & Readonly<{ locations: readonly string[] }>;
 }>;
@@ -93,6 +109,19 @@ export function beginNodeHostReplacement(
     | Readonly<{ [beginRouteReplacement]?(): Disposable }>
     | undefined;
   return http?.[beginRouteReplacement]?.() ?? { [Symbol.dispose]() {} };
+}
+
+/** Connects an adapter-owned Alarm to one running Program's routed Dependencies. */
+export function bindNodeAlarmDispatcher(
+  dependencies: Readonly<Record<string, unknown>>,
+  dispatch: (delivery: AlarmDelivery) => Promise<void>,
+): Disposable {
+  const alarm = dependencies.alarm as Partial<NodeAlarm> | undefined;
+  return typeof alarm?.bind === "function"
+    ? alarm.bind(dispatch)
+    : {
+        [Symbol.dispose]() {},
+      };
 }
 
 /** Implements the reusable host boundary; Features own all domain routing and APIs. */
@@ -153,7 +182,7 @@ export async function createNodeHost<Event = unknown>(
     database = new DatabaseSync(path);
   }
   const result: {
-    alarm?: Alarm & Disposable;
+    alarm?: NodeAlarm;
     authentication?: AuthenticationBackend;
     dataStore?: DataStore & AsyncDisposable;
     events?: HostedEventStore<Event>;
@@ -162,6 +191,7 @@ export async function createNodeHost<Event = unknown>(
     synchronization?: Synchronization;
     clock?: Clock;
     timer?: Timer;
+    telemetry?: Telemetry;
     workflowRuntime?: WorkflowRuntime;
     http?: HttpServer & AsyncDisposable & Readonly<{ locations: readonly string[] }>;
   } = {};
@@ -241,6 +271,11 @@ export async function createNodeHost<Event = unknown>(
         },
       };
     }
+    if (requested.has("telemetry")) {
+      result.telemetry = {
+        record() {},
+      };
+    }
     if (requested.has("workflowRuntime")) {
       result.workflowRuntime = createDevelopmentWorkflowRuntime();
     }
@@ -300,46 +335,118 @@ function createNodeSynchronization(): Synchronization {
   });
 }
 
-function createNodeAlarm(): Alarm & Disposable {
-  const scheduled = new Map<string, ReturnType<typeof setTimeout>>();
-  const handlers = new Map<string, () => Promise<void>>();
+function createNodeAlarm(): NodeAlarm {
+  type Scheduled = {
+    id: string;
+    at: number;
+    readyAt: number;
+    attempt: number;
+    generation: number;
+    target: ScheduledDependencyTarget;
+  };
+  const scheduled = new Map<string, Scheduled>();
+  const dispatchers = new Set<(delivery: AlarmDelivery) => Promise<void>>();
+  const generations = new Map<string, number>();
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  let running = false;
   let disposed = false;
-  return {
-    register({ id, run }) {
-      if (disposed) throw new Error("The Alarm Dependency is disposed.");
-      handlers.set(id, run);
-    },
-    schedule({ id, at }) {
-      if (disposed) throw new Error("The Alarm Dependency is disposed.");
-      const run = handlers.get(id);
-      if (run === undefined) throw new Error(`Alarm ${JSON.stringify(id)} is not registered.`);
-      const previous = scheduled.get(id);
-      if (previous !== undefined) clearTimeout(previous);
-      const timeout = setTimeout(
-        () => {
-          scheduled.delete(id);
-          void run().catch((error: unknown) => {
-            queueMicrotask(() => {
-              throw error;
-            });
-          });
-        },
-        Math.max(0, at - Date.now()),
-      );
-      scheduled.set(id, timeout);
-    },
-    cancel({ id }) {
-      const timeout = scheduled.get(id);
-      if (timeout === undefined) return;
+  const arm = (): void => {
+    if (disposed || running) return;
+    if (timeout !== undefined) {
       clearTimeout(timeout);
+      timeout = undefined;
+    }
+    let next: number | undefined;
+    for (const entry of scheduled.values()) {
+      if (next === undefined || entry.readyAt < next) next = entry.readyAt;
+    }
+    if (next === undefined) return;
+    timeout = setTimeout(
+      () => {
+        timeout = undefined;
+        void dispatchDue();
+      },
+      Math.min(2_147_483_647, Math.max(0, next - Date.now())),
+    );
+  };
+  const dispatchDue = async (): Promise<void> => {
+    if (disposed || running) return;
+    running = true;
+    try {
+      const now = Date.now();
+      const due = [...scheduled.values()]
+        .filter(({ readyAt }) => readyAt <= now)
+        .sort((left, right) => left.readyAt - right.readyAt || left.id.localeCompare(right.id))
+        .slice(0, 256);
+      for (const entry of due) {
+        const current = scheduled.get(entry.id);
+        if (current?.generation !== entry.generation) continue;
+        entry.attempt += 1;
+        let delivered = false;
+        for (const dispatch of dispatchers) {
+          try {
+            await dispatch({
+              id: entry.id,
+              at: entry.at,
+              attempt: entry.attempt,
+              target: entry.target,
+            });
+            delivered = true;
+            break;
+          } catch {
+            // Another bound Process may own the target; retain it for retry.
+          }
+        }
+        const retained = scheduled.get(entry.id);
+        if (retained?.generation !== entry.generation) continue;
+        if (delivered) scheduled.delete(entry.id);
+        else entry.readyAt = Date.now() + 25;
+      }
+    } finally {
+      running = false;
+      arm();
+    }
+  };
+  return {
+    bind(dispatch) {
+      if (disposed) throw new Error("The Alarm Dependency is disposed.");
+      dispatchers.add(dispatch);
+      arm();
+      return {
+        [Symbol.dispose]() {
+          dispatchers.delete(dispatch);
+        },
+      };
+    },
+    async schedule({ id, at, target }) {
+      if (disposed) throw new Error("The Alarm Dependency is disposed.");
+      if (!id || !Number.isFinite(at) || !target.dependency || !target.operation) {
+        throw new TypeError("Alarm id, time, Dependency, and operation are required.");
+      }
+      const generation = (generations.get(id) ?? 0) + 1;
+      generations.set(id, generation);
+      scheduled.set(id, {
+        id,
+        at,
+        readyAt: at,
+        attempt: 0,
+        generation,
+        target: cloneData(target, `Alarm ${id} target`),
+      });
+      arm();
+    },
+    async cancel({ id }) {
       scheduled.delete(id);
+      generations.set(id, (generations.get(id) ?? 0) + 1);
+      arm();
     },
     [Symbol.dispose]() {
       if (disposed) return;
       disposed = true;
-      for (const timeout of scheduled.values()) clearTimeout(timeout);
+      if (timeout !== undefined) clearTimeout(timeout);
+      timeout = undefined;
       scheduled.clear();
-      handlers.clear();
+      dispatchers.clear();
     },
   };
 }
@@ -390,33 +497,65 @@ export function createSqliteEventStore<Event>(
       revision INTEGER NOT NULL,
       event TEXT NOT NULL,
       PRIMARY KEY (stream, revision)
+    ) STRICT;
+    CREATE TABLE IF NOT EXISTS kit_event_streams (
+      stream TEXT PRIMARY KEY,
+      revision INTEGER NOT NULL
+    ) STRICT;
+    INSERT OR IGNORE INTO kit_event_streams (stream, revision)
+      SELECT stream, MAX(revision) FROM kit_events GROUP BY stream;
+    CREATE TABLE IF NOT EXISTS kit_event_snapshots (
+      stream TEXT PRIMARY KEY,
+      revision INTEGER NOT NULL,
+      snapshot TEXT NOT NULL
     ) STRICT
   `);
   const read = database.prepare(
-    "SELECT revision, event FROM kit_events WHERE stream = ? AND revision > ? ORDER BY revision",
+    "SELECT revision, event FROM kit_events WHERE stream = ? AND revision > ? ORDER BY revision LIMIT ?",
   );
   const revision = database.prepare(
-    "SELECT COALESCE(MAX(revision), 0) AS revision FROM kit_events WHERE stream = ?",
+    "SELECT COALESCE((SELECT revision FROM kit_event_streams WHERE stream = ?), 0) AS revision",
   );
   const insert = database.prepare(
     "INSERT INTO kit_events (stream, revision, event) VALUES (?, ?, ?)",
   );
+  const advance = database.prepare(
+    `INSERT INTO kit_event_streams (stream, revision) VALUES (?, ?)
+     ON CONFLICT(stream) DO UPDATE SET revision = excluded.revision`,
+  );
+  const snapshot = database.prepare(
+    "SELECT revision, snapshot FROM kit_event_snapshots WHERE stream = ?",
+  );
+  const saveSnapshot = database.prepare(
+    `INSERT INTO kit_event_snapshots (stream, revision, snapshot) VALUES (?, ?, ?)
+     ON CONFLICT(stream) DO UPDATE SET
+       revision = excluded.revision,
+       snapshot = excluded.snapshot`,
+  );
+  const compact = database.prepare("DELETE FROM kit_events WHERE stream = ? AND revision <= ?");
   const subscribers = new Map<string, Set<(event: StoredEvent<Event>) => void>>();
   let disposed = false;
   const assertLive = () => {
     if (disposed) throw new Error("The event store is disposed.");
   };
-  const readEvents = (stream: string, after: number): readonly StoredEvent<Event>[] => {
+  const readEvents = (
+    stream: string,
+    after: number,
+    limit: number,
+  ): readonly StoredEvent<Event>[] => {
     assertLive();
-    return (read.all(stream, after) as Array<{ revision: number; event: string }>).map((row) => ({
-      stream,
-      revision: row.revision,
-      event: JSON.parse(row.event) as Event,
-    }));
+    return (read.all(stream, after, limit) as Array<{ revision: number; event: string }>).map(
+      (row) => ({
+        stream,
+        revision: row.revision,
+        event: JSON.parse(row.event) as Event,
+      }),
+    );
   };
 
   return {
-    read: async ({ stream, after = 0 }) => readEvents(stream, after),
+    read: async ({ stream, after = 0, limit = Number.MAX_SAFE_INTEGER }) =>
+      readEvents(stream, after, limit),
     async append({ stream, expectedRevision, events }) {
       assertLive();
       database.exec("BEGIN IMMEDIATE");
@@ -435,6 +574,7 @@ export function createSqliteEventStore<Event>(
           insert.run(stream, stored.revision, JSON.stringify(stored.event));
           return stored;
         });
+        advance.run(stream, expectedRevision + appended.length);
         database.exec("COMMIT");
         for (const event of appended) {
           for (const publish of subscribers.get(stream) ?? []) publish(event);
@@ -446,7 +586,56 @@ export function createSqliteEventStore<Event>(
       }
     },
     subscribe({ stream, after = 0 }) {
-      return eventStream(readEvents(stream, after), subscribers, stream);
+      return eventStream(readEvents(stream, after, Number.MAX_SAFE_INTEGER), subscribers, stream);
+    },
+    async loadSnapshot({ stream }) {
+      assertLive();
+      const row = snapshot.get(stream) as { revision: number; snapshot: string } | undefined;
+      return row
+        ? {
+            stream,
+            revision: row.revision,
+            snapshot: JSON.parse(row.snapshot) as object,
+          }
+        : undefined;
+    },
+    async saveSnapshot({ stream, expectedRevision, revision: snapshotRevision, snapshot: value }) {
+      assertLive();
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        const head = revision.get(stream) as { revision: number };
+        const current = snapshot.get(stream) as { revision: number } | undefined;
+        if ((current?.revision ?? 0) !== expectedRevision || snapshotRevision > head.revision) {
+          database.exec("ROLLBACK");
+          return false;
+        }
+        saveSnapshot.run(
+          stream,
+          snapshotRevision,
+          JSON.stringify(cloneData(value, "EventStore snapshot")),
+        );
+        database.exec("COMMIT");
+        return true;
+      } catch (error) {
+        database.exec("ROLLBACK");
+        throw error;
+      }
+    },
+    async compact({ stream, through }) {
+      assertLive();
+      if (through === 0) return;
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        const current = snapshot.get(stream) as { revision: number } | undefined;
+        if ((current?.revision ?? 0) < through) {
+          throw new Error(`EventStore stream ${JSON.stringify(stream)} has no safe snapshot.`);
+        }
+        compact.run(stream, through);
+        database.exec("COMMIT");
+      } catch (error) {
+        database.exec("ROLLBACK");
+        throw error;
+      }
     },
     [Symbol.dispose]() {
       if (disposed) return;
@@ -461,6 +650,12 @@ type JetStreamBatch<Event> = Readonly<{
   stream: string;
   expectedRevision: number;
   events: readonly Event[];
+}>;
+
+type JetStreamSnapshot<Snapshot> = Readonly<{
+  stream: string;
+  revision: number;
+  snapshot: Snapshot;
 }>;
 
 /** Network authority for the semantic EventStore contract; Features remain transport-agnostic. */
@@ -487,7 +682,7 @@ export async function createJetStreamEventStore<Event>(
   };
 
   return {
-    async read({ stream, after = 0 }) {
+    async read({ stream, after = 0, limit = Number.MAX_SAFE_INTEGER }) {
       assertLive();
       return readJetStreamEvents<Event>(
         client,
@@ -495,13 +690,24 @@ export async function createJetStreamEventStore<Event>(
         eventSubject(prefix, stream),
         stream,
         after,
+        limit,
       );
     },
     async append({ stream, expectedRevision, events }) {
       assertLive();
       const subject = eventSubject(prefix, stream);
       const current = await lastJetStreamBatch<Event>(manager, streamName, subject);
-      if (batchRevision(current?.batch) !== expectedRevision) return undefined;
+      const snapshot = await lastJetStreamSnapshot<object>(
+        manager,
+        streamName,
+        snapshotSubject(prefix, stream),
+      );
+      if (
+        Math.max(batchRevision(current?.batch), snapshot?.snapshot.revision ?? 0) !==
+        expectedRevision
+      ) {
+        return undefined;
+      }
       if (events.length === 0) return [];
       const storedEvents = events.map((event) => cloneData(event, "EventStore event"));
       try {
@@ -534,12 +740,129 @@ export async function createJetStreamEventStore<Event>(
         after,
       );
     },
+    async loadSnapshot({ stream }) {
+      assertLive();
+      const stored = await lastJetStreamSnapshot<object>(
+        manager,
+        streamName,
+        snapshotSubject(prefix, stream),
+      );
+      return stored?.snapshot;
+    },
+    async saveSnapshot({ stream, expectedRevision, revision, snapshot }) {
+      assertLive();
+      const event = eventSubject(prefix, stream);
+      const snapshotName = snapshotSubject(prefix, stream);
+      const currentSnapshot = await lastJetStreamSnapshot<object>(
+        manager,
+        streamName,
+        snapshotName,
+      );
+      if ((currentSnapshot?.snapshot.revision ?? 0) !== expectedRevision) return false;
+      const currentBatch = await lastJetStreamBatch<Event>(manager, streamName, event);
+      const head = Math.max(
+        batchRevision(currentBatch?.batch),
+        currentSnapshot?.snapshot.revision ?? 0,
+      );
+      if (revision > head) return false;
+      const value: JetStreamSnapshot<object> = {
+        stream,
+        revision,
+        snapshot: cloneData(snapshot, "EventStore snapshot"),
+      };
+      try {
+        await client.publish(snapshotName, new TextEncoder().encode(JSON.stringify(value)), {
+          expect: { lastSubjectSequence: currentSnapshot?.sequence ?? 0 },
+        });
+      } catch (error) {
+        if (
+          error instanceof JetStreamApiError &&
+          (error.code === JetStreamApiCodes.StreamWrongLastSequence ||
+            error.code === JetStreamApiCodes.StreamWrongLastSequenceUnknown)
+        ) {
+          return false;
+        }
+        throw error;
+      }
+      await manager.streams.purge(streamName, { filter: snapshotName, keep: 1 });
+      return true;
+    },
+    async compact({ stream, through }) {
+      assertLive();
+      if (through === 0) return;
+      const snapshotName = snapshotSubject(prefix, stream);
+      const stored = await lastJetStreamSnapshot<object>(manager, streamName, snapshotName);
+      if ((stored?.snapshot.revision ?? 0) < through) {
+        throw new Error(`EventStore stream ${JSON.stringify(stream)} has no safe snapshot.`);
+      }
+      const subject = eventSubject(prefix, stream);
+      const sequence = await jetStreamSequenceThrough(client, streamName, subject, stream, through);
+      if (sequence !== undefined) {
+        await manager.streams.purge(streamName, { filter: subject, seq: sequence + 1 });
+      }
+    },
     async [Symbol.asyncDispose]() {
       if (disposed) return;
       disposed = true;
       await connection.drain();
     },
   };
+}
+
+async function lastJetStreamSnapshot<Snapshot>(
+  manager: JetStreamManager,
+  stream: string,
+  subject: string,
+): Promise<Readonly<{ sequence: number; snapshot: JetStreamSnapshot<Snapshot> }> | undefined> {
+  let message: StoredMsg | null;
+  try {
+    message = await manager.streams.getMessage(stream, { last_by_subj: subject });
+  } catch (error) {
+    if (error instanceof JetStreamApiError && error.code === JetStreamApiCodes.NoMessageFound) {
+      return;
+    }
+    throw error;
+  }
+  return message
+    ? { sequence: message.seq, snapshot: decodeSnapshot<Snapshot>(message.data) }
+    : undefined;
+}
+
+async function jetStreamSequenceThrough(
+  client: JetStreamClient,
+  streamName: string,
+  subject: string,
+  stream: string,
+  through: number,
+): Promise<number | undefined> {
+  const consumer = await client.consumers.get(streamName, {
+    filter_subjects: subject,
+    deliver_policy: DeliverPolicy.All,
+  });
+  let sequence: number | undefined;
+  try {
+    let pending = (await consumer.info()).num_pending;
+    while (pending > 0) {
+      const messages = await consumer.fetch({
+        max_messages: Math.min(pending, 1_000),
+        expires: 1_000,
+      });
+      let received = 0;
+      for await (const message of messages) {
+        received += 1;
+        const batch = decodeBatch<unknown>(message.data);
+        if (batch.stream !== stream) {
+          throw new TypeError("JetStream EventStore stream identity mismatch.");
+        }
+        if (batchRevision(batch) <= through) sequence = message.info.streamSequence;
+      }
+      if (!received) throw new Error(`JetStream EventStore timed out while compacting ${stream}.`);
+      pending -= received;
+    }
+    return sequence;
+  } finally {
+    await consumer.delete();
+  }
 }
 
 async function ensureEventStream(
@@ -618,6 +941,7 @@ async function readJetStreamEvents<Event>(
   subject: string,
   stream: string,
   after: number,
+  limit: number,
 ): Promise<readonly StoredEvent<Event>[]> {
   const consumer = await client.consumers.get(streamName, {
     filter_subjects: subject,
@@ -635,11 +959,13 @@ async function readJetStreamEvents<Event>(
       for await (const message of messages) {
         received += 1;
         appendBatch(result, decodeBatch<Event>(message.data), stream, after);
+        if (result.length >= limit) break;
       }
       if (!received) throw new Error(`JetStream EventStore timed out while reading ${stream}.`);
       pending -= received;
+      if (result.length >= limit) break;
     }
-    return result;
+    return result.slice(0, limit);
   } finally {
     await consumer.delete();
   }
@@ -692,6 +1018,18 @@ function decodeBatch<Event>(data: Uint8Array): JetStreamBatch<Event> {
   return value as JetStreamBatch<Event>;
 }
 
+function decodeSnapshot<Snapshot>(data: Uint8Array): JetStreamSnapshot<Snapshot> {
+  const value = JSON.parse(new TextDecoder().decode(data)) as Partial<JetStreamSnapshot<Snapshot>>;
+  if (
+    typeof value.stream !== "string" ||
+    !Number.isSafeInteger(value.revision) ||
+    value.snapshot === undefined
+  ) {
+    throw new TypeError("JetStream EventStore received an invalid snapshot.");
+  }
+  return value as JetStreamSnapshot<Snapshot>;
+}
+
 function appendBatch<Event>(
   target: StoredEvent<Event>[],
   batch: JetStreamBatch<Event>,
@@ -723,6 +1061,10 @@ function batchRevision(batch: JetStreamBatch<unknown> | undefined): number {
 
 function eventSubject(prefix: string, stream: string): string {
   return `${prefix}.${Buffer.from(stream).toString("base64url")}`;
+}
+
+function snapshotSubject(prefix: string, stream: string): string {
+  return `${prefix}.snapshot.${Buffer.from(stream).toString("base64url")}`;
 }
 
 async function createNodeHttpServer(input: {

@@ -29,6 +29,9 @@ type Mutable<Value extends object> = { -readonly [Key in keyof Value]: Value[Key
 type OperationsOf<Api> = Api extends DependencyContract
   ? DependencyDefinitionOf<Api>["Operations"]
   : Extract<Api, DependencyOperations>;
+type WorkflowDependencies<Model extends WorkflowModelDefinition> = Readonly<{
+  [Name in keyof Model["Dependencies"]]: OperationsOf<Model["Dependencies"][Name]>;
+}>;
 type StateOf<Model extends WorkflowModelDefinition> = Model["State"];
 type SignalOf<Model extends WorkflowModelDefinition> = Extract<keyof Model["Signals"], string>;
 declare const workflowModel: unique symbol;
@@ -165,7 +168,7 @@ export type WorkflowCancellation<Model extends WorkflowModelDefinition> = Readon
 
 export type WorkflowExecutionContext<Model extends WorkflowModelDefinition> = Readonly<{
   input: Model["Input"];
-  dependencies: Model["Dependencies"];
+  dependencies: WorkflowDependencies<Model>;
   state: Mutable<StateOf<Model>>;
   time: Readonly<{ now(): number }>;
   sleep(input: WorkflowSleep): Promise<void>;
@@ -879,6 +882,7 @@ class WorkflowCancellationState {
   readonly #propagation: "inherit" | "shield";
   #requested = false;
   #reason: string | undefined;
+  readonly #listeners = new Set<() => void>();
   readonly #request: Promise<void>;
   #resolve!: () => void;
 
@@ -906,6 +910,8 @@ class WorkflowCancellationState {
     this.#requested = true;
     this.#reason = reason;
     this.#resolve();
+    for (const listener of this.#listeners) listener();
+    this.#listeners.clear();
   }
 
   async wait(): Promise<void> {
@@ -915,6 +921,20 @@ class WorkflowCancellationState {
       return;
     }
     await this.#request;
+  }
+
+  subscribe(request: () => void): () => void {
+    if (this.requested()) {
+      request();
+      return () => undefined;
+    }
+    this.#listeners.add(request);
+    const unsubscribeParent =
+      this.#propagation === "inherit" ? this.#parent?.subscribe(request) : undefined;
+    return () => {
+      this.#listeners.delete(request);
+      unsubscribeParent?.();
+    };
   }
 }
 
@@ -1547,6 +1567,7 @@ class Execution<Model extends WorkflowModelDefinition> implements AsyncDisposabl
                   cancellation: {
                     requested: () => cancellation.requested(),
                     wait: () => cancellation.wait(),
+                    subscribe: (request) => cancellation.subscribe(request),
                   },
                 },
               }),
@@ -2216,7 +2237,7 @@ function durableDependencies<Model extends WorkflowModelDefinition>(
   execution: Execution<Model>,
   dependencies: WorkflowRequirements<Model>,
   cancellation: WorkflowCancellationState,
-): Model["Dependencies"] {
+): WorkflowDependencies<Model> {
   const reserved = new Set(["clock", "events", "identifiers", "timer", "workflowRuntime"]);
   return Object.freeze(
     Object.fromEntries(
@@ -2242,7 +2263,7 @@ function durableDependencies<Model extends WorkflowModelDefinition>(
           }),
         ]),
     ),
-  ) as Model["Dependencies"];
+  ) as WorkflowDependencies<Model>;
 }
 
 const workflowEventTypes = new Set<string>([

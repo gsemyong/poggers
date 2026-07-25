@@ -99,11 +99,50 @@ test.skipIf(!available)(
         value: { stream: "orders:one", revision: 4, event: { value: "shipped" } },
       });
       await iterator.return?.();
+      await expect(first.compact({ stream: "orders:one", through: 4 })).rejects.toThrow(
+        "has no safe snapshot",
+      );
+      await expect(
+        first.saveSnapshot({
+          stream: "orders:one",
+          expectedRevision: 0,
+          revision: 4,
+          snapshot: { value: "shipped" },
+        }),
+      ).resolves.toBe(true);
+      await expect(
+        second.saveSnapshot({
+          stream: "orders:one",
+          expectedRevision: 0,
+          revision: 4,
+          snapshot: { value: "stale" },
+        }),
+      ).resolves.toBe(false);
+      await first.compact({ stream: "orders:one", through: 4 });
+      await expect(second.read({ stream: "orders:one" })).resolves.toEqual([]);
+      await expect(
+        second.append({
+          stream: "orders:one",
+          expectedRevision: 4,
+          events: [{ value: "delivered" }],
+        }),
+      ).resolves.toEqual([
+        {
+          stream: "orders:one",
+          revision: 5,
+          event: { value: "delivered" },
+        },
+      ]);
 
       await second[Symbol.asyncDispose]();
       second = await createJetStreamEventStore<{ value: string }>(options);
       const caughtUp = await second.read({ stream: "orders:one" });
-      expect(caughtUp.map(({ revision }) => revision)).toEqual([1, 2, 3, 4]);
+      expect(caughtUp.map(({ revision }) => revision)).toEqual([5]);
+      await expect(second.loadSnapshot({ stream: "orders:one" })).resolves.toEqual({
+        stream: "orders:one",
+        revision: 4,
+        snapshot: { value: "shipped" },
+      });
     } finally {
       await Promise.allSettled([first[Symbol.asyncDispose](), second[Symbol.asyncDispose]()]);
     }

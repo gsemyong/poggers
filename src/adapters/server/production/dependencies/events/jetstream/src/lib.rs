@@ -83,7 +83,14 @@ impl Dependency for Events {
                 "read" => {
                     let stream_name = string(&input, "stream")?;
                     let after = optional_integer(&input, "after")?.unwrap_or(0);
-                    let events = read(&stream, stream_name, after).await?;
+                    let limit = optional_integer(&input, "limit")?.unwrap_or(i64::MAX);
+                    if limit < 1 {
+                        return Err(NativeError::new(
+                            "InvalidInput",
+                            "EventStore read limit must be positive.",
+                        ));
+                    }
+                    let events = read(&stream, stream_name, after, limit as usize).await?;
                     Ok(Value::from_json(&JsonValue::Array(events)))
                 }
                 "append" => append(&context, &stream, &input).await.map(|events| {
@@ -92,6 +99,16 @@ impl Dependency for Events {
                     })
                 }),
                 "subscribe" => subscribe(client, stream, input).await,
+                "loadSnapshot" => load_snapshot(&stream, &input).await.map(|snapshot| {
+                    snapshot.map_or(Value::Undefined, |snapshot| Value::from_json(&snapshot))
+                }),
+                "saveSnapshot" => save_snapshot(&context, &stream, &input)
+                    .await
+                    .map(Value::Boolean),
+                "compact" => {
+                    compact(&stream, &input).await?;
+                    Ok(Value::Undefined)
+                }
                 operation => Err(NativeError::new(
                     "UnknownOperation",
                     format!("Events has no operation {operation:?}."),
@@ -132,7 +149,8 @@ async fn append(
     let current = match &last {
         Some(message) => batch_revision(&decode(&message.payload)?)?,
         None => 0,
-    };
+    }
+    .max(snapshot_revision(stream, stream_name).await?);
     if current != expected {
         return Ok(None);
     }
@@ -154,7 +172,153 @@ async fn append(
     }
 }
 
-async fn read(stream: &Stream, name: &str, after: i64) -> NativeResult<Vec<JsonValue>> {
+async fn load_snapshot(stream: &Stream, input: &JsonValue) -> NativeResult<Option<JsonValue>> {
+    let stream_name = string(input, "stream")?;
+    let subject = snapshot_subject(stream_name);
+    match stream.get_last_raw_message_by_subject(&subject).await {
+        Ok(message) => {
+            let snapshot = decode(&message.payload)?;
+            validate_snapshot(&snapshot, stream_name)?;
+            Ok(Some(snapshot))
+        }
+        Err(error) if matches!(error.kind(), RawMessageErrorKind::NoMessageFound) => Ok(None),
+        Err(error) => Err(failure(error)),
+    }
+}
+
+async fn save_snapshot(
+    context: &jetstream::Context,
+    stream: &Stream,
+    input: &JsonValue,
+) -> NativeResult<bool> {
+    let stream_name = string(input, "stream")?;
+    let expected = integer(input, "expectedRevision")?;
+    let revision = integer(input, "revision")?;
+    let snapshot = input
+        .get("snapshot")
+        .ok_or_else(|| NativeError::new("InvalidInput", "snapshot is required."))?;
+    let snapshot_topic = snapshot_subject(stream_name);
+    let previous = match stream
+        .get_last_raw_message_by_subject(&snapshot_topic)
+        .await
+    {
+        Ok(message) => Some(message),
+        Err(error) if matches!(error.kind(), RawMessageErrorKind::NoMessageFound) => None,
+        Err(error) => return Err(failure(error)),
+    };
+    let current = match &previous {
+        Some(message) => {
+            let stored = decode(&message.payload)?;
+            validate_snapshot(&stored, stream_name)?;
+            integer(&stored, "revision")?
+        }
+        None => 0,
+    };
+    if current != expected {
+        return Ok(false);
+    }
+    let event_subject = subject(stream_name);
+    let event_revision = match stream.get_last_raw_message_by_subject(&event_subject).await {
+        Ok(message) => batch_revision(&decode(&message.payload)?)?,
+        Err(error) if matches!(error.kind(), RawMessageErrorKind::NoMessageFound) => 0,
+        Err(error) => return Err(failure(error)),
+    };
+    if revision > event_revision.max(current) {
+        return Ok(false);
+    }
+    let payload = serde_json::to_vec(&json!({
+        "stream": stream_name,
+        "revision": revision,
+        "snapshot": snapshot,
+    }))
+    .map_err(failure)?;
+    let message = PublishMessage::build()
+        .payload(payload.into())
+        .expected_last_subject_sequence(previous.as_ref().map_or(0, |message| message.sequence))
+        .outbound_message(snapshot_topic.clone());
+    let published = context.publish_message(message).await.map_err(failure)?;
+    match published.await {
+        Ok(_) => {
+            stream
+                .purge()
+                .filter(snapshot_topic)
+                .keep(1)
+                .await
+                .map_err(failure)?;
+            Ok(true)
+        }
+        Err(error) if matches!(error.kind(), PublishErrorKind::WrongLastSequence) => Ok(false),
+        Err(error) => Err(failure(error)),
+    }
+}
+
+async fn compact(stream: &Stream, input: &JsonValue) -> NativeResult<()> {
+    let stream_name = string(input, "stream")?;
+    let through = integer(input, "through")?;
+    if through == 0 {
+        return Ok(());
+    }
+    if snapshot_revision(stream, stream_name).await? < through {
+        return Err(NativeError::new(
+            "UnsafeCompaction",
+            format!("EventStore stream {stream_name:?} has no safe snapshot."),
+        ));
+    }
+    let subject = subject(stream_name);
+    let mut sequence = None;
+    let mut purge_through = None;
+    loop {
+        let message = match stream.direct_get_next_for_subject(&subject, sequence).await {
+            Ok(message) => message,
+            Err(error) if matches!(error.kind(), DirectGetErrorKind::NotFound) => break,
+            Err(error) => return Err(failure(error)),
+        };
+        sequence = Some(message.sequence.saturating_add(1));
+        if batch_revision(&decode(&message.payload)?)? <= through {
+            purge_through = Some(message.sequence);
+        }
+    }
+    if let Some(sequence) = purge_through {
+        stream
+            .purge()
+            .filter(subject)
+            .sequence(sequence.saturating_add(1))
+            .await
+            .map_err(failure)?;
+    }
+    Ok(())
+}
+
+async fn snapshot_revision(stream: &Stream, name: &str) -> NativeResult<i64> {
+    let subject = snapshot_subject(name);
+    match stream.get_last_raw_message_by_subject(&subject).await {
+        Ok(message) => {
+            let snapshot = decode(&message.payload)?;
+            validate_snapshot(&snapshot, name)?;
+            integer(&snapshot, "revision")
+        }
+        Err(error) if matches!(error.kind(), RawMessageErrorKind::NoMessageFound) => Ok(0),
+        Err(error) => Err(failure(error)),
+    }
+}
+
+fn validate_snapshot(snapshot: &JsonValue, stream: &str) -> NativeResult<()> {
+    if string(snapshot, "stream")? != stream || snapshot.get("snapshot").is_none() {
+        return Err(NativeError::new(
+            "InvalidEventStore",
+            "Invalid JetStream snapshot.",
+        ));
+    }
+    integer(snapshot, "revision")?;
+    Ok(())
+}
+
+async fn read(
+    stream: &Stream,
+    name: &str,
+    after: i64,
+    limit: usize,
+) -> NativeResult<Vec<JsonValue>> {
     let subject = subject(name);
     let mut sequence = None;
     let mut result = Vec::new();
@@ -166,6 +330,10 @@ async fn read(stream: &Stream, name: &str, after: i64) -> NativeResult<Vec<JsonV
         };
         sequence = Some(message.sequence.saturating_add(1));
         append_batch(&mut result, &decode(&message.payload)?, name, after)?;
+        if result.len() >= limit {
+            result.truncate(limit);
+            break;
+        }
     }
     Ok(result)
 }
@@ -176,7 +344,7 @@ async fn subscribe(client: Client, stream: Stream, input: JsonValue) -> NativeRe
     let subject = subject(&name);
     let mut messages = client.subscribe(subject).await.map_err(failure)?;
     client.flush().await.map_err(failure)?;
-    let initial = read(&stream, &name, after).await?;
+    let initial = read(&stream, &name, after, usize::MAX).await?;
     Ok(Value::stream(Box::pin(async_stream::try_stream! {
         let mut revision = after;
         for event in initial {
@@ -262,6 +430,10 @@ fn subject(stream: &str) -> String {
     format!("{PREFIX}.{}", URL_SAFE_NO_PAD.encode(stream))
 }
 
+fn snapshot_subject(stream: &str) -> String {
+    format!("{PREFIX}.snapshot.{}", URL_SAFE_NO_PAD.encode(stream))
+}
+
 fn string<'a>(value: &'a JsonValue, name: &str) -> NativeResult<&'a str> {
     value
         .get(name)
@@ -298,6 +470,10 @@ mod tests {
     fn subjects_are_stable_and_safe_for_arbitrary_stream_names() {
         assert_eq!(subject("orders/one"), "kit.events.b3JkZXJzL29uZQ");
         assert_eq!(subject("orders one.*"), "kit.events.b3JkZXJzIG9uZS4q");
+        assert_eq!(
+            snapshot_subject("orders/one"),
+            "kit.events.snapshot.b3JkZXJzL29uZQ"
+        );
     }
 
     #[test]

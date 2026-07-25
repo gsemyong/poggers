@@ -20,6 +20,8 @@ pub type NativeFuture<T> = Pin<Box<dyn Future<Output = NativeResult<T>> + Send>>
 pub type NativeStream = Pin<Box<dyn Stream<Item = NativeResult<Value>> + Send>>;
 pub type Record = IndexMap<String, Value>;
 
+const DEFERRED_DEPENDENCY_INVOCATION: &str = "kit.dependency.deferred-invocation";
+
 #[derive(Clone)]
 pub enum Value {
     Undefined,
@@ -107,6 +109,10 @@ impl fmt::Display for NativeError {
 impl std::error::Error for NativeError {}
 
 pub trait Dependency: Send + Sync {
+    fn start(&self, _engine: Engine) -> NativeFuture<()> {
+        Box::pin(async { Ok(()) })
+    }
+
     fn call(
         &self,
         engine: Engine,
@@ -120,8 +126,27 @@ pub trait Dependency: Send + Sync {
     }
 }
 
+/** Adapter-owned routing for compiler-declared provided Dependencies. */
+pub trait DependencyRouter: Send + Sync {
+    fn handles(&self, name: &str) -> bool;
+
+    fn route(
+        &self,
+        engine: Engine,
+        name: &str,
+        operation: &str,
+        input: Value,
+        invocation: DependencyInvocation,
+    ) -> NativeFuture<Value>;
+
+    fn shutdown(&self) -> NativeFuture<()> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
 type DependencyHeartbeat = Arc<dyn Fn(Value) -> NativeResult<()> + Send + Sync>;
 type DependencyDefer = Arc<dyn Fn(String) -> NativeResult<Value> + Send + Sync>;
+type DependencyAuthorityAssert = Arc<dyn Fn() -> NativeFuture<()> + Send + Sync>;
 
 #[derive(Default)]
 struct DependencyCancellationState {
@@ -198,6 +223,70 @@ impl DependencyCancellation {
 }
 
 #[derive(Clone)]
+pub struct DependencyAuthority {
+    pub scope: String,
+    pub owner: String,
+    pub failure_epoch: u64,
+    pub epoch: u64,
+    pub expires_at: f64,
+    assertion: Option<DependencyAuthorityAssert>,
+}
+
+impl DependencyAuthority {
+    pub fn new(
+        scope: impl Into<String>,
+        owner: impl Into<String>,
+        failure_epoch: u64,
+        epoch: u64,
+        expires_at: f64,
+    ) -> Self {
+        Self {
+            scope: scope.into(),
+            owner: owner.into(),
+            failure_epoch,
+            epoch,
+            expires_at,
+            assertion: None,
+        }
+    }
+
+    pub fn with_assertion(
+        mut self,
+        assertion: impl Fn() -> NativeFuture<()> + Send + Sync + 'static,
+    ) -> Self {
+        self.assertion = Some(Arc::new(assertion));
+        self
+    }
+
+    pub async fn assert(&self) -> NativeResult<()> {
+        match &self.assertion {
+            Some(assertion) => assertion().await,
+            None => Ok(()),
+        }
+    }
+}
+
+impl fmt::Debug for DependencyAuthority {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DependencyAuthority")
+            .field("scope", &self.scope)
+            .field("owner", &self.owner)
+            .field("failure_epoch", &self.failure_epoch)
+            .field("epoch", &self.epoch)
+            .field("expires_at", &self.expires_at)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DependencyTrace {
+    pub traceparent: String,
+    pub tracestate: Option<String>,
+    pub baggage: Option<String>,
+}
+
+#[derive(Clone)]
 pub struct DependencyInvocation {
     pub id: String,
     pub attempt: u64,
@@ -205,6 +294,8 @@ pub struct DependencyInvocation {
     pub started_at: f64,
     pub deadline: Option<f64>,
     pub previous_heartbeat: Option<Value>,
+    pub trace: Option<DependencyTrace>,
+    pub authority: Option<DependencyAuthority>,
     heartbeat: Option<DependencyHeartbeat>,
     defer: Option<DependencyDefer>,
     pub cancellation: DependencyCancellation,
@@ -220,6 +311,7 @@ impl fmt::Debug for DependencyInvocation {
             .field("started_at", &self.started_at)
             .field("deadline", &self.deadline)
             .field("previous_heartbeat", &self.previous_heartbeat)
+            .field("trace", &self.trace)
             .finish_non_exhaustive()
     }
 }
@@ -239,6 +331,8 @@ impl DependencyInvocation {
             started_at,
             deadline,
             previous_heartbeat: None,
+            trace: None,
+            authority: None,
             heartbeat: None,
             defer: None,
             cancellation: DependencyCancellation::default(),
@@ -274,10 +368,39 @@ impl DependencyInvocation {
         self
     }
 
+    pub fn with_authority(mut self, authority: DependencyAuthority) -> Self {
+        self.authority = Some(authority);
+        self
+    }
+
+    pub fn with_trace(
+        mut self,
+        traceparent: impl Into<String>,
+        tracestate: Option<String>,
+        baggage: Option<String>,
+    ) -> Self {
+        self.trace = Some(DependencyTrace {
+            traceparent: traceparent.into(),
+            tracestate,
+            baggage,
+        });
+        self
+    }
+
     pub fn heartbeat(&self, details: Value) -> NativeResult<()> {
         self.heartbeat
             .as_ref()
             .map_or_else(|| Ok(()), |heartbeat| heartbeat(details))
+    }
+
+    pub fn defer(&self, id: impl Into<String>) -> NativeResult<Value> {
+        let defer = self.defer.as_ref().ok_or_else(|| {
+            NativeError::new(
+                "InvalidDependencyInvocation",
+                "Direct Dependency invocations cannot be completed externally.",
+            )
+        })?;
+        defer(id.into())
     }
 
     fn to_value(&self) -> Value {
@@ -432,6 +555,45 @@ impl DependencyInvocation {
         if let Some(previous_heartbeat) = &self.previous_heartbeat {
             value.insert("previousHeartbeat".to_owned(), previous_heartbeat.clone());
         }
+        if let Some(trace) = &self.trace {
+            let mut fields = IndexMap::from([(
+                "traceparent".to_owned(),
+                Value::String(trace.traceparent.clone()),
+            )]);
+            if let Some(tracestate) = &trace.tracestate {
+                fields.insert("tracestate".to_owned(), Value::String(tracestate.clone()));
+            }
+            if let Some(baggage) = &trace.baggage {
+                fields.insert("baggage".to_owned(), Value::String(baggage.clone()));
+            }
+            value.insert("trace".to_owned(), Value::record(fields));
+        }
+        if let Some(authority) = &self.authority {
+            let assertion = authority.clone();
+            value.insert(
+                "authority".to_owned(),
+                Value::record(IndexMap::from([
+                    ("scope".to_owned(), Value::String(authority.scope.clone())),
+                    ("owner".to_owned(), Value::String(authority.owner.clone())),
+                    (
+                        "failureEpoch".to_owned(),
+                        Value::Number(authority.failure_epoch as f64),
+                    ),
+                    ("epoch".to_owned(), Value::Number(authority.epoch as f64)),
+                    ("expiresAt".to_owned(), Value::Number(authority.expires_at)),
+                    (
+                        "assert".to_owned(),
+                        Value::Function(NativeFunction::new(move |_engine, _arguments| {
+                            let assertion = assertion.clone();
+                            Box::pin(async move {
+                                assertion.assert().await?;
+                                Ok(Value::Undefined)
+                            })
+                        })),
+                    ),
+                ])),
+            );
+        }
         Value::record(value)
     }
 }
@@ -500,6 +662,10 @@ impl<Implementation> Dependency for ContractDependency<Implementation>
 where
     Implementation: Dependency + 'static,
 {
+    fn start(&self, engine: Engine) -> NativeFuture<()> {
+        self.implementation.start(engine)
+    }
+
     fn call(
         &self,
         engine: Engine,
@@ -543,7 +709,7 @@ where
     }
 }
 
-fn validate_value(value: &Value, contract: &TypeContract, path: &str) -> NativeResult<()> {
+pub fn validate_value(value: &Value, contract: &TypeContract, path: &str) -> NativeResult<()> {
     let valid = match contract {
         TypeContract::Primitive("boolean") => matches!(value, Value::Boolean(_)),
         TypeContract::Primitive("null") => matches!(value, Value::Null),
@@ -688,6 +854,7 @@ struct EngineState {
     tasks: AtomicUsize,
     task_completion: tokio::sync::Notify,
     invocations: Mutex<BTreeMap<String, u64>>,
+    router: RwLock<Option<Arc<dyn DependencyRouter>>>,
 }
 
 impl Engine {
@@ -702,7 +869,20 @@ impl Engine {
             tasks: AtomicUsize::new(0),
             task_completion: tokio::sync::Notify::new(),
             invocations: Mutex::new(BTreeMap::new()),
+            router: RwLock::new(None),
         }))
+    }
+
+    pub fn install_router(&self, router: Arc<dyn DependencyRouter>) -> NativeResult<()> {
+        let mut installed = write(&self.0.router);
+        if installed.is_some() {
+            return Err(NativeError::new(
+                "DuplicateDependencyRouter",
+                "A Dependency router is already installed.",
+            ));
+        }
+        *installed = Some(router);
+        Ok(())
     }
 
     pub fn register(
@@ -719,6 +899,14 @@ impl Engine {
             ));
         }
         external.insert(name, dependency);
+        Ok(())
+    }
+
+    pub async fn start_dependencies(&self) -> NativeResult<()> {
+        let dependencies = read(&self.0.external).values().cloned().collect::<Vec<_>>();
+        for dependency in dependencies {
+            dependency.start(self.clone()).await?;
+        }
         Ok(())
     }
 
@@ -811,7 +999,7 @@ impl Engine {
     }
 
     pub fn has_live_resources(&self) -> bool {
-        !lock(&self.0.resources).is_empty()
+        !lock(&self.0.resources).is_empty() || read(&self.0.router).is_some()
     }
 
     pub async fn shutdown(&self) -> NativeResult<()> {
@@ -823,6 +1011,14 @@ impl Engine {
             completion.await;
         }
         let mut errors = Vec::new();
+        let router = { write(&self.0.router).take() };
+        let router_shutdown = match router {
+            Some(router) => router.shutdown().await,
+            None => Ok(()),
+        };
+        if let Err(error) = router_shutdown {
+            errors.push(error);
+        }
         let resources = std::mem::take(&mut *lock(&self.0.resources));
         for resource in resources.into_iter().rev() {
             if let Err(error) = self.dispose(resource).await {
@@ -1076,38 +1272,28 @@ impl Engine {
             || invocation
                 .deadline
                 .is_some_and(|deadline| !deadline.is_finite())
+            || invocation
+                .trace
+                .as_ref()
+                .is_some_and(|trace| trace.traceparent.is_empty())
         {
             return Err(NativeError::new(
                 "InvalidDependencyInvocation",
                 format!("Dependency {name}.{operation} received invalid invocation metadata."),
             ));
         }
-        let provided = { read(&self.0.provided).get(name).cloned() };
-        if let Some(value) = provided {
-            if read(&self.0.provided_envelopes).contains(name) {
-                let dispatcher = value.as_record()?.get("@dependencyInvocation").cloned();
-                if let Some(dispatcher) = dispatcher {
-                    return self
-                        .invoke(
-                            dispatcher,
-                            vec![
-                                Value::String(operation.to_owned()),
-                                input,
-                                invocation.to_value(),
-                            ],
-                        )
-                        .await;
-                }
+        if read(&self.0.provided).contains_key(name) {
+            let router = read(&self.0.router).clone();
+            if let Some(router) = router
+                && router.handles(name)
+            {
+                return router
+                    .route(self.clone(), name, operation, input, invocation)
+                    .await;
             }
-            let input = if read(&self.0.provided_envelopes).contains(name) {
-                Value::record(IndexMap::from([
-                    ("input".to_owned(), input),
-                    ("invocation".to_owned(), invocation.to_value()),
-                ]))
-            } else {
-                input
-            };
-            return self.method(value, operation, vec![input]).await;
+            return self
+                .call_provided_with_invocation(name, operation, input, invocation)
+                .await;
         }
         if read(&self.0.declared).contains(name) {
             return Err(NativeError::new(
@@ -1124,6 +1310,46 @@ impl Engine {
         dependency
             .call(self.clone(), operation, input, invocation)
             .await
+    }
+
+    /** Invokes one local provided Dependency without consulting the adapter router. */
+    pub async fn call_provided_with_invocation(
+        &self,
+        name: &str,
+        operation: &str,
+        input: Value,
+        invocation: DependencyInvocation,
+    ) -> NativeResult<Value> {
+        let value = read(&self.0.provided).get(name).cloned().ok_or_else(|| {
+            NativeError::new(
+                "MissingDependency",
+                format!("Missing provided Dependency {name}.{operation}."),
+            )
+        })?;
+        if read(&self.0.provided_envelopes).contains(name) {
+            let dispatcher = value.as_record()?.get("@dependencyInvocation").cloned();
+            if let Some(dispatcher) = dispatcher {
+                return self
+                    .invoke(
+                        dispatcher,
+                        vec![
+                            Value::String(operation.to_owned()),
+                            input,
+                            invocation.to_value(),
+                        ],
+                    )
+                    .await;
+            }
+        }
+        let input = if read(&self.0.provided_envelopes).contains(name) {
+            Value::record(IndexMap::from([
+                ("input".to_owned(), input),
+                ("invocation".to_owned(), invocation.to_value()),
+            ]))
+        } else {
+            input
+        };
+        self.method(value, operation, vec![input]).await
     }
 
     pub fn assign_property(
@@ -1634,6 +1860,26 @@ impl Value {
     }
 }
 
+/** Creates the process-local marker used to carry a deferred result across a router. */
+pub fn deferred_dependency_invocation(id: impl Into<String>) -> Value {
+    Value::record([
+        (
+            "$kit".to_owned(),
+            Value::String(DEFERRED_DEPENDENCY_INVOCATION.to_owned()),
+        ),
+        ("id".to_owned(), Value::String(id.into())),
+    ])
+}
+
+/** Returns the completion id when a routed provider deferred its result. */
+pub fn deferred_dependency_invocation_id(value: &Value) -> Option<String> {
+    let marker = value.property("$kit", false).ok()?.string().ok()?;
+    if marker != DEFERRED_DEPENDENCY_INVOCATION {
+        return None;
+    }
+    value.property("id", false).ok()?.string().ok()
+}
+
 pub fn binary(operator: &str, left: Value, right: Value) -> NativeResult<Value> {
     match operator {
         "+" => match (&left, &right) {
@@ -1704,6 +1950,8 @@ fn write<T>(value: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
 
     struct Noop;
@@ -1722,6 +1970,32 @@ mod tests {
                     "UnknownOperation",
                     format!("Noop has no operation {operation:?}."),
                 ))
+            })
+        }
+    }
+
+    struct PassThroughRouter(Arc<AtomicUsize>);
+
+    impl DependencyRouter for PassThroughRouter {
+        fn handles(&self, name: &str) -> bool {
+            name == "peer"
+        }
+
+        fn route(
+            &self,
+            engine: Engine,
+            name: &str,
+            operation: &str,
+            input: Value,
+            invocation: DependencyInvocation,
+        ) -> NativeFuture<Value> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            let name = name.to_owned();
+            let operation = operation.to_owned();
+            Box::pin(async move {
+                engine
+                    .call_provided_with_invocation(&name, &operation, input, invocation)
+                    .await
             })
         }
     }
@@ -1796,6 +2070,36 @@ mod tests {
             engine.dependency_value("peer").expect("provided value"),
             Value::Record(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn routes_provided_dependencies_through_one_adapter_owned_hook() {
+        let engine = Engine::new();
+        let routes = Arc::new(AtomicUsize::new(0));
+        engine
+            .install_router(Arc::new(PassThroughRouter(routes.clone())))
+            .expect("install router");
+        let read = NativeFunction::new(|_engine, arguments| {
+            Box::pin(async move { Ok(arguments.into_iter().next().unwrap_or(Value::Undefined)) })
+        });
+        engine
+            .provide(
+                &["peer"],
+                &[],
+                Value::record(IndexMap::from([(
+                    "peer".to_owned(),
+                    Value::record(IndexMap::from([("read".to_owned(), Value::Function(read))])),
+                )])),
+            )
+            .expect("provide peer");
+
+        let result = engine
+            .call_dependency("peer", "read", Value::String("routed".to_owned()))
+            .await
+            .expect("routed call");
+
+        assert_eq!(result.string().expect("string result"), "routed");
+        assert_eq!(routes.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
