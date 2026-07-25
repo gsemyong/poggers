@@ -7,6 +7,9 @@ import {
 } from "@/adapters/server/development/session";
 import { buildServerProgram } from "@/adapters/server/production/compiler";
 import type { ServerProductionDependency } from "@/adapters/server/production/dependencies";
+import type { SourceCompilerExtension } from "@/compiler/extension";
+import type { ProgramIR } from "@/compiler/ir";
+import { SystemDiagnostic } from "@/compiler/source";
 import type { PlatformAdapter } from "@/contracts/platform";
 import type { ServerPlatform } from "@/platforms/server/platform";
 
@@ -25,12 +28,20 @@ export type ServerPlatformAdapterOptions = ServerDevelopmentOptions &
     productionDependencies?: readonly ServerProductionDependency[];
   }>;
 
+const serverCompilerExtension: SourceCompilerExtension = Object.freeze({
+  name: "server",
+  validate(ir) {
+    assertPortableServerPrograms(ir.programs);
+  },
+});
+
 /** Creates the complete development and production realization for the server Platform. */
 export function createServerPlatformAdapter(
   options: ServerPlatformAdapterOptions = {},
 ): ServerPlatformAdapter {
   return {
     name: "server",
+    compiler: [serverCompilerExtension],
     develop: (input) => developServerPrograms(input, options),
     async build(input) {
       const programs = [...input.programs].sort((left, right) =>
@@ -47,6 +58,7 @@ export function createServerPlatformAdapter(
           ir: input.ir,
           directory: input.directory,
           output: path,
+          profile: "release",
           program,
         });
         entries.push({
@@ -60,6 +72,25 @@ export function createServerPlatformAdapter(
       return { directory: input.output, entries };
     },
   };
+}
+
+function assertPortableServerPrograms(programs: readonly ProgramIR[]): void {
+  for (const program of programs) {
+    if (program.environment.platform !== "server") continue;
+    for (const contribution of program.contributions) {
+      const implementation = contribution.implementation;
+      if (implementation.kind !== "source") continue;
+      const span = implementation.diagnostic?.span ?? implementation.span;
+      const reason = implementation.diagnostic
+        ? implementation.diagnostic.message.replace(/^.*:\d+:\d+: /, "")
+        : "Its implementation is available only as host source.";
+      throw new SystemDiagnostic(
+        `Server Program contribution ${JSON.stringify(contribution.id)} must lower completely ` +
+          `to portable meaning. ${reason}`,
+        span,
+      );
+    }
+  }
 }
 
 function artifactName(name: string): string {

@@ -11,7 +11,7 @@ import {
   type ProgramIR,
   type TypeIR,
 } from "@/compiler/ir";
-import { linkProgram, ProgramLinkError } from "@/compiler/linker";
+import { linkProgram } from "@/compiler/linker";
 
 test("serializes arbitrary valid System IR deterministically", () => {
   fc.assert(
@@ -131,7 +131,7 @@ test("links the same Program identically for every contribution permutation", ()
   );
 });
 
-test("rejects duplicate providers, incompatible contracts, and provider cycles", () => {
+test("rejects duplicate providers and incompatible contracts while linking provider cycles", () => {
   expect(() =>
     linkProgram(
       fixtureProgram([
@@ -150,22 +150,24 @@ test("rejects duplicate providers, incompatible contracts, and provider cycles",
     ),
   ).toThrow(/incompatible contracts/);
 
-  expect(() =>
-    linkProgram(
-      fixtureProgram([
-        contribution(
-          "left",
-          [{ name: "right", type: numberType }],
-          [{ name: "left", type: numberType }],
-        ),
-        contribution(
-          "right",
-          [{ name: "left", type: numberType }],
-          [{ name: "right", type: numberType }],
-        ),
-      ]),
-    ),
-  ).toThrow(ProgramLinkError);
+  const linked = linkProgram(
+    fixtureProgram([
+      contribution(
+        "left",
+        [{ name: "right", type: numberType }],
+        [{ name: "left", type: numberType }],
+      ),
+      contribution(
+        "right",
+        [{ name: "left", type: numberType }],
+        [{ name: "right", type: numberType }],
+      ),
+    ]),
+  );
+  expect(linked.contributions.map(({ contribution }) => contribution.feature)).toEqual([
+    "left",
+    "right",
+  ]);
 });
 
 test("treats function parameter names as documentation rather than contract identity", () => {

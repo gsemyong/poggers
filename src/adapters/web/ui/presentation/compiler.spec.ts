@@ -8,7 +8,7 @@ import {
   validateWebPresentationSource,
 } from "@/adapters/web/ui/presentation/compiler";
 import { compilePresentationSource } from "@/compiler/presentation";
-import type { WebStyle } from "@/platforms/web/presentation";
+import { createContainer, type WebStyle } from "@/platforms/web/presentation";
 import { spring } from "@/platforms/web/presentation/dynamics";
 
 describe("web Presentation compiler", () => {
@@ -234,6 +234,7 @@ const presentation = (({ parameters }) => ({
   });
 
   it("lowers ordered pseudo, container, and preference conditions to native CSS", () => {
+    const control = createContainer("control");
     const compiled = compileWebStyle({
       paint: { opacity: 1 },
       rules: [
@@ -241,7 +242,7 @@ const presentation = (({ parameters }) => ({
         {
           when: {
             pseudo: "focus-visible",
-            container: { name: "control", minInlineSize: 320 },
+            container: { identity: control, minInlineSize: 320 },
             preference: { contrast: "more" },
           },
           use: {
@@ -263,6 +264,212 @@ const presentation = (({ parameters }) => ({
     );
   });
 
+  it("adapts reusable features to their container shape", () => {
+    const feature = createContainer("feature");
+    const compiled = compileWebStyle({
+      rules: [
+        {
+          when: {
+            container: {
+              identity: feature,
+              minAspectRatio: 4 / 3,
+              maxAspectRatio: 2,
+              orientation: "landscape",
+            },
+          },
+          use: {
+            layout: {
+              model: { kind: "grid", columns: [{ fraction: 2 }, { fraction: 1 }] },
+            },
+          },
+        },
+      ],
+    });
+
+    expect(compiled.css).toBe(
+      `@container feature (aspect-ratio>=1.3333333333333333/1) and (aspect-ratio<=2/1) and (orientation:landscape){.${compiled.className}{display:grid;grid-template-columns:2fr 1fr}}`,
+    );
+  });
+
+  it("preserves distinct ancestor selection in nested container conditions", () => {
+    const workspace = createContainer("workspace");
+    const panel = createContainer("panel");
+    const compiled = compileWebStyle({
+      rules: [
+        {
+          when: {
+            all: [
+              { container: { identity: workspace, minInlineSize: 720 } },
+              { container: { identity: panel, maxInlineSize: 360 } },
+            ],
+          },
+          use: { layout: { visibility: "hidden" } },
+        },
+      ],
+    });
+
+    expect(compiled.css).toBe(
+      `@container panel (inline-size<=360px){@container workspace (inline-size>=720px){.${compiled.className}{visibility:hidden}}}`,
+    );
+  });
+
+  it("aligns nested feature layout to parent grid tracks", () => {
+    const compiled = compileWebStyle({
+      layout: {
+        model: {
+          kind: "grid",
+          columns: "subgrid",
+          rows: "subgrid",
+          columnGap: 12,
+        },
+      },
+    });
+
+    expect(compiled.css).toBe(
+      `.${compiled.className}{column-gap:12px;display:grid;grid-template-columns:subgrid;grid-template-rows:subgrid}`,
+    );
+  });
+
+  it("places grid items on logical axes with one line and span vocabulary", () => {
+    const compiled = compileWebStyle({
+      layout: {
+        item: {
+          grid: {
+            inline: { start: 2, span: 3 },
+            block: { start: -3, end: -1 },
+          },
+        },
+      },
+    });
+
+    expect(compiled.css).toBe(`.${compiled.className}{grid-column:2/span 3;grid-row:-3/-1}`);
+    expect(() => compileWebStyle({ layout: { item: { grid: { inline: { start: 0 } } } } })).toThrow(
+      "non-zero integer grid line",
+    );
+    expect(() => compileWebStyle({ layout: { item: { grid: { inline: { span: 0 } } } } })).toThrow(
+      "positive integer",
+    );
+  });
+
+  it("coordinates a snapping collection through logical scroll meaning", () => {
+    const collection = compileWebStyle({
+      layout: {
+        overflow: { inline: "auto", block: "clip", overscroll: "contain" },
+        scroll: {
+          snap: { axis: "inline", strictness: "mandatory" },
+          padding: { inline: 16 },
+          indicator: {
+            size: "thin",
+            colors: {
+              thumb: { oklch: [0.6, 0.1, 240] },
+              track: "transparent",
+            },
+          },
+        },
+      },
+    });
+    const item = compileWebStyle({
+      layout: {
+        item: {
+          scroll: {
+            align: { inline: "center" },
+            stop: "always",
+            margin: { inline: 8 },
+          },
+        },
+      },
+    });
+
+    expect(collection.css).toBe(
+      `.${collection.className}{overflow-block:clip;overflow-inline:auto;overscroll-behavior:contain;scroll-padding-inline:16px;scroll-snap-type:inline mandatory;scrollbar-color:oklch(0.6 0.1 240) transparent;scrollbar-width:thin}`,
+    );
+    expect(item.css).toBe(
+      `.${item.className}{scroll-margin-inline:8px;scroll-snap-align:none center;scroll-snap-stop:always}`,
+    );
+    const hidden = compileWebStyle({
+      layout: { scroll: { indicator: { visibility: "hidden" } } },
+    });
+    expect(hidden.css).toBe(`.${hidden.className}{scrollbar-width:none}`);
+  });
+
+  it("describes vertical typography through block flow and glyph orientation", () => {
+    const compiled = compileWebStyle({
+      layout: { padding: { block: 12, inline: 20 } },
+      text: {
+        align: "start",
+        writing: { blockFlow: "right-to-left", glyphOrientation: "upright" },
+      },
+    });
+
+    expect(compiled.css).toBe(
+      `.${compiled.className}{padding-block:12px;padding-inline:20px;text-align:start;text-orientation:upright;writing-mode:vertical-rl}`,
+    );
+  });
+
+  it("hides compatible multi-line truncation artifacts behind semantic maxLines", () => {
+    const compiled = compileWebStyle({
+      text: { maxLines: 3, wrap: "pretty" },
+    });
+
+    expect(compiled.css).toBe(
+      `.${compiled.className}{-webkit-box-orient:vertical;-webkit-line-clamp:3;display:-webkit-box;overflow:hidden;text-wrap:pretty}`,
+    );
+    expect(() =>
+      compileWebStyle({
+        layout: { model: { kind: "flow", direction: "block" } },
+        text: { maxLines: 2 },
+      }),
+    ).toThrow("cannot be combined with an explicit layout model");
+    expect(() => compileWebStyle({ text: { maxLines: 1.5 } })).toThrow("positive integer");
+  });
+
+  it("lowers nested responsive condition meaning without duplicated declarations", () => {
+    const compiled = compileWebStyle({
+      rules: [
+        {
+          when: {
+            all: [
+              {
+                any: [{ container: { maxInlineSize: 420 } }, { pointer: { accuracy: "coarse" } }],
+              },
+              { not: { preference: { motion: "reduced" } } },
+            ],
+          },
+          use: {
+            layout: { padding: { inline: 20 } },
+            paint: { opacity: 0.9 },
+          },
+        },
+      ],
+    });
+    const declarations = `.${compiled.className}{opacity:0.9;padding-inline:20px}`;
+
+    expect(compiled.css).toBe(
+      `@media not (prefers-reduced-motion:reduce){@container (inline-size<=420px){${declarations}}}` +
+        `@media not (prefers-reduced-motion:reduce){@media (pointer:coarse){${declarations}}}`,
+    );
+  });
+
+  it("applies De Morgan semantics to negated compound conditions", () => {
+    const compiled = compileWebStyle({
+      rules: [
+        {
+          when: {
+            not: {
+              all: [{ pseudo: "hover" }, { preference: { colorScheme: "dark" } }],
+            },
+          },
+          use: { paint: { opacity: 0.7 } },
+        },
+      ],
+    });
+
+    expect(compiled.css).toBe(
+      `.${compiled.className}:where(:not(:hover)){opacity:0.7}` +
+        `@media not (prefers-color-scheme:dark){.${compiled.className}{opacity:0.7}}`,
+    );
+  });
+
   it("rejects conditions that cannot affect native CSS", () => {
     expect(() =>
       compileWebStyle({
@@ -274,6 +481,16 @@ const presentation = (({ parameters }) => ({
         rules: [{ when: { pseudo: "hover" }, use: {} }],
       }),
     ).toThrow("must apply at least one style");
+    expect(() =>
+      compileWebStyle({
+        rules: [
+          {
+            when: { container: { minAspectRatio: 0 } },
+            use: { paint: { opacity: 0.5 } },
+          },
+        ],
+      }),
+    ).toThrow("positive finite aspect ratio");
   });
 
   it("composes pure TypeScript recipes before compilation", () => {

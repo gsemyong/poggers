@@ -10,6 +10,7 @@ import {
   createRustProgramSession,
   runRustProgram,
 } from "@/adapters/server/production/fixtures/conformance";
+import { generateRustProgram } from "@/adapters/server/production/program";
 import type { SourceCompilerExtension } from "@/compiler/extension";
 import {
   selectSystemOutputs,
@@ -20,8 +21,13 @@ import {
   type StatementIR,
   type TypeIR,
 } from "@/compiler/ir";
+import { collectProgramManifest, linkProgram } from "@/compiler/linker";
 import { SystemDiagnostic, compileSystem, createSystemCompiler } from "@/compiler/source";
-import { executeProgramFixtureIR, executeProgramIR } from "@/runtime/interpreter";
+import {
+  executeLinkedProgramIR,
+  executeProgramFixtureIR,
+  executeProgramIR,
+} from "@/runtime/interpreter";
 
 const temporaryDirectories: string[] = [];
 
@@ -88,6 +94,40 @@ describe("System compiler", () => {
 
     expect(reordered.features.map(({ id }) => id)).toEqual(original.features.map(({ id }) => id));
     expect(reordered.programs.map(({ id }) => id)).toEqual(original.programs.map(({ id }) => id));
+  });
+
+  test("comments and formatting do not change portable function identity or generated meaning", async () => {
+    const source = headlessFactorySystemSource();
+    const formatted = source
+      .replace(
+        "function countTasks<Values",
+        "// Semantically irrelevant documentation.\n\nfunction countTasks<Values",
+      )
+      .replace(
+        "const count = countTasks(tasks);",
+        "const count =\n      countTasks(\n        tasks,\n      );",
+      );
+    const original = compileSystem(await fixture(source));
+    const changed = compileSystem(await fixture(formatted));
+    const originalProgram = original.programs.find(({ name }) => name === "server");
+    const changedProgram = changed.programs.find(({ name }) => name === "server");
+    if (!originalProgram || !changedProgram) throw new Error("Fixture has no server Program.");
+    const identities = (ir: SystemIR) =>
+      ir.programs.flatMap(({ contributions }) =>
+        contributions.flatMap(({ implementation }) =>
+          implementation.kind === "portable"
+            ? [implementation.start.id, ...implementation.functions.map(({ id }) => id)]
+            : [],
+        ),
+      );
+    const generatedMeaning = (program: typeof originalProgram) =>
+      generateRustProgram(linkProgram(program)).replace(
+        /^\/\/ TypeScript: .*$/gm,
+        "// TypeScript source",
+      );
+
+    expect(identities(changed)).toEqual(identities(original));
+    expect(generatedMeaning(changedProgram)).toBe(generatedMeaning(originalProgram));
   });
 
   test("lowers two Apps into one shared Program and independent interface outputs", async () => {
@@ -376,15 +416,48 @@ export const clean = ({ parameters }: { parameters: { sheet: unknown } }) => ({
   });
 
   test("rejects undeclared runtime calls at their source location", async () => {
+    const source = systemSource().replace(
+      "const values = await dependencies.numbers.read({ count: 4 });",
+      "const values = [Date.now()];",
+    );
+    const entry = await fixture(source);
+    const offset = source.indexOf("Date.now()");
+    const before = source.slice(0, offset);
+    const expected = {
+      file: entry,
+      line: before.split("\n").length,
+      column: offset - before.lastIndexOf("\n"),
+    };
+
+    let failure: unknown;
+    try {
+      compileSystem(entry);
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(SystemDiagnostic);
+    expect((failure as SystemDiagnostic).span).toEqual(expected);
+    expect(String(failure)).toMatch(/Portable helper calls must resolve/);
+  });
+
+  test("classifies unsupported syntax for target-specific adapter validation", async () => {
     const entry = await fixture(
       systemSource().replace(
         "const values = await dependencies.numbers.read({ count: 4 });",
-        "const values = [Date.now()];",
+        "const values = await dependencies.numbers.read({ count: 4 });\n" +
+          "        switch (values.length) { default: break; }",
       ),
     );
 
-    expect(() => compileSystem(entry)).toThrow(SystemDiagnostic);
-    expect(() => compileSystem(entry)).toThrow(/Portable helper calls must resolve/);
+    expect(
+      programContribution(compileSystem(entry), "feature/worker/program/cloud")?.implementation,
+    ).toMatchObject({
+      kind: "source",
+      reason: "host-source",
+      diagnostic: {
+        message: expect.stringMatching(/Unsupported portable statement SwitchStatement/),
+      },
+    });
   });
 
   test("distinguishes synchronous and asynchronous Dependency operations", async () => {
@@ -411,6 +484,116 @@ export const clean = ({ parameters }: { parameters: { sheet: unknown } }) => ({
     expect(() => compileSystem(unawaited)).toThrow(/must be awaited/);
   });
 
+  test("extracts a semantic Dependency's consumer operations and provider binding", async () => {
+    const source = systemSource().replace(
+      `type Numbers = {
+  read(input: { count: number }): Promise<readonly number[]>;
+};`,
+      `declare const dependencyDefinition: unique symbol;
+type DependencyDefinition = Readonly<{
+  Operations: Readonly<Record<string, (input: never) => unknown>>;
+  Failures?: Readonly<Record<string, object>>;
+  Heartbeats?: Readonly<Record<string, unknown>>;
+}>;
+type Dependency<Definition extends DependencyDefinition> = Readonly<
+  Definition["Operations"] & { readonly [dependencyDefinition]: Definition }
+>;
+type Numbers = Dependency<{
+  Operations: {
+    read(input: { count: number }): Promise<readonly number[]>;
+  };
+  Failures: {
+    unavailable: { retryAt: number };
+  };
+  Heartbeats: {
+    read: { received: number };
+  };
+}>;`,
+    );
+    const ir = compileSystem(await fixture(source));
+    const numbers = programContribution(ir, "feature/worker/program/cloud")?.requires.find(
+      ({ name }) => name === "numbers",
+    );
+
+    expect(numbers).toEqual({
+      name: "numbers",
+      binding: "envelope",
+      type: {
+        kind: "record",
+        fields: [
+          {
+            name: "read",
+            optional: false,
+            type: {
+              kind: "function",
+              parameters: [
+                {
+                  name: "input",
+                  optional: false,
+                  type: {
+                    kind: "record",
+                    fields: [
+                      {
+                        name: "count",
+                        optional: false,
+                        type: numberType(),
+                      },
+                    ],
+                  },
+                },
+              ],
+              result: {
+                kind: "promise",
+                value: { kind: "array", element: numberType() },
+              },
+            },
+          },
+        ],
+      },
+    });
+    const program = ir.programs.find(({ contributions }) =>
+      contributions.some(({ id }) => id === "feature/worker/program/cloud"),
+    );
+    if (!program) throw new Error("Expected cloud Program.");
+    expect(collectProgramManifest(program).bindings).toEqual([
+      {
+        name: "numbers",
+        binding: "envelope",
+        operations: [
+          expect.objectContaining({
+            name: "read",
+            mode: "asynchronous",
+          }),
+        ],
+      },
+    ]);
+
+    const invocations: unknown[] = [];
+    const writes: unknown[] = [];
+    await executeProgramIR(ir, "feature/worker/program/cloud", {
+      numbers: {
+        async read(context: {
+          input: { count: number };
+          invocation: Readonly<{ id: string; attempt: number }>;
+        }) {
+          invocations.push(context);
+          return [context.input.count];
+        },
+      },
+      output: { write: async (input) => void writes.push(input) },
+    });
+    expect(invocations).toEqual([
+      {
+        input: { count: 4 },
+        invocation: expect.objectContaining({
+          id: "direct:numbers:read:1",
+          attempt: 1,
+        }),
+      },
+    ]);
+    expect(writes).toEqual([{ category: "small", value: 4 }]);
+  });
+
   test("lowers authored dependency callbacks as portable closures", async () => {
     const entry = await fixture(
       systemSource()
@@ -432,6 +615,84 @@ export const clean = ({ parameters }: { parameters: { sheet: unknown } }) => ({
     expect(
       collectExpressions(implementation.start.body).some(({ kind }) => kind === "closure"),
     ).toBe(true);
+  });
+
+  test("preserves one static function binding across expanded portable use sites", async () => {
+    const entry = await fixture(
+      systemSource()
+        .replace(
+          "const child = createFeature<Child>",
+          "const stableIncrement = (value: number): number => value + 1;\nconst child = createFeature<Child>",
+        )
+        .replace(
+          "const values = await dependencies.numbers.read({ count: 4 });",
+          `const values = await dependencies.numbers.read({ count: 4 });
+        const selected = stableIncrement;
+        const handlers = { increment: stableIncrement };
+        if (handlers.increment !== selected) throw new Error("Static function identity changed.");
+        if (selected(1) !== 2) throw new Error("Static function invocation changed.");`,
+        ),
+    );
+    const ir = compileSystem(entry);
+    const contribution = programContribution(ir, "feature/worker/program/cloud");
+    if (contribution?.implementation.kind !== "portable") {
+      throw new Error("Expected portable static-function fixture.");
+    }
+    const stable = [
+      ...collectExpressions(contribution.implementation.start.body),
+      ...contribution.implementation.functions.flatMap(({ body }) => collectExpressions(body)),
+    ].filter(
+      (expression): expression is Extract<ExpressionIR, Readonly<{ kind: "closure" }>> =>
+        expression.kind === "closure" && expression.stable === true,
+    );
+    expect(stable.length).toBeGreaterThanOrEqual(2);
+    expect(new Set(stable.map(({ function: function_ }) => function_)).size).toBe(1);
+
+    const writes: unknown[] = [];
+    await executeProgramIR(ir, contribution.id, {
+      numbers: { read: async () => [1, 2, 3] },
+      output: { write: async (input) => void writes.push(input) },
+    });
+    expect(writes).toEqual([{ category: "small", value: 6 }]);
+  });
+
+  test("preserves a recursive static function reference without expanding it recursively", async () => {
+    const entry = await fixture(
+      systemSource()
+        .replace(
+          "const child = createFeature<Child>",
+          `const countDown = (value: number): number => {
+  const next = countDown;
+  return value <= 0 ? 0 : next(value - 1);
+};
+const child = createFeature<Child>`,
+        )
+        .replace(
+          "const values = await dependencies.numbers.read({ count: 4 });",
+          `const values = await dependencies.numbers.read({ count: 4 });
+        if (countDown(3) !== 0) throw new Error("Recursive function identity changed.");`,
+        ),
+    );
+    const ir = compileSystem(entry);
+    const contribution = programContribution(ir, "feature/worker/program/cloud");
+    if (contribution?.implementation.kind !== "portable") {
+      throw new Error("Expected portable recursive-function fixture.");
+    }
+    const recursiveReferences = contribution.implementation.functions
+      .flatMap(({ body }) => collectExpressions(body))
+      .filter(
+        (expression): expression is Extract<ExpressionIR, Readonly<{ kind: "closure" }>> =>
+          expression.kind === "closure" && expression.stable === true,
+      );
+    expect(recursiveReferences.length).toBeGreaterThanOrEqual(2);
+    expect(new Set(recursiveReferences.map(({ function: function_ }) => function_)).size).toBe(1);
+
+    const writes: unknown[] = [];
+    await executeProgramIR(ir, contribution.id, {
+      numbers: { read: async () => [1, 2, 3] },
+      output: { write: async (input) => void writes.push(input) },
+    });
+    expect(writes).toEqual([{ category: "small", value: 6 }]);
   });
 
   test("rejects any in portable Dependency contracts", async () => {
@@ -513,6 +774,158 @@ export const clean = ({ parameters }: { parameters: { sheet: unknown } }) => ({
 
     expect(() => compileSystem(entry)).toThrow(
       "Portable for-await-of requires an asynchronous stream.",
+    );
+  });
+
+  test("lowers and executes portable while loops", async () => {
+    const entry = await fixture(
+      systemSource().replace(
+        `for (const value of values) {
+          total += value;
+        }`,
+        `while (total < 10) {
+          total += 1;
+        }`,
+      ),
+    );
+    const ir = compileSystem(entry);
+    const contribution = programContribution(ir, "feature/worker/program/cloud");
+    if (contribution?.implementation.kind !== "portable") {
+      throw new Error("Expected portable IR.");
+    }
+    expect(contribution.implementation.start.body).toEqual(
+      expect.arrayContaining([expect.objectContaining({ kind: "while" })]),
+    );
+
+    const writes: unknown[] = [];
+    await executeProgramIR(ir, "feature/worker/program/cloud", {
+      numbers: { read: async () => [] },
+      output: { write: async (input) => writes.push(input) },
+    });
+    expect(writes).toEqual([{ category: "large", value: 10 }]);
+  });
+
+  test("composes portable asynchronous operations with standard Promise semantics", async () => {
+    const entry = await fixture(
+      systemSource().replace(
+        `const values = await dependencies.numbers.read({ count: 4 });
+        let total = 0;
+        for (const value of values) {
+          total += value;
+        }`,
+        `const groups: readonly (readonly number[])[] = await Promise.all([
+          dependencies.numbers.read({ count: 1 }),
+          dependencies.numbers.read({ count: 2 }),
+        ]);
+        let total = 0;
+        for (const group of groups) {
+          for (const groupValue of group) total += groupValue;
+        }
+        const first = await Promise.race([
+          dependencies.numbers.read({ count: 3 }),
+          dependencies.numbers.read({ count: 4 }),
+        ]);
+        for (const raceValue of first) total += raceValue;
+        const settled = await Promise.allSettled([
+          dependencies.numbers.read({ count: 5 }),
+          dependencies.numbers.read({ count: 6 }),
+        ]);
+        for (const settledResult of settled) {
+          if (settledResult.status === "fulfilled") {
+            for (const settledValue of settledResult.value) total += settledValue;
+          }
+        }`,
+      ),
+    );
+    const ir = compileSystem(entry);
+    const contribution = programContribution(ir, "feature/worker/program/cloud");
+    if (contribution?.implementation.kind !== "portable") {
+      throw new Error("Expected portable IR.");
+    }
+    expect(
+      collectExpressions(contribution.implementation.start.body)
+        .filter((expression) => expression.kind === "concurrent")
+        .map(({ operation }) => operation),
+    ).toEqual(["all", "race", "all-settled"]);
+
+    let resolveSlow!: (value: readonly number[]) => void;
+    const slow = new Promise<readonly number[]>((resolvePromise) => {
+      resolveSlow = resolvePromise;
+    });
+    const calls: number[] = [];
+    const writes: unknown[] = [];
+    await executeProgramIR(ir, contribution.id, {
+      numbers: {
+        async read({ count }: { count: number }) {
+          calls.push(count);
+          if (count === 3) return slow;
+          if (count === 6) throw new Error("expected rejection");
+          return [count];
+        },
+      },
+      output: { write: async (input) => writes.push(input) },
+    });
+    resolveSlow([3]);
+
+    expect(calls).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(writes).toEqual([{ category: "large", value: 12 }]);
+  });
+
+  test("composes direct portable methods", async () => {
+    const entry = await fixture(
+      systemSource().replace(
+        `const values = await dependencies.numbers.read({ count: 4 });
+        let total = 0;
+        for (const value of values) {
+          total += value;
+        }`,
+        `const reader = {
+          async read() {
+            return [2, 3];
+          },
+        };
+        const groups = await Promise.all([reader.read()]);
+        let total = 0;
+        for (const group of groups) {
+          for (const value of group) total += value;
+        }`,
+      ),
+    );
+    const ir = compileSystem(entry);
+    const contribution = programContribution(ir, "feature/worker/program/cloud");
+    if (contribution?.implementation.kind !== "portable") {
+      throw new Error("Expected portable IR.");
+    }
+    expect(
+      collectExpressions(contribution.implementation.start.body).some(
+        (expression) => expression.kind === "concurrent",
+      ),
+    ).toBe(true);
+
+    const writes: unknown[] = [];
+    await executeProgramIR(ir, contribution.id, {
+      numbers: { read: async () => [] },
+      output: { write: async (input) => writes.push(input) },
+    });
+    expect(writes).toEqual([{ category: "small", value: 5 }]);
+  });
+
+  test("rejects ambiguous or detached portable Promise composition", async () => {
+    const source = systemSource().replace(
+      "const values = await dependencies.numbers.read({ count: 4 });",
+      `Promise.all([dependencies.numbers.read({ count: 1 })]);
+        const values = await dependencies.numbers.read({ count: 4 });`,
+    );
+    const sourceEntry = await fixture(source);
+    expect(() => compileSystem(sourceEntry)).toThrow("Portable Promise.all must be awaited.");
+
+    const emptyRace = systemSource().replace(
+      "const values = await dependencies.numbers.read({ count: 4 });",
+      "const values: readonly number[] = await Promise.race([]);",
+    );
+    const raceEntry = await fixture(emptyRace);
+    expect(() => compileSystem(raceEntry)).toThrow(
+      "Portable Promise.race requires at least one operation.",
     );
   });
 
@@ -701,6 +1114,146 @@ export const clean = ({ parameters }: { parameters: { sheet: unknown } }) => ({
     );
   });
 
+  test("respects lexical shadowing of the Program Dependency binding in closures", async () => {
+    const ir = compileSystem(await fixture(shadowedDependencySystemSource()));
+    const contribution = programContribution(ir, "feature/worker/program/server");
+    if (contribution?.implementation.kind !== "portable") {
+      throw new Error("Expected portable shadowing fixture.");
+    }
+    const expressions = [
+      ...collectExpressions(contribution.implementation.start.body),
+      ...contribution.implementation.functions.flatMap(({ body }) => collectExpressions(body)),
+    ];
+    expect(
+      expressions
+        .filter((expression) => expression.kind === "dependency-call")
+        .map(({ dependency, operation }) => `${dependency}.${operation}`),
+    ).toEqual(["output.write"]);
+    expect(
+      expressions
+        .filter((expression) => expression.kind === "method-call")
+        .map(({ method }) => method),
+    ).toContain("write");
+
+    const writes: unknown[] = [];
+    await executeProgramIR(ir, contribution.id, {
+      output: { write: async (input) => writes.push(input) },
+    });
+    expect(writes).toEqual([{ value: "local" }]);
+  });
+
+  test("materializes generic literal meaning without a Feature-specific compiler path", async () => {
+    const ir = compileSystem(await projectFixture(typeLiteralFactorySystemSource()));
+    const contribution = programContribution(ir, "feature/catalog/program/server");
+    if (contribution?.implementation.kind !== "portable") {
+      throw new Error("Expected portable named-provider factory.");
+    }
+    const literals = [
+      ...collectExpressions(contribution.implementation.start.body),
+      ...contribution.implementation.functions.flatMap(({ body }) => collectExpressions(body)),
+    ].filter((expression) => expression.kind === "literal");
+
+    expect(contribution.provides.map(({ name }) => name)).toEqual(["catalog"]);
+    expect(literals).toContainEqual(
+      expect.objectContaining({
+        kind: "literal",
+        value: "catalog",
+        type: { kind: "literal", value: "catalog" },
+      }),
+    );
+  });
+
+  test("materializes resolved structural types without a Feature-specific compiler path", async () => {
+    const ir = compileSystem(await projectFixture(typeSchemaFactorySystemSource()));
+    const contribution = programContribution(ir, "feature/catalog/program/server");
+    if (contribution?.implementation.kind !== "portable") {
+      throw new Error("Expected portable schema-provider factory.");
+    }
+    const records = [
+      ...collectExpressions(contribution.implementation.start.body),
+      ...contribution.implementation.functions.flatMap(({ body }) => collectExpressions(body)),
+    ].filter((expression) => expression.kind === "record");
+    const schema = records
+      .map(expressionData)
+      .find(
+        (value): value is Record<string, unknown> =>
+          typeof value === "object" &&
+          value !== null &&
+          !Array.isArray(value) &&
+          "kind" in value &&
+          "fields" in value &&
+          value.kind === "record" &&
+          Array.isArray(value.fields),
+      );
+
+    expect(schema).toEqual({
+      fields: [
+        {
+          name: "count",
+          optional: true,
+          type: { kind: "primitive", name: "number" },
+        },
+        {
+          name: "tags",
+          optional: false,
+          type: { element: { kind: "primitive", name: "string" }, kind: "array" },
+        },
+        {
+          name: "title",
+          optional: false,
+          type: { kind: "primitive", name: "string" },
+        },
+      ],
+      kind: "record",
+    });
+  });
+
+  test("composes generic Features through one shared host Dependency contract", async () => {
+    const ir = compileSystem(await projectFixture(sharedHostDependencySystemSource()));
+    const program = ir.programs[0];
+    if (!program) throw new Error("Expected one server Program.");
+
+    const linked = linkProgram(program);
+
+    expect(linked.external.map(({ name }) => name)).toEqual(["events"]);
+    expect(linked.dependencies).toEqual([
+      expect.objectContaining({
+        name: "events",
+        consumers: ["orders", "users"],
+      }),
+    ]);
+  });
+
+  test("compiles one generic Dependency dispatcher for a generated provider API", async () => {
+    const ir = compileSystem(await projectFixture(dependencyDispatcherSystemSource()));
+    const program = ir.programs[0];
+    if (!program) throw new Error("Expected one server Program.");
+    const writes: unknown[] = [];
+
+    await using _execution = await executeLinkedProgramIR(linkProgram(program), {
+      output: {
+        async write(input) {
+          writes.push(input);
+        },
+      },
+    });
+
+    expect(writes).toEqual([{ doubled: 6, tripled: 9 }]);
+  });
+
+  test("rejects unresolved generic type materialization", async () => {
+    const entry = await projectFixture(
+      typeLiteralFactorySystemSource().replace(
+        'type Catalog = { Name: "catalog" };',
+        "type Catalog = { Name: string };",
+      ),
+    );
+
+    expect(() => compileSystem(entry)).toThrow(
+      /typeLiteral requires one resolved string, number, or boolean literal/,
+    );
+  });
+
   test("extracts state and actions from a Component-free UI Feature factory", async () => {
     const ir = compileSystem(await fixture(uiFactorySystemSource()));
     const program = ir.programs[0];
@@ -791,92 +1344,233 @@ export const clean = ({ parameters }: { parameters: { sheet: unknown } }) => ({
     expect(calls).toEqual(["numbers.read"]);
   });
 
-  test("generates and runs a standalone Rust artifact from the same portable IR", async () => {
-    const ir = compileSystem(await fixture(systemSource()));
-    const program = programContribution(ir, "feature/worker/program/cloud")!;
-    const directory = await temporaryDirectory("kit-production-");
-    const executable = resolve(directory, "portable-program");
+  test("distinguishes an authored empty catch from an absent catch", async () => {
+    const entry = await fixture(
+      systemSource().replace(
+        `const values = await dependencies.numbers.read({ count: 4 });
+        let total = 0;
+        for (const value of values) {
+          total += value;
+        }
+        if (total >= 10) {
+          await dependencies.output.write({ category: "large", value: total });
+        } else {
+          await dependencies.output.write({ category: "small", value: total });
+        }`,
+        `let total = 0;
+        try {
+          const values = await dependencies.numbers.read({ count: 4 });
+          for (const value of values) total += value;
+        } catch {
+        } finally {
+          total += 10;
+        }
+        await dependencies.output.write({ category: "large", value: total });`,
+      ),
+    );
+    const ir = compileSystem(entry);
+    const contribution = programContribution(ir, "feature/worker/program/cloud");
+    if (contribution?.implementation.kind !== "portable") {
+      throw new Error("Expected portable IR.");
+    }
+    expect(contribution.implementation.start.body).toContainEqual(
+      expect.objectContaining({
+        kind: "try",
+        catch: { body: [] },
+      }),
+    );
 
-    await buildRustProgram(program, executable);
-    const scenario = {
-      responses: {
-        "numbers.read": [{ ok: [1, 2, 3, 4] }],
-        "output.write": [{ ok: null }],
-      },
-    } as const;
-    await using native = await createRustProgramSession(executable);
-    const result = await native.run(scenario);
-    const reference = await executeProgramFixtureIR(ir, "feature/worker/program/cloud", scenario);
-
-    expect(result).toEqual(reference);
-    expect(result).toEqual({
-      calls: [
-        { dependency: "numbers", operation: "read", input: { count: 4 } },
-        {
-          dependency: "output",
-          operation: "write",
-          input: { category: "large", value: 10 },
+    const writes: unknown[] = [];
+    await executeProgramIR(ir, contribution.id, {
+      numbers: {
+        async read() {
+          throw new Error("handled");
         },
-      ],
-      result: { ok: null },
+      },
+      output: {
+        async write(input) {
+          writes.push(input);
+        },
+      },
     });
 
-    await fc.assert(
-      fc.asyncProperty(
-        fc.array(fc.integer({ min: -1_000, max: 1_000 }), { maxLength: 32 }),
-        async (values) => {
-          const generated = {
-            responses: {
-              "numbers.read": [{ ok: values }],
-              "output.write": [{ ok: null }],
-            },
-          };
-          const [javascript, rust] = await Promise.all([
-            executeProgramFixtureIR(ir, "feature/worker/program/cloud", generated),
-            native.run(generated),
-          ]);
-          expect(rust).toEqual(javascript);
-        },
+    expect(writes).toEqual([{ category: "large", value: 10 }]);
+  });
+
+  test("lowers computed record writes through the portable subset", async () => {
+    const entry = await fixture(
+      systemSource().replace(
+        `const values = await dependencies.numbers.read({ count: 4 });
+        let total = 0;
+        for (const value of values) {
+          total += value;
+        }
+        if (total >= 10) {
+          await dependencies.output.write({ category: "large", value: total });
+        } else {
+          await dependencies.output.write({ category: "small", value: total });
+        }`,
+        `const values: Record<string, number> = {};
+        const selected = "total";
+        values[selected] = 4;
+        values[selected] += 6;
+        await dependencies.output.write({ category: "large", value: values[selected] });`,
       ),
-      { numRuns: 40 },
+    );
+    const ir = compileSystem(entry);
+    const contribution = programContribution(ir, "feature/worker/program/cloud");
+    if (contribution?.implementation.kind !== "portable") {
+      throw new Error("Expected portable IR.");
+    }
+    expect(contribution.implementation.start.body).toContainEqual(
+      expect.objectContaining({ kind: "index-assign", operator: "=" }),
+    );
+    expect(contribution.implementation.start.body).toContainEqual(
+      expect.objectContaining({ kind: "index-assign", operator: "+=" }),
     );
 
-    const largeScenario = {
-      responses: {
-        "numbers.read": [{ ok: Array.from({ length: 10_000 }, () => 1) }],
-        "output.write": [{ ok: null }],
+    const writes: unknown[] = [];
+    await executeProgramIR(ir, contribution.id, {
+      numbers: {
+        async read() {
+          return [];
+        },
       },
-    };
-    await expect(native.run(largeScenario)).resolves.toEqual(
-      await executeProgramFixtureIR(ir, "feature/worker/program/cloud", largeScenario),
-    );
+      output: {
+        async write(input) {
+          writes.push(input);
+        },
+      },
+    });
+    expect(writes).toEqual([{ category: "large", value: 10 }]);
+  });
 
-    const failureScenario = {
-      responses: {
-        "numbers.read": [
-          { error: { message: "unavailable", data: { retryAfterMilliseconds: 250 } } },
+  test(
+    "generates and runs a standalone Rust artifact from the same portable IR",
+    { tags: ["native"], timeout: 120_000 },
+    async () => {
+      const ir = compileSystem(await fixture(systemSource()));
+      const program = programContribution(ir, "feature/worker/program/cloud")!;
+      const directory = await temporaryDirectory("kit-production-");
+      const executable = resolve(directory, "portable-program");
+
+      await buildRustProgram(program, executable);
+      const scenario = {
+        responses: {
+          "numbers.read": [{ ok: [1, 2, 3, 4] }],
+          "output.write": [{ ok: null }],
+        },
+      } as const;
+      await using native = await createRustProgramSession(executable);
+      const result = await native.run(scenario);
+      const reference = await executeProgramFixtureIR(ir, "feature/worker/program/cloud", scenario);
+
+      expect(result).toEqual(reference);
+      expect(result).toEqual({
+        calls: [
+          { dependency: "numbers", operation: "read", input: { count: 4 } },
+          {
+            dependency: "output",
+            operation: "write",
+            input: { category: "large", value: 10 },
+          },
         ],
-      },
-    } as const;
-    await expect(native.run(failureScenario)).resolves.toEqual(
-      await executeProgramFixtureIR(ir, "feature/worker/program/cloud", failureScenario),
-    );
+        result: { ok: null },
+      });
 
-    const factoryIR = compileSystem(await fixture(headlessFactorySystemSource()));
-    const factoryProgram = programContribution(factoryIR, "feature/tasks/program/server")!;
-    const factoryExecutable = resolve(directory, "factory-program");
-    const factoryScenario = {
-      responses: { "repository.read": [{ ok: ["one", "two"] }] },
-    } as const;
-    await buildRustProgram(factoryProgram, factoryExecutable);
-    await expect(runRustProgram(factoryExecutable, factoryScenario)).resolves.toEqual(
-      await executeProgramFixtureIR(factoryIR, "feature/tasks/program/server", factoryScenario),
-    );
-  }, 120_000);
+      await fc.assert(
+        fc.asyncProperty(
+          fc.array(fc.integer({ min: -1_000, max: 1_000 }), { maxLength: 32 }),
+          async (values) => {
+            const generated = {
+              responses: {
+                "numbers.read": [{ ok: values }],
+                "output.write": [{ ok: null }],
+              },
+            };
+            const [javascript, rust] = await Promise.all([
+              executeProgramFixtureIR(ir, "feature/worker/program/cloud", generated),
+              native.run(generated),
+            ]);
+            expect(rust).toEqual(javascript);
+          },
+        ),
+        { numRuns: 40 },
+      );
+
+      const largeScenario = {
+        responses: {
+          "numbers.read": [{ ok: Array.from({ length: 10_000 }, () => 1) }],
+          "output.write": [{ ok: null }],
+        },
+      };
+      await expect(native.run(largeScenario)).resolves.toEqual(
+        await executeProgramFixtureIR(ir, "feature/worker/program/cloud", largeScenario),
+      );
+
+      const failureScenario = {
+        responses: {
+          "numbers.read": [
+            { error: { message: "unavailable", data: { retryAfterMilliseconds: 250 } } },
+          ],
+        },
+      } as const;
+      await expect(native.run(failureScenario)).resolves.toEqual(
+        await executeProgramFixtureIR(ir, "feature/worker/program/cloud", failureScenario),
+      );
+
+      const factoryIR = compileSystem(await fixture(headlessFactorySystemSource()));
+      const factoryProgram = programContribution(factoryIR, "feature/tasks/program/server")!;
+      const factoryExecutable = resolve(directory, "factory-program");
+      const factoryScenario = {
+        responses: { "repository.read": [{ ok: ["one", "two"] }] },
+      } as const;
+      await buildRustProgram(factoryProgram, factoryExecutable);
+      await expect(runRustProgram(factoryExecutable, factoryScenario)).resolves.toEqual(
+        await executeProgramFixtureIR(factoryIR, "feature/tasks/program/server", factoryScenario),
+      );
+    },
+  );
+
+  test(
+    "preserves portable failure identity and source context in JavaScript and Rust",
+    { tags: ["native"], timeout: 120_000 },
+    async () => {
+      const ir = compileSystem(await projectFixture(throwingSystemSource()));
+      const contribution = programContribution(ir, "feature/worker/program/server")!;
+      const directory = await temporaryDirectory("kit-failure-");
+      const executable = resolve(directory, "failure-program");
+      const scenario = { responses: { "output.write": [{ ok: null }] } };
+
+      await buildRustProgram(contribution, executable);
+      const [javascript, rust] = await Promise.all([
+        executeProgramFixtureIR(ir, contribution.id, scenario),
+        runRustProgram(executable, scenario),
+      ]);
+
+      expect(rust).toEqual(javascript);
+      expect(rust).toMatchObject({
+        result: {
+          error: {
+            message: "intentional failure",
+          },
+        },
+      });
+    },
+  );
 });
 
 async function fixture(source: string): Promise<string> {
   const directory = await temporaryDirectory("kit-ir-");
+  const entry = resolve(directory, "system.ts");
+  await writeFile(entry, source);
+  return entry;
+}
+
+async function projectFixture(source: string): Promise<string> {
+  const parent = resolve(process.cwd(), ".data");
+  const directory = await mkdtemp(resolve(parent, "compiler-fixture-"));
+  temporaryDirectories.push(directory);
   const entry = resolve(directory, "system.ts");
   await writeFile(entry, source);
   return entry;
@@ -898,6 +1592,296 @@ function createFeature<C>(definition: object): Feature<C> {
 function createSystem(definition: object): object {
   return definition;
 }
+`;
+}
+
+function typeLiteralFactorySystemSource(): string {
+  return `
+import { createSystem, type Feature, type Program, typeLiteral } from "@/index";
+
+type Server = { Name: "server"; Platform: { Name: "server" } };
+type Reader = { read(input: {}): Promise<string> };
+type Model = { Name: string };
+type NamedFeature<Definition extends Model> = {
+  Programs: {
+    server: Program<Server, { Provides: { [Name in Definition["Name"]]: Reader } }>;
+  };
+};
+
+function createNamedFeature<Definition extends Model>(
+  value: string,
+): Feature<NamedFeature<Definition>> {
+  return createNamedServer<Definition>(value, () => typeLiteral<Definition["Name"]>());
+}
+
+function createNamedServer<Definition extends Model>(
+  value: string,
+  identity: () => Definition["Name"],
+): Feature<NamedFeature<Definition>> {
+  return {
+    programs: {
+      server: {
+        start() {
+          const name = identity();
+          return {
+            [name]: {
+              async read(_input: {}) {
+                return value;
+              },
+            },
+          } as { [Name in Definition["Name"]]: Reader };
+        },
+      },
+    },
+  } as unknown as Feature<NamedFeature<Definition>>;
+}
+
+type Catalog = { Name: "catalog" };
+const catalog = createNamedFeature<Catalog>("ready");
+
+export default createSystem({ features: { catalog } });
+`;
+}
+
+function typeSchemaFactorySystemSource(): string {
+  return `
+import {
+  createSystem,
+  type Feature,
+  type Program,
+  typeLiteral,
+  typeSchema,
+} from "@/index";
+
+type Server = { Name: "server"; Platform: { Name: "server" } };
+type Reader = { describe(input: {}): Promise<object> };
+type Model = { Name: string; Data: object };
+type SchemaFeature<Definition extends Model> = {
+  Programs: {
+    server: Program<Server, { Provides: { [Name in Definition["Name"]]: Reader } }>;
+  };
+};
+
+function createSchemaFeature<Definition extends Model>(): Feature<SchemaFeature<Definition>> {
+  return {
+    programs: {
+      server: {
+        start() {
+          const name = typeLiteral<Definition["Name"]>();
+          return {
+            [name]: {
+              async describe(_input: {}) {
+                return typeSchema<Definition["Data"]>() as object;
+              },
+            },
+          } as { [Name in Definition["Name"]]: Reader };
+        },
+      },
+    },
+  } as unknown as Feature<SchemaFeature<Definition>>;
+}
+
+type Catalog = {
+  Name: "catalog";
+  Data: { title: string; count?: number; tags: readonly string[] };
+};
+const catalog = createSchemaFeature<Catalog>();
+
+export default createSystem({ features: { catalog } });
+`;
+}
+
+function dependencyDispatcherSystemSource(): string {
+  return `
+import { dependencyInvocation } from "@/core/dependency";
+import {
+  createSystem,
+  type Dependency,
+  type Feature,
+  type Program,
+} from "@/index";
+
+type Server = { Name: "server"; Platform: { Name: "server" } };
+type Math = Dependency<{
+  Operations: {
+    double(input: { value: number }): Promise<number>;
+    triple(input: { value: number }): Promise<number>;
+  };
+}>;
+type Output = {
+  write(input: { doubled: number; tripled: number }): Promise<void>;
+};
+type Provider = {
+  Programs: { server: Program<Server, { Provides: { math: Math } }> };
+};
+type Consumer = {
+  Programs: {
+    server: Program<Server, { Requires: { math: Math; output: Output } }>;
+  };
+};
+
+function createMath(): Feature<Provider> {
+  return {
+    programs: {
+      server: {
+        start() {
+          const operations = {
+            double: ({ value }: { value: number }) => value * 2,
+            triple: ({ value }: { value: number }) => value * 3,
+          };
+          return {
+            math: {
+              [dependencyInvocation](
+                operation: "double" | "triple",
+                input: { value: number },
+                _invocation: {
+                  id: string;
+                  attempt: number;
+                  scheduledAt: number;
+                  startedAt: number;
+                },
+              ) {
+                const handler = operations[operation];
+                return handler(input);
+              },
+            },
+          } as unknown as { math: Math };
+        },
+      },
+    },
+  } as unknown as Feature<Provider>;
+}
+
+const consumer = {
+  programs: {
+    server: {
+      async start({ dependencies }: { dependencies: { math: Math; output: Output } }) {
+        const doubled = await dependencies.math.double({ value: 3 });
+        const tripled = await dependencies.math.triple({ value: 3 });
+        await dependencies.output.write({ doubled, tripled });
+      },
+    },
+  },
+} as Feature<Consumer>;
+
+export default createSystem({
+  features: {
+    math: createMath(),
+    consumer,
+  },
+});
+`;
+}
+
+function sharedHostDependencySystemSource(): string {
+  return `
+import { createSystem, type Feature, type Program } from "@/index";
+
+type Server = { Name: "server"; Platform: { Name: "server" } };
+type EventStore<Event = object> = {
+  append(input: { events: readonly Event[] }): Promise<void>;
+};
+type Model = { Event: object };
+type Slice<Definition extends Model> = {
+  Programs: {
+    server: Program<Server, { Requires: { events: EventStore } }>;
+  };
+};
+
+function createSlice<Definition extends Model>(): Feature<Slice<Definition>> {
+  return {
+    programs: {
+      server: {
+        async start({ dependencies }: { dependencies: { events: EventStore } }) {
+          const events = dependencies.events as EventStore<Definition["Event"]>;
+          await events.append({ events: [] as readonly Definition["Event"][] });
+        },
+      },
+    },
+  } as unknown as Feature<Slice<Definition>>;
+}
+
+type Order = { Event: { type: "order.created"; orderId: string } };
+type User = { Event: { type: "user.created"; userId: string } };
+
+export default createSystem({
+  features: {
+    orders: createSlice<Order>(),
+    users: createSlice<User>(),
+  },
+});
+`;
+}
+
+function shadowedDependencySystemSource(): string {
+  return `
+type Platform = { readonly Name: "server" };
+type Environment = { readonly Name: "server"; readonly Platform: Platform };
+type Program<E extends Environment, C extends object = {}> = Readonly<C & { Environment: E }>;
+${compositionTypes()}
+
+type Output = { write(input: { value: string }): Promise<void> };
+type Worker = {
+  Programs: {
+    server: Program<Environment, { Requires: { output: Output } }>;
+  };
+};
+
+const local = {
+  nested: {
+    async write(_input: { value: string }): Promise<void> {},
+  },
+};
+
+const worker = createFeature<Worker>({
+  programs: {
+    server: {
+      async start({ dependencies }: { dependencies: { output: Output } }) {
+        const invoke = async ({ dependencies }: { dependencies: typeof local }) => {
+          await dependencies.nested.write({ value: "local" });
+        };
+        await invoke({
+          dependencies: {
+            nested: {
+              async write(input) {
+                await dependencies.output.write(input);
+              },
+            },
+          },
+        });
+      },
+    },
+  },
+});
+
+export default createSystem({ features: { worker } });
+`;
+}
+
+function throwingSystemSource(): string {
+  return `
+import { createFeature, createSystem, type Program } from "@/index";
+
+type Server = { Name: "server"; Platform: { Name: "server" } };
+type Output = { write(input: { value: string }): Promise<void> };
+type Worker = {
+  Programs: {
+    server: Program<Server, { Requires: { output: Output } }>;
+  };
+};
+
+const worker = createFeature<Worker>({
+  programs: {
+    server: {
+      async start({ dependencies }) {
+        await dependencies.output.write({ value: "before failure" });
+        throw new Error("intentional failure");
+      },
+    },
+  },
+});
+
+export default createSystem({ features: { worker } });
 `;
 }
 
@@ -1349,13 +2333,18 @@ function collectExpressions(statements: readonly StatementIR[]): ExpressionIR[] 
     if (expression.kind === "array") expression.values.forEach(visit);
     else if (expression.kind === "record") expression.fields.forEach(({ value }) => visit(value));
     else if (expression.kind === "property" || expression.kind === "unary") visit(expression.value);
-    else if (expression.kind === "binary") {
+    else if (expression.kind === "index") {
+      visit(expression.value);
+      visit(expression.index);
+    } else if (expression.kind === "binary") {
       visit(expression.left);
       visit(expression.right);
     } else if (expression.kind === "conditional") {
       visit(expression.condition);
       visit(expression.consequent);
       visit(expression.alternate);
+    } else if (expression.kind === "concurrent") {
+      expression.values.forEach(visit);
     } else if (expression.kind === "call" || expression.kind === "dependency-call") {
       expression.arguments.forEach(visit);
     } else if (expression.kind === "invoke") {
@@ -1382,6 +2371,10 @@ function collectExpressions(statements: readonly StatementIR[]): ExpressionIR[] 
     } else if (statement.kind === "property-assign") {
       visit(statement.target);
       visit(statement.value);
+    } else if (statement.kind === "index-assign") {
+      visit(statement.target);
+      visit(statement.index);
+      visit(statement.value);
     } else if (statement.kind === "throw") visit(statement.value);
     else if (statement.kind === "expression") visit(statement.expression);
     else if (statement.kind === "if") {
@@ -1395,11 +2388,26 @@ function collectExpressions(statements: readonly StatementIR[]): ExpressionIR[] 
       visit(statement.from);
       visit(statement.to);
       expressions.push(...collectExpressions(statement.body));
+    } else if (statement.kind === "while") {
+      visit(statement.condition);
+      expressions.push(...collectExpressions(statement.body));
     } else if (statement.kind === "try") {
       expressions.push(...collectExpressions(statement.body));
-      expressions.push(...collectExpressions(statement.catch));
+      if (statement.catch) expressions.push(...collectExpressions(statement.catch.body));
       expressions.push(...collectExpressions(statement.finally));
     } else if (statement.value) visit(statement.value);
   }
   return expressions;
+}
+
+function expressionData(expression: ExpressionIR): unknown {
+  if (expression.kind === "literal") return expression.value;
+  if (expression.kind === "none") return undefined;
+  if (expression.kind === "array") return expression.values.map(expressionData);
+  if (expression.kind === "record") {
+    return Object.fromEntries(
+      expression.fields.map(({ name, value }) => [name, expressionData(value)]),
+    );
+  }
+  return undefined;
 }

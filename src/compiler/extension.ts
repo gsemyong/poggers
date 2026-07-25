@@ -18,7 +18,11 @@ export type SourceCompilerAPI = Readonly<{
   lower(type: ts.Type, at: ts.Node): TypeIR;
   portable(
     declaration: ts.ObjectLiteralElementLike | ts.FunctionLikeDeclaration,
-    options: Readonly<{ id: string; name: string }>,
+    options: Readonly<{
+      id: string;
+      name: string;
+      parameterIRTypes?: readonly TypeIR[];
+    }>,
   ): Readonly<{ entry: FunctionIR; functions: readonly FunctionIR[] }>;
   emptyRecord(): TypeIR;
   span(node: ts.Node): SourceSpan;

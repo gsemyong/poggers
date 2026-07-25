@@ -22,66 +22,95 @@ afterEach(async () => {
   );
 });
 
-test("keeps canonical operators and traces equivalent across JavaScript and Rust", async () => {
-  const directory = await mkdtemp(resolve(tmpdir(), "kit-rust-conformance-"));
-  temporaryDirectories.push(directory);
-  const entry = resolve(directory, "system.ts");
-  await writeFile(entry, conformanceSource());
-  const ir = compileSystem(entry);
-  const contribution = ir.programs[0]!.contributions[0]!;
-  const executable = resolve(directory, "conformance");
-  await buildRustProgram(contribution, executable);
-  await using native = await createRustProgramSession(executable);
+test(
+  "keeps canonical operators and traces equivalent across JavaScript and Rust",
+  { tags: ["native"], timeout: 120_000 },
+  async () => {
+    const directory = await mkdtemp(resolve(tmpdir(), "kit-rust-conformance-"));
+    temporaryDirectories.push(directory);
+    const entry = resolve(directory, "system.ts");
+    await writeFile(entry, conformanceSource());
+    const ir = compileSystem(entry);
+    const contribution = ir.programs[0]!.contributions[0]!;
+    const executable = resolve(directory, "conformance");
+    await buildRustProgram(contribution, executable);
+    const cached = resolve(directory, "conformance-cached");
+    const path = process.env.PATH;
+    try {
+      process.env.PATH = "";
+      await buildRustProgram(contribution, cached);
+    } finally {
+      process.env.PATH = path;
+    }
+    await rm(executable);
+    await using native = await createRustProgramSession(cached);
 
-  type Input = Readonly<{
-    left: number;
-    right: number;
-    first: boolean;
-    second: boolean;
-    prefix: string;
-    suffix: string;
-    nested: Readonly<{ value: number; label: string }>;
-  }>;
-  const verify = async (input: Input) => {
-    const scenario = {
-      responses: {
-        "input.read": [{ ok: input }],
-        "output.write": [{ ok: null }],
-      },
+    type Input = Readonly<{
+      left: number;
+      right: number;
+      first: boolean;
+      second: boolean;
+      prefix: string;
+      suffix: string;
+      nested: Readonly<{ value: number; label: string }>;
+    }>;
+    const verify = async (input: Input) => {
+      const scenario = {
+        responses: {
+          "input.read": [{ ok: input }],
+          "concurrent.read": [
+            { ok: input.left },
+            { ok: input.right },
+            { ok: input.left },
+            { ok: input.right },
+            { ok: input.left },
+            { error: { message: "expected concurrent rejection" } },
+          ],
+          "output.write": [{ ok: null }],
+        },
+      };
+      const [javascript, rust] = await Promise.all([
+        executeProgramFixtureIR(ir, contribution.id, scenario),
+        native.run(scenario),
+      ]);
+      expect(
+        javascript.calls.find(({ dependency }) => dependency === "output")?.input,
+      ).toMatchObject({
+        parallel: input.left + input.right,
+        raced: input.left,
+        serialized: `{"z":${input.right},"a":${input.left}}`,
+        settled: input.left,
+      });
+      expect(rust).toEqual(javascript);
     };
-    const [javascript, rust] = await Promise.all([
-      executeProgramFixtureIR(ir, contribution.id, scenario),
-      native.run(scenario),
-    ]);
-    expect(rust).toEqual(javascript);
-  };
 
-  await verify({
-    left: 0,
-    right: 1,
-    first: false,
-    second: false,
-    prefix: "\u2028",
-    suffix: "\u2029",
-    nested: { value: 0, label: "\0" },
-  });
+    await verify({
+      left: 0,
+      right: 1,
+      first: false,
+      second: false,
+      prefix: "\u2028",
+      suffix: "\u2029",
+      nested: { value: 0, label: "\0" },
+    });
 
-  await fc.assert(
-    fc.asyncProperty(
-      fc.record({
-        left: fc.integer({ min: -10_000, max: 10_000 }),
-        right: fc.integer({ min: -10_000, max: 10_000 }).filter((value) => value !== 0),
-        first: fc.boolean(),
-        second: fc.boolean(),
-        prefix: fc.string({ unit: "grapheme", maxLength: 12 }),
-        suffix: fc.string({ unit: "grapheme", maxLength: 12 }),
-        nested: fc.record({ value: fc.integer(), label: fc.string({ maxLength: 8 }) }),
-      }),
-      verify,
-    ),
-    { numRuns: 60 },
-  );
-}, 120_000);
+    await fc.assert(
+      fc.asyncProperty(
+        fc.record({
+          left: fc.integer({ min: -10_000, max: 10_000 }),
+          right: fc.integer({ min: -10_000, max: 10_000 }).filter((value) => value !== 0),
+          first: fc.boolean(),
+          second: fc.boolean(),
+          prefix: fc.string({ unit: "grapheme", maxLength: 12 }),
+          suffix: fc.string({ unit: "grapheme", maxLength: 12 }),
+          nested: fc.record({ value: fc.integer(), label: fc.string({ maxLength: 8 }) }),
+        }),
+        verify,
+      ),
+      { numRuns: 60 },
+    );
+  },
+);
 
 function conformanceSource(): string {
   return `
@@ -131,6 +160,10 @@ type Result = {
   positiveInfinity: number;
   negativeInfinity: number;
   negativeZero: number;
+  serialized: string;
+  parallel: number;
+  raced: number;
+  settled: number;
 };
 type Worker = {
   Programs: {
@@ -138,6 +171,7 @@ type Worker = {
       { Name: "server"; Platform: { Name: "server" } },
       {
         Requires: {
+          concurrent: { read(input: { value: number }): Promise<number> };
           input: { read(input: {}): Promise<Input> };
           output: { write(input: Result): Promise<void> };
         };
@@ -150,11 +184,30 @@ const worker = createFeature<Worker>({
     worker: {
       async start({ dependencies }: {
         dependencies: {
+          concurrent: { read(input: { value: number }): Promise<number> };
           input: { read(input: {}): Promise<Input> };
           output: { write(input: Result): Promise<void> };
         };
       }) {
         const value = await dependencies.input.read({});
+        const parallelValues: readonly number[] = await Promise.all([
+          dependencies.concurrent.read({ value: value.left }),
+          dependencies.concurrent.read({ value: value.right }),
+        ]);
+        let parallel = 0;
+        for (const parallelValue of parallelValues) parallel += parallelValue;
+        const raced = await Promise.race([
+          dependencies.concurrent.read({ value: value.left }),
+          dependencies.concurrent.read({ value: value.right }),
+        ]);
+        const settledValues = await Promise.allSettled([
+          dependencies.concurrent.read({ value: value.left }),
+          dependencies.concurrent.read({ value: value.right }),
+        ]);
+        let settled = 0;
+        for (const settledValue of settledValues) {
+          if (settledValue.status === "fulfilled") settled += settledValue.value;
+        }
         let assigned = value.left;
         assigned += 2;
         assigned -= 1;
@@ -187,6 +240,10 @@ const worker = createFeature<Worker>({
           positiveInfinity: 1 / 0,
           negativeInfinity: -1 / 0,
           negativeZero: -0,
+          serialized: JSON.stringify({ z: value.right, a: value.left }),
+          parallel,
+          raced,
+          settled,
         };
         await dependencies.output.write(result);
       },

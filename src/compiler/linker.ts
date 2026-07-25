@@ -1,9 +1,9 @@
 import {
   assertSystemIRVersion,
+  collectDependencyOperations,
+  orderDependencyGraph,
   type SystemIR,
-  type DependencyContractIR,
   type DependencyIR,
-  type DependencyOperationIR,
   type LinkedDependencyIR,
   type LinkedProgramIR,
   type ProgramContributionIR,
@@ -67,7 +67,10 @@ export function linkProgram(program: ProgramIR): LinkedProgramIR {
     const canonical = provider?.dependency ?? consumers[0]?.dependency;
     if (!canonical) continue;
     for (const consumer of consumers) {
-      if (!sameType(canonical.type, consumer.dependency.type)) {
+      if (
+        canonical.binding !== consumer.dependency.binding ||
+        !sameType(canonical.type, consumer.dependency.type)
+      ) {
         throw new ProgramLinkError(
           `Program ${JSON.stringify(program.name)} has incompatible contracts for Dependency ` +
             `${JSON.stringify(name)} between ${JSON.stringify(provider?.feature ?? consumers[0]!.feature)} ` +
@@ -83,45 +86,14 @@ export function linkProgram(program: ProgramIR): LinkedProgramIR {
     linkedDependencies.push({
       name,
       type: canonical.type,
+      ...(canonical.binding ? { binding: canonical.binding } : {}),
       consumers: consumers.map(({ feature }) => feature),
       ...(provider ? { provider: provider.feature } : {}),
     });
     if (!provider) external.push(canonical);
   }
 
-  const dependants = new Map<string, Set<string>>();
-  for (const [feature, values] of featureDependencies) {
-    for (const dependency of values) {
-      const items = dependants.get(dependency) ?? new Set<string>();
-      items.add(feature);
-      dependants.set(dependency, items);
-    }
-  }
-  const ready = [...featureDependencies]
-    .filter(([, values]) => values.size === 0)
-    .map(([feature]) => feature)
-    .sort();
-  const order: string[] = [];
-  while (ready.length) {
-    const feature = ready.shift()!;
-    order.push(feature);
-    for (const dependant of [...(dependants.get(feature) ?? [])].sort()) {
-      const values = featureDependencies.get(dependant)!;
-      values.delete(feature);
-      if (!values.size) insertSorted(ready, dependant);
-    }
-  }
-  if (order.length !== contributions.length) {
-    const cycle = contributions
-      .map(({ feature }) => feature)
-      .filter((feature) => !order.includes(feature));
-    const first = contributions.find(({ feature }) => cycle.includes(feature))!;
-    throw new ProgramLinkError(
-      `Program ${JSON.stringify(program.name)} has a Dependency provider cycle between Features: ` +
-        `${cycle.join(", ")}.`,
-      first.span,
-    );
-  }
+  const order = orderDependencyGraph(featureDependencies);
   const byFeature = new Map(
     contributions.map((contribution) => [contribution.feature, contribution]),
   );
@@ -148,65 +120,19 @@ export function collectProgramManifest(program: ProgramIR): ProgramManifest {
   const linked = linkProgram(program);
   return {
     name: program.name,
+    bindings: linked.dependencies
+      .filter(({ binding }) => binding === "envelope")
+      .map((dependency) => ({
+        name: dependency.name,
+        binding: "envelope",
+        operations: collectDependencyOperations(dependency),
+      })),
     contributions: linked.contributions.map(({ contribution }) => ({
       feature: contribution.feature,
       requires: contribution.requires.map((dependency) => dependency.name).sort(),
       provides: contribution.provides.map((dependency) => dependency.name).sort(),
     })),
   };
-}
-
-/** Projects one semantic Dependency into its canonical callable operations. */
-export function collectDependencyOperations(
-  dependency: DependencyIR,
-): readonly DependencyOperationIR[] {
-  if (dependency.type.kind !== "record") {
-    throw new Error(
-      `Dependency ${JSON.stringify(dependency.name)} must be a record of operations.`,
-    );
-  }
-  return dependency.type.fields
-    .map((field): DependencyOperationIR => {
-      if (field.optional || field.type.kind !== "function") {
-        throw new Error(
-          `Dependency ${JSON.stringify(dependency.name)} operation ${JSON.stringify(field.name)} ` +
-            "must be a required function.",
-        );
-      }
-      if (field.type.parameters.length > 1) {
-        throw new Error(
-          `Dependency ${JSON.stringify(dependency.name)} operation ${JSON.stringify(field.name)} ` +
-            "must accept one input object.",
-        );
-      }
-      return {
-        name: field.name,
-        mode:
-          field.type.result.kind === "promise"
-            ? "asynchronous"
-            : field.type.result.kind === "stream"
-              ? "stream"
-              : "synchronous",
-        input: field.type.parameters[0]?.type ?? { kind: "primitive", name: "void" },
-        output:
-          field.type.result.kind === "promise"
-            ? field.type.result.value
-            : field.type.result.kind === "stream"
-              ? field.type.result.element
-              : field.type.result,
-      };
-    })
-    .sort((left, right) => left.name.localeCompare(right.name));
-}
-
-/** Projects semantic Dependency types into their minimal runtime binding contracts. */
-export function projectDependencyContracts(
-  dependencies: readonly DependencyIR[],
-): readonly DependencyContractIR[] {
-  return dependencies.map((dependency) => ({
-    name: dependency.name,
-    operations: collectDependencyOperations(dependency),
-  }));
 }
 
 function dependenciesFor(
@@ -255,10 +181,4 @@ function typeIdentity(type: TypeIR): string {
         .map(({ optional, type: value }) => `${optional}:${typeIdentity(value)}`)
         .join(",")}=>${typeIdentity(type.result)}`;
   }
-}
-
-function insertSorted(values: string[], value: string): void {
-  const index = values.findIndex((candidate) => candidate.localeCompare(value) > 0);
-  if (index === -1) values.push(value);
-  else values.splice(index, 0, value);
 }

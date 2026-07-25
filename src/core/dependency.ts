@@ -2,12 +2,248 @@ import type { FeatureContract } from "@/core/feature";
 import type { ProgramContract } from "@/core/program";
 
 type Empty = Record<never, never>;
+type Procedure = (input: never) => unknown;
+type Procedures = Readonly<Record<string, Procedure>>;
 type Simplify<Value> = { readonly [Key in keyof Value]: Value[Key] };
 type UnionToIntersection<Union> = (Union extends unknown ? (value: Union) => void : never) extends (
   value: infer Intersection,
 ) => void
   ? Intersection
   : never;
+declare const dependencyDefinition: unique symbol;
+export const dependencyInvocation: unique symbol = Symbol("kit.dependency.invocation");
+export const dependencyInvocationControl: unique symbol = Symbol(
+  "kit.dependency.invocation.control",
+);
+export const deferredDependencyInvocation: unique symbol = Symbol(
+  "kit.dependency.invocation.deferred",
+);
+
+/** Type-level meaning shared by a Dependency's consumer and provider projections. */
+export type DependencyDefinition = Readonly<{
+  Operations: Procedures;
+  Failures?: Readonly<Record<string, object>>;
+  Heartbeats?: Readonly<Record<string, unknown>>;
+}>;
+
+/** The semantic API Programs consume. Its metadata is erased before runtime lowering. */
+export type Dependency<
+  Definition extends DependencyDefinition,
+  API extends Procedures = Definition["Operations"],
+> = Readonly<
+  API & {
+    readonly [dependencyDefinition]: Definition;
+  }
+>;
+
+export type DependencyContract = Dependency<DependencyDefinition>;
+
+export type DependencyDefinitionOf<Api extends DependencyContract> =
+  Api extends Readonly<{
+    [dependencyDefinition]: infer Definition extends DependencyDefinition;
+  }>
+    ? Definition
+    : never;
+
+type InputOf<Operation> = Operation extends (input: infer Input) => unknown ? Input : never;
+type FailureOf<Definition extends DependencyDefinition> =
+  Definition extends Readonly<{
+    Failures: infer Failures extends Readonly<Record<string, object>>;
+  }>
+    ? {
+        readonly [Name in keyof Failures]: Readonly<{
+          type: Extract<Name, string>;
+          data: Failures[Name];
+          message?: string;
+          retry?: Readonly<{ delay: number }>;
+        }>;
+      }[keyof Failures]
+    : never;
+type HeartbeatOf<
+  Definition extends DependencyDefinition,
+  Operation extends keyof Definition["Operations"],
+> =
+  Definition extends Readonly<{
+    Heartbeats: infer Heartbeats extends Readonly<Record<string, unknown>>;
+  }>
+    ? Operation extends keyof Heartbeats
+      ? Heartbeats[Operation]
+      : never
+    : never;
+
+/** Runtime-owned controls that never enter a Dependency's business input. */
+export type DependencyInvocationControl = Readonly<{
+  previousHeartbeat?: unknown;
+  heartbeat(input: unknown): void;
+  defer(input: Readonly<{ id: string }>): DeferredDependencyInvocation<unknown>;
+  cancellation: Readonly<{
+    requested(): boolean;
+    wait(): Promise<void>;
+  }>;
+}>;
+
+/**
+ * Runtime-owned information for one provider invocation.
+ *
+ * Durable callers retain `id` across retries and increment `attempt`. Direct
+ * calls create one process-local invocation with attempt `1`.
+ */
+export type DependencyInvocation = Readonly<{
+  id: string;
+  attempt: number;
+  scheduledAt: number;
+  startedAt: number;
+  deadline?: number;
+  readonly [dependencyInvocationControl]?: DependencyInvocationControl;
+}>;
+
+/** A serializable reference to one externally completed Dependency invocation. */
+export type DeferredDependencyInvocation<
+  Result = unknown,
+  Failure = never,
+  Heartbeat = never,
+> = Readonly<{
+  id: string;
+  activity: string;
+  execution: Readonly<{ workflow: string; id: string; run: string }>;
+  attempt: number;
+  readonly [deferredDependencyInvocation]?: Readonly<{
+    result: Result;
+    failure: Failure;
+    heartbeat: Heartbeat;
+  }>;
+}>;
+
+/** Runtime controls available while implementing one Dependency operation. */
+export type DependencyProviderInvocation<
+  Failure = never,
+  Heartbeat = never,
+  Result = unknown,
+> = Omit<DependencyInvocation, typeof dependencyInvocationControl> &
+  Readonly<{
+    previousHeartbeat?: Readonly<Heartbeat>;
+    heartbeat(input: Readonly<{ details: Heartbeat }>): void;
+    defer(
+      input: Readonly<{ id: string }>,
+    ): DeferredDependencyInvocation<Result, Failure, Heartbeat>;
+    cancellation: Readonly<{
+      requested(): boolean;
+      wait(): Promise<void>;
+    }>;
+    fail(input: Failure): never;
+  }>;
+
+/** Structured failure produced by a typed Dependency provider. */
+export class DependencyFailureError extends Error {
+  readonly data: unknown;
+  readonly retryDelay?: number;
+
+  constructor(
+    input: Readonly<{
+      type: string;
+      data: unknown;
+      message?: string;
+      retry?: Readonly<{ delay: number }>;
+    }>,
+  ) {
+    super(input.message ?? input.type);
+    this.name = input.type;
+    this.data = input.data;
+    const retryDelay = input.retry?.delay;
+    if (retryDelay !== undefined && (!Number.isSafeInteger(retryDelay) || retryDelay < 0)) {
+      throw new TypeError("Dependency retry delay must be a non-negative safe integer.");
+    }
+    this.retryDelay = retryDelay;
+  }
+}
+
+type OperationOutput<Operation> = Operation extends (...arguments_: never[]) => infer Output
+  ? Awaited<Output>
+  : never;
+type ProviderOperationResult<Operation, Failure, Heartbeat> = Operation extends (
+  ...arguments_: never[]
+) => infer Output
+  ? Output extends PromiseLike<unknown>
+    ? PromiseLike<
+        | OperationOutput<Operation>
+        | DeferredDependencyInvocation<OperationOutput<Operation>, Failure, Heartbeat>
+      >
+    : Output
+  : never;
+
+/** The one implementation projection used by portable and host providers. */
+export type DependencyImplementation<Api extends DependencyContract> = {
+  readonly [Operation in keyof DependencyDefinitionOf<Api>["Operations"]]: (
+    context: Readonly<{
+      input: InputOf<DependencyDefinitionOf<Api>["Operations"][Operation]>;
+      invocation: DependencyProviderInvocation<
+        FailureOf<DependencyDefinitionOf<Api>>,
+        HeartbeatOf<DependencyDefinitionOf<Api>, Operation>,
+        OperationOutput<DependencyDefinitionOf<Api>["Operations"][Operation]>
+      >;
+    }>,
+  ) => ProviderOperationResult<
+    DependencyDefinitionOf<Api>["Operations"][Operation],
+    FailureOf<DependencyDefinitionOf<Api>>,
+    HeartbeatOf<DependencyDefinitionOf<Api>, Operation>
+  >;
+};
+
+/** @internal Creates the runtime-branded form returned by provider `defer`. */
+export function createDeferredDependencyInvocation<Result>(
+  input: Omit<DeferredDependencyInvocation<Result>, typeof deferredDependencyInvocation>,
+): DeferredDependencyInvocation<Result> {
+  if (!input.id) throw new TypeError("Deferred Dependency invocation id is required.");
+  return Object.freeze({
+    ...input,
+    [deferredDependencyInvocation]: Object.freeze({}),
+  }) as DeferredDependencyInvocation<Result>;
+}
+
+/** @internal Recognizes a provider result whose completion is externally owned. */
+export function isDeferredDependencyInvocation(
+  value: unknown,
+): value is DeferredDependencyInvocation {
+  return Boolean(
+    value &&
+    typeof value === "object" &&
+    deferredDependencyInvocation in value &&
+    typeof (value as { id?: unknown }).id === "string",
+  );
+}
+
+/** Projects a named consumer Dependency map to the providers a host must mount. */
+export type DependencyImplementations<Dependencies extends object> = {
+  readonly [Name in keyof Dependencies]: Dependencies[Name] extends DependencyContract
+    ? DependencyImplementation<Dependencies[Name]>
+    : Dependencies[Name];
+};
+
+type MountedDependency = Readonly<{
+  [dependencyInvocation](
+    operation: string,
+    input: unknown,
+    invocation: DependencyInvocation,
+  ): unknown;
+}>;
+
+/** @internal Invokes a mounted provider with runtime-owned metadata. */
+export function invokeDependency(
+  dependency: object,
+  operation: string,
+  input: unknown,
+  invocation: DependencyInvocation,
+): unknown {
+  const invoke = (dependency as Partial<MountedDependency>)[dependencyInvocation];
+  if (typeof invoke === "function") {
+    return invoke.call(dependency, operation, input, invocation);
+  }
+  const method = Reflect.get(dependency, operation);
+  if (typeof method !== "function") {
+    throw new Error(`Dependency operation ${JSON.stringify(operation)} is not implemented.`);
+  }
+  return Reflect.apply(method, dependency, [input]);
+}
 
 type ProgramsOf<Owner> = Owner extends {
   Programs: infer Programs extends Record<string, ProgramContract>;

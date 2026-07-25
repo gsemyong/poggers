@@ -1,7 +1,8 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use kit_server_runtime::{
-    Dependency, DependencyContext, Engine, NativeError, NativeFuture, NativeResult, Value,
+    Dependency, DependencyContext, DependencyInvocation, Engine, NativeError, NativeFuture,
+    NativeResult, Value,
 };
 
 pub struct Timer;
@@ -11,7 +12,13 @@ pub async fn create(_context: DependencyContext) -> NativeResult<Timer> {
 }
 
 impl Dependency for Timer {
-    fn call(&self, _engine: Engine, operation: &str, input: Value) -> NativeFuture<Value> {
+    fn call(
+        &self,
+        _engine: Engine,
+        operation: &str,
+        input: Value,
+        _invocation: DependencyInvocation,
+    ) -> NativeFuture<Value> {
         let operation = operation.to_owned();
         Box::pin(async move {
             match operation.as_str() {
@@ -64,6 +71,7 @@ mod tests {
                 Engine::new(),
                 "sleep",
                 Value::from_json(&json!({ "until": 0 })),
+                DependencyInvocation::direct("timer", "sleep", 1).expect("invocation"),
             )
             .await
             .expect("sleep");

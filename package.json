@@ -13,9 +13,12 @@
   "files": [
     "dist",
     "CHANGELOG.md",
+    "docs/actors.md",
     "docs/compatibility.md",
+    "docs/data.md",
     "docs/features.md",
     "docs/migrations",
+    "docs/workflows.md",
     "examples/basic",
     "examples/basic/.gitignore",
     "tsconfig.json"
@@ -83,16 +86,27 @@
   "scripts": {
     "api:check": "nub scripts/api.ts",
     "api:update": "nub run build && nub scripts/api.ts --write",
+    "actor:benchmark": "nub scripts/actor.ts",
     "build": "nub scripts/build.ts",
+    "check:distribution": "tsc -p src/adapters/web/fixtures/request-render/tsconfig.json",
+    "check:examples": "tsc -p examples/basic/tsconfig.json && tsc -p examples/authenticated-crud/tsconfig.json && tsc -p playground/tsconfig.json",
+    "check:native": "vitest run --tagsFilter=native && cargo test --manifest-path src/adapters/server/production/Cargo.toml --workspace",
+    "check:presentation": "nub run presentation:check && vitest run src/core/ui/presentation.spec.ts src/compiler/presentation.spec.ts src/platforms/web/presentation.spec.ts src/platforms/web/presentation/dynamics.spec.ts src/adapters/web/ui/presentation",
+    "check:production": "vitest run --tagsFilter=production && KIT_NATIVE_PROFILE=release vitest run src/features/data.spec.ts -t \"builds the composed data Feature as a native executable\"",
+    "check:workflow": "vitest run src/features/workflow.spec.ts && cargo test --manifest-path src/adapters/server/production/Cargo.toml -p kit-server-workflow",
     "dev:crud": "nub src/cli.ts dev --dir examples/authenticated-crud",
     "dev:example": "nub src/cli.ts dev --dir playground",
-    "typecheck": "nub run build && tsc --noEmit && tsc -p src/adapters/web/fixtures/request-render/tsconfig.json && tsc -p examples/basic/tsconfig.json && tsc -p examples/authenticated-crud/tsconfig.json && tsc -p playground/tsconfig.json",
     "fmt": "oxfmt",
     "fmt:check": "oxfmt --check",
     "lint": "oxlint --disable-nested-config src scripts examples playground vitest.config.ts",
+    "presentation:check": "nub scripts/presentation.ts",
+    "presentation:update": "nub scripts/presentation.ts --write",
     "release": "nub scripts/release.ts",
-    "test": "nub run build && nub run api:check && vitest run && cargo test --manifest-path src/adapters/server/production/Cargo.toml --workspace",
-    "check": "nub run typecheck && nub run lint && nub run fmt:check && nub run test"
+    "release:check": "nub scripts/release.ts --check",
+    "test": "vitest run --tagsFilter='!native && !production'",
+    "test:workflow": "vitest run src/features/workflow.spec.ts --tagsFilter='!native && !production'",
+    "typecheck": "tsc --noEmit",
+    "check": "nub run typecheck && nub run lint && nub run fmt:check && vitest run && cargo test --manifest-path src/adapters/server/production/Cargo.toml --workspace && nub run build && nub run check:examples && nub run api:check && nub run presentation:check && nub run check:distribution && KIT_NATIVE_PROFILE=release vitest run src/features/data.spec.ts -t \"builds the composed data Feature as a native executable\""
   },
   "dependencies": {
     "@nats-io/jetstream": "3.4.0",
@@ -107,11 +121,14 @@
     "vitest": "^4.1.10"
   },
   "devDependencies": {
+    "@mdn/browser-compat-data": "8.0.7",
     "@types/node": "^26.1.1",
+    "@webref/css": "8.7.0",
     "fast-check": "^4.9.0",
     "oxfmt": "^0.60.0",
     "oxlint": "^1.75.0",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "web-features": "3.34.1"
   },
   "engines": {
     "node": ">=26.0.0"

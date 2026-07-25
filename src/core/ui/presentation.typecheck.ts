@@ -89,7 +89,7 @@ type PresentationParameters = Readonly<{
 
 declare function follow(velocity: number): Animation<number, number, number>;
 
-const presentation = (({ parameters, environment, events }) => {
+const presentation = (({ parameters, environment, events, state: rootState }) => {
   const confirmation = animate(events.save.completed, parameters.confirmation);
 
   return {
@@ -142,7 +142,7 @@ const presentation = (({ parameters, environment, events }) => {
       };
     },
     Child: ({ state, events }) => {
-      const visible = animate(state.visible ? 1 : 0, parameters.sheet);
+      const visible = animate(state.visible && rootState.open ? 1 : 0, parameters.sheet);
       void events.reveal;
       return {
         Badge({ props, elements }) {

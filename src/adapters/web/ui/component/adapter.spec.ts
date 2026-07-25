@@ -159,6 +159,7 @@ describe("Program UI composition", () => {
       dependencies: { navigation },
       programManifest: {
         name: "web.browser",
+        bindings: [],
         contributions: [{ feature: "web.routes", requires: ["navigation"], provides: [] }],
       },
       routes,
@@ -267,6 +268,7 @@ describe("Program UI composition", () => {
       dependencies: { navigation },
       programManifest: {
         name: "web.browser",
+        bindings: [],
         contributions: [{ feature: "web.routes", requires: ["navigation"], provides: [] }],
       },
       routes: [route("start", "/start", "Start"), route("finish", "/finish", "Finish")],
@@ -542,6 +544,7 @@ describe("Program UI composition", () => {
       logicalProgram: "browser",
       programManifest: {
         name: "web.browser",
+        bindings: [],
         contributions: [
           { feature: "web.consumer", requires: ["reader"], provides: [] },
           { feature: "web.consumer.provider", requires: [], provides: ["reader"] },

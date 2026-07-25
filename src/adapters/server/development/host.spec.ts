@@ -2,10 +2,15 @@ import { access, mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 import { afterEach, describe, expect, test } from "vitest";
 
-import { beginNodeHostReplacement, createNodeHost } from "@/adapters/server/development/host";
+import {
+  beginNodeHostReplacement,
+  createNodeHost,
+  createSqliteEventStore,
+} from "@/adapters/server/development/host";
 import type { DependencyContractIR, TypeIR } from "@/compiler/ir";
 
 const directories: string[] = [];
@@ -39,6 +44,96 @@ describe("server Platform host", () => {
     await expect(
       createNodeHost({ dependencies: [{ name: "unknown", operations: [] }] }),
     ).rejects.toThrow('Server Platform does not implement host Dependency "unknown".');
+  });
+
+  test("registers, replaces, cancels, and disposes process alarms", async () => {
+    const host = await createNodeHost({ dependencies: [alarmDependency] });
+    const calls: string[] = [];
+    host.alarm.register({
+      id: "replacement",
+      async run() {
+        calls.push("first");
+      },
+    });
+    host.alarm.register({
+      id: "replacement",
+      async run() {
+        calls.push("second");
+      },
+    });
+    host.alarm.schedule({ id: "replacement", at: 0 });
+    host.alarm.register({
+      id: "cancelled",
+      async run() {
+        calls.push("cancelled");
+      },
+    });
+    host.alarm.schedule({ id: "cancelled", at: 0 });
+    host.alarm.cancel({ id: "cancelled" });
+
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    expect(calls).toEqual(["second"]);
+    host.alarm[Symbol.dispose]();
+  });
+
+  test("preserves execution scopes across asynchronous work without leaking them", async () => {
+    const host = await createNodeHost({ dependencies: [executionContextDependency] });
+    const scope = { actor: "account", key: "one" };
+
+    await expect(
+      host.executionContext.run({
+        scope,
+        async task() {
+          await Promise.resolve();
+          return { scopes: host.executionContext.current({}) };
+        },
+      }),
+    ).resolves.toEqual({ scopes: [scope] });
+    expect(host.executionContext.current({})).toEqual([]);
+  });
+
+  test("serializes tasks sharing one local synchronization key", async () => {
+    const host = await createNodeHost({ dependencies: [synchronizationDependency] });
+    let active = 0;
+    let maximum = 0;
+
+    await Promise.all(
+      Array.from({ length: 8 }, (_, value) =>
+        host.synchronization.exclusive({
+          key: "actor:one",
+          async task() {
+            active += 1;
+            maximum = Math.max(maximum, active);
+            await Promise.resolve();
+            active -= 1;
+            return { value };
+          },
+        }),
+      ),
+    );
+
+    expect(maximum).toBe(1);
+  });
+
+  test("returns the exact canonical event representation that it persists", async () => {
+    using events = createSqliteEventStore<Record<string, unknown>>(new DatabaseSync(":memory:"));
+    const appended = await events.append({
+      stream: "canonical",
+      expectedRevision: 0,
+      events: [
+        {
+          second: 2,
+          first: [{ omitted: undefined, value: -0 }, undefined],
+          omitted: undefined,
+        },
+      ],
+    });
+
+    expect(appended?.[0]?.event).toEqual({
+      first: [{ value: 0 }, null],
+      second: 2,
+    });
+    expect(await events.read({ stream: "canonical" })).toEqual(appended);
   });
 
   test("allows browser commands from every declared interface origin", async () => {
@@ -152,6 +247,43 @@ const httpDependency = dependency("http", "route", {
   kind: "opaque",
   name: "Disposable",
 });
+const alarmDependency = {
+  name: "alarm",
+  operations: ["register", "schedule", "cancel"].map((name) => ({
+    name,
+    mode: "synchronous" as const,
+    input: { kind: "opaque" as const, name: "Input" },
+    output: { kind: "primitive" as const, name: "void" as const },
+  })),
+} as const satisfies DependencyContractIR;
+const executionContextDependency = {
+  name: "executionContext",
+  operations: [
+    {
+      name: "current",
+      mode: "synchronous",
+      input: { kind: "record", fields: [] },
+      output: { kind: "opaque", name: "Scopes" },
+    },
+    {
+      name: "run",
+      mode: "asynchronous",
+      input: { kind: "opaque", name: "Execution" },
+      output: { kind: "opaque", name: "Result" },
+    },
+  ],
+} as const satisfies DependencyContractIR;
+const synchronizationDependency = {
+  name: "synchronization",
+  operations: [
+    {
+      name: "exclusive",
+      mode: "asynchronous",
+      input: { kind: "opaque", name: "ExclusiveExecution" },
+      output: { kind: "opaque", name: "Result" },
+    },
+  ],
+} as const satisfies DependencyContractIR;
 
 function primitive(name: "number" | "string"): TypeIR {
   return { kind: "primitive", name };

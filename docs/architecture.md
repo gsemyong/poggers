@@ -38,6 +38,10 @@ TypeScript product source
    the same versioned IR.
 10. **The physical tree follows ownership.** Files split at real architectural,
     lifecycle, or distribution boundaries, not for mechanical symmetry.
+11. **Portability is adapter-declared and frontend-enforced.** A Platform whose
+    backend consumes portable IR rejects target source during semantic
+    compilation. A source-native Platform may own source without weakening
+    another Platform's invariant.
 
 ## Vocabulary
 
@@ -251,6 +255,35 @@ are recorded in `docs/api.json`; an intentional change requires a file under
 portable source, architecture boundaries, deterministic compiler behavior,
 runtime and adapter contracts, web artifacts, Rust production crates, package
 API drift, formatting, and linting.
+
+Use the validation ladder while editing:
+
+```sh
+nub exec vitest run path/to/file.spec.ts -t "changed behavior" --tagsFilter="!native && !production"
+nub run typecheck
+nub run test
+nub run test:workflow
+nub run check:native
+nub run check:workflow
+nub run check:presentation
+nub run check:production
+```
+
+The first two commands are the general inner loop. `test:workflow` is the
+focused Workflow source milestone. `test` is the complete source/development
+milestone. Neither compiles nor executes generated native Programs. Run
+cross-backend differential tests when portable compiler or IR meaning changes;
+run focused Cargo checks when a native Dependency changes. Native and
+production checks are explicit milestones; `check` runs every milestone once
+and builds the package once. API, example, Presentation, and browser checks are
+run while changing their owned surfaces and are always retained by the complete
+or release gate.
+
+In a consuming Workspace, `kit typecheck` and `kit check` also compile
+`src/system.ts` semantically after TypeScript succeeds. The selected compiler
+extensions enforce each Platform's realization contract. Unsupported server
+syntax therefore fails without invoking Cargo, while source-native web Programs
+remain TypeScript.
 
 `kit/testing` runs the same black-box System specification against development
 and production realizations. Browser inspection is used for end-to-end product

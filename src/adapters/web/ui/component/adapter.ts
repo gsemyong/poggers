@@ -885,7 +885,7 @@ function inferEmptyProgramManifest(
     }
   };
   visit(requireRuntimeFeature(system, interfacePath), interfacePath);
-  return { name, contributions };
+  return { name, bindings: [], contributions };
 }
 
 function createComponentInstance(

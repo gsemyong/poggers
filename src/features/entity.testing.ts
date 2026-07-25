@@ -1,3 +1,4 @@
+import { cloneData } from "@/core/data";
 import {
   bindEntityPrincipal,
   type DefinedEntity,
@@ -15,7 +16,7 @@ export function createMemoryEventStore<Event>(): EventStore<Event> {
   const subscribers = new Map<string, Set<(event: StoredEvent<Event>) => void>>();
   return {
     async read({ stream, after = 0 }) {
-      return (streams.get(stream) ?? []).filter((event) => event.revision > after);
+      return (streams.get(stream) ?? []).slice(after);
     },
     async append({ stream, expectedRevision, events }) {
       const current = streams.get(stream) ?? [];
@@ -23,7 +24,7 @@ export function createMemoryEventStore<Event>(): EventStore<Event> {
       const appended = events.map((event, index) => ({
         stream,
         revision: expectedRevision + index + 1,
-        event,
+        event: cloneData(event, "EventStore event"),
       }));
       streams.set(stream, [...current, ...appended]);
       for (const stored of appended) {
@@ -32,11 +33,7 @@ export function createMemoryEventStore<Event>(): EventStore<Event> {
       return appended;
     },
     subscribe({ stream, after = 0 }) {
-      return eventStream(
-        (streams.get(stream) ?? []).filter((event) => event.revision > after),
-        subscribers,
-        stream,
-      );
+      return eventStream((streams.get(stream) ?? []).slice(after), subscribers, stream);
     },
   };
 }

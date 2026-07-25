@@ -10,14 +10,17 @@ import {
   Await,
   type BrowserMainThread,
   type BrowserServiceWorker,
+  type ConfiguredWebPresentation,
   type Deferred,
   type Navigation,
   type Validate,
   type WebFeature,
   type WebPlatform,
+  type WebPresentation,
   type WebRoute,
   type WebServiceWorkerRuntime,
   createWebInterface,
+  createImageAsset,
 } from "kit/web";
 
 type GreetingRoutes = {
@@ -121,6 +124,7 @@ type Greeting = Readonly<{
             Actions: { increment(): void };
             Elements: {
               Root: "main";
+              Icon: "img";
               Title: "h1";
               Input: "input";
               Increment: "button";
@@ -199,6 +203,8 @@ export type WebContract = Readonly<{
   Features: { background: Background; greeting: Greeting };
 }>;
 
+type ProductWeb = PlatformInterfaceContract<WebContract, WebPlatform>;
+
 export type Product = Readonly<{
   Features: {
     admin: PlatformInterfaceContract<AdminContract, WebPlatform>;
@@ -225,13 +231,14 @@ const greeting: WebFeature<Greeting, WebContract> = {
           },
           view({
             actions,
-            elements: { Root, Title, Input, Increment, Count, Navigate, Link },
+            elements: { Root, Icon, Title, Input, Increment, Count, Navigate, Link },
             feature,
             props,
             state,
           }) {
             return (
               <Root data-kind="greeting">
+                <Icon alt="" aria-hidden="true" />
                 <Title>{props.message}</Title>
                 <Input aria-label="Hydration input" />
                 <Increment type="button" onClick={() => actions.increment()}>
@@ -472,18 +479,27 @@ const admin = createWebInterface<AdminContract>({
   },
 });
 
+const webPresentationParameters = {
+  icon: createImageAsset(new URL("./presentation-icon.svg", import.meta.url)),
+};
+
+const webPresentation = {
+  parameters: webPresentationParameters,
+  create: (({ parameters }) => ({
+    Greeting: () => ({
+      Message: () => ({
+        Icon: {
+          image: parameters.icon,
+          layout: { inlineSize: 16, blockSize: 16 },
+        },
+      }),
+    }),
+  })) satisfies WebPresentation<ProductWeb, typeof webPresentationParameters>,
+} satisfies ConfiguredWebPresentation<ProductWeb, typeof webPresentationParameters>;
+
 const web = createWebInterface<WebContract>({
   features: { background, greeting },
-  presentation: {
-    parameters: {},
-    create() {
-      return {
-        Greeting: () => ({
-          Message: () => ({}),
-        }),
-      };
-    },
-  },
+  presentation: webPresentation,
   installation: {
     shortName: "Conformance",
     start: { to: "greeting.client" },

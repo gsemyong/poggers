@@ -7,6 +7,7 @@ import {
   prepareCompiledWebDocument,
   prepareCompiledWebDocumentStream,
   prepareClientWebDocument,
+  prepareInitialWebPresentation,
   prepareWebDocument,
   renderWebDeferredFrame,
   renderWebDocument,
@@ -20,6 +21,7 @@ import type { ProgramManifest } from "@/compiler/ir";
 
 const manifest: ProgramManifest = {
   name: "browser",
+  bindings: [],
   contributions: [
     { feature: "shell", requires: [], provides: [] },
     { feature: "shell.items", requires: [], provides: [] },
@@ -586,6 +588,7 @@ Read [the reference](/reference).
       presentation: emptyPresentation,
       manifest: {
         name: "browser",
+        bindings: [],
         contributions: [{ feature: "shell", requires: [], provides: [] }],
       },
       components: {
@@ -647,6 +650,93 @@ Read [the reference](/reference).
     expect(html).toContain('<link rel="preload" as="image" fetchpriority="high" href="/cover.jpg"');
   });
 
+  test("serializes only request-invariant initial Presentation", async () => {
+    const system = {
+      features: {
+        shell: {
+          programs: {
+            browser: {
+              state: {},
+              components: {
+                Root: {
+                  state: { open: true },
+                  view({ elements: { Root } }: ViewContext) {
+                    return Root!({ children: "Hello" });
+                  },
+                },
+              },
+              root: "Root",
+            },
+          },
+        },
+      },
+    };
+    const shellManifest: ProgramManifest = {
+      name: "browser",
+      bindings: [],
+      contributions: [{ feature: "shell", requires: [], provides: [] }],
+    };
+    const shellContracts = {
+      "@feature/shell/component/Root": {
+        elements: { Root: "main" },
+        state: [{ name: "open" }],
+        propCallbacks: [],
+      },
+    };
+    const target = "@feature/shell/component/Root";
+    const prepared = await prepareInitialWebPresentation({
+      system,
+      interface: "shell",
+      program: "browser",
+      presentation: {
+        parameters: {},
+        create() {
+          return {
+            Root: ({ state }: { state: { open: boolean } }) => ({
+              Root: { paint: { opacity: state.open ? 1 : 0 } },
+            }),
+          };
+        },
+      },
+      manifest: shellManifest,
+      components: shellContracts,
+      targets: [target],
+    });
+
+    expect(prepared.components[target]?.elements.Root).toMatchObject({
+      className: expect.stringMatching(/^p/),
+      variables: {},
+    });
+    expect(prepared.styles).toHaveLength(1);
+
+    const dependent = prepareInitialWebPresentation({
+      system,
+      interface: "shell",
+      program: "browser",
+      presentation: {
+        parameters: {},
+        create() {
+          return {
+            Root: ({ props }: { props: { visible: boolean } }) => ({
+              Root: { paint: { opacity: props.visible ? 1 : 0 } },
+            }),
+          };
+        },
+      },
+      manifest: shellManifest,
+      components: shellContracts,
+      targets: [target],
+    });
+    const error = await dependent.catch((value: unknown) => value);
+    expect(error).toBeInstanceOf(AggregateError);
+    expect((error as AggregateError).errors[0]).toHaveProperty(
+      "message",
+      expect.stringContaining(
+        "Request-dependent props were read while preparing initial Presentation",
+      ),
+    );
+  });
+
   test("applies and removes route metadata in a live document", () => {
     const live = fakeDocument();
     vi.stubGlobal("document", live.document);
@@ -700,6 +790,7 @@ Read [the reference](/reference).
     };
     const shellManifest: ProgramManifest = {
       name: "browser",
+      bindings: [],
       contributions: [{ feature: "shell", requires: ["repository"], provides: [] }],
     };
     const document = await prepareWebDocument({

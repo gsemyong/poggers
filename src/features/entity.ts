@@ -10,11 +10,15 @@ import type {
   IdentitySession,
 } from "@/features/identity";
 import {
+  type Clock,
+  type EventStore,
   getHttpValue,
   type HttpRequest,
   type HttpResponse,
   type HttpServer,
+  type Identifiers,
   type ServerProcess,
+  type StoredEvent,
 } from "@/platforms/server/platform";
 import type {
   BrowserMainThread,
@@ -46,6 +50,7 @@ type CreateOf<Model extends EntityModelDefinition> = Model["Create"];
 type UpdateOf<Model extends EntityModelDefinition> = Model["Update"];
 type FilterOf<Model extends EntityModelDefinition> = Model["Filter"];
 type EventOf<Model extends EntityModelDefinition> = EntityEvent<ValueOf<Model>>;
+declare const entityModel: unique symbol;
 type IdentityOf<Model extends EntityModelDefinition> = IdentityModel<{
   Name: "identity";
   Principal: PrincipalOf<Model>;
@@ -67,25 +72,7 @@ export type EntityEvent<Value extends EntityValue> =
       commandId?: string;
     }>;
 
-export type StoredEvent<Event> = Readonly<{
-  stream: string;
-  revision: number;
-  event: Event;
-}>;
-
-/** Durable append-only persistence supplied by the selected host adapter. */
-export type EventStore<Event> = Readonly<{
-  read(input: { stream: string; after?: number }): Promise<readonly StoredEvent<Event>[]>;
-  append(input: {
-    stream: string;
-    expectedRevision: number;
-    events: readonly Event[];
-  }): Promise<readonly StoredEvent<Event>[] | undefined>;
-  subscribe(input: { stream: string; after?: number }): AsyncIterable<StoredEvent<Event>>;
-}>;
-
-export type Identifiers = Readonly<{ create(input: {}): string }>;
-export type Clock = Readonly<{ now(input: {}): number }>;
+export type { Clock, EventStore, Identifiers, StoredEvent } from "@/platforms/server/platform";
 
 export type EntityFailureCode = "unauthenticated" | "forbidden" | "not-found" | "conflict";
 
@@ -208,11 +195,17 @@ export type EntityService<Model extends EntityModelDefinition> = Readonly<{
 
 type Requirements<Model extends EntityModelDefinition> = Readonly<{
   identity: IdentityService<IdentityOf<Model>>;
-  events: EventStore<EventOf<Model>>;
+  events: EventStore;
   identifiers: Identifiers;
   clock: Clock;
   http: HttpServer;
 }>;
+
+type RuntimeRequirements<Model extends EntityModelDefinition> = Omit<
+  Requirements<Model>,
+  "events"
+> &
+  Readonly<{ events: EventStore<EventOf<Model>> }>;
 
 type ServerProvision<Model extends EntityModelDefinition> = Readonly<{
   [Name in Model["Name"]]: EntityService<Model>;
@@ -257,6 +250,7 @@ export type DefinedEntity<Model extends EntityModelDefinition> = Readonly<{
   dependency: Model["Name"];
   server: Feature<EntityServerFeature<Model>>;
   browser: Feature<EntityBrowserFeature<Model>>;
+  readonly [entityModel]?: Model;
 }>;
 
 /** Creates independently composable server and browser entity Features from one model. */
@@ -955,8 +949,9 @@ function createEntityClient<Model extends EntityModelDefinition>(
 
 function createEntityService<Model extends EntityModelDefinition>(
   implementation: EntityImplementation<Model>,
-  dependencies: Requirements<Model>,
+  requirements: Requirements<Model>,
 ): EntityService<Model> {
+  const dependencies = requirements as RuntimeRequirements<Model>;
   const stream = (principal: PrincipalOf<Model>) => `${implementation.name}:${principal.id}`;
   const read = async (principal: PrincipalOf<Model>) =>
     reduceEvents<ValueOf<Model>>(

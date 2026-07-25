@@ -36,7 +36,17 @@ export default defineConfig({
   test: {
     clearMocks: true,
     include: ["src/**/*.spec.ts", "examples/**/*.spec.ts", "playground/**/*.spec.ts"],
-    maxWorkers: 4,
+    maxWorkers: 2,
     restoreMocks: true,
+    tags: [
+      {
+        name: "native",
+        description: "Compiles or executes generated native Programs.",
+      },
+      {
+        name: "production",
+        description: "Builds and executes deployable System artifacts.",
+      },
+    ],
   },
 });

@@ -1,5 +1,6 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
@@ -15,6 +16,7 @@ import {
 import type { ProgramIR, SourceSpan } from "@/compiler/ir";
 import { linkProgram } from "@/compiler/linker";
 import { compileSystem } from "@/compiler/source";
+import { createMemoryEventStore } from "@/features/entity.testing";
 import { executeLinkedProgramIR } from "@/runtime/interpreter";
 
 const directories: string[] = [];
@@ -27,30 +29,44 @@ afterEach(async () => {
   );
 });
 
-test("caches production artifacts by semantic output rather than source spans", async () => {
-  const directory = await temporaryDirectory();
-  const cache = resolve(directory, "cache");
-  const first = await buildServerProgram({
-    system: "cache-fixture",
-    cache,
-    directory,
-    output: resolve(directory, "first"),
-    program: emptyProgram({ file: "first.ts", line: 1, column: 1 }),
-  });
-  const second = await buildServerProgram({
-    system: "cache-fixture",
-    cache,
-    directory,
-    output: resolve(directory, "second"),
-    program: emptyProgram({ file: "renamed.ts", line: 200, column: 40 }),
-  });
+test(
+  "caches production artifacts by semantic output rather than source spans",
+  { tags: ["native"], timeout: 120_000 },
+  async () => {
+    const directory = await temporaryDirectory();
+    const cache = resolve(directory, "cache");
+    const first = await buildServerProgram({
+      system: "cache-fixture",
+      cache,
+      directory,
+      output: resolve(directory, "first"),
+      program: emptyProgram({ file: "first.ts", line: 1, column: 1 }),
+    });
+    await rm(first.workspace, { force: true, recursive: true });
+    const path = process.env.PATH;
+    const second = await (async () => {
+      try {
+        process.env.PATH = "";
+        return await buildServerProgram({
+          system: "cache-fixture",
+          cache,
+          directory,
+          output: resolve(directory, "second"),
+          program: emptyProgram({ file: "renamed.ts", line: 200, column: 40 }),
+        });
+      } finally {
+        process.env.PATH = path;
+      }
+    })();
 
-  expect(first.cache).toBe("miss");
-  expect(second.cache).toBe("hit");
-  expect(second.semanticHash).toBe(first.semanticHash);
-  expect(second.workspace).toBe(first.workspace);
-  await expect(access(second.executable)).resolves.toBeUndefined();
-}, 120_000);
+    expect(first.cache).toBe("miss");
+    expect(second.cache).toBe("hit");
+    expect(second.semanticHash).toBe(first.semanticHash);
+    expect(second.workspace).toBe(first.workspace);
+    await expect(access(second.executable)).resolves.toBeUndefined();
+    await expect(access(resolve(second.workspace, "src/program.rs"))).resolves.toBeUndefined();
+  },
+);
 
 test("rejects unknown external Dependencies and host source before Cargo", async () => {
   const directory = await temporaryDirectory();
@@ -126,7 +142,9 @@ test("keeps shipped Feature and infrastructure policy out of production compiler
   const genericMachinery = sources.join("\n");
 
   for (const forbidden of [
+    "ActorRuntime",
     "createIdentity",
+    "createActor",
     "createEntity",
     "kit_users",
     "kit_sessions",
@@ -137,63 +155,206 @@ test("keeps shipped Feature and infrastructure policy out of production compiler
   }
 });
 
-test("injects an unrelated production Dependency into an expanded generic Feature", async () => {
-  const directory = await temporaryDirectory();
-  const source = resolve(directory, "src/system.ts");
-  await mkdir(resolve(directory, "src"), { recursive: true });
-  await writeFile(source, genericFeatureSource());
-  const ir = compileSystem(source);
-  const program = ir.programs.find(({ name }) => name === "worker");
-  if (!program) throw new Error("Fixture has no worker Program.");
-  const executable = resolve(directory, "worker");
-  const build = await buildServerProgram({
-    system: ir.system.name,
-    dependencies: [recorderDependency()],
-    cache: resolve(directory, "cache"),
-    directory,
-    output: executable,
-    program,
-  });
-  const generatedProgram = await readFile(resolve(build.workspace, "src/program.rs"), "utf8");
-  const generatedMain = await readFile(resolve(build.workspace, "src/main.rs"), "utf8");
-  expect(generatedProgram).toContain("recorder");
-  expect(generatedProgram).toContain("format");
-  expect(generatedMain).toContain("program::start");
-  expect(generatedMain).not.toContain("program.json");
-  await expect(access(resolve(build.workspace, "program.json"))).rejects.toMatchObject({
-    code: "ENOENT",
-  });
-  let run = 0;
-  await fc.assert(
-    fc.asyncProperty(
-      fc.record({
-        left: fc.integer({ min: -10_000, max: 10_000 }),
-        right: fc.integer({ min: -10_000, max: 10_000 }),
+test("enforces generic compiler and Feature target boundaries", async () => {
+  const compiler = await implementationSources(resolve(import.meta.dirname, "../../../compiler"));
+  const features = await implementationSources(resolve(import.meta.dirname, "../../../features"));
+
+  for (const file of compiler) {
+    expect(await readFile(file, "utf8"), `${file} imports Feature policy`).not.toMatch(
+      /from\s+["']@\/features(?:\/|["'])/,
+    );
+  }
+  for (const file of features) {
+    const source = await readFile(file, "utf8");
+    expect(source, `${file} imports a target adapter`).not.toMatch(
+      /from\s+["']@\/adapters(?:\/|["'])/,
+    );
+    expect(source, `${file} owns native target generation`).not.toMatch(
+      /\b(?:generateRust|RustProgramGenerator|rustc|cargo\s+build)\b/,
+    );
+  }
+});
+
+test(
+  "injects an unrelated production Dependency into an expanded generic Feature",
+  { tags: ["native"], timeout: 120_000 },
+  async () => {
+    const directory = await temporaryDirectory();
+    const source = resolve(directory, "src/system.ts");
+    await mkdir(resolve(directory, "src"), { recursive: true });
+    await writeFile(
+      resolve(directory, "tsconfig.json"),
+      JSON.stringify({
+        extends: resolve(import.meta.dirname, "../../../../tsconfig.json"),
       }),
-      async (input) => {
-        const reference: unknown[] = [];
-        const execution = await executeLinkedProgramIR(linkProgram(program), {
-          recorder: {
-            async read() {
-              return input;
+    );
+    await writeFile(source, genericFeatureSource());
+    const ir = compileSystem(source);
+    const program = ir.programs.find(({ name }) => name === "worker");
+    if (!program) throw new Error("Fixture has no worker Program.");
+    const executable = resolve(directory, "worker");
+    const build = await buildServerProgram({
+      system: ir.system.name,
+      dependencies: [recorderDependency()],
+      directory,
+      output: executable,
+      program,
+    });
+    const generatedProgram = await readFile(resolve(build.workspace, "src/program.rs"), "utf8");
+    const generatedMain = await readFile(resolve(build.workspace, "src/main.rs"), "utf8");
+    expect(generatedProgram).toContain("recorder");
+    expect(generatedProgram).toContain("format");
+    expect(generatedMain).toContain("program::start");
+    expect(generatedMain).not.toContain("program.json");
+    await expect(access(resolve(build.workspace, "program.json"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    let run = 0;
+    await fc.assert(
+      fc.asyncProperty(
+        fc.record({
+          left: fc.integer({ min: -10_000, max: 10_000 }),
+          right: fc.integer({ min: -10_000, max: 10_000 }),
+        }),
+        async (input) => {
+          const reference: unknown[] = [];
+          const execution = await executeLinkedProgramIR(linkProgram(program), {
+            recorder: {
+              async read() {
+                return input;
+              },
+              async record(value: unknown) {
+                reference.push(value);
+              },
             },
-            async record(value: unknown) {
-              reference.push(value);
-            },
+          });
+          await execution[Symbol.asyncDispose]();
+          const output = resolve(directory, `native-output-${run++}.jsonl`);
+          const native = await runNativeFixture(executable, output, input);
+          expect(native[0]).toEqual({
+            value: `format:native:${input.left + input.right}:1:direct:formatter:format:1`,
+          });
+          expect(native).toEqual(reference);
+        },
+      ),
+      { numRuns: 20 },
+    );
+  },
+);
+
+test(
+  "compiles Actor Features through the generic production Program backend",
+  { tags: ["native"], timeout: 120_000 },
+  async () => {
+    const directory = await temporaryDirectory();
+    const source = resolve(directory, "src/system.ts");
+    await mkdir(resolve(directory, "src"), { recursive: true });
+    await writeFile(
+      resolve(directory, "tsconfig.json"),
+      JSON.stringify({
+        extends: resolve(import.meta.dirname, "../../../../tsconfig.json"),
+      }),
+    );
+    await writeFile(source, actorFeatureSource());
+    const ir = compileSystem(source);
+    const program = ir.programs.find(({ name }) => name === "server");
+    if (!program) throw new Error("Actor fixture has no server Program.");
+    const build = await buildServerProgram({
+      system: ir.system.name,
+      dependencies: [recorderDependency()],
+      directory,
+      output: resolve(directory, "actor-server"),
+      profile: process.env.KIT_NATIVE_PROFILE === "release" ? "release" : "debug",
+      program,
+    });
+
+    await expect(access(build.executable)).resolves.toBeUndefined();
+    const generated = await readFile(resolve(build.workspace, "src/program.rs"), "utf8");
+    expect(generated).toContain('"counter"');
+    expect(generated).not.toContain("ActorRuntime");
+
+    const runReference = async (input: Readonly<{ key: string; amount: number }>) => {
+      const reference: unknown[] = [];
+      let time = 0;
+      const alarmHandlers = new Map<string, () => Promise<void>>();
+      const alarmTasks = new Map<string, ReturnType<typeof setTimeout>>();
+      await using _execution = await executeLinkedProgramIR(linkProgram(program), {
+        alarm: {
+          register({ id, run }: Readonly<{ id: string; run(): Promise<void> }>) {
+            alarmHandlers.set(id, run);
           },
-        });
-        await execution[Symbol.asyncDispose]();
-        const output = resolve(directory, `native-output-${run++}.jsonl`);
-        const native = await runNativeFixture(executable, output, input);
-        expect(native).toEqual(reference);
-      },
-    ),
-    { numRuns: 20 },
-  );
-}, 120_000);
+          schedule({ id }: Readonly<{ id: string; at: number }>) {
+            const previous = alarmTasks.get(id);
+            if (previous !== undefined) clearTimeout(previous);
+            const run = alarmHandlers.get(id);
+            if (run === undefined) throw new Error(`Alarm ${id} is not registered.`);
+            alarmTasks.set(
+              id,
+              setTimeout(() => {
+                alarmTasks.delete(id);
+                void run();
+              }, 0),
+            );
+          },
+          cancel({ id }: Readonly<{ id: string }>) {
+            const task = alarmTasks.get(id);
+            if (task !== undefined) clearTimeout(task);
+            alarmTasks.delete(id);
+          },
+        },
+        events: createMemoryEventStore(),
+        executionContext: createTestExecutionContext(),
+        synchronization: createTestSynchronization(),
+        clock: { now: () => ++time },
+        identifiers: { create: () => "reference-actor-worker" },
+        timer: {
+          async sleep() {
+            await new Promise<void>((resolve) => setTimeout(resolve, 20));
+          },
+        },
+        recorder: {
+          async read() {
+            return input;
+          },
+          async record({ input: value }: { input: unknown }) {
+            reference.push(value);
+          },
+        },
+      });
+      return reference;
+    };
+
+    const corpus = [
+      { key: "counter-zero", amount: 0 },
+      { key: "counter-positive", amount: 3 },
+      { key: "counter-large", amount: 1_000 },
+    ] as const;
+    for (const [index, input] of corpus.entries()) {
+      const reference = await runReference(input);
+      const nativeDatabase = resolve(directory, `actor-${index}.sqlite`);
+      const native = await runNativeFixture(
+        build.executable,
+        resolve(directory, `native-actor-${index}.jsonl`),
+        input,
+        { KIT_DATABASE: nativeDatabase },
+      );
+      expect(native).toEqual(reference);
+      if (index === 0) {
+        const restarted = await runNativeFixture(
+          build.executable,
+          resolve(directory, "native-actor-restarted.jsonl"),
+          input,
+          { KIT_DATABASE: nativeDatabase },
+        );
+        expect(restarted).toEqual(reference);
+      }
+    }
+  },
+);
 
 test.skipIf(spawnSync("nats-server", ["--version"], { stdio: "ignore" }).status !== 0)(
   "coordinates independent production replicas through a selected JetStream adapter",
+  { tags: ["native"], timeout: 180_000 },
   async () => {
     const directory = await temporaryDirectory();
     const natsPort = await availablePort();
@@ -209,7 +370,6 @@ test.skipIf(spawnSync("nats-server", ["--version"], { stdio: "ignore" }).status 
     await buildServerProgram({
       system: ir.system.name,
       dependencies: [jetStreamEventsDependency, networkRecorderDependency()],
-      cache: resolve(directory, "cache"),
       directory,
       lint: true,
       output: executable,
@@ -270,7 +430,6 @@ test.skipIf(spawnSync("nats-server", ["--version"], { stdio: "ignore" }).status 
       event: { value: "live" },
     });
   },
-  180_000,
 );
 
 function emptyProgram(span: SourceSpan): ProgramIR {
@@ -317,6 +476,43 @@ function recorderDependency() {
   });
 }
 
+function createTestExecutionContext() {
+  const storage = new AsyncLocalStorage<readonly object[]>();
+  return {
+    current() {
+      return storage.getStore() ?? [];
+    },
+    async run({ scope, task }: Readonly<{ scope: object; task(): Promise<object> }>) {
+      return await storage.run([...(storage.getStore() ?? []), scope], task);
+    },
+  };
+}
+
+function createTestSynchronization() {
+  const tails = new Map<string, Promise<void>>();
+  return {
+    async exclusive({
+      key,
+      task,
+    }: Readonly<{ key: string; task(): Promise<object> }>): Promise<object> {
+      const previous = tails.get(key) ?? Promise.resolve();
+      let release = () => {};
+      const current = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const tail = previous.then(() => current);
+      tails.set(key, tail);
+      await previous;
+      try {
+        return await task();
+      } finally {
+        release();
+        if (tails.get(key) === tail) tails.delete(key);
+      }
+    },
+  };
+}
+
 function networkRecorderDependency() {
   return defineServerProductionDependency({
     ...recorderDependency(),
@@ -339,28 +535,80 @@ function createSystem(definition: object): object {
 
 function genericFeatureSource(): string {
   return `
+import { dependencyInvocation } from "@/core/dependency";
+
 type Platform = { readonly Name: "server" };
 type Environment = { readonly Name: "server"; readonly Platform: Platform };
 type Program<E extends Environment, C extends object = {}> = Readonly<C & { Environment: E }>;
 ${compositionSource()}
-type Formatter = { format(input: { value: string }): Promise<string> };
+declare const dependencyDefinition: unique symbol;
+type DependencyDefinition = Readonly<{
+  Operations: Readonly<Record<string, (input: never) => unknown>>;
+}>;
+type Dependency<Definition extends DependencyDefinition> = Readonly<
+  Definition["Operations"] & { readonly [dependencyDefinition]: Definition }
+>;
+type Formatter = Dependency<{
+  Operations: {
+    format(input: { value: string }): Promise<string>;
+  };
+}>;
 type Recorder = {
   read(input: {}): Promise<{ left: number; right: number }>;
   record(input: { value: string }): Promise<void>;
 };
+type Peer = {
+  read(input: {}): string;
+  readPeer(input: {}): string;
+};
 type Formatting = { Programs: { worker: Program<Environment, { Requires: { recorder: Recorder }; Provides: { formatter: Formatter } }> } };
-type Consumer = { Programs: { worker: Program<Environment, { Requires: { formatter: Formatter; recorder: Recorder } }> } };
-type App = { Features: { formatting: Formatting; consumer: Consumer } };
+type Left = { Programs: { worker: Program<Environment, { Requires: { right: Peer }; Provides: { left: Peer } }> } };
+type Right = { Programs: { worker: Program<Environment, { Requires: { left: Peer }; Provides: { right: Peer } }> } };
+type Consumer = { Programs: { worker: Program<Environment, { Requires: { formatter: Formatter; left: Peer; recorder: Recorder; right: Peer } }> } };
+type App = { Features: { formatting: Formatting; left: Left; right: Right; consumer: Consumer } };
+
+const stableSuffix = (value: string): string => \`${"${value}"}!\`;
 
 function createFormatting<const Prefix extends string>(prefix: Prefix): Feature<Formatting> {
   return {
     programs: {
       worker: {
         start({ dependencies }: { dependencies: { recorder: Recorder } }) {
+          const selectedSuffix = stableSuffix;
+          const staticOperations = { suffix: stableSuffix };
+          if (staticOperations.suffix !== selectedSuffix || selectedSuffix("ok") !== "ok!") {
+            throw new Error("Static function identity changed.");
+          }
+          const operations: Readonly<
+            Record<
+              string,
+              (
+                input: { value: string },
+                invocation: { id: string; attempt: number },
+              ) => string
+            >
+          > = {
+            format(
+              input: { value: string },
+              invocation: { id: string; attempt: number },
+            ) {
+              return \`${"${prefix}"}${"${input.value}"}:${"${invocation.attempt}"}:${"${invocation.id}"}\`;
+            },
+          };
+          const formatOperation = Object.keys(operations).find(
+            (name) => operations[name] === operations.format,
+          );
+          if (formatOperation === undefined) throw new Error("Unable to resolve operation.");
           return {
             formatter: {
-              async format({ value }: { value: string }) {
-                return \`${"${prefix}"}${"${value}"}\`;
+              async [dependencyInvocation](
+                operation: "format",
+                input: { value: string },
+                invocation: { id: string; attempt: number },
+              ) {
+                const handler = operations[operation];
+                if (handler === undefined) throw new Error("Unknown operation.");
+                return \`${"${formatOperation}"}:${"${handler(input, invocation)}"}\`;
               },
               async [Symbol.asyncDispose]() {
                 await dependencies.recorder.record({ value: "disposed" });
@@ -374,13 +622,63 @@ function createFormatting<const Prefix extends string>(prefix: Prefix): Feature<
 }
 
 const formatting = createFormatting("native:");
+const left = createFeature<Left>({
+  programs: {
+    worker: {
+      start({ dependencies }: { dependencies: { right: Peer } }) {
+        return {
+          left: {
+            read(_input: {}) {
+              return "left";
+            },
+            readPeer(_input: {}) {
+              return dependencies.right.read({});
+            },
+          },
+        };
+      },
+    },
+  },
+});
+const right = createFeature<Right>({
+  programs: {
+    worker: {
+      start({ dependencies }: { dependencies: { left: Peer } }) {
+        return {
+          right: {
+            read(_input: {}) {
+              return "right";
+            },
+            readPeer(_input: {}) {
+              return dependencies.left.read({});
+            },
+          },
+        };
+      },
+    },
+  },
+});
 const consumer = createFeature<Consumer>({
   programs: {
     worker: {
-      async start({ dependencies }: { dependencies: { formatter: Formatter; recorder: Recorder } }) {
+      async start({ dependencies }: { dependencies: { formatter: Formatter; left: Peer; recorder: Recorder; right: Peer } }) {
+        try {
+          throw new Error("handled");
+        } catch {
+        }
         const input = await dependencies.recorder.read({});
-        const value = await dependencies.formatter.format({ value: \`${"${input.left + input.right}"}\` });
-        await dependencies.recorder.record({ value });
+        const state = { value: input.left };
+        state.value += input.right;
+        const restored = JSON.parse(JSON.stringify(state)) as { value: number };
+        restored.value += 1;
+        const value = await dependencies.formatter.format({ value: \`${"${restored.value - 1}"}\` });
+        const computed: Record<string, string> = {};
+        const selected = "value";
+        computed[selected] = value;
+        await dependencies.recorder.record({ value: computed[selected] });
+        await dependencies.recorder.record({
+          value: \`${"${dependencies.left.readPeer({})}"}:${"${dependencies.right.readPeer({})}"}\`,
+        });
       },
     },
   },
@@ -388,7 +686,394 @@ const consumer = createFeature<Consumer>({
 
 export default createSystem({
   metadata: { name: "Generic production fixture" },
-  features: { formatting, consumer },
+  features: { formatting, left, right, consumer },
+});
+`;
+}
+
+function actorFeatureSource(): string {
+  return `
+import {
+  createActor,
+  createFeature,
+  createSystem,
+  type Actor,
+  type ActorInvocation,
+  type Dependency,
+  type Feature,
+  type Program,
+} from "@/index";
+import type {
+  Clock,
+  EventStore,
+  ServerProcess,
+  Timer,
+} from "@/platforms/server/platform";
+
+type Counter = Actor<{
+  Name: "counter";
+  Key: string;
+  State: { value: number };
+}>;
+const counter = createActor({
+  state: (_context: Actor.Initial<Counter>): Counter["State"] => ({ value: 0 }),
+  commands: {
+    add({
+      state,
+      input,
+      fail,
+    }: Actor.Command<
+      Counter,
+      { amount: number },
+      { negative: { amount: number } }
+    >) {
+      if (input.amount < 0) {
+        fail({ type: "negative", data: { amount: input.amount } });
+      }
+      state.value += input.amount;
+      return { value: state.value };
+    },
+  },
+  queries: {
+    value({ state }: Actor.Query<Counter>) {
+      return { value: state.value };
+    },
+  },
+} satisfies Actor.Definition<Counter>);
+
+type Reminder = Actor<{
+  Name: "reminder";
+  Key: string;
+  State: { fired: number };
+}>;
+type FireInput = Readonly<{ at: number; remaining: number }>;
+type FireReminder = (
+  context: Actor.Command<Reminder, FireInput>,
+) => Readonly<{ fired: number }>;
+const fireReminder: FireReminder = ({ state, input, timers }) => {
+  state.fired += 1;
+  if (input.remaining > 1) {
+    timers.schedule({
+      id: "fire",
+      at: input.at,
+      command: fireReminder,
+      input: { at: input.at, remaining: input.remaining - 1 },
+    });
+  }
+  return { fired: state.fired };
+};
+const reminder = createActor({
+  state: (_context: Actor.Initial<Reminder>): Reminder["State"] => ({ fired: 0 }),
+  commands: {
+    fire: fireReminder,
+    schedule({ timers }: Actor.Command<Reminder>) {
+      timers.schedule({
+        id: "fire",
+        at: 0,
+        command: fireReminder,
+        input: { at: 0, remaining: 3 },
+      });
+      return { scheduled: true };
+    },
+  },
+  queries: {
+    status({ state }: Actor.Query<Reminder>) {
+      return { fired: state.fired };
+    },
+  },
+} satisfies Actor.Definition<Reminder>);
+
+type CycleRequest = Readonly<{
+  key: string;
+  input?: Readonly<{}>;
+  idempotencyKey?: string;
+}> & (Readonly<{ wait?: "completed" }> | Readonly<{ wait: "accepted" }>);
+type CycleAReference = Dependency<{
+  Operations: {
+    ping(request: CycleRequest): Promise<
+      Actor.Outcome<Readonly<{ actor: "a" }>> | ActorInvocation
+    >;
+    pingAccepted(request: CycleRequest): Promise<
+      Actor.Outcome<Readonly<{ actor: "a" }>> | ActorInvocation
+    >;
+    finish(request: CycleRequest): Promise<
+      Actor.Outcome<Readonly<{ finished: number }>> | ActorInvocation
+    >;
+    status(
+      request: Readonly<{ key: string; input?: Readonly<{}> }>,
+    ): Promise<Readonly<{ finished: number }>>;
+  };
+}>;
+type CycleBReference = Dependency<{
+  Operations: {
+    ping(request: CycleRequest): Promise<
+      Actor.Outcome<Readonly<{ actor: "b" }>> | ActorInvocation
+    >;
+    pingAccepted(request: CycleRequest): Promise<
+      Actor.Outcome<Readonly<{ actor: "b" }>> | ActorInvocation
+    >;
+  };
+}>;
+type CycleA = Actor<{
+  Name: "cycleA";
+  Key: string;
+  State: { finished: number };
+  Dependencies: { cycleB: CycleBReference };
+}>;
+type CycleB = Actor<{
+  Name: "cycleB";
+  Key: string;
+  State: Record<never, never>;
+  Dependencies: { cycleA: CycleAReference };
+}>;
+const cycleA = createActor({
+  state: (_context: Actor.Initial<CycleA>): CycleA["State"] => ({ finished: 0 }),
+  commands: {
+    async ping({ key, dependencies }: Actor.Command<CycleA>) {
+      await dependencies.cycleB.ping({ key });
+      return { actor: "a" as const };
+    },
+    async pingAccepted({ key, dependencies }: Actor.Command<CycleA>) {
+      await dependencies.cycleB.pingAccepted({ key });
+      return { actor: "a" as const };
+    },
+    finish({ state }: Actor.Command<CycleA>) {
+      state.finished += 1;
+      return { finished: state.finished };
+    },
+  },
+  queries: {
+    status({ state }: Actor.Query<CycleA>) {
+      return { finished: state.finished };
+    },
+  },
+} satisfies Actor.Definition<CycleA>);
+const cycleB = createActor({
+  state: (_context: Actor.Initial<CycleB>): CycleB["State"] => ({}),
+  commands: {
+    async ping({ key, dependencies }: Actor.Command<CycleB>) {
+      await dependencies.cycleA.finish({ key });
+      return { actor: "b" as const };
+    },
+    async pingAccepted({ key, dependencies }: Actor.Command<CycleB>) {
+      await dependencies.cycleA.finish({ key, wait: "accepted" });
+      return { actor: "b" as const };
+    },
+  },
+  queries: {},
+} satisfies Actor.Definition<CycleB>);
+
+type Recorder = Dependency<{
+  Operations: {
+    read(input: {}): Promise<{ key: string; amount: number }>;
+    record(input: { value: string }): Promise<void>;
+  };
+}>;
+type JournalEvent = Readonly<{
+  type: string;
+  invocation?: string;
+  operation?: string;
+  input?: object;
+  state?: object;
+  outcome?: object;
+  failure?: object;
+  attempt?: number;
+  attempts?: number;
+  timer?: string;
+  generation?: number;
+  dueAt?: number;
+}>;
+function actorStream(name: string, key: string): string {
+  return \`actor:${"${name.length}"}:${"${name}"}:${"${key.length}"}:${"${key}"}\`;
+}
+async function normalizedJournal(
+  events: EventStore<object>,
+  name: string,
+  key: string,
+): Promise<readonly object[]> {
+  const normalized: object[] = [];
+  const stored = await events.read({ stream: actorStream(name, key) });
+  for (const entry of stored) {
+    const event = entry.event as JournalEvent;
+    if (event.type === "actor.command.accepted") {
+      normalized.push({
+        type: event.type,
+        invocation: event.invocation,
+        operation: event.operation,
+        input: event.input,
+      });
+    } else if (event.type === "actor.command.claimed") {
+      normalized.push({
+        type: event.type,
+        invocation: event.invocation,
+        attempt: event.attempt,
+      });
+    } else if (event.type === "actor.command.completed") {
+      normalized.push({
+        type: event.type,
+        invocation: event.invocation,
+        state: event.state,
+        outcome: event.outcome,
+      });
+    } else if (event.type === "actor.command.failed") {
+      normalized.push({
+        type: event.type,
+        invocation: event.invocation,
+        failure: event.failure,
+      });
+    } else if (event.type === "actor.command.poisoned") {
+      normalized.push({
+        type: event.type,
+        invocation: event.invocation,
+        attempts: event.attempts,
+      });
+    } else if (event.type === "actor.timer.scheduled") {
+      normalized.push({
+        type: event.type,
+        timer: event.timer,
+        generation: event.generation,
+        dueAt: event.dueAt,
+        operation: event.operation,
+        input: event.input,
+      });
+    } else if (event.type === "actor.timer.cancelled") {
+      normalized.push({
+        type: event.type,
+        timer: event.timer,
+        generation: event.generation,
+      });
+    } else if (event.type === "actor.timer.fired") {
+      normalized.push({
+        type: event.type,
+        timer: event.timer,
+        generation: event.generation,
+        invocation: event.invocation,
+      });
+    }
+  }
+  return normalized;
+}
+type Probe = {
+  Programs: {
+    server: Program<ServerProcess, {
+      Requires: {
+        counter: Actor.Reference<typeof counter>;
+        cycleA: Actor.Reference<typeof cycleA>;
+        events: EventStore<object>;
+        reminder: Actor.Reference<typeof reminder>;
+        recorder: Recorder;
+        clock: Clock;
+        timer: Timer;
+      };
+    }>;
+  };
+};
+const probe = createFeature<Probe>({
+  programs: {
+    server: {
+      async start({ dependencies }: {
+        dependencies: {
+          counter: Actor.Reference<typeof counter>;
+          cycleA: Actor.Reference<typeof cycleA>;
+          events: EventStore<object>;
+          reminder: Actor.Reference<typeof reminder>;
+          recorder: Recorder;
+          clock: Clock;
+          timer: Timer;
+        };
+      }) {
+        const input = await dependencies.recorder.read({});
+        const first = await dependencies.counter.add({
+          key: input.key,
+          input: { amount: input.amount },
+          idempotencyKey: "same",
+        });
+        const duplicate = await dependencies.counter.add({
+          key: input.key,
+          input: { amount: input.amount },
+          idempotencyKey: "same",
+        });
+        const failed = await dependencies.counter.add({
+          key: input.key,
+          input: { amount: -1 },
+          idempotencyKey: "negative",
+        });
+        const accepted = await dependencies.counter.add({
+          key: input.key,
+          input: { amount: 1 },
+          idempotencyKey: "accepted",
+          wait: "accepted",
+        });
+        const afterAccepted = await dependencies.counter.value({ key: input.key });
+        const current = await dependencies.counter.value({ key: input.key });
+        await dependencies.reminder.schedule({
+          key: input.key,
+          idempotencyKey: "reminder",
+        });
+        await dependencies.timer.sleep({ until: dependencies.clock.now({}) + 10 });
+        const reminder = await dependencies.reminder.status({ key: input.key });
+        let cycleFailure: object = {};
+        try {
+          await dependencies.cycleA.ping({
+            key: "synchronous-cycle",
+            idempotencyKey: "cycle-failure",
+          });
+        } catch (error) {
+          cycleFailure = (error as Actor.Error).failure;
+        }
+        const acceptedCycle = await dependencies.cycleA.pingAccepted({
+          key: "accepted-cycle",
+          idempotencyKey: "cycle-accepted",
+        });
+        await dependencies.timer.sleep({ until: dependencies.clock.now({}) + 10 });
+        const cycleStatus = await dependencies.cycleA.status({ key: "accepted-cycle" });
+        const journals = {
+          counter: await normalizedJournal(dependencies.events, "counter", input.key),
+          reminder: await normalizedJournal(dependencies.events, "reminder", input.key),
+          cycleA: await normalizedJournal(
+            dependencies.events,
+            "cycleA",
+            "synchronous-cycle",
+          ),
+          cycleB: await normalizedJournal(
+            dependencies.events,
+            "cycleB",
+            "synchronous-cycle",
+          ),
+          acceptedCycleA: await normalizedJournal(
+            dependencies.events,
+            "cycleA",
+            "accepted-cycle",
+          ),
+          acceptedCycleB: await normalizedJournal(
+            dependencies.events,
+            "cycleB",
+            "accepted-cycle",
+          ),
+        };
+        await dependencies.recorder.record({
+          value: \`native:\${JSON.stringify({
+            first,
+            duplicate,
+            current,
+            failed,
+            accepted,
+            afterAccepted,
+            reminder,
+            cycleFailure,
+            acceptedCycle,
+            cycleStatus,
+            journals,
+          })}\`,
+        });
+      },
+    },
+  },
+}) as Feature<Probe>;
+
+export default createSystem({
+  metadata: { name: "Native Actor fixture" },
+  features: { counter, cycleA, cycleB, reminder, probe },
 });
 `;
 }
@@ -452,10 +1137,12 @@ async function runNativeFixture(
   executable: string,
   output: string,
   input: unknown,
+  environment: Readonly<Record<string, string>> = {},
 ): Promise<readonly unknown[]> {
   const child = spawn(executable, [], {
     env: {
       ...process.env,
+      ...environment,
       KIT_RECORDER_INPUT: JSON.stringify(input),
       KIT_RECORDER_OUTPUT: output,
     },
@@ -464,8 +1151,23 @@ async function runNativeFixture(
   let error = "";
   child.stderr.setEncoding("utf8").on("data", (value: string) => (error += value));
   await expect
-    .poll(async () => readFile(output, "utf8").catch(() => ""), { timeout: 10_000 })
-    .toContain("native:");
+    .poll(
+      async () => {
+        const contents = await readFile(output, "utf8").catch(() => "");
+        try {
+          const records = contents
+            .trim()
+            .split("\n")
+            .filter(Boolean)
+            .map((line) => JSON.parse(line) as unknown);
+          return records.some((record) => JSON.stringify(record).includes("native:"));
+        } catch {
+          return false;
+        }
+      },
+      { timeout: 10_000 },
+    )
+    .toBe(true);
   child.kill("SIGINT");
   await new Promise<void>((resolvePromise, reject) => {
     child.once("error", reject);
@@ -549,6 +1251,23 @@ function recordedValue(output: readonly unknown[]): unknown {
   } catch {
     return value;
   }
+}
+
+async function implementationSources(directory: string): Promise<string[]> {
+  const sources: string[] = [];
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const path = resolve(directory, entry.name);
+    if (entry.isDirectory()) {
+      sources.push(...(await implementationSources(path)));
+    } else if (
+      entry.isFile() &&
+      /\.(?:rs|tsx?)$/.test(entry.name) &&
+      !/\.(?:spec|testing|typecheck)\.tsx?$/.test(entry.name)
+    ) {
+      sources.push(path);
+    }
+  }
+  return sources.sort();
 }
 
 async function availablePort(): Promise<number> {

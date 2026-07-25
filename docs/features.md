@@ -27,6 +27,9 @@ Feature's implementation.
 
 ## Shipped Factories
 
+- [`Actor`](./actors.md) packages durable keyed state, serialized commands,
+  committed queries, typed references, one-shot timers, migrations, retries,
+  and bounded admission.
 - [`Data`](./data.md) packages authorized event-sourced mutations, optimistic
   browser behavior, typed live queries, and replaceable Turso projections.
 - [`Workflow`](./workflows.md) packages procedural durable execution, recorded

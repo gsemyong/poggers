@@ -117,6 +117,7 @@ function manifest(
 ): ProgramManifest {
   return {
     name,
+    bindings: [],
     contributions: [{ feature, requires, provides: ["identity"] }],
   };
 }

@@ -14,6 +14,7 @@ import {
   createWebAssetManifest,
   inspectClientManifest,
   negotiateWebRepresentation,
+  productionPresentationAssetPlugin,
   routeSourcePlugin,
   validateProductionWebRoute,
   webDevelopmentWorkspace,
@@ -258,6 +259,45 @@ class TestResponse extends EventEmitter {
 }
 
 describe("web asset manifest", () => {
+  it("resolves local Presentation assets identically for document and client builds", async () => {
+    const directory = await mkdtemp(resolve(tmpdir(), "kit-web-presentation-assets-"));
+    const source = resolve(directory, "src");
+    const files = new Map<string, Buffer>();
+    try {
+      await mkdir(resolve(source, "assets"), { recursive: true });
+      const icon = Buffer.from(
+        "<svg xmlns='http://www.w3.org/2000/svg'><path d='M0 0h1v1z'/></svg>",
+      );
+      const audio = Buffer.alloc(5_000, 7);
+      await writeFile(resolve(source, "assets/icon.svg"), icon);
+      await writeFile(resolve(source, "assets/control.wav"), audio);
+      const plugin = productionPresentationAssetPlugin(source, { files });
+      const hook = plugin.transform;
+      const handler = (typeof hook === "function" ? hook : hook?.handler) as unknown as (
+        code: string,
+        id: string,
+      ) => Promise<string | Readonly<{ code: string }> | null | undefined>;
+      const result = await handler(
+        `import { createImageAsset as image } from "kit/web";
+import * as web from "kit/web";
+export const icon = image(new URL("./assets/icon.svg", import.meta.url));
+export const audio = web.createAudioAsset(new URL("./assets/control.wav", import.meta.url));
+`,
+        resolve(source, "presentation.ts"),
+      );
+      const code = typeof result === "string" ? result : result?.code;
+      const hash = createHash("sha256").update(audio).digest("hex").slice(0, 12);
+      const audioPath = `/assets/control-${hash}.wav`;
+
+      expect(code).toContain(`data:image/svg+xml;base64,${icon.toString("base64")}`);
+      expect(code).toContain(JSON.stringify(audioPath));
+      expect(code).not.toContain("new URL");
+      expect([...files]).toEqual([[audioPath, audio]]);
+    } finally {
+      await rm(directory, { force: true, recursive: true });
+    }
+  });
+
   it("seals public files by content while keeping only proven hashed outputs immutable", async () => {
     const directory = await mkdtemp(resolve(tmpdir(), "kit-web-assets-"));
     try {
@@ -318,6 +358,13 @@ describe("web asset manifest", () => {
       });
       const firstFiles = await snapshotFiles(first.directory);
       expect(await snapshotFiles(second.directory)).toEqual(firstFiles);
+      const textualArtifacts = Object.entries(firstFiles)
+        .filter(([name]) => /\.(?:html|js|json)$/.test(name))
+        .map(([, value]) => Buffer.from(value, "base64").toString("utf8"));
+      expect(textualArtifacts.every((artifact) => !artifact.includes("file://"))).toBe(true);
+      expect(
+        textualArtifacts.some((artifact) => artifact.includes("data:image/svg+xml;base64,")),
+      ).toBe(true);
       const javascript = Object.entries(firstFiles)
         .filter(([name]) => name.endsWith(".js"))
         .map(([name, value]) => [name, Buffer.from(value, "base64").toString("utf8")] as const);

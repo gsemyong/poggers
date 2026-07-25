@@ -1,6 +1,52 @@
 import type { PresentationSourceIR } from "@/compiler/presentation";
 
-export const SYSTEM_IR_VERSION = 19 as const;
+export const SYSTEM_IR_VERSION = 23 as const;
+
+/**
+ * Orders providers before consumers while retaining mutually dependent
+ * contributions as one deterministic, lazily bound component.
+ */
+export function orderDependencyGraph(
+  graph: ReadonlyMap<string, ReadonlySet<string>>,
+): readonly string[] {
+  const indices = new Map<string, number>();
+  const lowLinks = new Map<string, number>();
+  const stack: string[] = [];
+  const stacked = new Set<string>();
+  const components: string[][] = [];
+  let nextIndex = 0;
+
+  const visit = (node: string): void => {
+    const nodeIndex = nextIndex++;
+    indices.set(node, nodeIndex);
+    lowLinks.set(node, nodeIndex);
+    stack.push(node);
+    stacked.add(node);
+    for (const dependency of [...(graph.get(node) ?? [])].sort()) {
+      if (!indices.has(dependency)) {
+        visit(dependency);
+        lowLinks.set(node, Math.min(lowLinks.get(node)!, lowLinks.get(dependency)!));
+      } else if (stacked.has(dependency)) {
+        lowLinks.set(node, Math.min(lowLinks.get(node)!, indices.get(dependency)!));
+      }
+    }
+    if (lowLinks.get(node) !== indices.get(node)) return;
+    const component: string[] = [];
+    let member: string | undefined;
+    do {
+      member = stack.pop();
+      if (member === undefined) break;
+      stacked.delete(member);
+      component.push(member);
+    } while (member !== node);
+    components.push(component.sort());
+  };
+
+  for (const node of [...graph.keys()].sort()) {
+    if (!indices.has(node)) visit(node);
+  }
+  return components.flat();
+}
 
 /** Serializable meaning owned and versioned by a compiler extension. */
 export type ExtensionIR =
@@ -61,6 +107,7 @@ export type ExpressionValueIR =
       )[];
     }>
   | Readonly<{ kind: "property"; value: ExpressionIR; name: string; optional?: true }>
+  | Readonly<{ kind: "index"; value: ExpressionIR; index: ExpressionIR }>
   | Readonly<{
       kind: "binary";
       operator:
@@ -102,6 +149,7 @@ export type ExpressionValueIR =
     }>
   | Readonly<{ kind: "json-parse"; value: ExpressionIR }>
   | Readonly<{ kind: "json-stringify"; value: ExpressionIR }>
+  | Readonly<{ kind: "object-keys"; value: ExpressionIR }>
   | Readonly<{ kind: "to-string"; value: ExpressionIR }>
   | Readonly<{
       kind: "stream-map";
@@ -117,12 +165,19 @@ export type ExpressionValueIR =
       kind: "closure";
       function: string;
       captures: readonly ExpressionIR[];
+      /** Preserves identity when one static function binding is expanded at multiple use sites. */
+      stable?: true;
     }>
   | Readonly<{
       kind: "conditional";
       condition: ExpressionIR;
       consequent: ExpressionIR;
       alternate: ExpressionIR;
+    }>
+  | Readonly<{
+      kind: "concurrent";
+      operation: "all" | "all-settled" | "race";
+      values: readonly ExpressionIR[];
     }>
   | Readonly<{
       kind: "dependency-call";
@@ -162,6 +217,14 @@ export type StatementIR =
       value: ExpressionIR;
       span: SourceSpan;
     }>
+  | Readonly<{
+      kind: "index-assign";
+      target: ExpressionIR;
+      index: ExpressionIR;
+      operator: "=" | "+=" | "-=" | "*=" | "/=" | "??=";
+      value: ExpressionIR;
+      span: SourceSpan;
+    }>
   | Readonly<{ kind: "expression"; expression: ExpressionIR; span: SourceSpan }>
   | Readonly<{ kind: "array-push"; array: string; value: ExpressionIR; span: SourceSpan }>
   | Readonly<{
@@ -193,10 +256,18 @@ export type StatementIR =
       span: SourceSpan;
     }>
   | Readonly<{
+      kind: "while";
+      condition: ExpressionIR;
+      body: readonly StatementIR[];
+      span: SourceSpan;
+    }>
+  | Readonly<{
       kind: "try";
       body: readonly StatementIR[];
-      error?: string;
-      catch: readonly StatementIR[];
+      catch?: Readonly<{
+        error?: string;
+        body: readonly StatementIR[];
+      }>;
       finally: readonly StatementIR[];
       span: SourceSpan;
     }>
@@ -226,6 +297,8 @@ export type ProgramImplementationIR =
 export type DependencyIR = Readonly<{
   name: string;
   type: TypeIR;
+  /** Absent only for pre-migration input-shaped providers. */
+  binding?: "envelope";
 }>;
 
 export type DependencyOperationIR = Readonly<{
@@ -239,6 +312,8 @@ export type DependencyOperationIR = Readonly<{
 export type DependencyContractIR = Readonly<{
   name: string;
   operations: readonly DependencyOperationIR[];
+  /** Absent only for pre-migration input-shaped providers. */
+  binding?: "envelope";
 }>;
 
 export type ComponentIR = Readonly<{
@@ -290,6 +365,8 @@ export type LinkedProgramContributionIR = Readonly<{
 export type LinkedDependencyIR = Readonly<{
   name: string;
   type: TypeIR;
+  /** Absent only for pre-migration input-shaped providers. */
+  binding?: "envelope";
   consumers: readonly string[];
   provider?: string;
 }>;
@@ -312,8 +389,63 @@ export type ProgramContributionManifest = Readonly<{
 /** Serializable dependency graph consumed by a Process runtime. */
 export type ProgramManifest = Readonly<{
   name: string;
+  bindings: readonly DependencyContractIR[];
   contributions: readonly ProgramContributionManifest[];
 }>;
+
+/** Projects one semantic Dependency into its canonical callable operations. */
+export function collectDependencyOperations(
+  dependency: DependencyIR,
+): readonly DependencyOperationIR[] {
+  if (dependency.type.kind !== "record") {
+    throw new Error(
+      `Dependency ${JSON.stringify(dependency.name)} must be a record of operations.`,
+    );
+  }
+  return dependency.type.fields
+    .map((field): DependencyOperationIR => {
+      if (field.optional || field.type.kind !== "function") {
+        throw new Error(
+          `Dependency ${JSON.stringify(dependency.name)} operation ${JSON.stringify(field.name)} ` +
+            "must be a required function.",
+        );
+      }
+      if (field.type.parameters.length > 1) {
+        throw new Error(
+          `Dependency ${JSON.stringify(dependency.name)} operation ${JSON.stringify(field.name)} ` +
+            "must accept one input object.",
+        );
+      }
+      return {
+        name: field.name,
+        mode:
+          field.type.result.kind === "promise"
+            ? "asynchronous"
+            : field.type.result.kind === "stream"
+              ? "stream"
+              : "synchronous",
+        input: field.type.parameters[0]?.type ?? { kind: "primitive", name: "void" },
+        output:
+          field.type.result.kind === "promise"
+            ? field.type.result.value
+            : field.type.result.kind === "stream"
+              ? field.type.result.element
+              : field.type.result,
+      };
+    })
+    .sort((left, right) => left.name.localeCompare(right.name));
+}
+
+/** Projects semantic Dependency types into their minimal runtime binding contracts. */
+export function projectDependencyContracts(
+  dependencies: readonly DependencyIR[],
+): readonly DependencyContractIR[] {
+  return dependencies.map((dependency) => ({
+    name: dependency.name,
+    operations: collectDependencyOperations(dependency),
+    ...(dependency.binding ? { binding: dependency.binding } : {}),
+  }));
+}
 
 export type FeatureIR = Readonly<{
   id: string;

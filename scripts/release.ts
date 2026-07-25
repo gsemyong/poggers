@@ -12,16 +12,22 @@ type PackResult = readonly [
 
 const root = resolve(import.meta.dirname, "..");
 const releaseArguments = process.argv.slice(2);
-const version = releaseArguments.find((argument) => !argument.startsWith("--"));
+const verify = releaseArguments.includes("--check");
+const rootManifest = JSON.parse(await readFile(resolve(root, "package.json"), "utf8")) as {
+  version: string;
+};
+const version =
+  releaseArguments.find((argument) => !argument.startsWith("--")) ??
+  (verify ? rootManifest.version : undefined);
 const dryRun = releaseArguments.includes("--dry-run");
 
 if (
   !version ||
   !/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?$/.test(version)
 ) {
-  throw new TypeError("Usage: nub run release -- <version> [--dry-run]");
+  throw new TypeError("Usage: nub run release -- <version> [--dry-run] | nub run release:check");
 }
-if ((await capture("git", ["status", "--porcelain"], root)).trim()) {
+if (!verify && (await capture("git", ["status", "--porcelain"], root)).trim()) {
   throw new Error("Release requires a clean worktree.");
 }
 
@@ -47,35 +53,47 @@ try {
   await run("nub", ["run", "check"], workspace);
   await run("nub", ["run", "build"], workspace);
 
-  const repository = (
-    await capture("gh", ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"], root)
-  ).trim();
   const tag = `v${version}`;
-  const releasePackage = `https://github.com/${repository}/releases/download/${tag}/kit-${version}.tgz`;
+  const repository = verify
+    ? undefined
+    : (
+        await capture(
+          "gh",
+          ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"],
+          root,
+        )
+      ).trim();
 
-  if (dryRun) {
+  if (verify) {
     console.log(`verified ${artifact}`);
-    console.log(`would create https://github.com/${repository}/releases/tag/${tag}`);
   } else {
-    await requirePublishable(tag);
-    const commit = (await capture("git", ["rev-parse", "HEAD"], root)).trim();
-    const arguments_ = [
-      "release",
-      "create",
-      tag,
-      artifact,
-      "--generate-notes",
-      "--target",
-      commit,
-      "--title",
-      tag,
-    ];
-    if (version.includes("-")) arguments_.push("--prerelease");
-    await run("gh", arguments_, root);
+    if (dryRun) {
+      console.log(`verified ${artifact}`);
+      console.log(`would create https://github.com/${repository}/releases/tag/${tag}`);
+    } else {
+      await requirePublishable(tag);
+      const commit = (await capture("git", ["rev-parse", "HEAD"], root)).trim();
+      const arguments_ = [
+        "release",
+        "create",
+        tag,
+        artifact,
+        "--generate-notes",
+        "--target",
+        commit,
+        "--title",
+        tag,
+      ];
+      if (version.includes("-")) arguments_.push("--prerelease");
+      await run("gh", arguments_, root);
+    }
   }
 
-  console.log(`package="${releasePackage}"`);
-  console.log('nubx -y -p "$package" kit create my-system --package "$package"');
+  if (!verify) {
+    const releasePackage = `https://github.com/${repository}/releases/download/${tag}/kit-${version}.tgz`;
+    console.log(`package="${releasePackage}"`);
+    console.log('nubx -y -p "$package" kit create my-system --package "$package"');
+  }
 } finally {
   await rm(temporary, { force: true, recursive: true });
 }

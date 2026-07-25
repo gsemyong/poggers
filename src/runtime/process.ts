@@ -1,12 +1,24 @@
 import { endBatch, signal as createSignal, startBatch } from "alien-signals";
 
-import type {
-  DependencyContractIR,
-  ProgramContributionManifest,
-  ProgramManifest,
-  TypeIR,
+import {
+  orderDependencyGraph,
+  type DependencyContractIR,
+  type DependencyOperationIR,
+  type ProgramContributionManifest,
+  type ProgramManifest,
+  type TypeIR,
 } from "@/compiler/ir";
-import type { ProgramContributionAddress } from "@/core/dependency";
+import {
+  DependencyFailureError,
+  dependencyInvocation,
+  dependencyInvocationControl,
+  invokeDependency,
+  isDeferredDependencyInvocation,
+  type DependencyInvocation,
+  type DependencyInvocationControl,
+  type DependencyProviderInvocation,
+  type ProgramContributionAddress,
+} from "@/core/dependency";
 import type { System, SystemContract } from "@/core/system";
 import type { ActionEvent } from "@/core/ui/presentation";
 import { createActionEventLedger } from "@/runtime/presentation";
@@ -25,6 +37,83 @@ export function scopeDependency(value: unknown, scope: DependencyScope): unknown
   if (!value || (typeof value !== "object" && typeof value !== "function")) return value;
   const scoped = (value as Partial<ScopedDependency>)[dependencyScope];
   return typeof scoped === "function" ? scoped.call(value, scope) : value;
+}
+
+export type DeferredDependencyBinding = Readonly<{
+  dependency: object;
+  bind(value: object): void;
+}>;
+
+/** Creates one lazily bound internal Dependency for a provider component. */
+export function createDeferredDependencyBinding(name: string): DeferredDependencyBinding {
+  let implementation: object | undefined;
+  const operations = new Map<PropertyKey, (...arguments_: unknown[]) => unknown>();
+  const operation = (property: PropertyKey) => {
+    const existing = operations.get(property);
+    if (existing) return existing;
+    const created =
+      property === dependencyInvocation
+        ? (operationName: unknown, input: unknown, invocation: unknown) => {
+            if (!implementation) {
+              throw new Error(`Dependency ${JSON.stringify(name)} is not ready.`);
+            }
+            return invokeDependency(
+              implementation,
+              String(operationName),
+              input,
+              invocation as DependencyInvocation,
+            );
+          }
+        : (...arguments_: unknown[]) => {
+            if (!implementation) {
+              throw new Error(`Dependency ${JSON.stringify(name)} is not ready.`);
+            }
+            const method = Reflect.get(implementation, property);
+            if (typeof method !== "function") {
+              throw new Error(
+                `Dependency ${JSON.stringify(name)} operation ${String(property)} is not implemented.`,
+              );
+            }
+            return Reflect.apply(method, implementation, arguments_);
+          };
+    operations.set(property, created);
+    return created;
+  };
+  const value = (property: PropertyKey): unknown => {
+    if (property === "then") return undefined;
+    if (property === dependencyInvocation || !implementation) return operation(property);
+    const resolved = Reflect.get(implementation, property);
+    return typeof resolved === "function" ? operation(property) : resolved;
+  };
+  const dependency = new Proxy(Object.create(null) as object, {
+    get: (_target, property) => value(property),
+    has: (_target, property) =>
+      property !== "then" &&
+      (!implementation ||
+        property === dependencyInvocation ||
+        Reflect.has(implementation, property)),
+    ownKeys: () => (implementation ? Reflect.ownKeys(implementation) : []),
+    getOwnPropertyDescriptor: (_target, property) =>
+      property === "then"
+        ? undefined
+        : {
+            configurable: true,
+            enumerable: implementation
+              ? Boolean(Reflect.getOwnPropertyDescriptor(implementation, property)?.enumerable)
+              : false,
+            value: value(property),
+            writable: false,
+          },
+  });
+  return {
+    dependency,
+    bind(value) {
+      if (implementation) {
+        throw new Error(`Dependency ${JSON.stringify(name)} is already bound.`);
+      }
+      implementation = value;
+    },
+  };
 }
 
 /**
@@ -56,77 +145,221 @@ function conformDependency(
   implementation: object,
 ): Readonly<Record<string | symbol, unknown>> {
   const operations = new Map(contract.operations.map((operation) => [operation.name, operation]));
-  for (const operation of operations.values()) {
-    if (typeof Reflect.get(implementation, operation.name) !== "function") {
-      throw new Error(
-        `External Dependency ${JSON.stringify(contract.name)} does not implement operation ` +
-          `${JSON.stringify(operation.name)}.`,
-      );
+  const dispatcher = Reflect.get(implementation, dependencyInvocation);
+  if (typeof dispatcher !== "function") {
+    for (const operation of operations.values()) {
+      if (typeof Reflect.get(implementation, operation.name) !== "function") {
+        throw new Error(
+          `External Dependency ${JSON.stringify(contract.name)} does not implement operation ` +
+            `${JSON.stringify(operation.name)}.`,
+        );
+      }
     }
   }
   const wrappers = new Map<string, (...arguments_: unknown[]) => unknown>();
   const facade = Object.create(null) as Readonly<Record<string | symbol, unknown>>;
+  let directInvocation = 0;
+  const invoke = (operation: string, input: unknown, invocation: DependencyInvocation): unknown => {
+    const contractOperation = operations.get(operation);
+    if (!contractOperation) {
+      throw new Error(
+        `Dependency ${JSON.stringify(contract.name)} has no operation ${JSON.stringify(operation)}.`,
+      );
+    }
+    assertDependencyInvocation(invocation, `${contract.name}.${operation}`);
+    assertRuntimeType(input, contractOperation.input, `${contract.name}.${operation} input`);
+    const output =
+      typeof dispatcher === "function"
+        ? Reflect.apply(dispatcher, implementation, [operation, input, invocation])
+        : Reflect.apply(
+            Reflect.get(implementation, operation) as (...values: unknown[]) => unknown,
+            implementation,
+            contract.binding === "envelope"
+              ? [{ input, invocation: providerInvocation(invocation) }]
+              : [input],
+          );
+    return conformDependencyOutput(contract.name, contractOperation, output);
+  };
+  const operationWrapper = (operation: DependencyOperationIR): ((input: unknown) => unknown) => {
+    let wrapper = wrappers.get(operation.name);
+    if (wrapper) return wrapper;
+    wrapper = (...arguments_: unknown[]) => {
+      if (arguments_.length > 1) {
+        throw new TypeError(
+          `Dependency ${contract.name}.${operation.name} accepts one input object.`,
+        );
+      }
+      const input = arguments_[0];
+      const now = Date.now();
+      return invoke(operation.name, input, {
+        id: `direct:${contract.name}:${operation.name}:${++directInvocation}`,
+        attempt: 1,
+        scheduledAt: now,
+        startedAt: now,
+      });
+    };
+    wrappers.set(operation.name, wrapper);
+    return wrapper;
+  };
   return new Proxy(facade, {
     get(_target, property) {
+      if (property === dependencyInvocation) return invoke;
       if (typeof property !== "string") return Reflect.get(implementation, property);
       const operation = operations.get(property);
       if (!operation) return Reflect.get(implementation, property);
-      let wrapper = wrappers.get(property);
-      if (wrapper) return wrapper;
-      const implementationOperation = Reflect.get(implementation, property);
-      wrapper = (...arguments_: unknown[]) => {
-        if (arguments_.length > 1) {
-          throw new TypeError(
-            `Dependency ${contract.name}.${operation.name} accepts one input object.`,
-          );
-        }
-        const input = arguments_[0];
-        assertRuntimeType(input, operation.input, `${contract.name}.${operation.name} input`);
-        const output = Reflect.apply(
-          implementationOperation as (...values: unknown[]) => unknown,
-          implementation,
-          arguments_,
-        );
-        if (operation.mode === "asynchronous") {
-          if (!isPromiseLike(output)) {
-            throw new TypeError(
-              `Dependency ${contract.name}.${operation.name} must return a Promise.`,
-            );
-          }
-          return Promise.resolve(output).then((value) => {
-            assertRuntimeType(value, operation.output, `${contract.name}.${operation.name} output`);
-            return value;
-          });
-        }
-        if (operation.mode === "stream") {
-          if (!isAsyncIterable(output)) {
-            throw new TypeError(
-              `Dependency ${contract.name}.${operation.name} must return an AsyncIterable.`,
-            );
-          }
-          return conformStream(
-            output,
-            operation.output,
-            `${contract.name}.${operation.name} output`,
-          );
-        }
-        assertRuntimeType(output, operation.output, `${contract.name}.${operation.name} output`);
-        return output;
-      };
-      wrappers.set(property, wrapper);
-      return wrapper;
+      return operationWrapper(operation);
     },
     getOwnPropertyDescriptor(_target, property) {
+      if (typeof property === "string") {
+        const operation = operations.get(property);
+        if (operation) {
+          return {
+            configurable: true,
+            enumerable: true,
+            value: operationWrapper(operation),
+            writable: false,
+          };
+        }
+      }
       const descriptor = Reflect.getOwnPropertyDescriptor(implementation, property);
       return descriptor ? { ...descriptor, configurable: true } : undefined;
     },
     getPrototypeOf: () => Reflect.getPrototypeOf(implementation),
-    has: (_target, property) => Reflect.has(implementation, property),
-    ownKeys: () => Reflect.ownKeys(implementation),
+    has: (_target, property) =>
+      property === dependencyInvocation ||
+      (typeof property === "string" && operations.has(property)) ||
+      Reflect.has(implementation, property),
+    ownKeys: () => [
+      ...new Set<string | symbol>([...Reflect.ownKeys(implementation), ...operations.keys()]),
+    ],
     set: () => false,
     defineProperty: () => false,
     deleteProperty: () => false,
   }) as Readonly<Record<string | symbol, unknown>>;
+}
+
+function providerInvocation(invocation: DependencyInvocation): DependencyProviderInvocation<
+  Readonly<{
+    type: string;
+    data: unknown;
+    message?: string;
+    retry?: Readonly<{ delay: number }>;
+  }>
+> {
+  const { [dependencyInvocationControl]: control = directInvocationControl, ...metadata } =
+    invocation;
+  const result = { ...metadata } as DependencyProviderInvocation<
+    Readonly<{
+      type: string;
+      data: unknown;
+      message?: string;
+      retry?: Readonly<{ delay: number }>;
+    }>
+  >;
+  if (control.previousHeartbeat !== undefined) {
+    Object.defineProperty(result, "previousHeartbeat", {
+      configurable: false,
+      enumerable: true,
+      value: control.previousHeartbeat,
+      writable: false,
+    });
+  }
+  Object.defineProperties(result, {
+    cancellation: {
+      configurable: false,
+      enumerable: false,
+      value: control.cancellation,
+      writable: false,
+    },
+    heartbeat: {
+      configurable: false,
+      enumerable: false,
+      value({ details }: Readonly<{ details: unknown }>): void {
+        control.heartbeat(details);
+      },
+      writable: false,
+    },
+    defer: {
+      configurable: false,
+      enumerable: false,
+      value(input: Readonly<{ id: string }>) {
+        if (!input || typeof input.id !== "string" || !input.id) {
+          throw new TypeError("Deferred Dependency invocation id is required.");
+        }
+        return control.defer(input);
+      },
+      writable: false,
+    },
+  });
+  Object.defineProperty(result, "fail", {
+    configurable: false,
+    enumerable: false,
+    value(
+      input: Readonly<{
+        type: string;
+        data: unknown;
+        message?: string;
+        retry?: Readonly<{ delay: number }>;
+      }>,
+    ): never {
+      throw new DependencyFailureError(input);
+    },
+    writable: false,
+  });
+  return Object.freeze(result);
+}
+
+const directInvocationControl: DependencyInvocationControl = Object.freeze({
+  heartbeat() {},
+  defer() {
+    throw new Error("Direct Dependency invocations cannot be completed externally.");
+  },
+  cancellation: Object.freeze({
+    requested: () => false,
+    wait: () => new Promise<void>(() => {}),
+  }),
+});
+
+function conformDependencyOutput(
+  dependency: string,
+  operation: DependencyContractIR["operations"][number],
+  output: unknown,
+): unknown {
+  if (operation.mode === "asynchronous") {
+    if (!isPromiseLike(output)) {
+      throw new TypeError(`Dependency ${dependency}.${operation.name} must return a Promise.`);
+    }
+    return Promise.resolve(output).then((value) => {
+      if (isDeferredDependencyInvocation(value)) return value;
+      assertRuntimeType(value, operation.output, `${dependency}.${operation.name} output`);
+      return value;
+    });
+  }
+  if (operation.mode === "stream") {
+    if (!isAsyncIterable(output)) {
+      throw new TypeError(
+        `Dependency ${dependency}.${operation.name} must return an AsyncIterable.`,
+      );
+    }
+    return conformStream(output, operation.output, `${dependency}.${operation.name} output`);
+  }
+  assertRuntimeType(output, operation.output, `${dependency}.${operation.name} output`);
+  return output;
+}
+
+function assertDependencyInvocation(invocation: DependencyInvocation, operation: string): void {
+  if (
+    !invocation ||
+    typeof invocation.id !== "string" ||
+    !invocation.id ||
+    !Number.isSafeInteger(invocation.attempt) ||
+    invocation.attempt < 1 ||
+    !Number.isFinite(invocation.scheduledAt) ||
+    !Number.isFinite(invocation.startedAt) ||
+    (invocation.deadline !== undefined && !Number.isFinite(invocation.deadline))
+  ) {
+    throw new TypeError(`Dependency ${operation} received invalid invocation metadata.`);
+  }
 }
 
 function conformStream(
@@ -206,7 +439,9 @@ function assertRuntimeType(value: unknown, contract: TypeIR, path: string): void
       break;
   }
   if (!valid) {
-    throw new TypeError(`${path} does not satisfy its semantic Dependency contract.`);
+    throw new TypeError(
+      `${path} does not satisfy its semantic Dependency contract ` + `${JSON.stringify(contract)}.`,
+    );
   }
 }
 
@@ -364,6 +599,7 @@ export function createUIContributionInstance(
 type ProgramContributionOptions = Readonly<{
   address: ProgramContributionAddress;
   provides: readonly string[];
+  providerContracts?: readonly DependencyContractIR[];
   dependencies?: Record<string, unknown>;
   features?: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
   initialState?: Readonly<Record<string, unknown>>;
@@ -574,13 +810,17 @@ export function createProgramContributionInstance(
         });
 
         if (options.provides.length) {
-          const dependencies = await result;
-          if (!isRecord(dependencies)) {
+          const implementations = await result;
+          if (!isRecord(implementations)) {
             throw new Error(
               `${formatAddress(options.address)} must return its declared Dependency object.`,
             );
           }
-          provided = Object.freeze({ ...dependencies });
+          const mounted = conformExternalDependencies(
+            options.providerContracts ?? [],
+            implementations,
+          );
+          provided = Object.freeze({ ...implementations, ...mounted });
           Object.assign(availableDependencies, provided);
           for (const dependency of Object.values(provided)) scope.adopt(dependency);
         } else if (result !== undefined) {
@@ -623,6 +863,7 @@ export type ProgramPlan = Readonly<{
   name: string;
   contributions: readonly PlannedContribution[];
   external: readonly string[];
+  bindings: readonly DependencyContractIR[];
 }>;
 
 export type ProgramAssemblyOptions = Readonly<{
@@ -676,6 +917,15 @@ export function planProgram(
 
   const declarations = new Map<string, ProgramContributionManifest>();
   const providers = new Map<string, string>();
+  const bindings = new Map<string, DependencyContractIR>();
+  for (const binding of manifest.bindings) {
+    if (bindings.has(binding.name)) {
+      throw new Error(
+        `Program "${name}" declares Dependency binding "${binding.name}" more than once.`,
+      );
+    }
+    bindings.set(binding.name, binding);
+  }
   for (const contribution of manifest.contributions) {
     if (declarations.has(contribution.feature)) {
       throw new Error(
@@ -728,7 +978,6 @@ export function planProgram(
   const external = new Set<string>();
   const pending = new Map<string, Set<string>>();
   const dependencyGraph = new Map<string, readonly string[]>();
-  const dependants = new Map<string, Set<string>>();
   for (const declaration of declarations.values()) {
     const dependencies = new Set<string>();
     for (const dependency of declaration.requires) {
@@ -738,39 +987,12 @@ export function planProgram(
     }
     pending.set(declaration.feature, dependencies);
     dependencyGraph.set(declaration.feature, [...dependencies].sort());
-    for (const dependency of dependencies) {
-      const values = dependants.get(dependency) ?? new Set<string>();
-      values.add(declaration.feature);
-      dependants.set(dependency, values);
-    }
   }
-
-  const ready = [...pending]
-    .filter(([, dependencies]) => !dependencies.size)
-    .map(([feature]) => feature)
-    .sort();
-  const ordered: string[] = [];
-  while (ready.length) {
-    const feature = ready.shift()!;
-    ordered.push(feature);
-    for (const dependant of [...(dependants.get(feature) ?? [])].sort()) {
-      const dependencies = pending.get(dependant)!;
-      dependencies.delete(feature);
-      if (!dependencies.size) insertSorted(ready, dependant);
-    }
-  }
-  if (ordered.length !== pending.size) {
-    const cycle = [...pending]
-      .filter(([feature]) => !ordered.includes(feature))
-      .map(([feature]) => feature)
-      .sort();
-    throw new Error(
-      `Program "${name}" has a Dependency provider cycle between Features: ${cycle.join(", ")}.`,
-    );
-  }
+  const ordered = orderDependencyGraph(pending);
 
   return {
     name,
+    bindings: [...bindings.values()],
     external: [...external].sort(),
     contributions: ordered.map((feature) => {
       const declaration = declarations.get(feature)!;
@@ -797,6 +1019,13 @@ export async function assembleProgram(options: ProgramAssemblyOptions): Promise<
   const ui: Record<string, Readonly<Record<string, unknown>>> = Object.create(null);
   const externalScope = new ResourceScope();
   const providedDependencies: Record<string, unknown> = Object.create(null);
+  const deferredDependencies = new Map<string, DeferredDependencyBinding>();
+  const providedNames = new Set(plan.contributions.flatMap(({ manifest }) => manifest.provides));
+  for (const name of [...providedNames].sort()) {
+    const binding = createDeferredDependencyBinding(name);
+    deferredDependencies.set(name, binding);
+    providedDependencies[name] = binding.dependency;
+  }
 
   validateDependencyBindings(plan, options.dependencies);
   if (options.ownDependencies !== false) {
@@ -822,11 +1051,17 @@ export async function assembleProgram(options: ProgramAssemblyOptions): Promise<
           program: options.name,
           feature: path,
         });
+      } else if (Object.hasOwn(providedDependencies, dependency)) {
+        registry[dependency] = providedDependencies[dependency];
       }
     }
     const instance = createProgramContributionInstance(planned.definition, {
       address: { program: options.name, feature: path },
       provides: planned.manifest.provides,
+      providerContracts: planned.manifest.provides.flatMap((name) => {
+        const contract = plan.bindings.find((binding) => binding.name === name);
+        return contract ? [contract] : [];
+      }),
       dependencies: registry,
       features: children,
       initialState: options.initialState?.[path],
@@ -842,15 +1077,6 @@ export async function assembleProgram(options: ProgramAssemblyOptions): Promise<
     for (const contribution of plan.contributions) instantiate(contribution.feature);
     for (const planned of plan.contributions) {
       const instance = instances.get(planned.feature)!;
-      const registry = registries.get(planned.feature)!;
-      for (const dependency of planned.manifest.requires) {
-        if (Object.hasOwn(providedDependencies, dependency)) {
-          registry[dependency] = scopeDependency(providedDependencies[dependency], {
-            program: options.name,
-            feature: planned.feature,
-          });
-        }
-      }
       const provided = await instance.start();
       const actual = Object.keys(provided).sort();
       const declared = [...planned.manifest.provides].sort();
@@ -860,7 +1086,9 @@ export async function assembleProgram(options: ProgramAssemblyOptions): Promise<
             `[${declared.join(", ")}].`,
         );
       }
-      Object.assign(providedDependencies, provided);
+      for (const [name, value] of Object.entries(provided)) {
+        deferredDependencies.get(name)?.bind(value as object);
+      }
     }
   } catch (error) {
     await disposeProgram([...instances.values()], externalScope).catch(() => undefined);
@@ -897,12 +1125,6 @@ export async function startProcess<Contract extends SystemContract>(
     dependencies,
     manifest,
   });
-}
-
-function insertSorted(values: string[], value: string): void {
-  const index = values.findIndex((candidate) => candidate.localeCompare(value) > 0);
-  if (index === -1) values.push(value);
-  else values.splice(index, 0, value);
 }
 
 async function disposeProgram(

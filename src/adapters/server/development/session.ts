@@ -20,12 +20,13 @@ import {
   type WebRouteLoaderPlan,
 } from "@/adapters/web-server";
 import {
+  projectDependencyContracts,
   selectSystemOutputs,
   type DependencyIR,
   type ProgramIR,
   type SystemIR,
 } from "@/compiler/ir";
-import { linkProgram, projectDependencyContracts } from "@/compiler/linker";
+import { linkProgram } from "@/compiler/linker";
 import type { DevelopmentSession, PlatformDevelopmentInput } from "@/contracts/platform";
 import type { System, SystemContract } from "@/core/system";
 import type { ServerPlatform } from "@/platforms/server/platform";

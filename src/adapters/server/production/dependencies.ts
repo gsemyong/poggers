@@ -1,7 +1,10 @@
 import { resolve } from "node:path";
 
-import type { DependencyIR, DependencyOperationIR } from "@/compiler/ir";
-import { collectDependencyOperations } from "@/compiler/linker";
+import {
+  collectDependencyOperations,
+  type DependencyIR,
+  type DependencyOperationIR,
+} from "@/compiler/ir";
 
 export type ServerProductionConfiguration = Readonly<{
   name: string;
@@ -34,12 +37,34 @@ export type ResolvedServerProductionDependency = Readonly<{
 const dependencyDirectory = (name: string): string =>
   resolve(import.meta.dirname, "dependencies", name);
 
+export const alarmDependency = defineServerProductionDependency({
+  name: "alarm",
+  dependency: "alarm",
+  configuration: [],
+  crate: { package: "kit-server-alarm", directory: dependencyDirectory("alarm") },
+  rust: { type: "kit_server_alarm::Alarm", constructor: "kit_server_alarm::create" },
+});
+
 export const clockDependency = defineServerProductionDependency({
   name: "clock",
   dependency: "clock",
   configuration: [],
   crate: { package: "kit-server-clock", directory: dependencyDirectory("clock") },
   rust: { type: "kit_server_clock::Clock", constructor: "kit_server_clock::create" },
+});
+
+export const executionContextDependency = defineServerProductionDependency({
+  name: "execution-context",
+  dependency: "executionContext",
+  configuration: [],
+  crate: {
+    package: "kit-server-execution-context",
+    directory: dependencyDirectory("execution-context"),
+  },
+  rust: {
+    type: "kit_server_execution_context::ExecutionContext",
+    constructor: "kit_server_execution_context::create",
+  },
 });
 
 export const identifiersDependency = defineServerProductionDependency({
@@ -53,6 +78,20 @@ export const identifiersDependency = defineServerProductionDependency({
   rust: {
     type: "kit_server_identifiers::Identifiers",
     constructor: "kit_server_identifiers::create",
+  },
+});
+
+export const synchronizationDependency = defineServerProductionDependency({
+  name: "synchronization",
+  dependency: "synchronization",
+  configuration: [],
+  crate: {
+    package: "kit-server-synchronization",
+    directory: dependencyDirectory("synchronization"),
+  },
+  rust: {
+    type: "kit_server_synchronization::Synchronization",
+    constructor: "kit_server_synchronization::create",
   },
 });
 
@@ -196,12 +235,15 @@ export const httpDependency = defineServerProductionDependency({
 });
 
 export const serverProductionDependencies: readonly ServerProductionDependency[] = Object.freeze([
+  alarmDependency,
   authenticationDependency,
   clockDependency,
   dataDependency,
   eventsDependency,
+  executionContextDependency,
   httpDependency,
   identifiersDependency,
+  synchronizationDependency,
   timerDependency,
   workflowRuntimeDependency,
 ]);

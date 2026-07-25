@@ -1,14 +1,19 @@
 import type { EventStore } from "@/features/entity";
 import { createMemoryEventStore } from "@/features/entity.testing";
 import {
+  WORKFLOW_DEFINITION_VERSION,
+  WORKFLOW_PROTOCOL_VERSION,
   type DefinedWorkflow,
   type WorkflowApi,
+  type WorkflowDefinition,
   type WorkflowImplementation,
   type WorkflowJournalEvent,
   type WorkflowModelDefinition,
   type WorkflowRuntime,
   type WorkflowTimer,
+  createWorkflowServer,
   createWorkflowService,
+  workflowImplementation,
 } from "@/features/workflow";
 import { createProgramContributionInstance } from "@/runtime/process";
 
@@ -21,8 +26,9 @@ export type WorkflowTestClock = Readonly<{
 let workflowFixtureIdentity = 0;
 
 type WorkflowRuntimeInput<Model extends WorkflowModelDefinition> = Readonly<{
+  definition: WorkflowDefinition<Model>;
   implementation: WorkflowImplementation<Model>;
-  dependencies: Parameters<typeof createWorkflowService<Model>>[1];
+  dependencies: Parameters<typeof createWorkflowService<Model>>[2];
 }>;
 
 /** Creates deterministic virtual time shared by workflow tests and restarts. */
@@ -60,6 +66,7 @@ export function createWorkflowTestClock(initial = 0): WorkflowTestClock {
 export async function createWorkflowFixture<Model extends WorkflowModelDefinition>(
   workflow: DefinedWorkflow<Model>,
   input: Readonly<{
+    name: Model["Name"];
     dependencies: Model["Dependencies"];
     clock?: WorkflowTestClock;
     events?: EventStore<WorkflowJournalEvent<Model>>;
@@ -75,13 +82,15 @@ export async function createWorkflowFixture<Model extends WorkflowModelDefinitio
 > {
   const clock = input.clock ?? createWorkflowTestClock();
   const events = input.events ?? createMemoryEventStore<WorkflowJournalEvent<Model>>();
+  const definition = testWorkflowDefinition<Model>(input.name);
+  const server = createWorkflowServer(workflow[workflowImplementation], () => definition);
   let instance = await start();
-  let api = Reflect.get(await instance.start(), workflow.dependency) as WorkflowApi<Model>;
+  let api = Reflect.get(await instance.start(), input.name) as WorkflowApi<Model>;
 
   async function start() {
-    return createProgramContributionInstance(workflow.server.programs.server as never, {
-      address: { program: "server", feature: workflow.dependency },
-      provides: [workflow.dependency],
+    return createProgramContributionInstance(server.programs.server as never, {
+      address: { program: "server", feature: input.name },
+      provides: [input.name],
       dependencies: {
         ...input.dependencies,
         clock: { now: () => clock.now() },
@@ -102,7 +111,7 @@ export async function createWorkflowFixture<Model extends WorkflowModelDefinitio
     async restart() {
       await instance.dispose();
       instance = await start();
-      api = Reflect.get(await instance.start(), workflow.dependency) as WorkflowApi<Model>;
+      api = Reflect.get(await instance.start(), input.name) as WorkflowApi<Model>;
     },
     async [Symbol.asyncDispose]() {
       await instance.dispose();
@@ -113,9 +122,29 @@ export async function createWorkflowFixture<Model extends WorkflowModelDefinitio
 function createTestWorkflowRuntime(): WorkflowRuntime {
   return Object.freeze({
     async create(input) {
-      const { implementation, dependencies } =
+      const { definition, implementation, dependencies } =
         input as WorkflowRuntimeInput<WorkflowModelDefinition>;
-      return createWorkflowService(implementation, dependencies);
+      return createWorkflowService(definition, implementation, dependencies);
     },
+  });
+}
+
+function testWorkflowDefinition<Model extends WorkflowModelDefinition>(
+  name: Model["Name"],
+): WorkflowDefinition<Model> {
+  const schema = Object.freeze({});
+  return Object.freeze({
+    version: WORKFLOW_DEFINITION_VERSION,
+    protocolVersion: WORKFLOW_PROTOCOL_VERSION,
+    name,
+    schemas: Object.freeze({
+      input: schema,
+      result: schema,
+      state: schema,
+      dependencies: schema,
+      signals: schema,
+      queries: schema,
+      failures: schema,
+    }),
   });
 }

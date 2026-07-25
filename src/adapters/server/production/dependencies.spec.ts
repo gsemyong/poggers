@@ -5,8 +5,7 @@ import {
   resolveServerProductionDependencies,
   type ServerProductionDependency,
 } from "@/adapters/server/production/dependencies";
-import type { DependencyIR } from "@/compiler/ir";
-import { collectDependencyOperations } from "@/compiler/linker";
+import { collectDependencyOperations, type DependencyIR } from "@/compiler/ir";
 
 const clock: DependencyIR = {
   name: "clock",

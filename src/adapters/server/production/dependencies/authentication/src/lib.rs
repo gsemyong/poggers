@@ -9,7 +9,8 @@ use argon2::{
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
 };
 use kit_server_runtime::{
-    Dependency, DependencyContext, Engine, NativeError, NativeFuture, NativeResult, Value,
+    Dependency, DependencyContext, DependencyInvocation, Engine, NativeError, NativeFuture,
+    NativeResult, Value,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value as JsonValue, json};
@@ -50,7 +51,13 @@ pub async fn create(context: DependencyContext) -> NativeResult<Authentication> 
 }
 
 impl Dependency for Authentication {
-    fn call(&self, _engine: Engine, operation: &str, input: Value) -> NativeFuture<Value> {
+    fn call(
+        &self,
+        _engine: Engine,
+        operation: &str,
+        input: Value,
+        _invocation: DependencyInvocation,
+    ) -> NativeFuture<Value> {
         let database = self.database.clone();
         let operation = operation.to_owned();
         Box::pin(async move {
@@ -348,7 +355,12 @@ mod tests {
 
     async fn invoke(authentication: &Authentication, operation: &str, input: Value) -> JsonValue {
         authentication
-            .call(Engine::new(), operation, input)
+            .call(
+                Engine::new(),
+                operation,
+                input,
+                DependencyInvocation::direct("authentication", operation, 1).expect("invocation"),
+            )
             .await
             .expect("authentication operation")
             .to_json()

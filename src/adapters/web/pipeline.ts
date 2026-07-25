@@ -4,7 +4,7 @@ import { realpathSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import type { ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
-import { basename, relative, resolve, sep } from "node:path";
+import { basename, dirname, extname, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import * as ts from "@typescript/typescript6";
@@ -31,6 +31,7 @@ import {
   WEB_MARKDOWN_MEDIA_TYPE,
   WEB_ROUTE_DATA_MEDIA_TYPE,
   webRouteHydrationMetadata,
+  type prepareInitialWebPresentation,
   type WebDocumentIR,
 } from "@/adapters/web/document";
 import {
@@ -62,8 +63,14 @@ import {
   validateWebPresentationSource,
   webResetCss,
 } from "@/adapters/web/ui/presentation/compiler";
-import type { SystemIR, ComponentIR, DependencyContractIR, ProgramIR } from "@/compiler/ir";
-import { collectProgramManifest, linkProgram, projectDependencyContracts } from "@/compiler/linker";
+import {
+  projectDependencyContracts,
+  type SystemIR,
+  type ComponentIR,
+  type DependencyContractIR,
+  type ProgramIR,
+} from "@/compiler/ir";
+import { collectProgramManifest, linkProgram } from "@/compiler/linker";
 import { compilePresentationSource } from "@/compiler/presentation";
 import { resolveSystem, type SystemPaths } from "@/compiler/source";
 import type { SystemCompilationRevision, SystemRevisionSource } from "@/contracts/platform";
@@ -89,6 +96,10 @@ type PreparedInterface = Readonly<{
   workers: readonly WebWorkerEntry[];
   serviceWorker?: string;
 }>;
+
+type ProductionPresentationAssets = {
+  readonly files: Map<string, Buffer>;
+};
 
 type PreparedInterfaceState = {
   current: PreparedInterface;
@@ -128,6 +139,11 @@ type PreparedRouteDocument = Readonly<{
   route: ReturnType<typeof collectWebRoutes>[number];
   document: WebDocumentIR;
   request: false | Readonly<{ loader: boolean; view: WebRenderNodeIR }>;
+}>;
+
+type PreparedProductionDocuments = Readonly<{
+  routes: readonly PreparedRouteDocument[];
+  presentation: Awaited<ReturnType<typeof prepareInitialWebPresentation>>;
 }>;
 
 export const WEB_ASSET_MANIFEST_VERSION = 2 as const;
@@ -287,6 +303,7 @@ export async function buildWebInterface(options: {
   await rm(outdir, { recursive: true, force: true });
   await mkdir(outdir, { recursive: true });
   try {
+    const presentationAssets: ProductionPresentationAssets = { files: new Map() };
     const prepared = await prepareInterface(
       paths,
       work,
@@ -299,19 +316,28 @@ export async function buildWebInterface(options: {
       prepared.ir,
       prepared.interface,
     );
-    const compiledComponents = collectCompiledWebComponents(prepared.ir, contract.uiProgram);
-    let routeDocuments = await prepareProductionDocuments(
+    let compiledComponents = collectCompiledWebComponents(prepared.ir, contract.uiProgram);
+    const preparedDocuments = await prepareProductionDocuments(
       paths,
       work,
       prepared.ir,
       prepared.interface,
       compiledComponents,
+      presentationAssets,
     );
+    let routeDocuments = preparedDocuments.routes;
+    compiledComponents = compiledComponents.map((component) => {
+      const presentation =
+        preparedDocuments.presentation.components[
+          runtimeComponentName(component.feature, component.name)
+        ];
+      return presentation ? Object.freeze({ ...component, presentation }) : component;
+    });
     const workerInputs = Object.fromEntries(
       prepared.workers.map(({ output, source }) => [output, source]),
     );
     await build({
-      ...viteConfiguration(paths, options.development, prepared.ir),
+      ...viteConfiguration(paths, options.development, prepared.ir, presentationAssets),
       build: {
         emptyOutDir: false,
         manifest: "manifest.json",
@@ -333,6 +359,7 @@ export async function buildWebInterface(options: {
         target: "es2022",
       },
     });
+    await writeProductionPresentationAssets(outdir, presentationAssets);
     const client = await readClientBuild(outdir);
     routeDocuments = routeDocuments.map(({ route, document, request }) => ({
       route,
@@ -825,13 +852,18 @@ async function writeIfChanged(path: string, contents: string): Promise<boolean> 
   return true;
 }
 
-function viteConfiguration(paths: SystemPaths, development = false, ir?: SystemIR) {
+function viteConfiguration(
+  paths: SystemPaths,
+  development = false,
+  ir?: SystemIR,
+  presentationAssets?: ProductionPresentationAssets,
+) {
   return {
     configFile: false as const,
     mode: development ? "development" : "production",
     oxc: { jsx: { development } },
     ...(development ? { optimizeDeps: { include: [], noDiscovery: true } } : {}),
-    plugins: vitePlugins(paths, ir),
+    plugins: vitePlugins(paths, ir, presentationAssets),
     resolve: {
       alias: packageSourceAliases(resolve(import.meta.dirname, "../.."), moduleExtension()),
       conditions: ["source", ...defaultClientConditions],
@@ -844,13 +876,222 @@ function moduleExtension(): ".ts" | ".js" {
   return import.meta.filename.endsWith(".ts") ? ".ts" : ".js";
 }
 
-function vitePlugins(paths: SystemPaths, ir?: SystemIR | (() => SystemIR)): Plugin[] {
+function vitePlugins(
+  paths: SystemPaths,
+  ir?: SystemIR | (() => SystemIR),
+  presentationAssets?: ProductionPresentationAssets,
+): Plugin[] {
   return [
     ...(ir ? [routeSourcePlugin(paths, ir)] : []),
     systemAliasPlugin(paths.source),
+    productionPresentationAssetPlugin(paths.source, presentationAssets),
     presentationTransformPlugin(paths.source),
     componentTransformPlugin(paths.source),
   ];
+}
+
+/** @internal Resolves authored local Presentation assets identically for SSR and the client. */
+export function productionPresentationAssetPlugin(
+  source: string,
+  assets?: ProductionPresentationAssets,
+): Plugin {
+  return {
+    name: "kit-production-presentation-assets",
+    enforce: "pre",
+    async transform(code, rawId) {
+      const id = cleanId(rawId);
+      if (!id.startsWith(`${source}${sep}`) || !/\.[cm]?[jt]sx?$/.test(id)) return;
+      const file = ts.createSourceFile(id, code, ts.ScriptTarget.Latest, true, webScriptKind(id));
+      const constructors = presentationAssetConstructors(file);
+      if (constructors.identifiers.size === 0 && constructors.namespaces.size === 0) return;
+      const references: { argument: ts.Expression; specifier: string }[] = [];
+      const visit = (node: ts.Node): void => {
+        if (ts.isCallExpression(node) && isPresentationAssetCall(node, constructors)) {
+          const argument = node.arguments[0];
+          const specifier = argument && localAssetSpecifier(argument);
+          if (argument && specifier) references.push({ argument, specifier });
+        }
+        ts.forEachChild(node, visit);
+      };
+      visit(file);
+      const replacements = await Promise.all(
+        references.map(async ({ argument, specifier }) => {
+          const path = resolve(dirname(id), specifier);
+          if (path !== source && !path.startsWith(`${source}${sep}`)) {
+            throw new Error(
+              `Presentation asset ${JSON.stringify(specifier)} must be inside ${JSON.stringify(source)}.`,
+            );
+          }
+          const contents = await readFile(path);
+          return {
+            start: argument.getStart(file),
+            end: argument.end,
+            value: JSON.stringify(productionPresentationAssetSource(path, contents, assets)),
+          };
+        }),
+      );
+      if (replacements.length === 0) return;
+      let transformed = code;
+      for (const replacement of replacements.sort((left, right) => right.start - left.start)) {
+        transformed =
+          transformed.slice(0, replacement.start) +
+          replacement.value +
+          transformed.slice(replacement.end);
+      }
+      return { code: transformed, map: null };
+    },
+  };
+}
+
+type PresentationAssetConstructors = Readonly<{
+  identifiers: ReadonlySet<string>;
+  namespaces: ReadonlySet<string>;
+}>;
+
+function presentationAssetConstructors(file: ts.SourceFile): PresentationAssetConstructors {
+  const identifiers = new Set<string>();
+  const namespaces = new Set<string>();
+  for (const statement of file.statements) {
+    if (
+      !ts.isImportDeclaration(statement) ||
+      !ts.isStringLiteral(statement.moduleSpecifier) ||
+      !isWebPresentationModule(statement.moduleSpecifier.text)
+    ) {
+      continue;
+    }
+    const bindings = statement.importClause?.namedBindings;
+    if (bindings && ts.isNamespaceImport(bindings)) {
+      namespaces.add(bindings.name.text);
+      continue;
+    }
+    if (!bindings || !ts.isNamedImports(bindings)) continue;
+    for (const element of bindings.elements) {
+      const imported = element.propertyName?.text ?? element.name.text;
+      if (isPresentationAssetConstructor(imported)) identifiers.add(element.name.text);
+    }
+  }
+  return { identifiers, namespaces };
+}
+
+function isWebPresentationModule(specifier: string): boolean {
+  return (
+    specifier === "kit/web" ||
+    specifier === "@/platforms/web/presentation" ||
+    specifier.endsWith("/platforms/web/presentation")
+  );
+}
+
+function isPresentationAssetConstructor(name: string): boolean {
+  return name === "createAudioAsset" || name === "createImageAsset";
+}
+
+function isPresentationAssetCall(
+  call: ts.CallExpression,
+  constructors: PresentationAssetConstructors,
+): boolean {
+  if (ts.isIdentifier(call.expression)) return constructors.identifiers.has(call.expression.text);
+  return (
+    ts.isPropertyAccessExpression(call.expression) &&
+    ts.isIdentifier(call.expression.expression) &&
+    constructors.namespaces.has(call.expression.expression.text) &&
+    isPresentationAssetConstructor(call.expression.name.text)
+  );
+}
+
+function localAssetSpecifier(expression: ts.Expression): string | undefined {
+  if (
+    !ts.isNewExpression(expression) ||
+    !ts.isIdentifier(expression.expression) ||
+    expression.expression.text !== "URL" ||
+    expression.arguments?.length !== 2
+  ) {
+    return;
+  }
+  const [path, base] = expression.arguments;
+  if (
+    !path ||
+    (!ts.isStringLiteral(path) && !ts.isNoSubstitutionTemplateLiteral(path)) ||
+    !base ||
+    !ts.isPropertyAccessExpression(base) ||
+    base.name.text !== "url" ||
+    !ts.isMetaProperty(base.expression) ||
+    base.expression.keywordToken !== ts.SyntaxKind.ImportKeyword ||
+    base.expression.name.text !== "meta" ||
+    !path.text.startsWith(".") ||
+    path.text.includes("?") ||
+    path.text.includes("#")
+  ) {
+    return;
+  }
+  return path.text;
+}
+
+function productionPresentationAssetSource(
+  file: string,
+  contents: Buffer,
+  assets?: ProductionPresentationAssets,
+): string {
+  const extension = extname(file).toLowerCase();
+  if (contents.byteLength < 4_096 || !assets) {
+    return `data:${webAssetMediaType(extension)};base64,${contents.toString("base64")}`;
+  }
+  const stem =
+    basename(file, extension)
+      .toLowerCase()
+      .replaceAll(/[^a-z0-9]+/g, "-")
+      .replaceAll(/^-|-$/g, "") || "asset";
+  const hash = createHash("sha256").update(contents).digest("hex").slice(0, 12);
+  const path = `/assets/${stem}-${hash}${extension}`;
+  const previous = assets.files.get(path);
+  if (previous && !previous.equals(contents)) {
+    throw new Error(`Production Presentation asset collision at ${JSON.stringify(path)}.`);
+  }
+  assets.files.set(path, contents);
+  return path;
+}
+
+function webAssetMediaType(extension: string): string {
+  return (
+    (
+      {
+        ".avif": "image/avif",
+        ".flac": "audio/flac",
+        ".gif": "image/gif",
+        ".jpeg": "image/jpeg",
+        ".jpg": "image/jpeg",
+        ".m4a": "audio/mp4",
+        ".mp3": "audio/mpeg",
+        ".ogg": "audio/ogg",
+        ".opus": "audio/ogg",
+        ".png": "image/png",
+        ".svg": "image/svg+xml",
+        ".wav": "audio/wav",
+        ".webp": "image/webp",
+      } as Readonly<Record<string, string>>
+    )[extension] ?? "application/octet-stream"
+  );
+}
+
+async function writeProductionPresentationAssets(
+  directory: string,
+  assets: ProductionPresentationAssets,
+): Promise<void> {
+  for (const [path, contents] of [...assets.files].sort(([left], [right]) =>
+    left.localeCompare(right),
+  )) {
+    const output = resolve(directory, path.slice(1));
+    await mkdir(dirname(output), { recursive: true });
+    await writeFile(output, contents);
+  }
+}
+
+function webScriptKind(file: string): ts.ScriptKind {
+  if (file.endsWith(".tsx")) return ts.ScriptKind.TSX;
+  if (file.endsWith(".jsx")) return ts.ScriptKind.JSX;
+  if (file.endsWith(".js") || file.endsWith(".mjs") || file.endsWith(".cjs")) {
+    return ts.ScriptKind.JS;
+  }
+  return ts.ScriptKind.TS;
 }
 
 /** @internal Creates source projections for independently loaded browser Routes and Programs. */
@@ -1931,7 +2172,8 @@ async function prepareProductionDocuments(
   ir: SystemIR,
   interfaceId: string,
   components: readonly CompiledWebComponentIR[],
-): Promise<readonly PreparedRouteDocument[]> {
+  presentationAssets: ProductionPresentationAssets,
+): Promise<PreparedProductionDocuments> {
   const contract = webInterfaceContract(ir, interfaceId);
   const program = ir.programs.find(({ name }) => name === contract.uiProgram);
   if (!program) throw new Error(`Missing UI Program ${JSON.stringify(contract.uiProgram)}.`);
@@ -1945,13 +2187,18 @@ async function prepareProductionDocuments(
     return { route, request };
   });
   const staticRoutes = entries.filter(({ request }) => request === false).map(({ route }) => route);
+  const presentationTargets = requestRenderedPresentationTargets(entries, components);
   const source = resolve(work, "document.generated.ts");
   const staticDocuments = new Map<string, WebDocumentIR>();
-  if (staticRoutes.length || contract.routes.length === 0) {
+  let initialPresentation: PreparedProductionDocuments["presentation"] = Object.freeze({
+    components: Object.freeze({}),
+    styles: Object.freeze([]),
+  });
+  if (staticRoutes.length || contract.routes.length === 0 || presentationTargets.length) {
     await writeIfChanged(
       source,
       `import system from ${JSON.stringify(paths.system)};
-import { prepareClientWebDocument, prepareWebDocument } from ${JSON.stringify(resolve(import.meta.dirname, `document${moduleExtension()}`))};
+import { prepareClientWebDocument, prepareInitialWebPresentation, prepareWebDocument } from ${JSON.stringify(resolve(import.meta.dirname, `document${moduleExtension()}`))};
 
 let interfaceFeature = system;
 for (const name of ${JSON.stringify(contract.interface.feature.split(".").filter(Boolean))}) {
@@ -1961,9 +2208,9 @@ if (!interfaceFeature?.presentation) {
   throw new Error(${JSON.stringify(`Web interface ${contract.interface.feature} has no Presentation.`)});
 }
 const routes = ${JSON.stringify(staticRoutes)};
-export default await Promise.all((routes.length ? routes : [undefined]).map(async (route) => ({
+const documents = await Promise.all((routes.length ? routes : ${contract.routes.length ? "[]" : "[undefined]"}).map(async (route) => ({
   route,
-      document: route?.document === "shell"
+  document: route?.document === "shell"
     ? prepareClientWebDocument({
         title: route.metadata?.title ?? system.metadata?.name ?? "Kit",
         language: route.metadata?.language,
@@ -1989,6 +2236,18 @@ export default await Promise.all((routes.length ? routes : [undefined]).map(asyn
         entry: "/app.js",
       }),
 })));
+const presentation = await prepareInitialWebPresentation({
+  system,
+  interface: ${JSON.stringify(contract.interface.feature)},
+  program: ${JSON.stringify(contract.uiProgram)},
+  logicalProgram: ${JSON.stringify(program.logicalName)},
+  presentation: interfaceFeature.presentation,
+  manifest: ${JSON.stringify(collectProgramManifest(program))},
+  components: ${JSON.stringify(contract.components)},
+  targets: ${JSON.stringify(presentationTargets)},
+  presentationDependencies: ${JSON.stringify(collectPresentationDependencies(ir, contract.uiProgram))},
+});
+export default { documents, presentation };
 `,
     );
     const output = resolve(work, "document-evaluate");
@@ -2000,7 +2259,7 @@ export default await Promise.all((routes.length ? routes : [undefined]).map(asyn
         alias: packageSourceAliases(resolve(import.meta.dirname, "../.."), moduleExtension()),
         conditions: ["source", ...defaultServerConditions],
       },
-      plugins: vitePlugins(paths),
+      plugins: vitePlugins(paths, undefined, presentationAssets),
       build: {
         emptyOutDir: true,
         minify: false,
@@ -2017,34 +2276,41 @@ export default await Promise.all((routes.length ? routes : [undefined]).map(asyn
     const loaded = (await import(
       `${pathToFileURL(resolve(output, "document.js")).href}?v=${Date.now()}`
     )) as {
-      default?: readonly Readonly<{
-        route?: ReturnType<typeof collectWebRoutes>[number];
-        document: WebDocumentIR;
-      }>[];
+      default?: Readonly<{
+        documents: readonly Readonly<{
+          route?: ReturnType<typeof collectWebRoutes>[number];
+          document: WebDocumentIR;
+        }>[];
+        presentation: PreparedProductionDocuments["presentation"];
+      }>;
     };
-    const documents = loaded.default;
-    if (!documents?.length) throw new Error("Web document preparation returned no artifact.");
+    const documents = loaded.default?.documents;
+    if (!documents) throw new Error("Web document preparation returned no artifact.");
     for (const { route, document } of documents) {
       staticDocuments.set(routeIdentity(route), withWebStyles(document));
     }
+    initialPresentation = loaded.default!.presentation;
   }
   if (!contract.routes.length) {
     const route = fallbackWebRoute();
     const document = staticDocuments.get(routeIdentity(undefined));
     if (!document) throw new Error("Web root document preparation returned no artifact.");
-    return [
-      Object.freeze({
-        route,
-        document: contract.installation ? withWebInstallation(document) : document,
-        request: false,
-      }),
-    ];
+    return Object.freeze({
+      routes: Object.freeze([
+        Object.freeze({
+          route,
+          document: contract.installation ? withWebInstallation(document) : document,
+          request: false,
+        }),
+      ]),
+      presentation: initialPresentation,
+    });
   }
-  return entries.map(({ route, request }) => {
+  const routes = entries.map(({ route, request }) => {
     const document =
       request === false
         ? staticDocuments.get(routeIdentity(route))
-        : dynamicRouteDocument(ir, route);
+        : dynamicRouteDocument(ir, route, initialPresentation.styles);
     if (!document) {
       throw new Error(`Web Route ${JSON.stringify(routeIdentity(route))} produced no document.`);
     }
@@ -2054,6 +2320,28 @@ export default await Promise.all((routes.length ? routes : [undefined]).map(asyn
       request,
     });
   });
+  return Object.freeze({ routes: Object.freeze(routes), presentation: initialPresentation });
+}
+
+function requestRenderedPresentationTargets(
+  entries: readonly Readonly<{
+    route: ReturnType<typeof collectWebRoutes>[number];
+    request: PreparedRouteDocument["request"];
+  }>[],
+  components: readonly CompiledWebComponentIR[],
+): readonly string[] {
+  const targets = new Set<string>();
+  for (const { route, request } of entries) {
+    if (request === false) continue;
+    for (const component of compiledComponentClosure(
+      routeIdentity(route),
+      request.view,
+      components,
+    )) {
+      targets.add(runtimeComponentName(component.feature, component.name));
+    }
+  }
+  return Object.freeze([...targets].sort());
 }
 
 function requestRouteArtifact(
@@ -2084,9 +2372,18 @@ function validateRequestRenderClosure(
   view: WebRenderNodeIR,
   components: readonly CompiledWebComponentIR[],
 ): void {
+  compiledComponentClosure(route, view, components);
+}
+
+function compiledComponentClosure(
+  route: string,
+  view: WebRenderNodeIR,
+  components: readonly CompiledWebComponentIR[],
+): readonly CompiledWebComponentIR[] {
   const resolveComponent = createCompiledWebComponentResolver(components);
   const pending = [...renderComponentTargets(view)];
   const visited = new Set<string>();
+  const result: CompiledWebComponentIR[] = [];
   while (pending.length) {
     const identity = pending.pop()!;
     if (visited.has(identity)) continue;
@@ -2103,8 +2400,10 @@ function validateRequestRenderClosure(
         `Request-rendered web Route ${JSON.stringify(route)} cannot render Component ${JSON.stringify(identity)}: ${detail}`,
       );
     }
+    result.push(component);
     pending.push(...renderComponentTargets(component.view));
   }
+  return Object.freeze(result);
 }
 
 function renderComponentTargets(node: WebRenderNodeIR): readonly string[] {
@@ -2141,6 +2440,7 @@ function renderComponentTargets(node: WebRenderNodeIR): readonly string[] {
 function dynamicRouteDocument(
   ir: SystemIR,
   route: ReturnType<typeof collectWebRoutes>[number],
+  presentationStyles: readonly string[],
 ): WebDocumentIR {
   return withWebStyles(
     Object.freeze({
@@ -2150,6 +2450,7 @@ function dynamicRouteDocument(
         metadata: routeDocumentMetadata(route.metadata),
         entry: "/app.js",
       }),
+      styles: presentationStyles,
       rendering: "hydrate" as const,
     }),
   );

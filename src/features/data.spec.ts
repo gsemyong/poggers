@@ -80,28 +80,35 @@ describe("semantic data Feature", () => {
     }
   }, 30_000);
 
-  test("builds the composed data Feature as a native production program", async () => {
-    const parent = resolve(process.cwd(), ".data");
-    await mkdir(parent, { recursive: true });
-    const directory = await mkdtemp(resolve(parent, "data-production-"));
-    try {
-      const entry = resolve(directory, "system.ts");
-      await writeFile(entry, dataSystemSource());
-      const ir = compileSystem(entry);
-      const program = ir.programs[0];
-      if (!program) throw new Error("Data compiler fixture has no server Program.");
-      const build = await buildServerProgram({
-        system: ir.system.name,
-        cache: resolve(parent, "data-production-cache"),
-        directory,
-        output: resolve(directory, "data-server"),
-        program,
-      });
-      await expect(access(build.executable)).resolves.toBeUndefined();
-    } finally {
-      await rm(directory, { force: true, recursive: true });
-    }
-  }, 240_000);
+  test(
+    "builds the composed data Feature as a native executable",
+    { tags: ["native"], timeout: 240_000 },
+    async () => {
+      const parent = resolve(process.cwd(), ".data");
+      await mkdir(parent, { recursive: true });
+      const directory = await mkdtemp(resolve(parent, "data-production-"));
+      try {
+        const entry = resolve(directory, "system.ts");
+        await writeFile(entry, dataSystemSource());
+        const ir = compileSystem(entry);
+        const program = ir.programs[0];
+        if (!program) throw new Error("Data compiler fixture has no server Program.");
+        const build = await buildServerProgram({
+          system: ir.system.name,
+          directory,
+          output: resolve(directory, "data-server"),
+          profile: process.env.KIT_NATIVE_PROFILE === "release" ? "release" : "debug",
+          program,
+        });
+        await expect(access(build.executable)).resolves.toBeUndefined();
+        expect(build.profile).toBe(
+          process.env.KIT_NATIVE_PROFILE === "release" ? "release" : "debug",
+        );
+      } finally {
+        await rm(directory, { force: true, recursive: true });
+      }
+    },
+  );
 
   test("packages authorized event-sourced writes, typed queries, and local full-text search", async () => {
     await using store = nativeStore();

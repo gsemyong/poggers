@@ -452,9 +452,9 @@ async function projectSearch<Model extends DataModelDefinition>(
   return {
     revision: snapshot.revision,
     matches: Object.freeze(
-      matches.map(({ record, score = 0 }) => ({
+      matches.map(({ record, score }) => ({
         record,
-        score,
+        score: score ?? 0,
       })),
     ),
   };

@@ -67,8 +67,16 @@ class RustProgramGenerator {
         )
         .join("\n        ");
       const provides = contribution.provides.map(({ name }) => name).sort();
+      const providerEnvelopes = contribution.provides
+        .filter(({ binding }) => binding === "envelope")
+        .map(({ name }) => name)
+        .sort();
       const retain = provides.length
-        ? `engine.provide(&[${provides.map(rustString).join(", ")}], result)?;`
+        ? `engine.provide(
+        &[${provides.map(rustString).join(", ")}],
+        &[${providerEnvelopes.map(rustString).join(", ")}],
+        result,
+    )?;`
         : "engine.retain(result);";
       return [
         `    let dependencies = Value::record(BTreeMap::from([
@@ -79,19 +87,29 @@ class RustProgramGenerator {
       ];
     });
     const exports = this.#exports.map((definition) => this.#export(definition));
+    const providedDependencies = this.#linked.dependencies
+      .filter(({ provider }) => provider !== undefined)
+      .map(({ name }) => name)
+      .sort();
+    const declarations = providedDependencies.length
+      ? `    engine.declare_provided(&[${providedDependencies.map(rustString).join(", ")}])?;\n`
+      : "";
     const generatedFunctions = functions.join("\n\n");
     const runtimeImports = ["Engine", "NativeError", "NativeFuture", "NativeResult", "Value"];
     if (generatedFunctions.includes("assign(")) runtimeImports.push("assign");
     if (generatedFunctions.includes("binary(")) runtimeImports.push("binary");
     if (generatedFunctions.includes("NativeFunction")) runtimeImports.push("NativeFunction");
+    if (generatedFunctions.includes("Record::new()")) runtimeImports.push("Record");
     const helpers = [
       `fn cell(value: Value) -> Cell {
     Arc::new(Mutex::new(value))
 }`,
-      `fn read_cell(value: &Cell) -> Value {
-    value.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
-}`,
     ];
+    if (generatedFunctions.includes("read_cell(")) {
+      helpers.push(`fn read_cell(value: &Cell) -> Value {
+    value.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+}`);
+    }
     if (generatedFunctions.includes("write_cell(")) {
       helpers.push(`fn write_cell(value: &Cell, next: Value) {
     *value.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = next;
@@ -132,7 +150,7 @@ ${generatedFunctions}
 ${exports.join("\n\n")}
 
 pub async fn start(engine: Engine) -> NativeResult<()> {
-${starts.join("\n\n")}
+${declarations}${starts.join("\n\n")}
     Ok(())
 }
 `;
@@ -236,6 +254,15 @@ ${indent}write_cell(&${binding(statement.name)}, assign(${rustString(statement.o
 ${indent}let ${right} = ${this.#expression(contribution, statement.value)};
 ${indent}engine.assign_property(${target}, ${rustString(statement.property)}, ${rustString(statement.operator)}, ${right})?;\n`;
             }
+            case "index-assign": {
+              const target = this.#temporaryName("target");
+              const index = this.#temporaryName("index");
+              const right = this.#temporaryName("right");
+              return `${indent}let ${target} = ${this.#expression(contribution, statement.target)};
+${indent}let ${index} = ${this.#expression(contribution, statement.index)}.to_text();
+${indent}let ${right} = ${this.#expression(contribution, statement.value)};
+${indent}engine.assign_property(${target}, &${index}, ${rustString(statement.operator)}, ${right})?;\n`;
+            }
             case "expression":
               return `${indent}${this.#expression(contribution, statement.expression)};\n`;
             case "array-push": {
@@ -278,6 +305,9 @@ ${indent}for item in ${from}..${to} {
 ${indent}    let ${binding(statement.item)} = cell(Value::Number(item as f64));
 ${this.#statements(contribution, statement.body, target, depth + 1)}${indent}}\n`;
             }
+            case "while":
+              return `${indent}while ${this.#expression(contribution, statement.condition)}.truthy() {
+${this.#statements(contribution, statement.body, target, depth + 1)}${indent}}\n`;
             case "try":
               return this.#tryStatement(contribution, statement, target, depth);
             case "return": {
@@ -305,10 +335,10 @@ ${this.#statements(contribution, statement.body, target, depth + 1)}${indent}}\n
     const indent = "    ".repeat(depth);
     const result = this.#temporaryName("result");
     const finalization = this.#temporaryName("finalization");
-    const caught = statement.catch.length
+    const caught = statement.catch
       ? `Err(error) => {
-${statement.error ? `${indent}        let ${binding(statement.error)} = cell(Value::Error(Arc::new(error)));\n` : ""}${indent}        async {
-${this.#statements(contribution, statement.catch, "completion", depth + 3)}${canFallThrough(statement.catch) ? `${indent}            Ok(Completion::Continue)\n` : ""}
+${statement.catch.error ? `${indent}        let ${binding(statement.catch.error)} = cell(Value::Error(Arc::new(error)));\n` : ""}${indent}        async {
+${this.#statements(contribution, statement.catch.body, "completion", depth + 3)}${canFallThrough(statement.catch.body) ? `${indent}            Ok(Completion::Continue)\n` : ""}
 ${indent}        }.await
 ${indent}    },`
       : `Err(error) => Err(error),`;
@@ -347,16 +377,16 @@ ${indent}}\n`;
           .map((value) => this.#expression(contribution, value))
           .join(", ")}])`;
       case "record":
-        return `Value::record(BTreeMap::from([${expression.fields
+        return `Value::mutable_record([${expression.fields
           .map(
             ({ name, value }) =>
               `(${rustString(name)}.to_owned(), ${this.#expression(contribution, value)})`,
           )
-          .join(", ")}]))`;
+          .join(", ")}])`;
       case "record-merge": {
         const record = this.#temporaryName("record");
         return `{
-            let mut ${record} = BTreeMap::new();
+            let mut ${record} = Record::new();
 ${expression.entries
   .map((entry) =>
     entry.kind === "field"
@@ -364,11 +394,13 @@ ${expression.entries
       : `            ${record}.extend(${this.#expression(contribution, entry.value)}.as_record()?.iter().map(|(name, value)| (name.clone(), value.clone())));`,
   )
   .join("\n")}
-            Value::record(${record})
+            Value::mutable_record(${record})
         }`;
       }
       case "property":
         return `${this.#expression(contribution, expression.value)}.property(${rustString(expression.name)}, ${String(Boolean(expression.optional))})?`;
+      case "index":
+        return `${this.#expression(contribution, expression.value)}.property(&${this.#expression(contribution, expression.index)}.to_text(), false)?`;
       case "binary": {
         const left = this.#temporaryName("left");
         if (["&&", "||", "??"].includes(expression.operator)) {
@@ -400,13 +432,26 @@ ${expression.entries
       case "method-call":
         return `engine.method(${this.#expression(contribution, expression.receiver)}, ${rustString(expression.method)}, vec![${expression.arguments.map((argument) => this.#expression(contribution, argument)).join(", ")}]).await?`;
       case "dependency-call":
-        return `engine.call_dependency(${rustString(expression.dependency)}, ${rustString(expression.operation)}, ${expression.arguments[0] ? this.#expression(contribution, expression.arguments[0]) : "Value::Undefined"}).await?`;
+        return `engine.call_dependency_scoped(${rustString(contribution)}, ${rustString(expression.dependency)}, ${rustString(expression.operation)}, ${expression.arguments[0] ? this.#expression(contribution, expression.arguments[0]) : "Value::Undefined"}).await?`;
       case "conditional":
         return `if ${this.#expression(contribution, expression.condition)}.truthy() { ${this.#expression(contribution, expression.consequent)} } else { ${this.#expression(contribution, expression.alternate)} }`;
+      case "concurrent": {
+        const method =
+          expression.operation === "all"
+            ? "concurrent_all"
+            : expression.operation === "race"
+              ? "concurrent_race"
+              : "concurrent_all_settled";
+        return `engine.${method}(vec![${expression.values
+          .map((value) => this.#futureExpression(contribution, value))
+          .join(", ")}]).await?`;
+      }
       case "json-parse":
         return `Value::from_json(&serde_json::from_str::<serde_json::Value>(&${this.#expression(contribution, expression.value)}.string()?).map_err(|error| NativeError::new("SyntaxError", error.to_string()))?)`;
       case "json-stringify":
         return `Value::String(${this.#expression(contribution, expression.value)}.to_json()?.to_string())`;
+      case "object-keys":
+        return `engine.object_keys(${this.#expression(contribution, expression.value)})?`;
       case "to-string":
         return `Value::String(${this.#expression(contribution, expression.value)}.to_text())`;
       case "stream-map":
@@ -422,12 +467,18 @@ ${expression.entries
               : `cell(${this.#expression(contribution, capture)})`;
           return { name, value };
         });
-        return `{
-            ${captures.map(({ name, value }) => `let ${name} = ${value}.clone();`).join("\n            ")}
-            Value::Function(NativeFunction::new(move |engine, arguments| {
+        const declarations = captures
+          .map(({ name, value }) => `            let ${name} = ${value}.clone();\n`)
+          .join("");
+        const closure = `NativeFunction::new(move |engine, arguments| {
                 let captures = vec![${captures.map(({ name }) => `${name}.clone()`).join(", ")}];
                 ${this.#functionName(contribution, expression.function)}(engine, captures, arguments, None)
-            }))
+            })`;
+        const function_ = expression.stable
+          ? `engine.stable_function(${rustString(`${contribution}/${expression.function}`)}, ${closure})`
+          : closure;
+        return `{
+${declarations}            Value::Function(${function_})
         }`;
       }
       case "error": {
@@ -455,6 +506,48 @@ ${expression.entries
       case "error-match":
         return `Value::Boolean(matches!(${this.#expression(contribution, expression.value)}, Value::Error(error) if error.name == ${rustString(expression.name)}))`;
     }
+  }
+
+  #futureExpression(contribution: string, expression: ExpressionIR): string {
+    let future: string;
+    if (expression.kind === "call") {
+      future = `${this.#functionName(contribution, expression.function)}(engine.clone(), Vec::new(), vec![${expression.arguments.map((argument) => this.#expression(contribution, argument)).join(", ")}], None)`;
+    } else if (expression.kind === "invoke") {
+      const engine = this.#temporaryName("engine");
+      const function_ = this.#temporaryName("function");
+      const arguments_ = this.#temporaryName("arguments");
+      future = `{
+            let ${engine} = engine.clone();
+            let ${function_} = ${this.#expression(contribution, expression.callee)};
+            let ${arguments_} = vec![${expression.arguments.map((argument) => this.#expression(contribution, argument)).join(", ")}];
+            Box::pin(async move { ${engine}.invoke(${function_}, ${arguments_}).await })
+        }`;
+    } else if (expression.kind === "dependency-call") {
+      const engine = this.#temporaryName("engine");
+      const input = this.#temporaryName("input");
+      future = `{
+            let ${engine} = engine.clone();
+            let ${input} = ${expression.arguments[0] ? this.#expression(contribution, expression.arguments[0]) : "Value::Undefined"};
+            Box::pin(async move {
+                ${engine}.call_dependency_scoped(${rustString(contribution)}, ${rustString(expression.dependency)}, ${rustString(expression.operation)}, ${input}).await
+            })
+        }`;
+    } else if (expression.kind === "method-call") {
+      const engine = this.#temporaryName("engine");
+      const receiver = this.#temporaryName("receiver");
+      const arguments_ = this.#temporaryName("arguments");
+      future = `{
+            let ${engine} = engine.clone();
+            let ${receiver} = ${this.#expression(contribution, expression.receiver)};
+            let ${arguments_} = vec![${expression.arguments.map((argument) => this.#expression(contribution, argument)).join(", ")}];
+            ${engine}.method(${receiver}, ${rustString(expression.method)}, ${arguments_})
+        }`;
+    } else {
+      throw new Error(
+        `Concurrent expression ${JSON.stringify(expression.kind)} is not an asynchronous operation.`,
+      );
+    }
+    return `(${future}) as NativeFuture<Value>`;
   }
 
   #functionName(contribution: string, id: string): string {

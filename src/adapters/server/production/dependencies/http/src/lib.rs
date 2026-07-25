@@ -17,8 +17,8 @@ use axum::{
 };
 use bytes::Bytes;
 use kit_server_runtime::{
-    Dependency, DependencyContext, Engine, NativeError, NativeFunction, NativeFuture, NativeResult,
-    Value,
+    Dependency, DependencyContext, DependencyInvocation, Engine, NativeError, NativeFunction,
+    NativeFuture, NativeResult, Value,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -464,7 +464,13 @@ fn select_web_artifact(web: &WebArtifacts, headers: &HeaderMap) -> Option<WebArt
 }
 
 impl Dependency for Http {
-    fn call(&self, engine: Engine, operation: &str, input: Value) -> NativeFuture<Value> {
+    fn call(
+        &self,
+        engine: Engine,
+        operation: &str,
+        input: Value,
+        _invocation: DependencyInvocation,
+    ) -> NativeFuture<Value> {
         let state = self.state.clone();
         let operation = operation.to_owned();
         Box::pin(async move {

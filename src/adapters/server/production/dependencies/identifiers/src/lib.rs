@@ -1,5 +1,6 @@
 use kit_server_runtime::{
-    Dependency, DependencyContext, Engine, NativeError, NativeFuture, NativeResult, Value,
+    Dependency, DependencyContext, DependencyInvocation, Engine, NativeError, NativeFuture,
+    NativeResult, Value,
 };
 use uuid::Uuid;
 
@@ -10,7 +11,13 @@ pub async fn create(_context: DependencyContext) -> NativeResult<Identifiers> {
 }
 
 impl Dependency for Identifiers {
-    fn call(&self, _engine: Engine, operation: &str, _input: Value) -> NativeFuture<Value> {
+    fn call(
+        &self,
+        _engine: Engine,
+        operation: &str,
+        _input: Value,
+        _invocation: DependencyInvocation,
+    ) -> NativeFuture<Value> {
         let result = match operation {
             "create" => Ok(Value::String(Uuid::new_v4().to_string())),
             operation => Err(NativeError::new(
@@ -40,7 +47,12 @@ mod tests {
         let mut values = HashSet::new();
         for _ in 0..32 {
             let value = identifiers
-                .call(Engine::new(), "create", Value::Undefined)
+                .call(
+                    Engine::new(),
+                    "create",
+                    Value::Undefined,
+                    DependencyInvocation::direct("identifiers", "create", 1).expect("invocation"),
+                )
                 .await
                 .expect("create identifier")
                 .string()

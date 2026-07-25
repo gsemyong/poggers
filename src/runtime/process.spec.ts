@@ -3,6 +3,14 @@ import fc from "fast-check";
 import { describe, expect, test, vi } from "vitest";
 
 import type { ProgramManifest } from "@/compiler/ir";
+import {
+  dependencyInvocation,
+  dependencyInvocationControl,
+  invokeDependency,
+  type Dependency,
+  type DependencyInvocation,
+  type DependencyProviderInvocation,
+} from "@/core/dependency";
 import type { Feature } from "@/core/feature";
 import type { Program } from "@/core/program";
 import type { System } from "@/core/system";
@@ -10,6 +18,7 @@ import type { BrowserMainThread } from "@/platforms/web/platform";
 import {
   bindDependenciesToScope,
   conformExternalDependencies,
+  createDeferredDependencyBinding,
   createProgramContributionInstance,
   createUIContributionInstance,
   planProgram,
@@ -82,6 +91,144 @@ describe("Program runtime", () => {
     expect(() => invalid.now({})).toThrow("semantic Dependency contract");
     expect(() => invalid.read({})).toThrow("must return a Promise");
     expect(() => invalid.changes({})).toThrow("must return an AsyncIterable");
+  });
+
+  test("mounts one provider envelope for direct and runtime-owned invocations", async () => {
+    const invocations: Array<
+      Readonly<{ input: { value: number }; invocation: DependencyInvocation }>
+    > = [];
+    const dependencies = conformExternalDependencies(
+      [
+        {
+          name: "service",
+          binding: "envelope",
+          operations: [
+            {
+              name: "double",
+              mode: "asynchronous",
+              input: {
+                kind: "record",
+                fields: [
+                  {
+                    name: "value",
+                    optional: false,
+                    type: { kind: "primitive", name: "number" },
+                  },
+                ],
+              },
+              output: { kind: "primitive", name: "number" },
+            },
+          ],
+        },
+      ],
+      {
+        service: {
+          async double(context: { input: { value: number }; invocation: DependencyInvocation }) {
+            invocations.push(context);
+            return context.input.value * 2;
+          },
+        },
+      },
+    );
+    const service = dependencies.service as {
+      double(input: { value: number }): Promise<number>;
+    };
+
+    expect(dependencyInvocation in service).toBe(true);
+    await expect(service.double({ value: 2 })).resolves.toBe(4);
+    await expect(
+      invokeDependency(
+        service,
+        "double",
+        { value: 3 },
+        {
+          id: "durable:one",
+          attempt: 4,
+          scheduledAt: 10,
+          startedAt: 20,
+        },
+      ),
+    ).resolves.toBe(6);
+
+    expect(invocations).toHaveLength(2);
+    expect(invocations[0]).toMatchObject({
+      input: { value: 2 },
+      invocation: { attempt: 1 },
+    });
+    expect(invocations[0]?.invocation.id).toMatch(/^direct:service:double:1$/);
+    expect(invocations[1]).toEqual({
+      input: { value: 3 },
+      invocation: {
+        id: "durable:one",
+        attempt: 4,
+        scheduledAt: 10,
+        startedAt: 20,
+      },
+    });
+  });
+
+  test("projects runtime heartbeat and cancellation controls into one provider envelope", async () => {
+    const heartbeats: unknown[] = [];
+    const dependencies = conformExternalDependencies(
+      [
+        {
+          name: "service",
+          binding: "envelope",
+          operations: [
+            {
+              name: "work",
+              mode: "asynchronous",
+              input: { kind: "record", fields: [] },
+              output: { kind: "primitive", name: "boolean" },
+            },
+          ],
+        },
+      ],
+      {
+        service: {
+          async work({
+            invocation,
+          }: {
+            invocation: DependencyProviderInvocation<never, { completed: number }>;
+          }) {
+            expect(invocation.previousHeartbeat).toEqual({ completed: 2 });
+            invocation.heartbeat({ details: { completed: 3 } });
+            expect(invocation.cancellation.requested()).toBe(true);
+            await invocation.cancellation.wait();
+            return true;
+          },
+        },
+      },
+    );
+
+    await expect(
+      invokeDependency(
+        dependencies.service as object,
+        "work",
+        {},
+        {
+          id: "durable:heartbeat",
+          attempt: 2,
+          scheduledAt: 10,
+          startedAt: 20,
+          [dependencyInvocationControl]: {
+            previousHeartbeat: { completed: 2 },
+            heartbeat: (details) => heartbeats.push(details),
+            defer: ({ id }) => ({
+              id,
+              activity: "durable:heartbeat",
+              execution: { workflow: "test", id: "one", run: "run-one" },
+              attempt: 2,
+            }),
+            cancellation: {
+              requested: () => true,
+              wait: () => Promise.resolve(),
+            },
+          },
+        },
+      ),
+    ).resolves.toBe(true);
+    expect(heartbeats).toEqual([{ completed: 3 }]);
   });
 
   test("disposes arbitrary owned resources once in reverse order", async () => {
@@ -588,6 +735,107 @@ describe("Program runtime", () => {
     await process.dispose();
   });
 
+  test("lazily binds mutually dependent Feature APIs after startup", async () => {
+    type Peer = Readonly<{ read(): string; readPeer(): string }>;
+    type Left = {
+      Programs: {
+        server: Program<Server, { Requires: { right: Peer }; Provides: { left: Peer } }>;
+      };
+    };
+    type Right = {
+      Programs: {
+        server: Program<Server, { Requires: { left: Peer }; Provides: { right: Peer } }>;
+      };
+    };
+    const system: System<{ Features: { left: Left; right: Right } }> = {
+      features: {
+        left: {
+          programs: {
+            server: {
+              start({ dependencies }) {
+                return {
+                  left: {
+                    read: () => "left",
+                    readPeer: () => dependencies.right.read(),
+                  },
+                };
+              },
+            },
+          },
+        },
+        right: {
+          programs: {
+            server: {
+              start({ dependencies }) {
+                return {
+                  right: {
+                    read: () => "right",
+                    readPeer: () => dependencies.left.read(),
+                  },
+                };
+              },
+            },
+          },
+        },
+      },
+    };
+
+    const process = await startProcess(
+      system,
+      "server",
+      {},
+      manifest(
+        "server",
+        { feature: "left", requires: ["right"], provides: ["left"] },
+        { feature: "right", requires: ["left"], provides: ["right"] },
+      ),
+    );
+    const dependencies = process.dependencies as Readonly<{ left: Peer; right: Peer }>;
+
+    expect(dependencies.left.readPeer()).toBe("right");
+    expect(dependencies.right.readPeer()).toBe("left");
+    await process.dispose();
+  });
+
+  test("rejects an internal Dependency call before its provider is ready", async () => {
+    const system = {
+      features: {
+        left: {
+          programs: {
+            server: {
+              start({ dependencies }: { dependencies: { right: { read(): string } } }) {
+                dependencies.right.read();
+                return { left: { read: () => "left" } };
+              },
+            },
+          },
+        },
+        right: {
+          programs: {
+            server: {
+              start() {
+                return { right: { read: () => "right" } };
+              },
+            },
+          },
+        },
+      },
+    };
+
+    await expect(
+      startProcess(
+        system,
+        "server",
+        {},
+        manifest(
+          "server",
+          { feature: "left", requires: ["right"], provides: ["left"] },
+          { feature: "right", requires: ["left"], provides: ["right"] },
+        ),
+      ),
+    ).rejects.toThrow('Dependency "right" is not ready');
+  });
+
   test("validates every external Dependency before user work starts", async () => {
     type Leaf = { Programs: { cloud: Program<Server, { Requires: { value: string } }> } };
     type App = { Features: { first: Leaf; second: Leaf } };
@@ -827,7 +1075,7 @@ describe("Program runtime", () => {
     );
   });
 
-  test("rejects invalid Dependency graphs before starting user code", () => {
+  test("rejects duplicate providers and retains provider cycles for lazy binding", () => {
     const system = {
       features: {
         first: { programs: { server: {} } },
@@ -847,7 +1095,7 @@ describe("Program runtime", () => {
       ),
     ).toThrow('multiple providers for Dependency "shared"');
 
-    expect(() =>
+    expect(
       planProgram(
         system,
         "server",
@@ -856,8 +1104,30 @@ describe("Program runtime", () => {
           { feature: "first", requires: ["second"], provides: ["first"] },
           { feature: "second", requires: ["first"], provides: ["second"] },
         ),
-      ),
-    ).toThrow("provider cycle between Features: first, second");
+      ).contributions.map(({ feature }) => feature),
+    ).toEqual(["first", "second"]);
+  });
+
+  test("keeps lazily bound Dependencies non-thenable", async () => {
+    const binding = createDeferredDependencyBinding("reader");
+
+    expect("then" in binding.dependency).toBe(false);
+    expect(Reflect.get(binding.dependency, "then")).toBeUndefined();
+    await expect(Promise.resolve(binding.dependency)).resolves.toBe(binding.dependency);
+
+    let count = 0;
+    binding.bind({
+      read: () => "ready",
+      signal: { increment: ({ amount }: { amount: number }) => (count += amount) },
+    });
+    expect((binding.dependency as { read(): string }).read()).toBe("ready");
+    expect(
+      (
+        binding.dependency as {
+          signal: { increment(input: { amount: number }): number };
+        }
+      ).signal.increment({ amount: 2 }),
+    ).toBe(2);
   });
 
   test("validates an exact external Dependency set", () => {
@@ -977,6 +1247,93 @@ describe("Program runtime", () => {
     ]);
   });
 
+  test("mounts one semantic Feature provider for every consuming contribution", async () => {
+    type Doubler = Dependency<{
+      Operations: {
+        double(input: { value: number }): Promise<number>;
+      };
+    }>;
+    const invocations: DependencyInvocation[] = [];
+    const values: number[] = [];
+    const system = {
+      features: {
+        provider: {
+          programs: {
+            server: {
+              start() {
+                return {
+                  doubler: {
+                    async double({
+                      input,
+                      invocation,
+                    }: {
+                      input: { value: number };
+                      invocation: DependencyInvocation;
+                    }) {
+                      invocations.push(invocation);
+                      return input.value * 2;
+                    },
+                  },
+                };
+              },
+            },
+          },
+        },
+        consumer: {
+          programs: {
+            server: {
+              async start({ dependencies }: { dependencies: { doubler: Doubler } }) {
+                values.push(await dependencies.doubler.double({ value: 21 }));
+              },
+            },
+          },
+        },
+      },
+    };
+
+    const process = await startProcess(
+      system,
+      "server",
+      {},
+      {
+        name: "server",
+        bindings: [
+          {
+            name: "doubler",
+            binding: "envelope",
+            operations: [
+              {
+                name: "double",
+                mode: "asynchronous",
+                input: {
+                  kind: "record",
+                  fields: [
+                    {
+                      name: "value",
+                      optional: false,
+                      type: { kind: "primitive", name: "number" },
+                    },
+                  ],
+                },
+                output: { kind: "primitive", name: "number" },
+              },
+            ],
+          },
+        ],
+        contributions: [
+          { feature: "provider", requires: [], provides: ["doubler"] },
+          { feature: "consumer", requires: ["doubler"], provides: [] },
+        ],
+      },
+    );
+
+    expect(values).toEqual([42]);
+    expect(invocations).toHaveLength(1);
+    expect(invocations[0]).toMatchObject({ attempt: 1 });
+    expect(invocations[0]?.id).toMatch(/^direct:doubler:double:1$/);
+    await process.dispose();
+  });
+
   test("shares one Feature binding locally and recreates it for another Process", async () => {
     let created = 0;
     const observed: number[] = [];
@@ -1038,6 +1395,7 @@ function manifest(
 ): ProgramManifest {
   return {
     name,
+    bindings: [],
     contributions: contributions.map((contribution) => ({
       feature: contribution.feature,
       requires: contribution.requires ?? [],

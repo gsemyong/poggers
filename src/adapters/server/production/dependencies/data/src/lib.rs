@@ -6,7 +6,8 @@ use std::{
 };
 
 use kit_server_runtime::{
-    Dependency, DependencyContext, Engine, NativeError, NativeFuture, NativeResult, Value,
+    Dependency, DependencyContext, DependencyInvocation, Engine, NativeError, NativeFuture,
+    NativeResult, Value,
 };
 use serde_json::{Map, Value as JsonValue, json};
 use tokio::sync::Mutex;
@@ -52,7 +53,13 @@ pub async fn create(context: DependencyContext) -> NativeResult<Data> {
 }
 
 impl Dependency for Data {
-    fn call(&self, _engine: Engine, operation: &str, input: Value) -> NativeFuture<Value> {
+    fn call(
+        &self,
+        _engine: Engine,
+        operation: &str,
+        input: Value,
+        _invocation: DependencyInvocation,
+    ) -> NativeFuture<Value> {
         let state = self.state.clone();
         let operation = operation.to_owned();
         Box::pin(async move {
@@ -638,6 +645,7 @@ mod tests {
                 "indexes": ["priority", "archived"],
                 "search": ["title"]
             })),
+            DependencyInvocation::direct("dataStore", "replace", 1).expect("invocation"),
         )
         .await
         .expect("replace");
@@ -652,6 +660,7 @@ mod tests {
                         "order": [{ "field": "priority", "direction": "descending" }]
                     }
                 })),
+                DependencyInvocation::direct("dataStore", "query", 2).expect("invocation"),
             )
             .await
             .expect("query")
@@ -668,6 +677,7 @@ mod tests {
                     "collection": "notes",
                     "query": { "text": "systems" }
                 })),
+                DependencyInvocation::direct("dataStore", "query", 3).expect("invocation"),
             )
             .await
             .expect("search")

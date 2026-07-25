@@ -103,6 +103,11 @@ describe("project template", () => {
 
     const modules = resolve(target, "node_modules");
     await mkdir(modules, { recursive: true });
+    await mkdir(resolve(modules, ".bin"));
+    await symlink(
+      resolve(import.meta.dirname, "../node_modules/typescript/bin/tsc"),
+      resolve(modules, ".bin/tsc"),
+    );
     await symlink(resolve(import.meta.dirname, ".."), resolve(modules, "kit"), "dir");
     await mkdir(resolve(modules, "@types"), { recursive: true });
     await symlink(
@@ -126,6 +131,8 @@ describe("project template", () => {
         target,
       ),
     ).toBe(0);
+    await expect(runCli(["typecheck", "--dir", target])).resolves.toBeUndefined();
+    expect(process.exitCode).toBe(0);
 
     await runCli(["build", "--dir", target, "--outdir", "dist"]);
     await expect(access(resolve(target, ".kit"))).rejects.toHaveProperty("code", "ENOENT");
@@ -288,18 +295,22 @@ describe("project template", () => {
     },
   );
 
-  test("builds a portable server Program through the normal production path", async () => {
-    const directory = await mkdtemp(resolve(tmpdir(), "kit-production-cli-"));
-    directories.push(directory);
-    await mkdir(resolve(directory, "src"), { recursive: true });
-    await writeFile(resolve(directory, "src/system.ts"), portableServerSystem());
+  test(
+    "builds a portable server Program through the normal production path",
+    { tags: ["native"], timeout: 120_000 },
+    async () => {
+      const directory = await mkdtemp(resolve(tmpdir(), "kit-production-cli-"));
+      directories.push(directory);
+      await mkdir(resolve(directory, "src"), { recursive: true });
+      await writeFile(resolve(directory, "src/system.ts"), portableServerSystem());
 
-    await runCli(["build", "--dir", directory]);
+      await runCli(["build", "--dir", directory]);
 
-    const artifact = resolve(directory, "dist/worker");
-    await expect(access(artifact)).resolves.toBeUndefined();
-    await expect(run(artifact, [], directory)).resolves.toBe(0);
-  }, 120_000);
+      const artifact = resolve(directory, "dist/worker");
+      await expect(access(artifact)).resolves.toBeUndefined();
+      await expect(run(artifact, [], directory)).resolves.toBe(0);
+    },
+  );
 });
 
 async function expectCanonicalSourceRoot(source: string): Promise<void> {

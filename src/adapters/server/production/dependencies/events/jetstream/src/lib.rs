@@ -13,7 +13,8 @@ use async_nats::{
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures_util::StreamExt;
 use kit_server_runtime::{
-    Dependency, DependencyContext, Engine, NativeError, NativeFuture, NativeResult, Value,
+    Dependency, DependencyContext, DependencyInvocation, Engine, NativeError, NativeFuture,
+    NativeResult, Value,
 };
 use serde_json::{Value as JsonValue, json};
 
@@ -65,7 +66,13 @@ pub async fn create(context: DependencyContext) -> NativeResult<Events> {
 }
 
 impl Dependency for Events {
-    fn call(&self, _engine: Engine, operation: &str, input: Value) -> NativeFuture<Value> {
+    fn call(
+        &self,
+        _engine: Engine,
+        operation: &str,
+        input: Value,
+        _invocation: DependencyInvocation,
+    ) -> NativeFuture<Value> {
         let client = self.client.clone();
         let context = self.context.clone();
         let stream = self.stream.clone();

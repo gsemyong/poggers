@@ -1,3 +1,4 @@
+import type { DependencyImplementations } from "@/core/dependency";
 import type {
   EnvironmentContract,
   HasProgramUI,
@@ -180,7 +181,9 @@ export type ProgramStartContext<
 
 type ProgramStartResult<Contract extends ProgramContract> = keyof ProvidesOf<Contract> extends never
   ? ProgramResourceResult
-  : ProvidesOf<Contract> | PromiseLike<ProvidesOf<Contract>>;
+  :
+      | DependencyImplementations<ProvidesOf<Contract>>
+      | PromiseLike<DependencyImplementations<ProvidesOf<Contract>>>;
 
 export type ProgramDefinition<
   Owner extends FeatureContract,

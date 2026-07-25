@@ -1,6 +1,7 @@
 import { animate, settled, velocity } from "kit/ui";
 import {
   createAudioAsset,
+  createContainer,
   createImageAsset,
   follow,
   pulse,
@@ -13,6 +14,10 @@ import {
 
 import type { Web } from "../apps/main/app";
 import type { SheetState } from "../features/dashboard";
+
+const workspaceContainer = createContainer("workspace");
+const sheetContainer = createContainer("sheet");
+const metricContainer = createContainer("metric");
 
 const parameters = {
   color: {
@@ -133,7 +138,7 @@ const createEditorial = (({ parameters: values, environment }) => {
                 model: { kind: "flow", direction: "block", gap },
                 minBlockSize: { viewport: { axis: "block", percent: 100 } },
                 padding: values.space.page,
-                container: { name: "workspace", axis: "inline" },
+                container: { identity: workspaceContainer, axis: "inline" },
               },
               paint: { fill: values.color.canvas },
               text: { family: ["system", "sans"], color: values.color.ink },
@@ -145,7 +150,7 @@ const createEditorial = (({ parameters: values, environment }) => {
               },
               rules: [
                 {
-                  when: { container: { name: "workspace", maxInlineSize: 620 } },
+                  when: { container: { identity: workspaceContainer, maxInlineSize: 620 } },
                   use: { layout: { maxInlineSize: "fill" } },
                 },
               ],
@@ -157,7 +162,7 @@ const createEditorial = (({ parameters: values, environment }) => {
               text: { size: featureState.compact ? 40 : 52, weight: 650, lineHeight: 1.04 },
               rules: [
                 {
-                  when: { container: { name: "workspace", maxInlineSize: 620 } },
+                  when: { container: { identity: workspaceContainer, maxInlineSize: 620 } },
                   use: { text: { size: 36 } },
                 },
               ],
@@ -246,7 +251,7 @@ const createEditorial = (({ parameters: values, environment }) => {
                 minBlockSize: 312,
                 padding: 24,
                 position: { kind: "relative" },
-                container: { name: "sheet", axis: "inline" },
+                container: { identity: sheetContainer, axis: "inline" },
               },
               paint: {
                 fill: values.color.surface,
@@ -311,7 +316,7 @@ const createEditorial = (({ parameters: values, environment }) => {
               },
               rules: [
                 {
-                  when: { container: { name: "workspace", maxInlineSize: 620 } },
+                  when: { container: { identity: workspaceContainer, maxInlineSize: 620 } },
                   use: {
                     layout: {
                       model: { kind: "grid", columns: [{ fraction: 1 }], gap },
@@ -335,7 +340,7 @@ const createEditorial = (({ parameters: values, environment }) => {
                 model: { kind: "flow", direction: "block", gap: 10 },
                 minBlockSize: featureState.compact ? 180 : 220,
                 padding: featureState.compact ? 18 : 24,
-                container: { name: "metric", axis: "inline" },
+                container: { identity: metricContainer, axis: "inline" },
               },
               paint: {
                 fill: values.color.surface,
@@ -372,7 +377,7 @@ const createEditorial = (({ parameters: values, environment }) => {
               },
               rules: [
                 {
-                  when: { container: { name: "metric", maxInlineSize: 280 } },
+                  when: { container: { identity: metricContainer, maxInlineSize: 280 } },
                   use: { text: { size: 32 } },
                 },
               ],

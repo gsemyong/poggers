@@ -6,7 +6,8 @@ use std::{
 };
 
 use kit_server_runtime::{
-    Dependency, DependencyContext, Engine, NativeError, NativeFuture, NativeResult, Value,
+    Dependency, DependencyContext, DependencyInvocation, Engine, NativeError, NativeFuture,
+    NativeResult, Value,
 };
 use rusqlite::{Connection, params};
 use serde_json::{Value as JsonValue, json};
@@ -52,7 +53,13 @@ pub async fn create(context: DependencyContext) -> NativeResult<Events> {
 }
 
 impl Dependency for Events {
-    fn call(&self, _engine: Engine, operation: &str, input: Value) -> NativeFuture<Value> {
+    fn call(
+        &self,
+        _engine: Engine,
+        operation: &str,
+        input: Value,
+        _invocation: DependencyInvocation,
+    ) -> NativeFuture<Value> {
         let state = self.state.clone();
         let operation = operation.to_owned();
         Box::pin(async move {
@@ -246,7 +253,14 @@ mod tests {
     }
 
     async fn call(events: &Events, operation: &str, input: JsonValue) -> NativeResult<Value> {
-        events.call(Engine::new(), operation, value(input)).await
+        events
+            .call(
+                Engine::new(),
+                operation,
+                value(input),
+                DependencyInvocation::direct("events", operation, 1)?,
+            )
+            .await
     }
 
     #[tokio::test]

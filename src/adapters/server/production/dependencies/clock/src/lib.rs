@@ -1,7 +1,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use kit_server_runtime::{
-    Dependency, DependencyContext, Engine, NativeError, NativeFuture, NativeResult, Value,
+    Dependency, DependencyContext, DependencyInvocation, Engine, NativeError, NativeFuture,
+    NativeResult, Value,
 };
 
 pub struct Clock;
@@ -11,7 +12,13 @@ pub async fn create(_context: DependencyContext) -> NativeResult<Clock> {
 }
 
 impl Dependency for Clock {
-    fn call(&self, _engine: Engine, operation: &str, _input: Value) -> NativeFuture<Value> {
+    fn call(
+        &self,
+        _engine: Engine,
+        operation: &str,
+        _input: Value,
+        _invocation: DependencyInvocation,
+    ) -> NativeFuture<Value> {
         let result = match operation {
             "now" => SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -42,7 +49,12 @@ mod tests {
         .await
         .expect("create clock");
         let value = clock
-            .call(Engine::new(), "now", Value::Undefined)
+            .call(
+                Engine::new(),
+                "now",
+                Value::Undefined,
+                DependencyInvocation::direct("clock", "now", 1).expect("invocation"),
+            )
             .await
             .expect("read clock")
             .number()

@@ -21,6 +21,21 @@ afterEach(async () => {
 });
 
 describe("server Platform adapter", () => {
+  test("rejects non-portable server source during semantic compilation", async () => {
+    const fixture = await createFixture(
+      httpProgramSource("first").replace(
+        "return dependencies.http.route({",
+        "switch (1) { default: break; }\n        return dependencies.http.route({",
+      ),
+    );
+    const adapter = createServerPlatformAdapter();
+
+    expect(() => compileSystem(fixture.system)).not.toThrow();
+    expect(() => compileSystem(fixture.system, adapter.compiler ?? [])).toThrow(
+      /Server Program contribution .* must lower completely to portable meaning.*SwitchStatement/,
+    );
+  });
+
   test("emits and launches one independent artifact per named Program", async () => {
     const fixture = await createFixture(twoProgramSource());
     const ir = compileSystem(fixture.system);

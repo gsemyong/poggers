@@ -591,7 +591,7 @@ fn component_map(values: Vec<Value>) -> Result<BTreeMap<String, Value>, String> 
         validate_allowed_keys(
             &component,
             &["elements", "feature", "name", "span", "state", "view"],
-            &["diagnostic"],
+            &["diagnostic", "presentation"],
             "compiled web Component",
         )?;
         let feature = string(&component, "feature")?;
@@ -617,6 +617,9 @@ fn component_map(values: Vec<Value>) -> Result<BTreeMap<String, Value>, String> 
         }) {
             return Err("compiled web Component state must contain scalar values".to_owned());
         }
+        if let Some(presentation) = component.get("presentation") {
+            validate_initial_presentation(presentation, elements)?;
+        }
         let view = component
             .get("view")
             .ok_or_else(|| "compiled web Component view is required".to_owned())?;
@@ -633,6 +636,124 @@ fn component_map(values: Vec<Value>) -> Result<BTreeMap<String, Value>, String> 
         }
     }
     Ok(components)
+}
+
+fn validate_initial_presentation(
+    presentation: &Value,
+    component_elements: &Map<String, Value>,
+) -> Result<(), String> {
+    validate_keys(
+        presentation,
+        &["elements"],
+        "compiled web Component initial Presentation",
+    )?;
+    let elements = presentation
+        .get("elements")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            "compiled web Component initial Presentation elements must be an object".to_owned()
+        })?;
+    for (name, artifact) in elements {
+        if !component_elements.contains_key(name) {
+            return Err(format!(
+                "compiled web Component initial Presentation references unknown Element {name:?}"
+            ));
+        }
+        validate_allowed_keys(
+            artifact,
+            &["className", "variables"],
+            &["image"],
+            "compiled web Component initial Presentation Element",
+        )?;
+        let class_name = string(artifact, "className")?;
+        if !valid_identifier(class_name) {
+            return Err("compiled web Component initial Presentation class is invalid".to_owned());
+        }
+        let variables = artifact
+            .get("variables")
+            .and_then(Value::as_object)
+            .ok_or_else(|| {
+                "compiled web Component initial Presentation variables must be an object".to_owned()
+            })?;
+        if variables.iter().any(|(name, value)| {
+            !name.starts_with("--")
+                || !name[2..]
+                    .chars()
+                    .all(|character| character == '-' || character.is_ascii_alphanumeric())
+                || !value.is_string()
+        }) {
+            return Err(
+                "compiled web Component initial Presentation variables are invalid".to_owned(),
+            );
+        }
+        if artifact
+            .get("image")
+            .is_some_and(|value| !value.is_string())
+        {
+            return Err(
+                "compiled web Component initial Presentation image must be a string".to_owned(),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn apply_initial_presentation(
+    component: &Value,
+    element: &str,
+    attributes: &mut BTreeMap<String, String>,
+) -> Result<(), String> {
+    let Some(artifact) = component
+        .get("presentation")
+        .and_then(|value| value.get("elements"))
+        .and_then(|value| value.get(element))
+    else {
+        return Ok(());
+    };
+    let class_name = string(artifact, "className")?;
+    attributes
+        .entry("class".to_owned())
+        .and_modify(|value| {
+            if !value.is_empty() {
+                value.push(' ');
+            }
+            value.push_str(class_name);
+        })
+        .or_insert_with(|| class_name.to_owned());
+    let variables = artifact
+        .get("variables")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            "compiled web Component initial Presentation variables must be an object".to_owned()
+        })?;
+    if !variables.is_empty() {
+        let declarations = variables
+            .iter()
+            .map(|(name, value)| {
+                value
+                    .as_str()
+                    .map(|value| format!("{name}:{value}"))
+                    .ok_or_else(|| {
+                        "compiled web Component initial Presentation variable must be a string"
+                            .to_owned()
+                    })
+            })
+            .collect::<Result<Vec<_>, String>>()?
+            .join(";");
+        attributes
+            .entry("style".to_owned())
+            .and_modify(|value| {
+                if !value.is_empty() && !value.ends_with(';') {
+                    value.push(';');
+                }
+                value.push_str(&declarations);
+            })
+            .or_insert(declarations);
+    }
+    if let Some(image) = artifact.get("image").and_then(Value::as_str) {
+        attributes.insert("src".to_owned(), image.to_owned());
+    }
+    Ok(())
 }
 
 fn validate_render_node(value: &Value) -> Result<(), String> {
@@ -1192,11 +1313,12 @@ fn evaluate_render_node(
                     return Err(format!("duplicate web render attribute {name:?}"));
                 }
             }
+            let element = string(node, "element")?;
+            if let Some(component) = stack.last().and_then(|identity| components.get(identity)) {
+                apply_initial_presentation(component, element, &mut attributes)?;
+            }
             let owner = compiled_component_runtime_name(stack.last().map(String::as_str));
-            attributes.insert(
-                "data-kit-element".to_owned(),
-                format!("{owner}/{}", string(node, "element")?),
-            );
+            attributes.insert("data-kit-element".to_owned(), format!("{owner}/{element}"));
             let mut children = Vec::new();
             for child in array(node, "children")? {
                 children.extend(evaluate_render_node(

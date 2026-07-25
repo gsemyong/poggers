@@ -1,17 +1,24 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt,
     future::Future,
     pin::Pin,
-    sync::{Arc, Mutex, RwLock},
+    sync::{
+        Arc, Mutex, RwLock,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    task::{Context, Poll},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
-use futures_util::{Stream, StreamExt};
+use futures_util::{Stream, StreamExt, task::noop_waker_ref};
+use indexmap::IndexMap;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
 pub type NativeResult<T> = Result<T, NativeError>;
 pub type NativeFuture<T> = Pin<Box<dyn Future<Output = NativeResult<T>> + Send>>;
 pub type NativeStream = Pin<Box<dyn Stream<Item = NativeResult<Value>> + Send>>;
+pub type Record = IndexMap<String, Value>;
 
 #[derive(Clone)]
 pub enum Value {
@@ -21,8 +28,8 @@ pub enum Value {
     Number(f64),
     String(String),
     Array(Arc<Mutex<Vec<Value>>>),
-    Record(Arc<BTreeMap<String, Value>>),
-    MutableRecord(Arc<Mutex<BTreeMap<String, Value>>>),
+    Record(Arc<Record>),
+    MutableRecord(Arc<Mutex<Record>>),
     Function(NativeFunction),
     Dependency(String),
     InterceptedDependency(NativeFunction),
@@ -42,6 +49,10 @@ impl NativeFunction {
 
     fn call(&self, engine: Engine, arguments: Vec<Value>) -> NativeFuture<Value> {
         (self.0)(engine, arguments)
+    }
+
+    fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
     }
 }
 
@@ -96,10 +107,332 @@ impl fmt::Display for NativeError {
 impl std::error::Error for NativeError {}
 
 pub trait Dependency: Send + Sync {
-    fn call(&self, engine: Engine, operation: &str, input: Value) -> NativeFuture<Value>;
+    fn call(
+        &self,
+        engine: Engine,
+        operation: &str,
+        input: Value,
+        invocation: DependencyInvocation,
+    ) -> NativeFuture<Value>;
 
     fn shutdown(&self) -> NativeFuture<()> {
         Box::pin(async { Ok(()) })
+    }
+}
+
+type DependencyHeartbeat = Arc<dyn Fn(Value) -> NativeResult<()> + Send + Sync>;
+type DependencyDefer = Arc<dyn Fn(String) -> NativeResult<Value> + Send + Sync>;
+
+#[derive(Default)]
+struct DependencyCancellationState {
+    requested: Arc<AtomicBool>,
+    notification: Arc<tokio::sync::Notify>,
+    reason: Mutex<Option<String>>,
+}
+
+#[derive(Clone, Default)]
+pub struct DependencyCancellation {
+    state: Arc<DependencyCancellationState>,
+    parent: Option<Arc<DependencyCancellation>>,
+    inherits_parent: bool,
+}
+
+impl DependencyCancellation {
+    pub fn requested(&self) -> bool {
+        self.state.requested.load(Ordering::SeqCst)
+            || (self.inherits_parent
+                && self
+                    .parent
+                    .as_ref()
+                    .is_some_and(|parent| parent.requested()))
+    }
+
+    pub fn reason(&self) -> Option<String> {
+        if self.state.requested.load(Ordering::SeqCst) {
+            return lock(&self.state.reason).clone();
+        }
+        if self.inherits_parent {
+            return self.parent.as_ref().and_then(|parent| parent.reason());
+        }
+        None
+    }
+
+    pub fn child(&self, inherits_parent: bool) -> Self {
+        Self {
+            state: Arc::new(DependencyCancellationState::default()),
+            parent: Some(Arc::new(self.clone())),
+            inherits_parent,
+        }
+    }
+
+    pub fn request(&self) {
+        self.request_with_reason(None);
+    }
+
+    pub fn request_with_reason(&self, reason: Option<String>) {
+        if !self.state.requested.swap(true, Ordering::SeqCst) {
+            *lock(&self.state.reason) = reason;
+            self.state.notification.notify_waiters();
+        }
+    }
+
+    pub async fn wait(&self) {
+        if self.requested() {
+            return;
+        }
+        let notified = self.state.notification.notified();
+        if self.requested() {
+            return;
+        }
+        if self.inherits_parent
+            && let Some(parent) = &self.parent
+        {
+            tokio::select! {
+                _ = notified => {}
+                _ = Box::pin(parent.wait()) => {}
+            }
+        } else {
+            notified.await;
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct DependencyInvocation {
+    pub id: String,
+    pub attempt: u64,
+    pub scheduled_at: f64,
+    pub started_at: f64,
+    pub deadline: Option<f64>,
+    pub previous_heartbeat: Option<Value>,
+    heartbeat: Option<DependencyHeartbeat>,
+    defer: Option<DependencyDefer>,
+    pub cancellation: DependencyCancellation,
+}
+
+impl fmt::Debug for DependencyInvocation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DependencyInvocation")
+            .field("id", &self.id)
+            .field("attempt", &self.attempt)
+            .field("scheduled_at", &self.scheduled_at)
+            .field("started_at", &self.started_at)
+            .field("deadline", &self.deadline)
+            .field("previous_heartbeat", &self.previous_heartbeat)
+            .finish_non_exhaustive()
+    }
+}
+
+impl DependencyInvocation {
+    pub fn new(
+        id: impl Into<String>,
+        attempt: u64,
+        scheduled_at: f64,
+        started_at: f64,
+        deadline: Option<f64>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            attempt,
+            scheduled_at,
+            started_at,
+            deadline,
+            previous_heartbeat: None,
+            heartbeat: None,
+            defer: None,
+            cancellation: DependencyCancellation::default(),
+        }
+    }
+
+    pub fn direct(name: &str, operation: &str, sequence: u64) -> NativeResult<Self> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| NativeError::new("ClockFailure", error.to_string()))?
+            .as_secs_f64()
+            * 1_000.0;
+        Ok(Self::new(
+            format!("direct:{name}:{operation}:{sequence}"),
+            1,
+            now,
+            now,
+            None,
+        ))
+    }
+
+    pub fn with_controls(
+        mut self,
+        previous_heartbeat: Option<Value>,
+        heartbeat: impl Fn(Value) -> NativeResult<()> + Send + Sync + 'static,
+        defer: impl Fn(String) -> NativeResult<Value> + Send + Sync + 'static,
+        cancellation: DependencyCancellation,
+    ) -> Self {
+        self.previous_heartbeat = previous_heartbeat;
+        self.heartbeat = Some(Arc::new(heartbeat));
+        self.defer = Some(Arc::new(defer));
+        self.cancellation = cancellation;
+        self
+    }
+
+    pub fn heartbeat(&self, details: Value) -> NativeResult<()> {
+        self.heartbeat
+            .as_ref()
+            .map_or_else(|| Ok(()), |heartbeat| heartbeat(details))
+    }
+
+    fn to_value(&self) -> Value {
+        let heartbeat = self.heartbeat.clone();
+        let defer = self.defer.clone();
+        let requested = self.cancellation.clone();
+        let wait = self.cancellation.clone();
+        let mut value = IndexMap::from([
+            ("id".to_owned(), Value::String(self.id.clone())),
+            ("attempt".to_owned(), Value::Number(self.attempt as f64)),
+            ("scheduledAt".to_owned(), Value::Number(self.scheduled_at)),
+            ("startedAt".to_owned(), Value::Number(self.started_at)),
+            (
+                "heartbeat".to_owned(),
+                Value::Function(NativeFunction::new(move |_engine, arguments| {
+                    let heartbeat = heartbeat.clone();
+                    Box::pin(async move {
+                        let input = arguments
+                            .into_iter()
+                            .next()
+                            .ok_or_else(|| {
+                                NativeError::new("TypeError", "heartbeat requires input.")
+                            })?
+                            .as_record()?;
+                        let details = input.get("details").cloned().ok_or_else(|| {
+                            NativeError::new("TypeError", "Heartbeat details are required.")
+                        })?;
+                        if let Some(heartbeat) = heartbeat {
+                            heartbeat(details)?;
+                        }
+                        Ok(Value::Undefined)
+                    })
+                })),
+            ),
+            (
+                "defer".to_owned(),
+                Value::Function(NativeFunction::new(move |_engine, arguments| {
+                    let defer = defer.clone();
+                    Box::pin(async move {
+                        let input = arguments
+                            .into_iter()
+                            .next()
+                            .ok_or_else(|| NativeError::new("TypeError", "defer requires input."))?
+                            .as_record()?;
+                        let id = input
+                            .get("id")
+                            .ok_or_else(|| {
+                                NativeError::new(
+                                    "TypeError",
+                                    "Deferred Dependency invocation id is required.",
+                                )
+                            })?
+                            .clone()
+                            .string()?;
+                        if id.is_empty() {
+                            return Err(NativeError::new(
+                                "TypeError",
+                                "Deferred Dependency invocation id is required.",
+                            ));
+                        }
+                        let defer = defer.ok_or_else(|| {
+                            NativeError::new(
+                                "InvalidDependencyInvocation",
+                                "Direct Dependency invocations cannot be completed externally.",
+                            )
+                        })?;
+                        defer(id)
+                    })
+                })),
+            ),
+            (
+                "cancellation".to_owned(),
+                Value::record(IndexMap::from([
+                    (
+                        "requested".to_owned(),
+                        Value::Function(NativeFunction::new(move |_engine, _arguments| {
+                            let requested = requested.clone();
+                            Box::pin(async move { Ok(Value::Boolean(requested.requested())) })
+                        })),
+                    ),
+                    (
+                        "wait".to_owned(),
+                        Value::Function(NativeFunction::new(move |_engine, _arguments| {
+                            let wait = wait.clone();
+                            Box::pin(async move {
+                                wait.wait().await;
+                                Ok(Value::Undefined)
+                            })
+                        })),
+                    ),
+                ])),
+            ),
+            (
+                "fail".to_owned(),
+                Value::Function(NativeFunction::new(|_engine, arguments| {
+                    Box::pin(async move {
+                        let input = arguments
+                            .into_iter()
+                            .next()
+                            .ok_or_else(|| NativeError::new("TypeError", "fail requires input."))?
+                            .as_record()?;
+                        let failure_type = input
+                            .get("type")
+                            .ok_or_else(|| {
+                                NativeError::new("TypeError", "Failure type is required.")
+                            })?
+                            .clone()
+                            .string()?;
+                        let message = input
+                            .get("message")
+                            .filter(|value| !value.is_undefined())
+                            .map(|value| value.clone().string())
+                            .transpose()?
+                            .unwrap_or_else(|| failure_type.clone());
+                        let mut error = NativeError::new(failure_type, message);
+                        if let Some(data) = input.get("data").filter(|value| !value.is_undefined())
+                        {
+                            error = error.with_field("data", data.clone());
+                        }
+                        if let Some(retry) =
+                            input.get("retry").filter(|value| !value.is_undefined())
+                        {
+                            let delay = retry
+                                .as_record()?
+                                .get("delay")
+                                .ok_or_else(|| {
+                                    NativeError::new(
+                                        "TypeError",
+                                        "Dependency retry delay is required.",
+                                    )
+                                })?
+                                .number()?;
+                            if !delay.is_finite()
+                                || delay.fract() != 0.0
+                                || !(0.0..=9_007_199_254_740_991.0).contains(&delay)
+                            {
+                                return Err(NativeError::new(
+                                    "TypeError",
+                                    "Dependency retry delay must be a non-negative safe integer.",
+                                ));
+                            }
+                            error = error.with_field("retryDelay", Value::Number(delay));
+                        }
+                        Err(error)
+                    })
+                })),
+            ),
+        ]);
+        if let Some(deadline) = self.deadline {
+            value.insert("deadline".to_owned(), Value::Number(deadline));
+        }
+        if let Some(previous_heartbeat) = &self.previous_heartbeat {
+            value.insert("previousHeartbeat".to_owned(), previous_heartbeat.clone());
+        }
+        Value::record(value)
     }
 }
 
@@ -167,10 +500,18 @@ impl<Implementation> Dependency for ContractDependency<Implementation>
 where
     Implementation: Dependency + 'static,
 {
-    fn call(&self, engine: Engine, operation: &str, input: Value) -> NativeFuture<Value> {
+    fn call(
+        &self,
+        engine: Engine,
+        operation: &str,
+        input: Value,
+        invocation: DependencyInvocation,
+    ) -> NativeFuture<Value> {
         // Operations prefixed with @ are private adapter integration, never Program API.
         if operation.starts_with('@') {
-            return self.implementation.call(engine, operation, input);
+            return self
+                .implementation
+                .call(engine, operation, input, invocation);
         }
         let Some(contract) = self.operations.get(operation).cloned() else {
             let name = self.name;
@@ -186,7 +527,9 @@ where
         if let Err(error) = validate_value(&input, &contract.input, &path) {
             return Box::pin(async move { Err(error) });
         }
-        let output = self.implementation.call(engine, operation, input);
+        let output = self
+            .implementation
+            .call(engine, operation, input, invocation);
         let path = format!("{}.{} output", self.name, operation);
         Box::pin(async move {
             let value = output.await?;
@@ -337,16 +680,28 @@ pub struct Engine(Arc<EngineState>);
 
 struct EngineState {
     external: RwLock<BTreeMap<String, Arc<dyn Dependency>>>,
+    declared: RwLock<BTreeSet<String>>,
     provided: RwLock<BTreeMap<String, Value>>,
+    provided_envelopes: RwLock<BTreeSet<String>>,
     resources: Mutex<Vec<Value>>,
+    stable_functions: Mutex<BTreeMap<String, NativeFunction>>,
+    tasks: AtomicUsize,
+    task_completion: tokio::sync::Notify,
+    invocations: Mutex<BTreeMap<String, u64>>,
 }
 
 impl Engine {
     pub fn new() -> Self {
         Self(Arc::new(EngineState {
             external: RwLock::new(BTreeMap::new()),
+            declared: RwLock::new(BTreeSet::new()),
             provided: RwLock::new(BTreeMap::new()),
+            provided_envelopes: RwLock::new(BTreeSet::new()),
             resources: Mutex::new(Vec::new()),
+            stable_functions: Mutex::new(BTreeMap::new()),
+            tasks: AtomicUsize::new(0),
+            task_completion: tokio::sync::Notify::new(),
+            invocations: Mutex::new(BTreeMap::new()),
         }))
     }
 
@@ -369,9 +724,16 @@ impl Engine {
 
     pub fn dependency_value(&self, name: &str) -> NativeResult<Value> {
         if let Some(value) = read(&self.0.provided).get(name) {
-            return Ok(value.clone());
+            return Ok(if read(&self.0.provided_envelopes).contains(name) {
+                Value::Dependency(name.to_owned())
+            } else {
+                value.clone()
+            });
         }
         if read(&self.0.external).contains_key(name) {
+            return Ok(Value::Dependency(name.to_owned()));
+        }
+        if read(&self.0.declared).contains(name) {
             return Ok(Value::Dependency(name.to_owned()));
         }
         Err(NativeError::new(
@@ -380,13 +742,37 @@ impl Engine {
         ))
     }
 
+    pub fn declare_provided(&self, names: &[&str]) -> NativeResult<()> {
+        let external = read(&self.0.external);
+        let provided = read(&self.0.provided);
+        let mut declared = write(&self.0.declared);
+        for name in names {
+            if external.contains_key(*name)
+                || provided.contains_key(*name)
+                || declared.contains(*name)
+            {
+                return Err(NativeError::new(
+                    "DuplicateDependency",
+                    format!("Dependency {name:?} is already registered or declared."),
+                ));
+            }
+            declared.insert((*name).to_owned());
+        }
+        Ok(())
+    }
+
     pub fn retain(&self, value: Value) {
         if !value.is_undefined() {
             lock(&self.0.resources).push(value);
         }
     }
 
-    pub fn provide(&self, names: &[&str], value: Value) -> NativeResult<()> {
+    pub fn provide(
+        &self,
+        names: &[&str],
+        envelope_names: &[&str],
+        value: Value,
+    ) -> NativeResult<()> {
         let record = value.as_record()?;
         let actual = record.keys().map(String::as_str).collect::<Vec<_>>();
         if actual != names {
@@ -394,6 +780,14 @@ impl Engine {
                 "InvalidProvision",
                 format!("Provided {actual:?}, declared {names:?}."),
             ));
+        }
+        for name in envelope_names {
+            if !names.contains(name) {
+                return Err(NativeError::new(
+                    "InvalidProvision",
+                    format!("Envelope Dependency {name:?} is not provided by this contribution."),
+                ));
+            }
         }
         let mut provided = write(&self.0.provided);
         for name in names {
@@ -411,6 +805,8 @@ impl Engine {
             provided.insert((*name).to_owned(), value.clone());
             lock(&self.0.resources).push(value);
         }
+        write(&self.0.provided_envelopes)
+            .extend(envelope_names.iter().map(|name| (*name).to_owned()));
         Ok(())
     }
 
@@ -419,8 +815,15 @@ impl Engine {
     }
 
     pub async fn shutdown(&self) -> NativeResult<()> {
-        let resources = std::mem::take(&mut *lock(&self.0.resources));
+        while self.0.tasks.load(Ordering::Acquire) > 0 {
+            let completion = self.0.task_completion.notified();
+            if self.0.tasks.load(Ordering::Acquire) == 0 {
+                break;
+            }
+            completion.await;
+        }
         let mut errors = Vec::new();
+        let resources = std::mem::take(&mut *lock(&self.0.resources));
         for resource in resources.into_iter().rev() {
             if let Err(error) = self.dispose(resource).await {
                 errors.push(error);
@@ -452,12 +855,131 @@ impl Engine {
         }
     }
 
+    pub fn stable_function(&self, identity: &str, function: NativeFunction) -> NativeFunction {
+        let mut functions = lock(&self.0.stable_functions);
+        functions
+            .entry(identity.to_owned())
+            .or_insert(function)
+            .clone()
+    }
+
+    pub fn object_keys(&self, value: Value) -> NativeResult<Value> {
+        let keys = match value {
+            Value::Record(record) => record.keys().cloned().collect::<Vec<_>>(),
+            Value::MutableRecord(record) => lock(&record).keys().cloned().collect::<Vec<_>>(),
+            value => {
+                return Err(NativeError::new(
+                    "TypeError",
+                    format!("Object.keys requires a record, received {value:?}."),
+                ));
+            }
+        };
+        Ok(Value::array(keys.into_iter().map(Value::String).collect()))
+    }
+
+    pub async fn concurrent_all(
+        &self,
+        operations: Vec<NativeFuture<Value>>,
+    ) -> NativeResult<Value> {
+        let mut started = self.start_concurrent(operations);
+        let mut values = vec![None; started.settled.len()];
+        for (index, result) in started.settled.iter_mut().enumerate() {
+            if let Some(result) = result.take() {
+                values[index] = Some(result?);
+            }
+        }
+        while started.pending > 0 {
+            let (index, result) = started.next().await?;
+            values[index] = Some(result?);
+        }
+        Ok(Value::array(
+            values
+                .into_iter()
+                .map(|value| value.unwrap_or(Value::Undefined))
+                .collect(),
+        ))
+    }
+
+    pub async fn concurrent_race(
+        &self,
+        operations: Vec<NativeFuture<Value>>,
+    ) -> NativeResult<Value> {
+        if operations.is_empty() {
+            return Err(NativeError::new(
+                "InvalidPromiseComposition",
+                "Promise.race requires at least one operation.",
+            ));
+        }
+        let mut started = self.start_concurrent(operations);
+        for result in &mut started.settled {
+            if let Some(result) = result.take() {
+                return result;
+            }
+        }
+        let (_, result) = started.next().await?;
+        result
+    }
+
+    pub async fn concurrent_all_settled(
+        &self,
+        operations: Vec<NativeFuture<Value>>,
+    ) -> NativeResult<Value> {
+        let mut started = self.start_concurrent(operations);
+        let mut values = vec![None; started.settled.len()];
+        for (index, result) in started.settled.iter_mut().enumerate() {
+            if let Some(result) = result.take() {
+                values[index] = Some(settled_value(result));
+            }
+        }
+        while started.pending > 0 {
+            let (index, result) = started.next().await?;
+            values[index] = Some(settled_value(result));
+        }
+        Ok(Value::array(
+            values
+                .into_iter()
+                .map(|value| value.unwrap_or(Value::Undefined))
+                .collect(),
+        ))
+    }
+
+    fn start_concurrent(&self, operations: Vec<NativeFuture<Value>>) -> ConcurrentOperations {
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut settled = Vec::with_capacity(operations.len());
+        let mut pending = 0;
+        let waker = noop_waker_ref();
+        let mut context = Context::from_waker(waker);
+        for (index, mut operation) in operations.into_iter().enumerate() {
+            match operation.as_mut().poll(&mut context) {
+                Poll::Ready(result) => settled.push(Some(result)),
+                Poll::Pending => {
+                    settled.push(None);
+                    pending += 1;
+                    let sender = sender.clone();
+                    self.0.tasks.fetch_add(1, Ordering::AcqRel);
+                    let state = self.0.clone();
+                    tokio::spawn(async move {
+                        let _task = ConcurrentTask(state);
+                        let _ = sender.send((index, operation.await));
+                    });
+                }
+            }
+        }
+        drop(sender);
+        ConcurrentOperations {
+            pending,
+            receiver,
+            settled,
+        }
+    }
+
     pub async fn next(&self, stream: Value) -> NativeResult<Option<Value>> {
         match stream {
             Value::Stream(stream) => stream.lock().await.next().await.transpose(),
-            Value::Record(record) => {
+            iterator @ (Value::Record(_) | Value::MutableRecord(_)) => {
+                let record = iterator.as_record()?;
                 let iterator = if record.contains_key("next") {
-                    Value::Record(record)
+                    iterator
                 } else {
                     let iterator = record.get("@asyncIterator").cloned().ok_or_else(|| {
                         NativeError::new("TypeError", "Value is not an asynchronous stream.")
@@ -514,9 +1036,84 @@ impl Engine {
         operation: &str,
         input: Value,
     ) -> NativeResult<Value> {
+        self.call_dependency_scoped("runtime", name, operation, input)
+            .await
+    }
+
+    pub async fn call_dependency_scoped(
+        &self,
+        scope: &str,
+        name: &str,
+        operation: &str,
+        input: Value,
+    ) -> NativeResult<Value> {
+        let sequence = {
+            let mut invocations = lock(&self.0.invocations);
+            let sequence = invocations.entry(format!("{scope}\0{name}")).or_default();
+            *sequence += 1;
+            *sequence
+        };
+        self.call_dependency_with_invocation(
+            name,
+            operation,
+            input,
+            DependencyInvocation::direct(name, operation, sequence)?,
+        )
+        .await
+    }
+
+    pub async fn call_dependency_with_invocation(
+        &self,
+        name: &str,
+        operation: &str,
+        input: Value,
+        invocation: DependencyInvocation,
+    ) -> NativeResult<Value> {
+        if invocation.id.is_empty()
+            || invocation.attempt == 0
+            || !invocation.scheduled_at.is_finite()
+            || !invocation.started_at.is_finite()
+            || invocation
+                .deadline
+                .is_some_and(|deadline| !deadline.is_finite())
+        {
+            return Err(NativeError::new(
+                "InvalidDependencyInvocation",
+                format!("Dependency {name}.{operation} received invalid invocation metadata."),
+            ));
+        }
         let provided = { read(&self.0.provided).get(name).cloned() };
         if let Some(value) = provided {
+            if read(&self.0.provided_envelopes).contains(name) {
+                let dispatcher = value.as_record()?.get("@dependencyInvocation").cloned();
+                if let Some(dispatcher) = dispatcher {
+                    return self
+                        .invoke(
+                            dispatcher,
+                            vec![
+                                Value::String(operation.to_owned()),
+                                input,
+                                invocation.to_value(),
+                            ],
+                        )
+                        .await;
+                }
+            }
+            let input = if read(&self.0.provided_envelopes).contains(name) {
+                Value::record(IndexMap::from([
+                    ("input".to_owned(), input),
+                    ("invocation".to_owned(), invocation.to_value()),
+                ]))
+            } else {
+                input
+            };
             return self.method(value, operation, vec![input]).await;
+        }
+        if read(&self.0.declared).contains(name) {
+            return Err(NativeError::new(
+                "UnreadyDependency",
+                format!("Dependency {name:?} is not ready."),
+            ));
         }
         let dependency = { read(&self.0.external).get(name).cloned() }.ok_or_else(|| {
             NativeError::new(
@@ -524,7 +1121,9 @@ impl Engine {
                 format!("Missing Dependency {name}.{operation}."),
             )
         })?;
-        dependency.call(self.clone(), operation, input).await
+        dependency
+            .call(self.clone(), operation, input, invocation)
+            .await
     }
 
     pub fn assign_property(
@@ -705,6 +1304,47 @@ impl Engine {
     }
 }
 
+struct ConcurrentOperations {
+    pending: usize,
+    receiver: tokio::sync::mpsc::UnboundedReceiver<(usize, NativeResult<Value>)>,
+    settled: Vec<Option<NativeResult<Value>>>,
+}
+
+struct ConcurrentTask(Arc<EngineState>);
+
+impl Drop for ConcurrentTask {
+    fn drop(&mut self) {
+        self.0.tasks.fetch_sub(1, Ordering::AcqRel);
+        self.0.task_completion.notify_waiters();
+    }
+}
+
+impl ConcurrentOperations {
+    async fn next(&mut self) -> NativeResult<(usize, NativeResult<Value>)> {
+        let result = self.receiver.recv().await.ok_or_else(|| {
+            NativeError::new(
+                "ConcurrentTaskFailure",
+                "A Promise operation ended without reporting its result.",
+            )
+        })?;
+        self.pending -= 1;
+        Ok(result)
+    }
+}
+
+fn settled_value(result: NativeResult<Value>) -> Value {
+    match result {
+        Ok(value) => Value::record([
+            ("status".to_owned(), Value::String("fulfilled".to_owned())),
+            ("value".to_owned(), value),
+        ]),
+        Err(error) => Value::record([
+            ("status".to_owned(), Value::String("rejected".to_owned())),
+            ("reason".to_owned(), Value::Error(Arc::new(error))),
+        ]),
+    }
+}
+
 impl Default for Engine {
     fn default() -> Self {
         Self::new()
@@ -712,12 +1352,12 @@ impl Default for Engine {
 }
 
 impl Value {
-    pub fn record(values: BTreeMap<String, Value>) -> Self {
-        Self::Record(Arc::new(values))
+    pub fn record(values: impl IntoIterator<Item = (String, Value)>) -> Self {
+        Self::Record(Arc::new(values.into_iter().collect()))
     }
 
-    pub fn mutable_record(values: BTreeMap<String, Value>) -> Self {
-        Self::MutableRecord(Arc::new(Mutex::new(values)))
+    pub fn mutable_record(values: impl IntoIterator<Item = (String, Value)>) -> Self {
+        Self::MutableRecord(Arc::new(Mutex::new(values.into_iter().collect())))
     }
 
     pub fn into_mutable_record(self) -> NativeResult<Self> {
@@ -754,11 +1394,10 @@ impl Value {
             JsonValue::Number(value) => Self::Number(value.as_f64().unwrap_or(0.0)),
             JsonValue::String(value) => Self::String(value.clone()),
             JsonValue::Array(values) => Self::array(values.iter().map(Self::from_json).collect()),
-            JsonValue::Object(values) => Self::record(
+            JsonValue::Object(values) => Self::mutable_record(
                 values
                     .iter()
-                    .map(|(name, value)| (name.clone(), Self::from_json(value)))
-                    .collect(),
+                    .map(|(name, value)| (name.clone(), Self::from_json(value))),
             ),
         }
     }
@@ -783,8 +1422,7 @@ impl Value {
             JsonValue::Object(values) => Self::record(
                 values
                     .iter()
-                    .map(|(name, value)| (name.clone(), Self::from_canonical_json(value)))
-                    .collect(),
+                    .map(|(name, value)| (name.clone(), Self::from_canonical_json(value))),
             ),
             _ => Self::from_json(value),
         }
@@ -875,7 +1513,7 @@ impl Value {
         }
     }
 
-    pub fn as_record(&self) -> NativeResult<Arc<BTreeMap<String, Value>>> {
+    pub fn as_record(&self) -> NativeResult<Arc<Record>> {
         match self {
             Self::Record(value) => Ok(value.clone()),
             Self::MutableRecord(value) => Ok(Arc::new(lock(value).clone())),
@@ -965,7 +1603,19 @@ impl Value {
                 "message" => Self::String(value.message.clone()),
                 _ => value.fields.get(name).cloned().unwrap_or(Self::Undefined),
             }),
-            Self::Array(value) if name == "length" => Ok(Self::Number(lock(value).len() as f64)),
+            Self::Array(value) => {
+                let values = lock(value);
+                if name == "length" {
+                    return Ok(Self::Number(values.len() as f64));
+                }
+                let index = name
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|index| index.to_string() == name);
+                Ok(index
+                    .and_then(|index| values.get(index).cloned())
+                    .unwrap_or(Self::Undefined))
+            }
             Self::String(value) if name == "length" => {
                 Ok(Self::Number(value.chars().count() as f64))
             }
@@ -1029,6 +1679,7 @@ fn equal(left: &Value, right: &Value) -> bool {
         (Value::Boolean(left), Value::Boolean(right)) => left == right,
         (Value::Number(left), Value::Number(right)) => left == right,
         (Value::String(left), Value::String(right)) => left == right,
+        (Value::Function(left), Value::Function(right)) => left.ptr_eq(right),
         _ => false,
     }
 }
@@ -1058,7 +1709,13 @@ mod tests {
     struct Noop;
 
     impl Dependency for Noop {
-        fn call(&self, _engine: Engine, operation: &str, _input: Value) -> NativeFuture<Value> {
+        fn call(
+            &self,
+            _engine: Engine,
+            operation: &str,
+            _input: Value,
+            _invocation: DependencyInvocation,
+        ) -> NativeFuture<Value> {
             let operation = operation.to_owned();
             Box::pin(async move {
                 Err(NativeError::new(
@@ -1081,6 +1738,21 @@ mod tests {
             5.0
         );
         assert!(!Value::String(String::new()).truthy());
+        let values = Value::array(vec![Value::String("first".to_owned())]);
+        assert_eq!(
+            values
+                .property("0", false)
+                .expect("array index")
+                .string()
+                .expect("string"),
+            "first"
+        );
+        assert!(
+            values
+                .property("1", false)
+                .expect("missing array index")
+                .is_undefined()
+        );
     }
 
     #[test]
@@ -1091,6 +1763,229 @@ mod tests {
             .register("noop", Arc::new(Noop))
             .expect_err("duplicate must fail");
         assert_eq!(error.name, "DuplicateDependency");
+    }
+
+    #[tokio::test]
+    async fn exposes_declared_dependencies_and_rejects_calls_until_the_provider_is_ready() {
+        let engine = Engine::new();
+        engine
+            .declare_provided(&["peer"])
+            .expect("declare internal Dependency");
+        assert!(matches!(
+            engine.dependency_value("peer").expect("declared value"),
+            Value::Dependency(name) if name == "peer"
+        ));
+
+        let error = engine
+            .call_dependency("peer", "read", Value::Undefined)
+            .await
+            .expect_err("unready call must fail");
+        assert_eq!(error.name, "UnreadyDependency");
+
+        engine
+            .provide(
+                &["peer"],
+                &[],
+                Value::record(IndexMap::from([(
+                    "peer".to_owned(),
+                    Value::record(IndexMap::new()),
+                )])),
+            )
+            .expect("bind internal Dependency");
+        assert!(matches!(
+            engine.dependency_value("peer").expect("provided value"),
+            Value::Record(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn creates_structured_failures_from_portable_provider_invocations() {
+        let engine = Engine::new();
+        let invocation = DependencyInvocation::new("activity:one", 2, 10.0, 20.0, Some(30.0));
+        let error = engine
+            .method(
+                invocation.to_value(),
+                "fail",
+                vec![Value::record(IndexMap::from([
+                    ("type".to_owned(), Value::String("unavailable".to_owned())),
+                    (
+                        "data".to_owned(),
+                        Value::record(IndexMap::from([(
+                            "retryAt".to_owned(),
+                            Value::Number(42.0),
+                        )])),
+                    ),
+                    (
+                        "message".to_owned(),
+                        Value::String("Try again later.".to_owned()),
+                    ),
+                    (
+                        "retry".to_owned(),
+                        Value::record(IndexMap::from([("delay".to_owned(), Value::Number(25.0))])),
+                    ),
+                ]))],
+            )
+            .await
+            .expect_err("provider failure");
+
+        assert_eq!(error.name, "unavailable");
+        assert_eq!(error.message, "Try again later.");
+        assert_eq!(
+            error
+                .fields
+                .get("data")
+                .expect("failure data")
+                .property("retryAt", false)
+                .expect("retryAt")
+                .number()
+                .expect("number"),
+            42.0
+        );
+        assert_eq!(
+            error
+                .fields
+                .get("retryDelay")
+                .expect("retry delay")
+                .number()
+                .expect("number"),
+            25.0
+        );
+    }
+
+    #[tokio::test]
+    async fn projects_heartbeat_and_cancellation_into_portable_provider_invocations() {
+        let engine = Engine::new();
+        let heartbeats = Arc::new(Mutex::new(Vec::new()));
+        let received = heartbeats.clone();
+        let cancellation = DependencyCancellation::default();
+        let invocation = DependencyInvocation::new("activity:one", 2, 10.0, 20.0, Some(30.0))
+            .with_controls(
+                Some(Value::record(IndexMap::from([(
+                    "completed".to_owned(),
+                    Value::Number(1.0),
+                )]))),
+                move |details| {
+                    lock(&received).push(details);
+                    Ok(())
+                },
+                |id| {
+                    Ok(Value::record(IndexMap::from([(
+                        "id".to_owned(),
+                        Value::String(id),
+                    )])))
+                },
+                cancellation.clone(),
+            )
+            .to_value();
+
+        assert_eq!(
+            invocation
+                .property("previousHeartbeat", false)
+                .expect("previous heartbeat")
+                .property("completed", false)
+                .expect("completed")
+                .number()
+                .expect("number"),
+            1.0
+        );
+        engine
+            .method(
+                invocation.clone(),
+                "heartbeat",
+                vec![Value::record(IndexMap::from([(
+                    "details".to_owned(),
+                    Value::record(IndexMap::from([(
+                        "completed".to_owned(),
+                        Value::Number(2.0),
+                    )])),
+                )]))],
+            )
+            .await
+            .expect("heartbeat");
+        assert_eq!(
+            lock(&heartbeats)[0]
+                .property("completed", false)
+                .expect("completed")
+                .number()
+                .expect("number"),
+            2.0
+        );
+        assert_eq!(
+            engine
+                .method(
+                    invocation.clone(),
+                    "defer",
+                    vec![Value::record(IndexMap::from([(
+                        "id".to_owned(),
+                        Value::String("completion:one".to_owned()),
+                    )]))],
+                )
+                .await
+                .expect("deferred invocation")
+                .property("id", false)
+                .expect("completion id")
+                .string()
+                .expect("string"),
+            "completion:one"
+        );
+
+        let cancellation_value = invocation
+            .property("cancellation", false)
+            .expect("cancellation");
+        assert!(
+            !engine
+                .method(cancellation_value.clone(), "requested", Vec::new())
+                .await
+                .expect("requested")
+                .truthy()
+        );
+        let waiting = tokio::spawn({
+            let engine = engine.clone();
+            let cancellation_value = cancellation_value.clone();
+            async move { engine.method(cancellation_value, "wait", Vec::new()).await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished());
+        cancellation.request();
+        waiting
+            .await
+            .expect("cancellation task")
+            .expect("cancellation wait");
+        assert!(
+            engine
+                .method(cancellation_value, "requested", Vec::new())
+                .await
+                .expect("requested")
+                .truthy()
+        );
+    }
+
+    #[tokio::test]
+    async fn composes_inherited_and_shielded_cancellation() {
+        let parent = DependencyCancellation::default();
+        let inherited = parent.child(true);
+        let shielded = parent.child(false);
+        let inherited_wait = tokio::spawn({
+            let inherited = inherited.clone();
+            async move { inherited.wait().await }
+        });
+        let shielded_wait = tokio::spawn({
+            let shielded = shielded.clone();
+            async move { shielded.wait().await }
+        });
+
+        tokio::task::yield_now().await;
+        parent.request_with_reason(Some("parent-request".to_owned()));
+        inherited_wait.await.expect("inherited cancellation");
+        assert!(inherited.requested());
+        assert_eq!(inherited.reason().as_deref(), Some("parent-request"));
+        assert!(!shielded.requested());
+        assert!(!shielded_wait.is_finished());
+
+        shielded.request_with_reason(Some("local-request".to_owned()));
+        shielded_wait.await.expect("shielded cancellation");
+        assert!(shielded.requested());
+        assert_eq!(shielded.reason().as_deref(), Some("local-request"));
     }
 
     #[test]
@@ -1115,6 +2010,129 @@ mod tests {
                 "input",
             )
             .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn preserves_promise_order_settlement_and_uncancelled_race_losers() {
+        let engine = Engine::new();
+        let (first_sender, first_receiver) = tokio::sync::oneshot::channel();
+        let (second_sender, second_receiver) = tokio::sync::oneshot::channel();
+        let all = tokio::spawn({
+            let engine = engine.clone();
+            async move {
+                engine
+                    .concurrent_all(vec![
+                        Box::pin(async move {
+                            first_receiver.await.expect("first result");
+                            Ok(Value::Number(1.0))
+                        }),
+                        Box::pin(async move {
+                            second_receiver.await.expect("second result");
+                            Ok(Value::Number(2.0))
+                        }),
+                    ])
+                    .await
+            }
+        });
+        second_sender.send(()).expect("send second");
+        first_sender.send(()).expect("send first");
+        let ordered = all.await.expect("all task").expect("all");
+        assert_eq!(
+            lock(&ordered.as_array().expect("ordered array"))
+                .iter()
+                .map(|value| value.number().expect("number"))
+                .collect::<Vec<_>>(),
+            vec![1.0, 2.0]
+        );
+
+        let settled = engine
+            .concurrent_all_settled(vec![
+                Box::pin(async { Ok(Value::String("ready".to_owned())) }),
+                Box::pin(async { Err(NativeError::new("Expected", "rejected")) }),
+            ])
+            .await
+            .expect("all settled");
+        let settled = lock(&settled.as_array().expect("settled array")).clone();
+        assert_eq!(
+            settled[0]
+                .property("status", false)
+                .expect("status")
+                .string()
+                .expect("status string"),
+            "fulfilled"
+        );
+        assert_eq!(
+            settled[1]
+                .property("status", false)
+                .expect("status")
+                .string()
+                .expect("status string"),
+            "rejected"
+        );
+
+        let (loser_sender, loser_receiver) = tokio::sync::oneshot::channel();
+        let loser_finished = Arc::new(AtomicBool::new(false));
+        let loser_observation = loser_finished.clone();
+        let raced = engine
+            .concurrent_race(vec![
+                Box::pin(async { Ok(Value::Number(1.0)) }),
+                Box::pin(async move {
+                    loser_receiver.await.expect("loser release");
+                    loser_observation.store(true, Ordering::Release);
+                    Ok(Value::Number(2.0))
+                }),
+            ])
+            .await
+            .expect("race");
+        assert_eq!(raced.number().expect("race number"), 1.0);
+        assert!(!loser_finished.load(Ordering::Acquire));
+        loser_sender.send(()).expect("release loser");
+        engine.shutdown().await.expect("shutdown");
+        assert!(loser_finished.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn advances_mutable_portable_iterator_records() {
+        let engine = Engine::new();
+        let delivered = Arc::new(AtomicBool::new(false));
+        let next = NativeFunction::new({
+            let delivered = delivered.clone();
+            move |_engine, _arguments| {
+                let done = delivered.swap(true, Ordering::AcqRel);
+                Box::pin(async move {
+                    Ok(Value::mutable_record([
+                        ("done".to_owned(), Value::Boolean(done)),
+                        (
+                            "value".to_owned(),
+                            if done {
+                                Value::Undefined
+                            } else {
+                                Value::String("first".to_owned())
+                            },
+                        ),
+                    ]))
+                })
+            }
+        });
+        let iterator = Value::mutable_record([("next".to_owned(), Value::Function(next))]);
+
+        assert_eq!(
+            engine
+                .next(iterator.clone())
+                .await
+                .expect("first iteration")
+                .expect("first value")
+                .string()
+                .expect("string"),
+            "first"
+        );
+        assert!(
+            engine
+                .next(iterator)
+                .await
+                .expect("completed iteration")
+                .is_none()
         );
     }
 

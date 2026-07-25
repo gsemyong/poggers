@@ -61,7 +61,7 @@ export function testSystem(definition: SystemTestDefinition): void {
   const timeout = definition.timeout ?? 240_000;
   describe.sequential(definition.name, () => {
     test("development", { timeout }, () => verifyDevelopment(definition));
-    test("production", { timeout }, () => verifyProduction(definition));
+    test("production", { tags: ["production"], timeout }, () => verifyProduction(definition));
   });
 }
 

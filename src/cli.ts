@@ -6,7 +6,7 @@ import process from "node:process";
 
 import { platformAdapters } from "@/adapters/registry";
 import type { PlatformAdapterImplementation } from "@/contracts/platform";
-import { buildSystem, developSystem } from "@/realization";
+import { buildSystem, developSystem, resolveSystemRealization } from "@/realization";
 
 const valueFlags = new Set(["dir", "name", "outdir", "outfile", "package"]);
 const ignoredStarterEntries = new Set([
@@ -50,10 +50,14 @@ export async function runCli(
       console.log(`built ${artifacts.directory}`);
     }
   } else if (command === "typecheck") {
-    process.exitCode = await run(
+    const code = await run(
       [resolve(directory, "node_modules/.bin/tsc"), "-p", "tsconfig.json"],
       directory,
     );
+    process.exitCode = code;
+    if (code === 0) {
+      resolveSystemRealization(directory, adapters, app ? { app } : {});
+    }
   } else if (command === "test") {
     process.exitCode = await run(
       [resolve(directory, "node_modules/.bin/vitest"), "run", "--passWithNoTests"],
@@ -70,9 +74,10 @@ export async function runCli(
       const code = await run(current, directory);
       if (code !== 0) {
         process.exitCode = code;
-        break;
+        return;
       }
     }
+    resolveSystemRealization(directory, adapters, app ? { app } : {});
   } else {
     console.error("Usage: kit <dev [app]|build [app]|typecheck|test|check|create>");
     process.exitCode = 1;

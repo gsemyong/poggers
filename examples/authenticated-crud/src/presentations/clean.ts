@@ -1,4 +1,9 @@
-import type { ConfiguredWebPresentation, WebPresentation, WebStyle } from "kit/web";
+import {
+  createContainer,
+  type ConfiguredWebPresentation,
+  type WebPresentation,
+  type WebStyle,
+} from "kit/web";
 
 import type { WorkspaceWeb } from "../apps/web";
 
@@ -16,6 +21,8 @@ const parameters = {
   },
   radius: { control: 6, surface: 8 },
 } as const;
+const interfaceContainer = createContainer("interface");
+const tasksContainer = createContainer("tasks");
 
 const createClean = (({ parameters: values }) => {
   const button = (kind: "default" | "primary" | "danger" = "default"): WebStyle => {
@@ -67,7 +74,7 @@ const createClean = (({ parameters: values }) => {
           layout: {
             model: { kind: "flow", direction: "block" },
             minBlockSize: { viewport: { axis: "block", percent: 100, mode: "dynamic" } },
-            container: { name: "interface", axis: "inline" },
+            container: { identity: interfaceContainer, axis: "inline" },
           },
           paint: { fill: values.color.canvas },
           text: { family: ["system", "sans"], color: values.color.ink },
@@ -80,7 +87,7 @@ const createClean = (({ parameters: values }) => {
           paint: { fill: values.color.surface, stroke: { width: 1, color: values.color.line } },
           rules: [
             {
-              when: { container: { name: "interface", maxInlineSize: 560 } },
+              when: { container: { identity: interfaceContainer, maxInlineSize: 560 } },
               use: {
                 layout: {
                   model: { kind: "flow", direction: "block", gap: 12, align: "stretch" },
@@ -103,7 +110,7 @@ const createClean = (({ parameters: values }) => {
           layout: { model: { kind: "flow", direction: "inline", gap: 14, align: "center" } },
           rules: [
             {
-              when: { container: { name: "interface", maxInlineSize: 560 } },
+              when: { container: { identity: interfaceContainer, maxInlineSize: 560 } },
               use: {
                 layout: {
                   model: {
@@ -129,7 +136,7 @@ const createClean = (({ parameters: values }) => {
           layout: { inlineSize: "fill", padding: 24 },
           rules: [
             {
-              when: { container: { name: "interface", maxInlineSize: 560 } },
+              when: { container: { identity: interfaceContainer, maxInlineSize: 560 } },
               use: { layout: { padding: 12 } },
             },
           ],
@@ -192,7 +199,7 @@ const createClean = (({ parameters: values }) => {
             maxInlineSize: 980,
             margin: { inline: "auto" },
             padding: 26,
-            container: { name: "tasks", axis: "inline" },
+            container: { identity: tasksContainer, axis: "inline" },
           },
           paint: {
             fill: values.color.surface,
@@ -201,7 +208,7 @@ const createClean = (({ parameters: values }) => {
           },
           rules: [
             {
-              when: { container: { name: "interface", maxInlineSize: 560 } },
+              when: { container: { identity: interfaceContainer, maxInlineSize: 560 } },
               use: {
                 layout: { model: { kind: "flow", direction: "block", gap: 14 }, padding: 16 },
               },
@@ -220,7 +227,7 @@ const createClean = (({ parameters: values }) => {
           },
           rules: [
             {
-              when: { container: { name: "tasks", maxInlineSize: 620 } },
+              when: { container: { identity: tasksContainer, maxInlineSize: 620 } },
               use: {
                 layout: {
                   model: { kind: "flow", direction: "block", gap: 12, align: "stretch" },
@@ -265,7 +272,7 @@ const createClean = (({ parameters: values }) => {
           },
           rules: [
             {
-              when: { container: { name: "tasks", maxInlineSize: 620 } },
+              when: { container: { identity: tasksContainer, maxInlineSize: 620 } },
               use: {
                 layout: {
                   model: {
@@ -287,7 +294,7 @@ const createClean = (({ parameters: values }) => {
           layout: { model: { kind: "flow", direction: "inline", gap: 7, align: "center" } },
           rules: [
             {
-              when: { container: { name: "tasks", maxInlineSize: 360 } },
+              when: { container: { identity: tasksContainer, maxInlineSize: 360 } },
               use: {
                 layout: {
                   model: { kind: "flow", direction: "block", gap: 7, align: "stretch" },

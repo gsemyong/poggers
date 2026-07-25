@@ -5,7 +5,8 @@ use std::{
 };
 
 use kit_server_runtime::{
-    Dependency, DependencyContext, Engine, NativeError, NativeFuture, NativeResult, Value,
+    Dependency, DependencyContext, DependencyInvocation, Engine, NativeError, NativeFuture,
+    NativeResult, Value,
 };
 
 pub struct Recorder {
@@ -29,7 +30,13 @@ pub async fn create(context: DependencyContext) -> NativeResult<Recorder> {
 }
 
 impl Dependency for Recorder {
-    fn call(&self, _engine: Engine, operation: &str, input: Value) -> NativeFuture<Value> {
+    fn call(
+        &self,
+        _engine: Engine,
+        operation: &str,
+        input: Value,
+        _invocation: DependencyInvocation,
+    ) -> NativeFuture<Value> {
         let output = self.output.clone();
         let input_value = self.input.clone();
         let operation = operation.to_owned();

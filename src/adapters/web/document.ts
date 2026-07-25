@@ -166,6 +166,24 @@ export type WebDocumentComponentContract = Readonly<{
   propCallbacks: readonly string[];
 }>;
 
+type WebInitialComponentPresentationIR = Readonly<{
+  elements: Readonly<
+    Record<
+      string,
+      Readonly<{
+        className: string;
+        variables: Readonly<Record<string, string>>;
+        image?: string;
+      }>
+    >
+  >;
+}>;
+
+export type WebInitialPresentationIR = Readonly<{
+  components: Readonly<Record<string, WebInitialComponentPresentationIR>>;
+  styles: readonly string[];
+}>;
+
 type PreparedElement = Readonly<{
   kind: "element";
   tag: string;
@@ -407,6 +425,131 @@ export async function prepareWebDocument(input: {
   if (failure !== undefined) throw failure;
   if (!document) throw new Error("Initial web document preparation produced no document.");
   return document;
+}
+
+/**
+ * Evaluates request-invariant initial Presentation meaning for the native request renderer.
+ * Request-dependent Presentation is rejected instead of producing divergent development and
+ * production documents.
+ */
+export async function prepareInitialWebPresentation(input: {
+  system: object;
+  interface: string;
+  program: string;
+  logicalProgram?: string;
+  presentation: RuntimeConfiguredPresentation;
+  manifest: ProgramManifest;
+  components: Readonly<Record<string, WebDocumentComponentContract>>;
+  targets: readonly string[];
+  presentationDependencies?: Readonly<Record<string, readonly unknown[]>>;
+}): Promise<WebInitialPresentationIR> {
+  const system = input.system as RuntimeSystem;
+  const logicalProgram = input.logicalProgram ?? input.program;
+  const contributions = collectContributions(system, logicalProgram, input.manifest);
+  const instances: UIContributionInstance[] = [];
+  const apis: Record<string, Readonly<Record<string, unknown>>> = Object.create(null);
+  const result: Record<string, WebInitialComponentPresentationIR> = Object.create(null);
+  const styles = new Set<string>();
+  let failure: unknown;
+
+  try {
+    for (const contribution of [...contributions].sort(
+      (left, right) => depth(right.path) - depth(left.path) || left.path.localeCompare(right.path),
+    )) {
+      const instance = createUIContributionInstance(contribution.definition, {
+        name: `presentation:${contribution.path}`,
+        dependencies: unavailableDependencies(contribution.path),
+        features: contribution.children,
+      });
+      Object.assign(contribution, { instance });
+      instances.push(instance);
+      apis[contribution.path] = instance.api;
+      const parent = parentPath(contribution.path);
+      if (parent !== undefined) {
+        const owner = contributions.find(({ path }) => path === parent);
+        if (owner) owner.children[leafName(contribution.path)] = instance.api;
+      }
+    }
+
+    const prepared = createPreparedPresentation(
+      system,
+      input.interface,
+      logicalProgram,
+      input.presentation,
+      apis,
+    );
+    try {
+      for (const name of [...new Set(input.targets)].sort()) {
+        const contract = input.components[name];
+        const definition = resolveComponent(system, logicalProgram, name);
+        const presentation = prepared.components.get(name);
+        if (!contract || !definition || !presentation) continue;
+        const owner = componentOwner(name) ?? "";
+        const props = unavailablePresentationProps(name);
+        const feature = apis[owner] ?? Object.freeze({});
+        const stateSource =
+          typeof definition.state === "function"
+            ? definition.state({
+                props,
+                feature,
+                features: childFeatureApis(owner, apis),
+              })
+            : definition.state;
+        const state = Object.freeze({ ...stateSource });
+        const declarations = evaluatePreparedPresentation(
+          presentation.render,
+          presentation.parent,
+          {
+            props,
+            state: presentationState(feature, state),
+            events: createActionEventLedger(Object.keys(definition.actions ?? {})).events,
+            elements: Object.keys(contract.elements),
+          },
+        );
+        const artifacts = planWebPresentationArtifacts(declarations, {
+          dynamic: Boolean(input.presentationDependencies?.[name]?.length),
+        });
+        const elements = Object.fromEntries(
+          Object.entries(artifacts.elements).flatMap(([element, artifact]) => {
+            if (!artifact) return [];
+            styles.add(artifact.css);
+            return [
+              [
+                element,
+                Object.freeze({
+                  className: artifact.className,
+                  variables: artifact.variables,
+                  ...(artifact.image ? { image: artifact.image.source } : {}),
+                }),
+              ] as const,
+            ];
+          }),
+        );
+        result[name] = Object.freeze({ elements: Object.freeze(elements) });
+      }
+    } finally {
+      prepared.dispose();
+    }
+  } catch (error) {
+    failure = error;
+  }
+
+  const results = await Promise.allSettled(
+    instances.reverse().map((instance) => instance.dispose()),
+  );
+  const disposalFailures = results.flatMap((result) =>
+    result.status === "rejected" ? [result.reason] : [],
+  );
+  if (failure !== undefined || disposalFailures.length) {
+    throw new AggregateError(
+      [...(failure === undefined ? [] : [failure]), ...disposalFailures],
+      "Unable to prepare initial web Presentation.",
+    );
+  }
+  return Object.freeze({
+    components: Object.freeze(result),
+    styles: Object.freeze([...styles].sort()),
+  });
 }
 
 type PendingWebNode =
@@ -2182,6 +2325,23 @@ function unavailableDependencies(feature: string): Readonly<Record<string, unkno
         `Dependency ${JSON.stringify(name)} was read while preparing static Feature ${JSON.stringify(feature)}.`,
       );
     },
+  });
+}
+
+function unavailablePresentationProps(component: string): Readonly<Record<string, unknown>> {
+  const unavailable = () => {
+    throw new TypeError(
+      `Request-dependent props were read while preparing initial Presentation for Component ${JSON.stringify(component)}.`,
+    );
+  };
+  return new Proxy(Object.create(null) as Record<string, unknown>, {
+    get(_target, name) {
+      if (typeof name === "symbol") return undefined;
+      return unavailable();
+    },
+    getOwnPropertyDescriptor: unavailable,
+    has: unavailable,
+    ownKeys: unavailable,
   });
 }
 

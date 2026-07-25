@@ -130,12 +130,15 @@ type Fulfillment = WorkflowModel<{
 }>;
 
 const fulfillment = createWorkflow<Fulfillment>({
-  name: "fulfillment",
-  state: () => ({ phase: "pending" }),
-  async run({ dependencies, state, sleep }, input) {
+  state: ({ input: _input }) => ({ phase: "pending" }),
+  activities: {
+    warehouse: { reserve: {} },
+    shipping: { ship: {} },
+  },
+  async execute({ dependencies, state, sleep, input }) {
     const reservation = await dependencies.warehouse.reserve(input);
     state.phase = "reserved";
-    await sleep({ milliseconds: 300_000 });
+    await sleep({ duration: 300_000 });
     const shipment = await dependencies.shipping.ship(reservation);
     state.phase = "shipped";
     return shipment;

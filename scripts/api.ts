@@ -44,15 +44,16 @@ const intent = readArgument("intent");
 const packageManifest = JSON.parse(
   await readFile(resolve(root, "package.json"), "utf8"),
 ) as PackageManifest;
-const current = await createApiManifest(packageManifest, await readExistingIntent());
+const recordedIntent = write ? (intent ?? "") : await readExistingIntent();
+const current = await createApiManifest(packageManifest, recordedIntent);
 
 if (write) {
-  if (!intent) {
+  if (!recordedIntent) {
     throw new Error("API updates require --intent <change-file>.");
   }
-  await validateIntent(intent);
-  await writeFile(manifestPath, `${JSON.stringify({ ...current, intent }, undefined, 2)}\n`);
-  console.log(`recorded public API with ${intent}`);
+  await validateIntent(recordedIntent);
+  await writeFile(manifestPath, `${JSON.stringify(current, undefined, 2)}\n`);
+  console.log(`recorded public API with ${recordedIntent}`);
 } else {
   const recorded = JSON.parse(await readFile(manifestPath, "utf8")) as ApiManifest;
   await validateIntent(recorded.intent);

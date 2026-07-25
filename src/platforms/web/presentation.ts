@@ -7,6 +7,7 @@ import type { WebSpring, WebTrack, WebTween } from "@/platforms/web/presentation
 import type { IntrinsicElements } from "@/platforms/web/ui";
 
 type Empty = Record<never, never>;
+declare const webContainerBrand: unique symbol;
 
 /** Live web observations shared by every Presentation under one mounted UI root. */
 export type WebPresentationEnvironment = Readonly<{
@@ -121,6 +122,18 @@ export type WebMeasure =
   | "max-content"
   | "fit-content";
 
+/** A stable typed identity shared by one container declaration and its queries. */
+export type WebContainer<Name extends string = string> = Name &
+  Readonly<{ readonly [webContainerBrand]: true }>;
+
+/** Creates one validated container identity without exposing native query names. */
+export function createContainer<const Name extends string>(name: Name): WebContainer<Name> {
+  if (!/^-?[_a-zA-Z][_a-zA-Z0-9-]*$/.test(name)) {
+    throw new TypeError(`Invalid web container identity ${JSON.stringify(name)}.`);
+  }
+  return name as WebContainer<Name>;
+}
+
 export type WebLogicalBox<Value> =
   | Value
   | Readonly<{ block?: Value; inline?: Value }>
@@ -142,6 +155,12 @@ export type WebGridTrack =
       repeat: Readonly<{ count: number | "fit" | "fill"; track: WebGridTrack }>;
     }>;
 
+/** Places one grid item along a logical axis without exposing CSS line syntax. */
+export type WebGridPlacement =
+  | Readonly<{ start: number; end?: never; span?: number }>
+  | Readonly<{ start?: number; end: number; span?: never }>
+  | Readonly<{ start?: never; end?: never; span: number }>;
+
 export type WebLayoutModel =
   | Readonly<{
       kind: "flow";
@@ -154,8 +173,8 @@ export type WebLayoutModel =
     }>
   | Readonly<{
       kind: "grid";
-      columns?: readonly WebGridTrack[];
-      rows?: readonly WebGridTrack[];
+      columns?: "subgrid" | readonly WebGridTrack[];
+      rows?: "subgrid" | readonly WebGridTrack[];
       gap?: WebLength;
       columnGap?: WebLength;
       rowGap?: WebLength;
@@ -195,6 +214,18 @@ export type WebLayout = Readonly<{
     shrink?: number;
     basis?: WebMeasure;
     overlay?: boolean;
+    grid?: Readonly<{
+      inline?: WebGridPlacement;
+      block?: WebGridPlacement;
+    }>;
+    scroll?: Readonly<{
+      align?: Readonly<{
+        block?: "start" | "center" | "end";
+        inline?: "start" | "center" | "end";
+      }>;
+      stop?: "normal" | "always";
+      margin?: WebLogicalBox<WebLength>;
+    }>;
   }>;
   overflow?: Readonly<{
     inline?: "visible" | "clip" | "scroll" | "auto";
@@ -202,9 +233,23 @@ export type WebLayout = Readonly<{
     overscroll?: "auto" | "contain" | "none";
     gutter?: "auto" | "stable" | "stable-both";
   }>;
+  scroll?: Readonly<{
+    snap?: Readonly<{
+      axis: "inline" | "block" | "both";
+      strictness: "mandatory" | "proximity";
+    }>;
+    padding?: WebLogicalBox<WebLength>;
+    indicator?:
+      | Readonly<{ visibility: "hidden" }>
+      | Readonly<{
+          visibility?: "auto";
+          size?: "auto" | "thin";
+          colors?: Readonly<{ thumb: WebColor; track: WebColor }>;
+        }>;
+  }>;
   containment?: "none" | "layout" | "paint" | "strict";
   visibility?: "visible" | "hidden" | "deferred";
-  container?: Readonly<{ name?: string; axis: "inline" | "size" }>;
+  container?: Readonly<{ identity?: WebContainer; axis: "inline" | "size" }>;
 }>;
 
 export type WebGradientStop = Readonly<{ at: number; color: WebColor }>;
@@ -307,10 +352,15 @@ export type WebText = Readonly<{
   align?: "start" | "center" | "end" | "justify";
   wrap?: "wrap" | "nowrap" | "balance" | "pretty";
   overflow?: "clip" | "ellipsis";
+  maxLines?: number;
   wordBreak?: "normal" | "break-all" | "keep-all";
   hyphens?: "none" | "manual" | "auto";
   decoration?: "none" | "underline" | "line-through" | "overline";
   case?: "none" | "uppercase" | "lowercase" | "capitalize";
+  writing?: Readonly<{
+    blockFlow: "top-to-bottom" | "right-to-left" | "left-to-right";
+    glyphOrientation?: "natural" | "upright" | "sideways";
+  }>;
 }>;
 
 export type WebMedia = Readonly<{
@@ -333,14 +383,17 @@ export type WebAffordance = Readonly<{
   accent?: WebColor;
 }>;
 
-export type WebCondition = Readonly<{
+export type WebConditionTest = Readonly<{
   pseudo?: "hover" | "active" | "focus-visible" | "disabled";
   container?: Readonly<{
-    name?: string;
+    identity?: WebContainer;
     minInlineSize?: WebQueryLength;
     maxInlineSize?: WebQueryLength;
     minBlockSize?: WebQueryLength;
     maxBlockSize?: WebQueryLength;
+    minAspectRatio?: number;
+    maxAspectRatio?: number;
+    orientation?: "portrait" | "landscape";
   }>;
   preference?: Readonly<{
     colorScheme?: "light" | "dark";
@@ -353,6 +406,12 @@ export type WebCondition = Readonly<{
     hover?: boolean;
   }>;
 }>;
+
+export type WebCondition =
+  | WebConditionTest
+  | Readonly<{ all: readonly [WebCondition, WebCondition, ...WebCondition[]] }>
+  | Readonly<{ any: readonly [WebCondition, WebCondition, ...WebCondition[]] }>
+  | Readonly<{ not: WebCondition }>;
 
 export type WebStyleFragment = Readonly<{
   layout?: WebLayout;

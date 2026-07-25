@@ -1,7 +1,19 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, copyFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import {
+  access,
+  chmod,
+  copyFile,
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  stat,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
+import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 
 import { generateRustProgram } from "@/adapters/server/production/program";
@@ -15,6 +27,13 @@ type RustVerificationSource = Readonly<{
   program: string;
 }>;
 
+type RustVerificationProfile = "debug" | "release";
+
+const VERIFICATION_CACHE_VERSION = 1;
+const VERIFICATION_CACHE_ENTRIES = 8;
+const VERIFICATION_CACHE_HARD_LIMIT = 32;
+const VERIFICATION_CACHE_GRACE_MS = 5 * 60 * 1000;
+
 /**
  * Builds a test harness around the exact Rust Program lowering used by
  * production. The harness supplies scripted external Dependencies and records
@@ -23,41 +42,77 @@ type RustVerificationSource = Readonly<{
 export async function buildRustProgram(
   contribution: ProgramContributionIR,
   output: string,
+  options: Readonly<{ profile?: RustVerificationProfile }> = {},
 ): Promise<string> {
   const generated = generateVerificationSource(contribution);
-  const directory = await mkdtemp(resolve(tmpdir(), "kit-rust-"));
-  const target = resolve(tmpdir(), "kit-rust-target-v2");
-  try {
-    await mkdir(resolve(directory, "src"), { recursive: true });
-    await writeFile(resolve(directory, "Cargo.toml"), generated.manifest);
-    await writeFile(resolve(directory, "src/main.rs"), generated.main);
-    await writeFile(resolve(directory, "src/program.rs"), generated.program);
-    const format = await command("cargo", ["fmt", "--all"], directory);
-    if (format.code !== 0) throw new Error(`Generated Rust formatting failed:\n${format.stderr}`);
-    const lint = await command(
-      "cargo",
-      ["clippy", "--release", "--quiet", "--", "-D", "warnings"],
-      directory,
-      undefined,
-      { ...process.env, CARGO_TARGET_DIR: target },
-    );
-    if (lint.code !== 0) {
-      throw new Error(`Generated Rust failed linting:\n${lint.stderr || lint.stdout}`);
-    }
-    const built = await command("cargo", ["build", "--release", "--quiet"], directory, undefined, {
-      ...process.env,
-      CARGO_TARGET_DIR: target,
-    });
-    if (built.code !== 0) {
-      throw new Error(`Generated Rust failed to build:\n${built.stderr || built.stdout}`);
-    }
-    await mkdir(dirname(output), { recursive: true });
-    await copyFile(resolve(target, "release", generated.name), output);
-    await chmod(output, 0o755);
+  const profile = options.profile ?? "debug";
+  const cache = resolve(
+    process.env.KIT_PRODUCTION_CACHE ?? resolve(homedir(), ".cache/kit/production"),
+  );
+  const identity = createHash("sha256")
+    .update(
+      JSON.stringify({
+        version: VERIFICATION_CACHE_VERSION,
+        target: `${process.platform}-${process.arch}`,
+        toolchain: await rustToolchain(),
+        generated: { ...generated, program: canonicalRustSource(generated.program) },
+      }),
+    )
+    .digest("hex");
+  const directory = resolve(cache, "conformance/workspaces", identity);
+  const artifact = resolve(cache, "conformance/artifacts", identity, profile, generated.name);
+  const target = resolve(cache, "target");
+  await Promise.all([
+    writeIfChanged(resolve(directory, "Cargo.toml"), generated.manifest),
+    writeIfChanged(resolve(directory, "src/main.rs"), generated.main),
+    writeIfChanged(resolve(directory, "src/program.rs"), generated.program),
+  ]);
+  await touch(directory);
+  if (await exists(artifact)) {
+    await touch(artifact);
+    await copyExecutable(artifact, output);
     return output;
-  } finally {
-    await rm(directory, { force: true, recursive: true });
   }
+
+  const environment = { ...process.env, CARGO_TARGET_DIR: target };
+  const format = await command("cargo", ["fmt", "--all", "--", "--check"], directory);
+  if (format.code !== 0) {
+    const formatted = await command("cargo", ["fmt", "--all"], directory);
+    if (formatted.code !== 0) {
+      throw new Error(`Generated Rust formatting failed:\n${formatted.stderr}`);
+    }
+  }
+  const release = profile === "release" ? ["--release"] : [];
+  const lint = await command(
+    "cargo",
+    ["clippy", ...release, "--quiet", "--", "-D", "warnings"],
+    directory,
+    undefined,
+    environment,
+  );
+  if (lint.code !== 0) {
+    throw new Error(`Generated Rust failed linting:\n${lint.stderr || lint.stdout}`);
+  }
+  const built = await command(
+    "cargo",
+    ["build", ...release, "--quiet"],
+    directory,
+    undefined,
+    environment,
+  );
+  if (built.code !== 0) {
+    throw new Error(`Generated Rust failed to build:\n${built.stderr || built.stdout}`);
+  }
+  await mkdir(dirname(artifact), { recursive: true });
+  const temporary = `${artifact}.${process.pid}.tmp`;
+  await copyFile(resolve(target, profile, generated.name), temporary);
+  await rename(temporary, artifact).catch(async (error: unknown) => {
+    await rm(temporary, { force: true });
+    if (!(await exists(artifact))) throw error;
+  });
+  await copyExecutable(artifact, output);
+  await retainVerificationCache(cache, identity);
+  return output;
 }
 
 export async function runRustProgram(executable: string, scenario: unknown): Promise<unknown> {
@@ -134,7 +189,10 @@ function generateVerificationSource(contribution: ProgramContributionIR): RustVe
   };
   const linked = linkProgram(program);
   const source = generateRustProgram(linked);
-  const name = `kit_${createHash("sha256").update(source).digest("hex").slice(0, 16)}`;
+  const name = `kit_${createHash("sha256")
+    .update(canonicalRustSource(source))
+    .digest("hex")
+    .slice(0, 16)}`;
   const runtime = resolve(import.meta.dirname, "../runtime").replaceAll("\\", "/");
   return {
     name,
@@ -172,7 +230,7 @@ function verificationMain(dependencies: readonly string[]): string {
 };
 
 use kit_server_runtime::{
-    Dependency, Engine, NativeError, NativeFuture, NativeResult, Value,
+    Dependency, DependencyInvocation, Engine, NativeError, NativeFuture, NativeResult, Value,
 };
 use serde_json::{json, Value as JsonValue};
 
@@ -189,7 +247,13 @@ struct FixtureDependency {
 }
 
 impl Dependency for FixtureDependency {
-    fn call(&self, _engine: Engine, operation: &str, input: Value) -> NativeFuture<Value> {
+    fn call(
+        &self,
+        _engine: Engine,
+        operation: &str,
+        input: Value,
+        _invocation: DependencyInvocation,
+    ) -> NativeFuture<Value> {
         let name = self.name;
         let operation = operation.to_owned();
         let state = self.state.clone();
@@ -302,6 +366,89 @@ function rustString(value: string): string {
   return JSON.stringify(value)
     .replaceAll("\\u2028", "\\u{2028}")
     .replaceAll("\\u2029", "\\u{2029}");
+}
+
+function canonicalRustSource(source: string): string {
+  return source.replaceAll(/^\s*\/\/ TypeScript: .+:\d+:\d+\s*$/gm, "");
+}
+
+let rustToolchainResult: Promise<string> | undefined;
+
+function rustToolchain(): Promise<string> {
+  rustToolchainResult ??= command("rustc", ["-vV"], process.cwd()).then((value) => {
+    if (value.code !== 0) throw new Error(`Cannot inspect Rust toolchain:\n${value.stderr}`);
+    return value.stdout.trim();
+  });
+  return rustToolchainResult;
+}
+
+async function writeIfChanged(path: string, source: string): Promise<void> {
+  if ((await readFile(path, "utf8").catch(() => undefined)) === source) return;
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, source);
+}
+
+async function copyExecutable(source: string, output: string): Promise<void> {
+  await mkdir(dirname(output), { recursive: true });
+  await copyFile(source, output);
+  await chmod(output, 0o755);
+}
+
+async function touch(path: string): Promise<void> {
+  const now = new Date();
+  await utimes(path, now, now).catch(() => undefined);
+}
+
+async function exists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function retainVerificationCache(cache: string, preserve: string): Promise<void> {
+  const workspaceRoot = resolve(cache, "conformance/workspaces");
+  const artifactRoot = resolve(cache, "conformance/artifacts");
+  const entries = await readdir(workspaceRoot, { withFileTypes: true }).catch(() => []);
+  const candidates = await Promise.all(
+    entries
+      .filter((entry) => entry.isDirectory() && entry.name !== preserve)
+      .map(async (entry) => ({
+        name: entry.name,
+        used: (await stat(resolve(workspaceRoot, entry.name))).mtimeMs,
+      })),
+  );
+  const excess = Math.max(
+    0,
+    entries.filter((entry) => entry.isDirectory()).length - VERIFICATION_CACHE_ENTRIES,
+  );
+  const expired = candidates
+    .filter(({ used }) => Date.now() - used >= VERIFICATION_CACHE_GRACE_MS)
+    .sort((left, right) => left.used - right.used);
+  const selected = expired.slice(0, excess);
+  const selectedNames = new Set(selected.map(({ name }) => name));
+  selected.push(
+    ...candidates
+      .filter(({ name }) => !selectedNames.has(name))
+      .sort((left, right) => left.used - right.used)
+      .slice(
+        0,
+        Math.max(
+          0,
+          entries.filter((entry) => entry.isDirectory()).length -
+            selected.length -
+            VERIFICATION_CACHE_HARD_LIMIT,
+        ),
+      ),
+  );
+  for (const { name } of selected) {
+    await Promise.all([
+      rm(resolve(workspaceRoot, name), { force: true, recursive: true }),
+      rm(resolve(artifactRoot, name), { force: true, recursive: true }),
+    ]);
+  }
 }
 
 function command(

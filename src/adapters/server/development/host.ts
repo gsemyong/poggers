@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
@@ -25,15 +26,19 @@ import { getMigrations } from "better-auth/db/migration";
 import { createTursoDataStore, type TursoDatabase } from "@/adapters/data/turso";
 import { createDevelopmentWorkflowRuntime } from "@/adapters/server/development/workflow";
 import type { DependencyContractIR } from "@/compiler/ir";
+import { cloneData } from "@/core/data";
 import type { DataStore } from "@/features/data";
 import type { Clock, EventStore, Identifiers, StoredEvent } from "@/features/entity";
 import type { AuthenticationBackend } from "@/features/identity";
 import type { WorkflowRuntime } from "@/features/workflow";
 import type {
+  Alarm,
+  ExecutionContext,
   HttpField,
   HttpRequest,
   HttpResponse,
   HttpServer,
+  Synchronization,
   Timer,
 } from "@/platforms/server/platform";
 import { conformExternalDependencies } from "@/runtime/process";
@@ -64,10 +69,13 @@ type ReloadableHttpServer = HttpServer &
   }>;
 
 export type NodeHost<Event> = Readonly<{
+  alarm: Alarm & Disposable;
   authentication: AuthenticationBackend;
   dataStore: DataStore & AsyncDisposable;
   events: HostedEventStore<Event>;
+  executionContext: ExecutionContext;
   identifiers: Identifiers;
+  synchronization: Synchronization;
   clock: Clock;
   timer: Timer;
   workflowRuntime: WorkflowRuntime;
@@ -101,12 +109,15 @@ export async function createNodeHost<Event = unknown>(
   input: NodeHostOptions & Readonly<{ dependencies: readonly DependencyContractIR[] }>,
 ): Promise<Readonly<Record<string, unknown>>> {
   const available: readonly NodeHostDependency[] = [
+    "alarm",
     "authentication",
     "clock",
     "dataStore",
     "events",
+    "executionContext",
     "http",
     "identifiers",
+    "synchronization",
     "timer",
     "workflowRuntime",
   ];
@@ -142,16 +153,20 @@ export async function createNodeHost<Event = unknown>(
     database = new DatabaseSync(path);
   }
   const result: {
+    alarm?: Alarm & Disposable;
     authentication?: AuthenticationBackend;
     dataStore?: DataStore & AsyncDisposable;
     events?: HostedEventStore<Event>;
+    executionContext?: ExecutionContext;
     identifiers?: Identifiers;
+    synchronization?: Synchronization;
     clock?: Clock;
     timer?: Timer;
     workflowRuntime?: WorkflowRuntime;
     http?: HttpServer & AsyncDisposable & Readonly<{ locations: readonly string[] }>;
   } = {};
   try {
+    if (requested.has("alarm")) result.alarm = createNodeAlarm();
     if (requested.has("authentication")) {
       const auth = betterAuth({
         appName: input.appName ?? "Kit",
@@ -210,7 +225,13 @@ export async function createNodeHost<Event = unknown>(
           ? await createJetStreamEventStore<Event>(eventStore)
           : createSqliteEventStore<Event>(database!, closeDatabase);
     }
+    if (requested.has("executionContext")) {
+      result.executionContext = createNodeExecutionContext();
+    }
     if (requested.has("identifiers")) result.identifiers = { create: () => randomUUID() };
+    if (requested.has("synchronization")) {
+      result.synchronization = createNodeSynchronization();
+    }
     if (requested.has("clock")) result.clock = { now: () => Date.now() };
     if (requested.has("timer")) {
       result.timer = {
@@ -235,12 +256,92 @@ export async function createNodeHost<Event = unknown>(
     }
     return conformExternalDependencies(input.dependencies, result);
   } catch (error) {
+    result.alarm?.[Symbol.dispose]();
     await result.http?.[Symbol.asyncDispose]();
     await result.dataStore?.[Symbol.asyncDispose]();
     await disposeHostedEventStore(result.events);
     closeDatabase();
     throw error;
   }
+}
+
+function createNodeExecutionContext(): ExecutionContext {
+  const storage = new AsyncLocalStorage<readonly object[]>();
+  return Object.freeze({
+    current() {
+      return storage.getStore() ?? [];
+    },
+    async run({ scope, task }) {
+      const current = storage.getStore() ?? [];
+      return await storage.run([...current, scope], task);
+    },
+  });
+}
+
+function createNodeSynchronization(): Synchronization {
+  const tails = new Map<string, Promise<void>>();
+  return Object.freeze({
+    async exclusive({ key, task }) {
+      const previous = tails.get(key) ?? Promise.resolve();
+      let release = () => {};
+      const current = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const tail = previous.then(() => current);
+      tails.set(key, tail);
+      await previous;
+      try {
+        return await task();
+      } finally {
+        release();
+        if (tails.get(key) === tail) tails.delete(key);
+      }
+    },
+  });
+}
+
+function createNodeAlarm(): Alarm & Disposable {
+  const scheduled = new Map<string, ReturnType<typeof setTimeout>>();
+  const handlers = new Map<string, () => Promise<void>>();
+  let disposed = false;
+  return {
+    register({ id, run }) {
+      if (disposed) throw new Error("The Alarm Dependency is disposed.");
+      handlers.set(id, run);
+    },
+    schedule({ id, at }) {
+      if (disposed) throw new Error("The Alarm Dependency is disposed.");
+      const run = handlers.get(id);
+      if (run === undefined) throw new Error(`Alarm ${JSON.stringify(id)} is not registered.`);
+      const previous = scheduled.get(id);
+      if (previous !== undefined) clearTimeout(previous);
+      const timeout = setTimeout(
+        () => {
+          scheduled.delete(id);
+          void run().catch((error: unknown) => {
+            queueMicrotask(() => {
+              throw error;
+            });
+          });
+        },
+        Math.max(0, at - Date.now()),
+      );
+      scheduled.set(id, timeout);
+    },
+    cancel({ id }) {
+      const timeout = scheduled.get(id);
+      if (timeout === undefined) return;
+      clearTimeout(timeout);
+      scheduled.delete(id);
+    },
+    [Symbol.dispose]() {
+      if (disposed) return;
+      disposed = true;
+      for (const timeout of scheduled.values()) clearTimeout(timeout);
+      scheduled.clear();
+      handlers.clear();
+    },
+  };
 }
 
 function numberEnvironment(name: string): number | undefined {
@@ -326,8 +427,12 @@ export function createSqliteEventStore<Event>(
           return undefined;
         }
         const appended = events.map((event, index) => {
-          const stored = { stream, revision: expectedRevision + index + 1, event };
-          insert.run(stream, stored.revision, JSON.stringify(event));
+          const stored = {
+            stream,
+            revision: expectedRevision + index + 1,
+            event: cloneData(event, "EventStore event"),
+          };
+          insert.run(stream, stored.revision, JSON.stringify(stored.event));
           return stored;
         });
         database.exec("COMMIT");
@@ -398,10 +503,13 @@ export async function createJetStreamEventStore<Event>(
       const current = await lastJetStreamBatch<Event>(manager, streamName, subject);
       if (batchRevision(current?.batch) !== expectedRevision) return undefined;
       if (events.length === 0) return [];
+      const storedEvents = events.map((event) => cloneData(event, "EventStore event"));
       try {
         await client.publish(
           subject,
-          new TextEncoder().encode(JSON.stringify({ stream, expectedRevision, events })),
+          new TextEncoder().encode(
+            JSON.stringify({ stream, expectedRevision, events: storedEvents }),
+          ),
           { expect: { lastSubjectSequence: current?.sequence ?? 0 } },
         );
       } catch (error) {
@@ -414,7 +522,7 @@ export async function createJetStreamEventStore<Event>(
         }
         throw error;
       }
-      return storedBatch(stream, expectedRevision, events);
+      return storedBatch(stream, expectedRevision, storedEvents);
     },
     subscribe({ stream, after = 0 }) {
       assertLive();

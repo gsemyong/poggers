@@ -6,8 +6,10 @@ import type {
   WebLayoutContinuity,
   WebColor,
   WebCondition,
+  WebConditionTest,
   WebFill,
   WebGradientStop,
+  WebGridPlacement,
   WebGridTrack,
   WebLayout,
   WebLength,
@@ -251,8 +253,8 @@ function layout(result: CSSDeclarations, value: WebLayout | undefined): void {
     if (model.wrap !== undefined) result["flex-wrap"] = model.wrap ? "wrap" : "nowrap";
   } else if (model?.kind === "grid") {
     result.display = "grid";
-    if (model.columns) result["grid-template-columns"] = model.columns.map(gridTrack).join(" ");
-    if (model.rows) result["grid-template-rows"] = model.rows.map(gridTrack).join(" ");
+    if (model.columns) result["grid-template-columns"] = gridTracks(model.columns);
+    if (model.rows) result["grid-template-rows"] = gridTracks(model.rows);
     assign(result, "gap", length(model.gap));
     assign(result, "column-gap", length(model.columnGap));
     assign(result, "row-gap", length(model.rowGap));
@@ -299,6 +301,18 @@ function layout(result: CSSDeclarations, value: WebLayout | undefined): void {
     if (value.item.shrink !== undefined) result["flex-shrink"] = number(value.item.shrink);
     assign(result, "flex-basis", measure(value.item.basis));
     if (value.item.overlay) result["grid-area"] = "1/1";
+    if (value.item.grid) {
+      assign(result, "grid-column", gridPlacement(value.item.grid.inline));
+      assign(result, "grid-row", gridPlacement(value.item.grid.block));
+    }
+    if (value.item.scroll) {
+      const alignment = value.item.scroll.align;
+      if (alignment) {
+        result["scroll-snap-align"] = `${alignment.block ?? "none"} ${alignment.inline ?? "none"}`;
+      }
+      if (value.item.scroll.stop) result["scroll-snap-stop"] = value.item.scroll.stop;
+      logicalBox(result, "scroll-margin", value.item.scroll.margin, length);
+    }
   }
   if (value.overflow) {
     if (value.overflow.inline) result["overflow-inline"] = value.overflow.inline;
@@ -309,13 +323,31 @@ function layout(result: CSSDeclarations, value: WebLayout | undefined): void {
         value.overflow.gutter === "stable-both" ? "stable both-edges" : value.overflow.gutter;
     }
   }
+  if (value.scroll) {
+    if (value.scroll.snap) {
+      result["scroll-snap-type"] = `${value.scroll.snap.axis} ${value.scroll.snap.strictness}`;
+    }
+    logicalBox(result, "scroll-padding", value.scroll.padding, length);
+    const indicator = value.scroll.indicator;
+    if (indicator?.visibility === "hidden") {
+      result["scrollbar-width"] = "none";
+    } else if (indicator) {
+      if (indicator.size) result["scrollbar-width"] = indicator.size;
+      if (indicator.colors) {
+        result["scrollbar-color"] =
+          `${color(indicator.colors.thumb)} ${color(indicator.colors.track)}`;
+      }
+    }
+  }
   if (value.containment) result.contain = value.containment;
   if (value.visibility === "visible") result.visibility = "visible";
   if (value.visibility === "hidden") result.visibility = "hidden";
   if (value.visibility === "deferred") result["content-visibility"] = "auto";
   if (value.container) {
     result["container-type"] = value.container.axis === "inline" ? "inline-size" : "size";
-    if (value.container.name) result["container-name"] = identifier(value.container.name);
+    if (value.container.identity) {
+      result["container-name"] = identifier(value.container.identity);
+    }
   }
 }
 
@@ -396,10 +428,33 @@ function text(result: CSSDeclarations, value: WebText | undefined): void {
     else result["text-wrap"] = value.wrap === "wrap" ? "wrap" : value.wrap;
   }
   if (value.overflow) result["text-overflow"] = value.overflow;
+  if (value.maxLines !== undefined) {
+    if (result.display !== undefined) {
+      throw new TypeError("Text maxLines cannot be combined with an explicit layout model.");
+    }
+    result.display = "-webkit-box";
+    result["-webkit-box-orient"] = "vertical";
+    result["-webkit-line-clamp"] = positiveInteger(value.maxLines);
+    result.overflow = "hidden";
+  }
   if (value.wordBreak) result["word-break"] = value.wordBreak;
   if (value.hyphens) result.hyphens = value.hyphens;
   if (value.decoration) result["text-decoration-line"] = value.decoration;
   if (value.case) result["text-transform"] = value.case;
+  if (value.writing) {
+    result["writing-mode"] = {
+      "top-to-bottom": "horizontal-tb",
+      "right-to-left": "vertical-rl",
+      "left-to-right": "vertical-lr",
+    }[value.writing.blockFlow];
+    if (value.writing.glyphOrientation) {
+      result["text-orientation"] = {
+        natural: "mixed",
+        upright: "upright",
+        sideways: "sideways",
+      }[value.writing.glyphOrientation];
+    }
+  }
 }
 
 function media(result: CSSDeclarations, value: WebStyleFragment["media"]): void {
@@ -439,43 +494,186 @@ function affordance(result: CSSDeclarations, value: WebStyleFragment["affordance
 }
 
 function conditionalRule(condition: WebCondition, value: CSSDeclarations): string {
-  if (!condition.pseudo && !condition.container && !condition.preference && !condition.pointer) {
-    throw new TypeError("A web Presentation condition cannot be empty.");
-  }
-  let selector = "&";
-  if (condition.pseudo) selector += `:where(:${condition.pseudo})`;
-  let result = rule(selector, value);
+  return distinctConditionBranches(conditionBranches(condition))
+    .map((branch) => conditionalBranch(branch, value))
+    .join("");
+}
 
-  if (condition.container) {
-    const query: string[] = [];
-    withoutDynamicValues(() => {
-      containerRange(query, "inline-size", ">=", condition.container?.minInlineSize);
-      containerRange(query, "inline-size", "<=", condition.container?.maxInlineSize);
-      containerRange(query, "block-size", ">=", condition.container?.minBlockSize);
-      containerRange(query, "block-size", "<=", condition.container?.maxBlockSize);
-    });
-    if (!query.length) throw new TypeError("A container condition must define a size range.");
-    const name = condition.container.name ? ` ${identifier(condition.container.name)}` : "";
-    result = `@container${name} (${query.join(") and (")}){${result}}`;
-  }
+type WebConditionAtom =
+  | Readonly<{
+      kind: "pseudo";
+      value: NonNullable<WebConditionTest["pseudo"]>;
+      negated: boolean;
+    }>
+  | Readonly<{
+      kind: "container";
+      name?: string;
+      query: string;
+      negated: boolean;
+    }>
+  | Readonly<{ kind: "media"; query: string; negated: boolean }>;
 
-  const media: string[] = [];
-  const preference = condition.preference;
-  if (preference?.colorScheme) media.push(`(prefers-color-scheme:${preference.colorScheme})`);
-  if (preference?.contrast) media.push(`(prefers-contrast:${preference.contrast})`);
-  if (preference?.motion) {
-    media.push(
-      `(prefers-reduced-motion:${preference.motion === "reduced" ? "reduce" : "no-preference"})`,
+type WebConditionBranch = readonly WebConditionAtom[];
+
+function conditionBranches(condition: WebCondition, negated = false): WebConditionBranch[] {
+  if ("all" in condition) {
+    return negated
+      ? condition.all.flatMap((item) => conditionBranches(item, true))
+      : condition.all.reduce<WebConditionBranch[]>(
+          (branches, item) => combineConditionBranches(branches, conditionBranches(item)),
+          [[]],
+        );
+  }
+  if ("any" in condition) {
+    return negated
+      ? condition.any.reduce<WebConditionBranch[]>(
+          (branches, item) => combineConditionBranches(branches, conditionBranches(item, true)),
+          [[]],
+        )
+      : condition.any.flatMap((item) => conditionBranches(item));
+  }
+  if ("not" in condition) return conditionBranches(condition.not, !negated);
+
+  const atoms = conditionAtoms(condition);
+  if (!atoms.length) throw new TypeError("A web Presentation condition cannot be empty.");
+  return negated ? atoms.map((atom) => [{ ...atom, negated: true }]) : [atoms];
+}
+
+function combineConditionBranches(
+  left: readonly WebConditionBranch[],
+  right: readonly WebConditionBranch[],
+): WebConditionBranch[] {
+  const maximumBranches = 64;
+  if (left.length * right.length > maximumBranches) {
+    throw new TypeError(
+      `A web Presentation condition expands beyond ${maximumBranches} native branches.`,
     );
   }
+  return left.flatMap((leftBranch) => right.map((rightBranch) => [...leftBranch, ...rightBranch]));
+}
+
+function conditionAtoms(condition: WebConditionTest): WebConditionAtom[] {
+  const result: WebConditionAtom[] = [];
+  if (condition.pseudo) {
+    result.push({ kind: "pseudo", value: condition.pseudo, negated: false });
+  }
+  if (condition.container) {
+    const queries: string[] = [];
+    withoutDynamicValues(() => {
+      containerRange(queries, "inline-size", ">=", condition.container?.minInlineSize);
+      containerRange(queries, "inline-size", "<=", condition.container?.maxInlineSize);
+      containerRange(queries, "block-size", ">=", condition.container?.minBlockSize);
+      containerRange(queries, "block-size", "<=", condition.container?.maxBlockSize);
+      containerRatio(queries, ">=", condition.container?.minAspectRatio);
+      containerRatio(queries, "<=", condition.container?.maxAspectRatio);
+      if (condition.container?.orientation) {
+        queries.push(`orientation:${condition.container.orientation}`);
+      }
+    });
+    if (!queries.length) throw new TypeError("A container condition must define a size range.");
+    for (const query of queries) {
+      result.push({
+        kind: "container",
+        ...(condition.container.identity ? { name: identifier(condition.container.identity) } : {}),
+        query,
+        negated: false,
+      });
+    }
+  }
+  const preference = condition.preference;
+  if (preference?.colorScheme) {
+    result.push({
+      kind: "media",
+      query: `prefers-color-scheme:${preference.colorScheme}`,
+      negated: false,
+    });
+  }
+  if (preference?.contrast) {
+    result.push({
+      kind: "media",
+      query: `prefers-contrast:${preference.contrast}`,
+      negated: false,
+    });
+  }
+  if (preference?.motion) {
+    result.push({
+      kind: "media",
+      query: `prefers-reduced-motion:${preference.motion === "reduced" ? "reduce" : "no-preference"}`,
+      negated: false,
+    });
+  }
   if (preference?.forcedColors !== undefined) {
-    media.push(`(forced-colors:${preference.forcedColors ? "active" : "none"})`);
+    result.push({
+      kind: "media",
+      query: `forced-colors:${preference.forcedColors ? "active" : "none"}`,
+      negated: false,
+    });
   }
-  if (condition.pointer?.accuracy) media.push(`(pointer:${condition.pointer.accuracy})`);
+  if (condition.pointer?.accuracy) {
+    result.push({
+      kind: "media",
+      query: `pointer:${condition.pointer.accuracy}`,
+      negated: false,
+    });
+  }
   if (condition.pointer?.hover !== undefined) {
-    media.push(`(hover:${condition.pointer.hover ? "hover" : "none"})`);
+    result.push({
+      kind: "media",
+      query: `hover:${condition.pointer.hover ? "hover" : "none"}`,
+      negated: false,
+    });
   }
-  if (media.length) result = `@media ${media.join(" and ")}{${result}}`;
+  return result;
+}
+
+function distinctConditionBranches(
+  branches: readonly WebConditionBranch[],
+): readonly WebConditionBranch[] {
+  const seen = new Set<string>();
+  return branches.filter((branch) => {
+    const key = JSON.stringify(branch);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function conditionalBranch(branch: WebConditionBranch, value: CSSDeclarations): string {
+  let selector = "&";
+  for (const atom of branch) {
+    if (atom.kind !== "pseudo") continue;
+    selector += atom.negated ? `:where(:not(:${atom.value}))` : `:where(:${atom.value})`;
+  }
+  let result = rule(selector, value);
+
+  const containers = new Map<string, string[]>();
+  for (const atom of branch) {
+    if (atom.kind !== "container" || atom.negated) continue;
+    const queries = containers.get(atom.name ?? "") ?? [];
+    queries.push(atom.query);
+    containers.set(atom.name ?? "", queries);
+  }
+  for (const [name, queries] of containers) {
+    result = `@container${name ? ` ${name}` : ""} (${queries.join(") and (")}){${result}}`;
+  }
+  for (const atom of branch) {
+    if (atom.kind === "container" && atom.negated) {
+      result = `@container${atom.name ? ` ${atom.name}` : ""} not (${atom.query}){${result}}`;
+    }
+  }
+
+  const media = branch
+    .filter(
+      (atom): atom is Extract<WebConditionAtom, Readonly<{ kind: "media" }>> =>
+        atom.kind === "media" && !atom.negated,
+    )
+    .map(({ query }) => query);
+  if (media.length) result = `@media (${media.join(") and (")}){${result}}`;
+  for (const atom of branch) {
+    if (atom.kind === "media" && atom.negated) {
+      result = `@media not (${atom.query}){${result}}`;
+    }
+  }
   return result;
 }
 
@@ -536,6 +734,10 @@ function gridTrack(value: WebGridTrack): string {
   return value === "min-content" || value === "max-content"
     ? value
     : requiredLength(value as WebLength);
+}
+
+function gridTracks(value: "subgrid" | readonly WebGridTrack[]): string {
+  return value === "subgrid" ? value : value.map(gridTrack).join(" ");
 }
 
 function fill(value: WebFill | undefined): string | undefined {
@@ -664,6 +866,14 @@ function containerRange(
   if (value !== undefined) result.push(`${dimension}${operator}${length(value)}`);
 }
 
+function containerRatio(result: string[], operator: ">=" | "<=", value: number | undefined): void {
+  if (value === undefined) return;
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new RangeError(`Expected a positive finite aspect ratio, received ${value}.`);
+  }
+  result.push(`aspect-ratio${operator}${number(value)}/1`);
+}
+
 function isLength(value: unknown): value is WebLength {
   return (
     typeof value === "number" ||
@@ -679,6 +889,33 @@ function isLength(value: unknown): value is WebLength {
 
 function number(value: number, minimum?: number, maximum?: number): string {
   return numericToken(value, "", false, minimum, maximum);
+}
+
+function positiveInteger(value: number): string {
+  if (!Number.isInteger(value) || value < 1) {
+    throw new RangeError(`Expected a positive integer, received ${value}.`);
+  }
+  return number(value);
+}
+
+function gridPlacement(value: WebGridPlacement | undefined): string | undefined {
+  if (!value) return undefined;
+  return withoutDynamicValues(() => {
+    const start = value.start === undefined ? undefined : gridLine(value.start);
+    if (value.end !== undefined) return `${start ?? "auto"}/${gridLine(value.end)}`;
+    if (value.span !== undefined) {
+      const span = `span ${positiveInteger(value.span)}`;
+      return start ? `${start}/${span}` : span;
+    }
+    return start;
+  });
+}
+
+function gridLine(value: number): string {
+  if (!Number.isInteger(value) || value === 0) {
+    throw new RangeError(`Expected a non-zero integer grid line, received ${value}.`);
+  }
+  return number(value);
 }
 
 function numericToken(
