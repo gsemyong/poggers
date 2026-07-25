@@ -6,11 +6,10 @@ This is the living source of truth for Kit's durable virtual Actor Feature.
 Checked items record verified evidence, not intention. Update the gap ledger,
 milestone checklists, decisions, and progress log as evidence changes.
 
-Workflow and Presentation work remain tracked separately in
-[`product-languages-plan.md`](./product-languages-plan.md). Do not expand those
-workstreams while this goal is active unless shared substrate work requires a
-focused compatibility check. Do not commit this work unless the user
-explicitly asks.
+Presentation completion remains tracked separately in
+[`presentation-plan.md`](./presentation-plan.md). Do not expand that workstream
+while this goal is active unless shared substrate work requires a focused
+compatibility check.
 
 ## North Star
 
@@ -234,7 +233,7 @@ idempotency without introducing a second facade.
   cancellation is proven to have the required durable meaning.
 - Parent/child supervision trees are not part of the virtual Actor product
   model. Activation failure recovery is runtime policy; domain coordination
-  belongs in manager Actors or Workflows.
+  belongs in manager Actors or a future orchestration Feature built over them.
 
 ### Effects And Delivery
 
@@ -247,15 +246,15 @@ idempotency without introducing a second facade.
 - External providers must be idempotent, deduplicate explicitly, or expose an
   atomic outbox/transaction boundary.
 - No general distributed transaction is promised across Actors. Multi-Actor
-  business coordination uses sagas or durable Workflows.
+  business coordination uses explicit sagas or a future orchestration Feature.
 
 ### Reminders
 
 - A reminder is named, durable, one-shot, replaceable, cancellable, and
   generation-fenced.
 - Recurrence is expressed by scheduling the next reminder from committed
-  Actor logic. Calendar and cron scheduling remain a Workflow/Scheduler
-  concern unless a concrete Actor use case falsifies this boundary.
+  Actor logic. Calendar and cron scheduling remain a Scheduler Feature concern
+  unless a concrete Actor use case falsifies this boundary.
 - Reminder intent commits with Actor state.
 - Delivery may repeat; generation and invocation identity make processing
   idempotent.
@@ -729,8 +728,7 @@ Actor iteration.
 The focused production release gate adds release-native compilation,
 distribution verification, generated artifacts, and representative
 multi-process behavior. Presentation/browser checks run only if shared web or
-Presentation code changed. Workflow checks run only if shared compiler/runtime
-behavior changed.
+Presentation code changed.
 
 ## Test Matrix
 
@@ -812,7 +810,7 @@ surface:
 - unbounded reentrancy modes;
 - cron/calendar scheduling inside Actors;
 - hiding the single-hot-key serialization ceiling;
-- running full repository, browser, Workflow, or release-native gates for every
+- running full repository, browser, or release-native gates for every
   Actor edit;
 - claiming production scaling from in-process manual-routing simulations.
 
@@ -942,7 +940,7 @@ surface:
   versioned canonical JSON wire messages.
 - Added one generic remote Dependency runtime for async request/reply, ordered
   streams, typed failures, heartbeats, previous heartbeat state, deadlines,
-  dynamic cancellation, deferred completion, and W3C trace propagation.
+  dynamic cancellation, heartbeat propagation, and W3C trace propagation.
   Synchronous operations fail before remote dispatch, and transport never
   retries arbitrary product work implicitly.
 - Proved delayed and duplicate frames, out-of-order delivery, response loss,
@@ -953,10 +951,9 @@ surface:
   without Actor vocabulary. The unchanged inventory Actor reference crosses
   the same protocol and preserves Feature-owned idempotency under a duplicated
   invocation.
-- Closed the F4 focused gate with 103 architecture/compiler/runtime tests, 40
-  Actor tests, two affected Workflow activity tests, root type checking,
-  linting, formatting, and the unchanged generated-Rust Actor differential
-  passing in 27.26 seconds. Production network/native transport remains F7;
+- Closed the F4 focused gate with architecture/compiler/runtime tests, Actor
+  tests, root type checking, linting, formatting, and the unchanged
+  generated-Rust Actor differential. Production network/native transport remains F7;
   membership, owner resolution, and local-versus-remote routing begin in F5.
 - Added a generic in-memory Process membership and directory state machine with
   versioned views, renewable leases, failure epochs, configurable virtual

@@ -136,21 +136,6 @@ export const timerDependency = defineServerProductionDependency({
   rust: { type: "kit_server_timer::Timer", constructor: "kit_server_timer::create" },
 });
 
-export const workflowRuntimeDependency = defineServerProductionDependency({
-  name: "workflow-runtime",
-  dependency: "workflowRuntime",
-  requires: ["clock", "events", "identifiers", "timer"],
-  configuration: [],
-  crate: {
-    package: "kit-server-workflow",
-    directory: dependencyDirectory("workflow"),
-  },
-  rust: {
-    type: "kit_server_workflow::WorkflowRuntime",
-    constructor: "kit_server_workflow::create",
-  },
-});
-
 export const eventsDependency = defineServerProductionDependency({
   name: "events-sqlite",
   dependency: "events",
@@ -265,7 +250,6 @@ export const serverProductionDependencies: readonly ServerProductionDependency[]
   synchronizationDependency,
   telemetryDependency,
   timerDependency,
-  workflowRuntimeDependency,
 ]);
 
 /** Validates production metadata without repeating the semantic Dependency API. */

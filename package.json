@@ -18,7 +18,6 @@
     "docs/data.md",
     "docs/features.md",
     "docs/migrations",
-    "docs/workflows.md",
     "examples/basic",
     "examples/basic/.gitignore",
     "tsconfig.json"
@@ -93,7 +92,6 @@
     "check:native": "vitest run --tagsFilter=native && cargo test --manifest-path src/adapters/server/production/Cargo.toml --workspace",
     "check:presentation": "nub run presentation:check && vitest run src/core/ui/presentation.spec.ts src/compiler/presentation.spec.ts src/platforms/web/presentation.spec.ts src/platforms/web/presentation/dynamics.spec.ts src/adapters/web/ui/presentation",
     "check:production": "vitest run --tagsFilter=production && KIT_NATIVE_PROFILE=release vitest run src/features/data.spec.ts -t \"builds the composed data Feature as a native executable\"",
-    "check:workflow": "vitest run src/features/workflow.spec.ts && cargo test --manifest-path src/adapters/server/production/Cargo.toml -p kit-server-workflow",
     "dev:crud": "nub src/cli.ts dev --dir examples/authenticated-crud",
     "dev:example": "nub src/cli.ts dev --dir playground",
     "fmt": "oxfmt",
@@ -104,7 +102,6 @@
     "release": "nub scripts/release.ts",
     "release:check": "nub scripts/release.ts --check",
     "test": "vitest run --tagsFilter='!native && !production'",
-    "test:workflow": "vitest run src/features/workflow.spec.ts --tagsFilter='!native && !production'",
     "typecheck": "tsc --noEmit",
     "check": "nub run typecheck && nub run lint && nub run fmt:check && vitest run && cargo test --manifest-path src/adapters/server/production/Cargo.toml --workspace && nub run build && nub run check:examples && nub run api:check && nub run presentation:check && nub run check:distribution && KIT_NATIVE_PROFILE=release vitest run src/features/data.spec.ts -t \"builds the composed data Feature as a native executable\""
   },

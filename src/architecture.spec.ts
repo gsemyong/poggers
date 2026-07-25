@@ -75,6 +75,11 @@ const modules: readonly ModuleBoundary[] = [
   },
   { file: "adapters/source.ts", imports: [] },
   { file: "adapters/web-server.ts", imports: ["adapters/web", "compiler", "runtime"] },
+  {
+    file: "adapters/server/production/compiler.ts",
+    imports: ["adapters/server/production", "adapters/web-server", "compiler"],
+  },
+  { file: "adapters/server/production/program.ts", imports: ["compiler"] },
 ] as const;
 
 describe("architecture import graph", () => {
@@ -123,6 +128,35 @@ describe("architecture import graph", () => {
           `${boundary.file} imports @/${imported}; ` +
             `allowed: ${boundary.imports.map((value) => `@/${value}`).join(", ")}`,
         );
+      }
+    }
+    expect(violations).toEqual([]);
+  });
+
+  test("keeps generic portable lowering free of product Feature vocabulary", async () => {
+    const source = import.meta.dirname;
+    const typescript = [
+      ...(await sourceFiles(resolve(source, "compiler"))).filter(
+        (file) => !/\.(?:spec|typecheck)\.tsx?$/.test(file),
+      ),
+      resolve(source, "runtime/interpreter.ts"),
+      resolve(source, "adapters/server/production/compiler.ts"),
+      resolve(source, "adapters/server/production/program.ts"),
+    ];
+    const rust = [
+      resolve(source, "adapters/server/production/runtime/src/lib.rs"),
+      resolve(source, "adapters/server/production/distribution/src/lib.rs"),
+    ];
+    const violations: string[] = [];
+    for (const file of typescript) {
+      if (/\b(?:actor|workflow)\b/i.test(await readFile(file, "utf8"))) {
+        violations.push(file.slice(source.length + 1));
+      }
+    }
+    for (const file of rust) {
+      const implementation = (await readFile(file, "utf8")).split("\n#[cfg(test)]")[0]!;
+      if (/\b(?:actor|workflow)\b/i.test(implementation)) {
+        violations.push(file.slice(source.length + 1));
       }
     }
     expect(violations).toEqual([]);

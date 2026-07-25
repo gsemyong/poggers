@@ -16,9 +16,6 @@ export const dependencyInvocation: unique symbol = Symbol("kit.dependency.invoca
 export const dependencyInvocationControl: unique symbol = Symbol(
   "kit.dependency.invocation.control",
 );
-export const deferredDependencyInvocation: unique symbol = Symbol(
-  "kit.dependency.invocation.deferred",
-);
 
 /** Type-level meaning shared by a Dependency's consumer and provider projections. */
 export type DependencyDefinition = Readonly<{
@@ -98,7 +95,6 @@ type HeartbeatOf<
 export type DependencyInvocationControl = Readonly<{
   previousHeartbeat?: unknown;
   heartbeat(input: unknown): void;
-  defer(input: Readonly<{ id: string }>): DeferredDependencyInvocation<unknown>;
   cancellation: Readonly<{
     requested(): boolean;
     wait(): Promise<void>;
@@ -138,35 +134,14 @@ export type DependencyInvocation = Readonly<{
   readonly [dependencyInvocationControl]?: DependencyInvocationControl;
 }>;
 
-/** A serializable reference to one externally completed Dependency invocation. */
-export type DeferredDependencyInvocation<
-  Result = unknown,
-  Failure = never,
-  Heartbeat = never,
-> = Readonly<{
-  id: string;
-  activity: string;
-  execution: Readonly<{ workflow: string; id: string; run: string }>;
-  attempt: number;
-  readonly [deferredDependencyInvocation]?: Readonly<{
-    result: Result;
-    failure: Failure;
-    heartbeat: Heartbeat;
-  }>;
-}>;
-
 /** Runtime controls available while implementing one Dependency operation. */
-export type DependencyProviderInvocation<
-  Failure = never,
-  Heartbeat = never,
-  Result = unknown,
-> = Omit<DependencyInvocation, typeof dependencyInvocationControl> &
+export type DependencyProviderInvocation<Failure = never, Heartbeat = never> = Omit<
+  DependencyInvocation,
+  typeof dependencyInvocationControl
+> &
   Readonly<{
     previousHeartbeat?: Readonly<Heartbeat>;
     heartbeat(input: Readonly<{ details: Heartbeat }>): void;
-    defer(
-      input: Readonly<{ id: string }>,
-    ): DeferredDependencyInvocation<Result, Failure, Heartbeat>;
     cancellation: Readonly<{
       requested(): boolean;
       wait(): Promise<void>;
@@ -201,14 +176,9 @@ export class DependencyFailureError extends Error {
 type OperationOutput<Operation> = Operation extends (...arguments_: never[]) => infer Output
   ? Awaited<Output>
   : never;
-type ProviderOperationResult<Operation, Failure, Heartbeat> = Operation extends (
-  ...arguments_: never[]
-) => infer Output
+type ProviderOperationResult<Operation> = Operation extends (...arguments_: never[]) => infer Output
   ? Output extends PromiseLike<unknown>
-    ? PromiseLike<
-        | OperationOutput<Operation>
-        | DeferredDependencyInvocation<OperationOutput<Operation>, Failure, Heartbeat>
-      >
+    ? PromiseLike<OperationOutput<Operation>>
     : Output
   : never;
 
@@ -219,39 +189,11 @@ export type DependencyImplementation<Api extends DependencyContract> = {
       input: InputOf<DependencyDefinitionOf<Api>["Operations"][Operation]>;
       invocation: DependencyProviderInvocation<
         FailureOf<DependencyDefinitionOf<Api>>,
-        HeartbeatOf<DependencyDefinitionOf<Api>, Operation>,
-        OperationOutput<DependencyDefinitionOf<Api>["Operations"][Operation]>
+        HeartbeatOf<DependencyDefinitionOf<Api>, Operation>
       >;
     }>,
-  ) => ProviderOperationResult<
-    DependencyDefinitionOf<Api>["Operations"][Operation],
-    FailureOf<DependencyDefinitionOf<Api>>,
-    HeartbeatOf<DependencyDefinitionOf<Api>, Operation>
-  >;
+  ) => ProviderOperationResult<DependencyDefinitionOf<Api>["Operations"][Operation]>;
 };
-
-/** @internal Creates the runtime-branded form returned by provider `defer`. */
-export function createDeferredDependencyInvocation<Result>(
-  input: Omit<DeferredDependencyInvocation<Result>, typeof deferredDependencyInvocation>,
-): DeferredDependencyInvocation<Result> {
-  if (!input.id) throw new TypeError("Deferred Dependency invocation id is required.");
-  return Object.freeze({
-    ...input,
-    [deferredDependencyInvocation]: Object.freeze({}),
-  }) as DeferredDependencyInvocation<Result>;
-}
-
-/** @internal Recognizes a provider result whose completion is externally owned. */
-export function isDeferredDependencyInvocation(
-  value: unknown,
-): value is DeferredDependencyInvocation {
-  return Boolean(
-    value &&
-    typeof value === "object" &&
-    deferredDependencyInvocation in value &&
-    typeof (value as { id?: unknown }).id === "string",
-  );
-}
 
 /** Projects a named consumer Dependency map to the providers a host must mount. */
 export type DependencyImplementations<Dependencies extends object> = {

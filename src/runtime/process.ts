@@ -13,7 +13,6 @@ import {
   dependencyInvocation,
   dependencyInvocationControl,
   invokeDependency,
-  isDeferredDependencyInvocation,
   type DependencyInvocation,
   type DependencyInvocationControl,
   type DependencyProviderInvocation,
@@ -391,17 +390,6 @@ function providerInvocation(
       },
       writable: false,
     },
-    defer: {
-      configurable: false,
-      enumerable: false,
-      value(input: Readonly<{ id: string }>) {
-        if (!input || typeof input.id !== "string" || !input.id) {
-          throw new TypeError("Deferred Dependency invocation id is required.");
-        }
-        return control.defer(input);
-      },
-      writable: false,
-    },
   });
   Object.defineProperty(result, "fail", {
     configurable: false,
@@ -450,9 +438,6 @@ export function assertDependencyFailure(
 
 const directInvocationControl: DependencyInvocationControl = Object.freeze({
   heartbeat() {},
-  defer() {
-    throw new Error("Direct Dependency invocations cannot be completed externally.");
-  },
   cancellation: Object.freeze({
     requested: () => false,
     wait: () => new Promise<void>(() => {}),
@@ -470,7 +455,6 @@ function conformDependencyOutput(
       throw new TypeError(`Dependency ${dependency}.${operation.name} must return a Promise.`);
     }
     return Promise.resolve(output).then((value) => {
-      if (isDeferredDependencyInvocation(value)) return value;
       assertRuntimeType(value, operation.output, `${dependency}.${operation.name} output`);
       return value;
     });

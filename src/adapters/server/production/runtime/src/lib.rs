@@ -20,8 +20,6 @@ pub type NativeFuture<T> = Pin<Box<dyn Future<Output = NativeResult<T>> + Send>>
 pub type NativeStream = Pin<Box<dyn Stream<Item = NativeResult<Value>> + Send>>;
 pub type Record = IndexMap<String, Value>;
 
-const DEFERRED_DEPENDENCY_INVOCATION: &str = "kit.dependency.deferred-invocation";
-
 #[derive(Clone)]
 pub enum Value {
     Undefined,
@@ -145,7 +143,6 @@ pub trait DependencyRouter: Send + Sync {
 }
 
 type DependencyHeartbeat = Arc<dyn Fn(Value) -> NativeResult<()> + Send + Sync>;
-type DependencyDefer = Arc<dyn Fn(String) -> NativeResult<Value> + Send + Sync>;
 type DependencyAuthorityAssert = Arc<dyn Fn() -> NativeFuture<()> + Send + Sync>;
 
 #[derive(Default)]
@@ -297,7 +294,6 @@ pub struct DependencyInvocation {
     pub trace: Option<DependencyTrace>,
     pub authority: Option<DependencyAuthority>,
     heartbeat: Option<DependencyHeartbeat>,
-    defer: Option<DependencyDefer>,
     pub cancellation: DependencyCancellation,
 }
 
@@ -334,7 +330,6 @@ impl DependencyInvocation {
             trace: None,
             authority: None,
             heartbeat: None,
-            defer: None,
             cancellation: DependencyCancellation::default(),
         }
     }
@@ -358,12 +353,10 @@ impl DependencyInvocation {
         mut self,
         previous_heartbeat: Option<Value>,
         heartbeat: impl Fn(Value) -> NativeResult<()> + Send + Sync + 'static,
-        defer: impl Fn(String) -> NativeResult<Value> + Send + Sync + 'static,
         cancellation: DependencyCancellation,
     ) -> Self {
         self.previous_heartbeat = previous_heartbeat;
         self.heartbeat = Some(Arc::new(heartbeat));
-        self.defer = Some(Arc::new(defer));
         self.cancellation = cancellation;
         self
     }
@@ -393,19 +386,8 @@ impl DependencyInvocation {
             .map_or_else(|| Ok(()), |heartbeat| heartbeat(details))
     }
 
-    pub fn defer(&self, id: impl Into<String>) -> NativeResult<Value> {
-        let defer = self.defer.as_ref().ok_or_else(|| {
-            NativeError::new(
-                "InvalidDependencyInvocation",
-                "Direct Dependency invocations cannot be completed externally.",
-            )
-        })?;
-        defer(id.into())
-    }
-
     fn to_value(&self) -> Value {
         let heartbeat = self.heartbeat.clone();
-        let defer = self.defer.clone();
         let requested = self.cancellation.clone();
         let wait = self.cancellation.clone();
         let mut value = IndexMap::from([
@@ -432,42 +414,6 @@ impl DependencyInvocation {
                             heartbeat(details)?;
                         }
                         Ok(Value::Undefined)
-                    })
-                })),
-            ),
-            (
-                "defer".to_owned(),
-                Value::Function(NativeFunction::new(move |_engine, arguments| {
-                    let defer = defer.clone();
-                    Box::pin(async move {
-                        let input = arguments
-                            .into_iter()
-                            .next()
-                            .ok_or_else(|| NativeError::new("TypeError", "defer requires input."))?
-                            .as_record()?;
-                        let id = input
-                            .get("id")
-                            .ok_or_else(|| {
-                                NativeError::new(
-                                    "TypeError",
-                                    "Deferred Dependency invocation id is required.",
-                                )
-                            })?
-                            .clone()
-                            .string()?;
-                        if id.is_empty() {
-                            return Err(NativeError::new(
-                                "TypeError",
-                                "Deferred Dependency invocation id is required.",
-                            ));
-                        }
-                        let defer = defer.ok_or_else(|| {
-                            NativeError::new(
-                                "InvalidDependencyInvocation",
-                                "Direct Dependency invocations cannot be completed externally.",
-                            )
-                        })?;
-                        defer(id)
                     })
                 })),
             ),
@@ -1860,26 +1806,6 @@ impl Value {
     }
 }
 
-/** Creates the process-local marker used to carry a deferred result across a router. */
-pub fn deferred_dependency_invocation(id: impl Into<String>) -> Value {
-    Value::record([
-        (
-            "$kit".to_owned(),
-            Value::String(DEFERRED_DEPENDENCY_INVOCATION.to_owned()),
-        ),
-        ("id".to_owned(), Value::String(id.into())),
-    ])
-}
-
-/** Returns the completion id when a routed provider deferred its result. */
-pub fn deferred_dependency_invocation_id(value: &Value) -> Option<String> {
-    let marker = value.property("$kit", false).ok()?.string().ok()?;
-    if marker != DEFERRED_DEPENDENCY_INVOCATION {
-        return None;
-    }
-    value.property("id", false).ok()?.string().ok()
-}
-
 pub fn binary(operator: &str, left: Value, right: Value) -> NativeResult<Value> {
     match operator {
         "+" => match (&left, &right) {
@@ -2172,12 +2098,6 @@ mod tests {
                     lock(&received).push(details);
                     Ok(())
                 },
-                |id| {
-                    Ok(Value::record(IndexMap::from([(
-                        "id".to_owned(),
-                        Value::String(id),
-                    )])))
-                },
                 cancellation.clone(),
             )
             .to_value();
@@ -2214,25 +2134,6 @@ mod tests {
                 .expect("number"),
             2.0
         );
-        assert_eq!(
-            engine
-                .method(
-                    invocation.clone(),
-                    "defer",
-                    vec![Value::record(IndexMap::from([(
-                        "id".to_owned(),
-                        Value::String("completion:one".to_owned()),
-                    )]))],
-                )
-                .await
-                .expect("deferred invocation")
-                .property("id", false)
-                .expect("completion id")
-                .string()
-                .expect("string"),
-            "completion:one"
-        );
-
         let cancellation_value = invocation
             .property("cancellation", false)
             .expect("cancellation");

@@ -81,13 +81,6 @@ const mail: DependencyImplementation<Mail> = {
 };
 void mail;
 
-const deferredMail: DependencyImplementation<Mail> = {
-  async send({ invocation }) {
-    return invocation.defer({ id: `mail:${invocation.id}` });
-  },
-};
-void deferredMail;
-
 const invalidFailure: DependencyImplementation<Mail> = {
   async send({ invocation }) {
     return invocation.fail({

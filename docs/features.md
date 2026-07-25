@@ -32,8 +32,6 @@ Feature's implementation.
   and bounded admission.
 - [`Data`](./data.md) packages authorized event-sourced mutations, optimistic
   browser behavior, typed live queries, and replaceable Turso projections.
-- [`Workflow`](./workflows.md) packages procedural durable execution, recorded
-  Dependency results, timers, signals, queries, replay, and lease recovery.
 
 Use [`examples/authenticated-crud`](../examples/authenticated-crud) for a
 multi-Feature pressure test and [`examples/basic`](../examples/basic) as the

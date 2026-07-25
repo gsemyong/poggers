@@ -2,7 +2,6 @@ import { expect, test, vi } from "vitest";
 
 import type { DependencyContractIR } from "@/compiler/ir";
 import {
-  createDeferredDependencyInvocation,
   dependencyInvocationControl,
   invokeDependency,
   type DependencyInvocation,
@@ -138,9 +137,6 @@ test("runs unrelated asynchronous and stream Dependencies across one generic Pro
         [dependencyInvocationControl]: {
           previousHeartbeat: { completed: 1 },
           heartbeat: (details) => observed.push(details),
-          defer: () => {
-            throw new Error("Unexpected deferred result.");
-          },
           cancellation: inactiveCancellation(),
         },
       },
@@ -399,7 +395,7 @@ test("reports loss as uncertain and leaves retries explicit with stable invocati
   ]);
 });
 
-test("propagates cancellation, deadlines, and caller-owned deferred completion", async () => {
+test("propagates cancellation and deadlines", async () => {
   const cancellation = cancellable();
   const providerCancelled = vi.fn();
   const network = createMemoryDependencyTransport();
@@ -421,7 +417,6 @@ test("propagates cancellation, deadlines, and caller-owned deferred completion",
             providerCancelled();
             return 1;
           }
-          if (input.value === 2) return invocation.defer({ id: "completion-2" });
           await new Promise((resolve) => setTimeout(resolve, 100));
           return 3;
         },
@@ -437,9 +432,6 @@ test("propagates cancellation, deadlines, and caller-owned deferred completion",
       ...invocation("cancel-1", 1),
       [dependencyInvocationControl]: {
         heartbeat: () => undefined,
-        defer: () => {
-          throw new Error("Unexpected deferred result.");
-        },
         cancellation,
       },
     },
@@ -447,32 +439,6 @@ test("propagates cancellation, deadlines, and caller-owned deferred completion",
   cancellation.request();
   await expect(pending).rejects.toMatchObject({ code: "cancelled", uncertain: true });
   await expect.poll(() => providerCancelled.mock.calls.length).toBe(1);
-
-  const deferred = await invokeDependency(
-    remote,
-    "work",
-    { value: 2 },
-    {
-      ...invocation("defer-2", 1),
-      [dependencyInvocationControl]: {
-        heartbeat: () => undefined,
-        defer: ({ id }) =>
-          createDeferredDependencyInvocation({
-            id,
-            activity: "caller",
-            execution: { workflow: "test", id: "one", run: "run-one" },
-            attempt: 1,
-          }),
-        cancellation: inactiveCancellation(),
-      },
-    },
-  );
-  expect(deferred).toMatchObject({
-    id: "completion-2",
-    activity: "caller",
-    execution: { workflow: "test", id: "one", run: "run-one" },
-    attempt: 1,
-  });
 
   await expect(
     invokeDependency(

@@ -5,12 +5,10 @@ import {
 } from "@/compiler/ir";
 import { cloneData } from "@/core/data";
 import {
-  createDeferredDependencyInvocation,
   DependencyFailureError,
   dependencyInvocation,
   dependencyInvocationControl,
   invokeDependency,
-  isDeferredDependencyInvocation,
   type DependencyInvocation,
   type DependencyInvocationAuthority,
 } from "@/core/dependency";
@@ -51,7 +49,6 @@ type WireFrameBase = Readonly<{
 export type DependencyWireFrame =
   | (WireFrameBase & Readonly<{ kind: "heartbeat"; details: unknown }>)
   | (WireFrameBase & Readonly<{ kind: "result"; value: unknown }>)
-  | (WireFrameBase & Readonly<{ kind: "deferred"; id: string }>)
   | (WireFrameBase & Readonly<{ kind: "item"; value: unknown }>)
   | (WireFrameBase & Readonly<{ kind: "complete" }>)
   | (WireFrameBase &
@@ -222,13 +219,6 @@ export function createDependencyRequestHandler(
                 ? {}
                 : { previousHeartbeat: request.invocation.previousHeartbeat }),
               heartbeat: (details) => emit({ kind: "heartbeat", details }),
-              defer: ({ id }) =>
-                createDeferredDependencyInvocation({
-                  id,
-                  activity: request.invocation.id,
-                  execution: { workflow: "remote", id: "remote", run: "remote" },
-                  attempt: request.invocation.attempt,
-                }),
               cancellation,
             },
           };
@@ -244,9 +234,7 @@ export function createDependencyRequestHandler(
             }
             emit({ kind: "complete" });
           } else {
-            const value = await Promise.resolve(result);
-            if (isDeferredDependencyInvocation(value)) emit({ kind: "deferred", id: value.id });
-            else emit({ kind: "result", value });
+            emit({ kind: "result", value: await Promise.resolve(result) });
           }
         } catch (error) {
           if (error instanceof DependencyFailureError) {
@@ -519,17 +507,6 @@ async function remoteResult(
           break;
         case "result":
           return frame.value;
-        case "deferred": {
-          const control = invocation[dependencyInvocationControl];
-          if (!control) {
-            throw new RemoteDependencyError(
-              "unsupported-deferred-result",
-              `Dependency ${dependency.name}.${operation.name} deferred without runtime ownership.`,
-              false,
-            );
-          }
-          return control.defer({ id: frame.id });
-        }
         case "failure":
           assertDependencyFailure(
             frame.failure,
@@ -604,7 +581,6 @@ function remoteStream(
                 frame.error.uncertain,
               );
             case "result":
-            case "deferred":
               throw new RemoteDependencyError(
                 "invalid-response",
                 `Dependency ${dependency.name}.${operation.name} returned a result frame for a stream.`,
@@ -709,9 +685,7 @@ function assertFrame(frame: DependencyWireFrame, invocation: string, sequence: n
     frame.invocation !== invocation ||
     frame.sequence !== sequence ||
     !Number.isSafeInteger(frame.sequence) ||
-    !["heartbeat", "result", "deferred", "item", "complete", "failure", "error"].includes(
-      frame.kind,
-    )
+    !["heartbeat", "result", "item", "complete", "failure", "error"].includes(frame.kind)
   ) {
     throw new RemoteDependencyError(
       "invalid-response",
@@ -720,7 +694,6 @@ function assertFrame(frame: DependencyWireFrame, invocation: string, sequence: n
     );
   }
   if (
-    (frame.kind === "deferred" && (!frame.id || typeof frame.id !== "string")) ||
     (frame.kind === "failure" &&
       (!frame.failure ||
         typeof frame.failure !== "object" ||

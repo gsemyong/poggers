@@ -324,12 +324,6 @@ describe("Program runtime", () => {
           [dependencyInvocationControl]: {
             previousHeartbeat: { completed: 2 },
             heartbeat: (details) => heartbeats.push(details),
-            defer: ({ id }) => ({
-              id,
-              activity: "durable:heartbeat",
-              execution: { workflow: "test", id: "one", run: "run-one" },
-              attempt: 2,
-            }),
             cancellation: {
               requested: () => true,
               wait: () => Promise.resolve(),

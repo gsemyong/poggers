@@ -15,4 +15,4 @@ Rust runtime share these semantics. Floating promises, spread inputs, empty
 races, and general promise-valued data remain unsupported.
 
 See
-[`docs/migrations/0005-portable-concurrency.md`](../docs/migrations/0005-portable-concurrency.md).
+[`docs/migrations/0004-portable-concurrency.md`](../docs/migrations/0004-portable-concurrency.md).

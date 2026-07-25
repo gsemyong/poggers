@@ -262,16 +262,13 @@ Use the validation ladder while editing:
 nub exec vitest run path/to/file.spec.ts -t "changed behavior" --tagsFilter="!native && !production"
 nub run typecheck
 nub run test
-nub run test:workflow
 nub run check:native
-nub run check:workflow
 nub run check:presentation
 nub run check:production
 ```
 
-The first two commands are the general inner loop. `test:workflow` is the
-focused Workflow source milestone. `test` is the complete source/development
-milestone. Neither compiles nor executes generated native Programs. Run
+The first two commands are the general inner loop. `test` is the complete
+source/development milestone and does not compile or execute generated native Programs. Run
 cross-backend differential tests when portable compiler or IR meaning changes;
 run focused Cargo checks when a native Dependency changes. Native and
 production checks are explicit milestones; `check` runs every milestone once

@@ -21,8 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use kit_server_runtime::{
     DependencyAuthority, DependencyCancellation, DependencyInvocation, DependencyRouter, Engine,
-    NativeError, NativeFuture, NativeResult, TypeContract, Value, deferred_dependency_invocation,
-    deferred_dependency_invocation_id, validate_value,
+    NativeError, NativeFuture, NativeResult, TypeContract, Value, validate_value,
 };
 
 #[derive(Clone, Debug)]
@@ -343,7 +342,6 @@ struct WireFrame {
 enum WireFramePayload {
     Heartbeat { details: serde_json::Value },
     Result { value: serde_json::Value },
-    Deferred { id: String },
     Item { value: serde_json::Value },
     Complete,
     Failure { failure: WireFailure },
@@ -965,7 +963,6 @@ impl ProcessRouter {
                     )
                 })
             },
-            |id| Ok(deferred_dependency_invocation(id)),
             cancellation.clone(),
         );
         let invocation = match &request.invocation.trace {
@@ -1149,18 +1146,13 @@ impl ProcessRouter {
                 }
             },
             Ok(value) => {
-                let payload = match deferred_dependency_invocation_id(&value) {
-                    Some(id) => WireFramePayload::Deferred { id },
-                    None => {
-                        validate_value(
-                            &value,
-                            &operation.output,
-                            &format!("{}.{} remote output", request.dependency, request.operation),
-                        )?;
-                        WireFramePayload::Result {
-                            value: value.canonical_json()?,
-                        }
-                    }
+                validate_value(
+                    &value,
+                    &operation.output,
+                    &format!("{}.{} remote output", request.dependency, request.operation),
+                )?;
+                let payload = WireFramePayload::Result {
+                    value: value.canonical_json()?,
                 };
                 self.emit(reply, &request.invocation.id, sequence, payload)
                     .await
@@ -1323,10 +1315,6 @@ impl RemoteSession {
                     validate_value(&value, &self.operation.output, "remote Dependency output")?;
                     return Ok(value);
                 }
-                WireFramePayload::Deferred { id } => {
-                    self.terminal = true;
-                    return self.invocation.defer(id);
-                }
                 WireFramePayload::Failure { failure } => {
                     self.terminal = true;
                     return Err(wire_failure(failure, &self.operation)?);
@@ -1377,7 +1365,7 @@ impl RemoteSession {
                         self.finish();
                         Err(remote_error(error.code, error.message, error.uncertain))?;
                     }
-                    WireFramePayload::Result { .. } | WireFramePayload::Deferred { .. } => {
+                    WireFramePayload::Result { .. } => {
                         Err(remote_error(
                             "invalid-response",
                             "Remote stream Dependency returned a result frame.",
@@ -2386,15 +2374,6 @@ mod tests {
                     failures: BTreeMap::new(),
                 },
                 DistributionOperation {
-                    name: "deferred",
-                    identity: "deferred-v1",
-                    mode: DistributionOperationMode::Asynchronous,
-                    input: input(),
-                    output: TypeContract::Primitive("void"),
-                    heartbeat: None,
-                    failures: BTreeMap::new(),
-                },
-                DistributionOperation {
                     name: "fail",
                     identity: "fail-v1",
                     mode: DistributionOperationMode::Asynchronous,
@@ -2497,18 +2476,6 @@ mod tests {
                         yield Value::Number(1.0);
                         yield Value::Number(2.0);
                     }))),
-                    "deferred" => {
-                        let defer = invocation.property("defer", false)?;
-                        engine
-                            .invoke(
-                                defer,
-                                vec![Value::record([(
-                                    "id".to_owned(),
-                                    Value::String("completion-one".to_owned()),
-                                )])],
-                            )
-                            .await
-                    }
                     "fail" => Err(NativeError::new("unavailable", "Service unavailable.")
                         .with_field(
                             "data",
@@ -2806,7 +2773,6 @@ mod tests {
                             lock(&received).push(value);
                             Ok(())
                         },
-                        |id| Ok(Value::String(format!("deferred:{id}"))),
                         DependencyCancellation::default(),
                     ),
             )
@@ -2922,25 +2888,6 @@ mod tests {
         }
         assert!(first_abandoned.load(Ordering::Acquire));
 
-        let deferred = second
-            .call_dependency_with_invocation(
-                "service",
-                "deferred",
-                input(0.0),
-                DependencyInvocation::new("deferred-one", 1, now, now, None).with_controls(
-                    None,
-                    |_| Ok(()),
-                    |id| Ok(Value::String(format!("deferred:{id}"))),
-                    DependencyCancellation::default(),
-                ),
-            )
-            .await
-            .expect("remote deferred result");
-        assert_eq!(
-            deferred.string().expect("deferred marker"),
-            "deferred:completion-one"
-        );
-
         let failure = second
             .call_dependency("service", "fail", input(0.0))
             .await
@@ -2998,7 +2945,6 @@ mod tests {
                         DependencyInvocation::new("wait-one", 1, now, now, None).with_controls(
                             None,
                             |_| Ok(()),
-                            |id| Ok(Value::String(format!("deferred:{id}"))),
                             cancellation,
                         ),
                     )

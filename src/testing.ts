@@ -25,8 +25,6 @@ export {
   createDataFixture,
   createMemoryDataStore,
 } from "@/features/data.testing";
-export { createWorkflowFixture, createWorkflowTestClock } from "@/features/workflow.testing";
-export type { WorkflowTestClock } from "@/features/workflow.testing";
 export { createUIContributionInstance } from "@/runtime/process";
 export { createPresentationFrame } from "@/runtime/presentation";
 

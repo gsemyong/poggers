@@ -24,13 +24,11 @@ import { betterAuth } from "better-auth";
 import { getMigrations } from "better-auth/db/migration";
 
 import { createTursoDataStore, type TursoDatabase } from "@/adapters/data/turso";
-import { createDevelopmentWorkflowRuntime } from "@/adapters/server/development/workflow";
 import type { DependencyContractIR } from "@/compiler/ir";
 import { cloneData } from "@/core/data";
 import type { DataStore } from "@/features/data";
 import type { Clock, EventStore, Identifiers, StoredEvent } from "@/features/entity";
 import type { AuthenticationBackend } from "@/features/identity";
-import type { WorkflowRuntime } from "@/features/workflow";
 import type {
   Alarm,
   ExecutionContext,
@@ -94,7 +92,6 @@ export type NodeHost<Event> = Readonly<{
   clock: Clock;
   timer: Timer;
   telemetry: Telemetry;
-  workflowRuntime: WorkflowRuntime;
   http: HttpServer & AsyncDisposable & Readonly<{ locations: readonly string[] }>;
 }>;
 export type NodeHostDependency = keyof NodeHost<unknown>;
@@ -148,7 +145,6 @@ export async function createNodeHost<Event = unknown>(
     "identifiers",
     "synchronization",
     "timer",
-    "workflowRuntime",
   ];
   const requested = new Set(input.dependencies.map(({ name }) => name));
   for (const dependency of requested) {
@@ -192,7 +188,6 @@ export async function createNodeHost<Event = unknown>(
     clock?: Clock;
     timer?: Timer;
     telemetry?: Telemetry;
-    workflowRuntime?: WorkflowRuntime;
     http?: HttpServer & AsyncDisposable & Readonly<{ locations: readonly string[] }>;
   } = {};
   try {
@@ -275,9 +270,6 @@ export async function createNodeHost<Event = unknown>(
       result.telemetry = {
         record() {},
       };
-    }
-    if (requested.has("workflowRuntime")) {
-      result.workflowRuntime = createDevelopmentWorkflowRuntime();
     }
     if (requested.has("http")) {
       result.http = await createNodeHttpServer({

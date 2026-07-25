@@ -810,23 +810,50 @@ async function retainTargetCache(cacheRoot: string, workspace: string): Promise<
   const marker = resolve(cacheRoot, ".retained");
   const previous = await stat(marker).catch(() => undefined);
   if (previous && Date.now() - previous.mtimeMs < CACHE_RETENTION_INTERVAL_MS) return;
-  const target = resolve(cacheRoot, "target");
-  const configured = Number(
-    process.env.KIT_PRODUCTION_TARGET_CACHE_BYTES ?? DEFAULT_TARGET_CACHE_BYTES,
-  );
-  const limit =
-    Number.isSafeInteger(configured) && configured > 0 ? configured : DEFAULT_TARGET_CACHE_BYTES;
-  if ((await directoryBytes(target)) > limit) {
-    const cleaned = await command(
-      "cargo",
-      ["clean", "--manifest-path", resolve(workspace, "Cargo.toml"), "--target-dir", target],
-      workspace,
+  const lock = resolve(cacheRoot, ".retention-lock");
+  if (!(await acquireRetentionLock(lock))) return;
+  try {
+    const retained = await stat(marker).catch(() => undefined);
+    if (retained && Date.now() - retained.mtimeMs < CACHE_RETENTION_INTERVAL_MS) return;
+    const target = resolve(cacheRoot, "target");
+    const configured = Number(
+      process.env.KIT_PRODUCTION_TARGET_CACHE_BYTES ?? DEFAULT_TARGET_CACHE_BYTES,
     );
-    if (cleaned.code !== 0) {
-      throw new Error(`Cannot retain the generated native cache:\n${cleaned.stderr}`);
+    const limit =
+      Number.isSafeInteger(configured) && configured > 0 ? configured : DEFAULT_TARGET_CACHE_BYTES;
+    if ((await directoryBytes(target)) > limit) {
+      const cleaned = await command(
+        "cargo",
+        ["clean", "--manifest-path", resolve(workspace, "Cargo.toml"), "--target-dir", target],
+        workspace,
+      );
+      if (cleaned.code !== 0) {
+        throw new Error(`Cannot retain the generated native cache:\n${cleaned.stderr}`);
+      }
     }
+    await writeFile(marker, String(Date.now()));
+  } finally {
+    await rm(lock, { force: true, recursive: true });
   }
-  await writeFile(marker, String(Date.now()));
+}
+
+async function acquireRetentionLock(lock: string): Promise<boolean> {
+  try {
+    await mkdir(lock);
+    return true;
+  } catch (error) {
+    if (!hasCode(error, "EEXIST")) throw error;
+  }
+  const existing = await stat(lock).catch(() => undefined);
+  if (existing && Date.now() - existing.mtimeMs < CACHE_RETENTION_INTERVAL_MS) return false;
+  await rm(lock, { force: true, recursive: true });
+  try {
+    await mkdir(lock);
+    return true;
+  } catch (error) {
+    if (hasCode(error, "EEXIST")) return false;
+    throw error;
+  }
 }
 
 async function directoryBytes(directory: string): Promise<number> {
@@ -914,6 +941,10 @@ function duplicate(values: readonly string[], label: string): void {
 
 function digest(value: string): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function hasCode(error: unknown, code: string): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === code;
 }
 
 async function exists(path: string): Promise<boolean> {

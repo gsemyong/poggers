@@ -28,9 +28,8 @@ not become runtime dependencies.
 
 Recursive data values, a generic cancellation primitive, independently detached tasks,
 persistent Program-local state, generators, and general resource-valued operations are not in
-profile v0. A Feature factory may expose a typed lifecycle value with compiler-known meaning;
-Workflow cancellation branches are one such value and still lower through ordinary portable
-callbacks. Unsupported resource shapes are rejected.
+profile v0. A Feature factory may expose a typed lifecycle value with compiler-known meaning.
+Unsupported resource shapes are rejected.
 
 The profile excludes ambient globals, dynamic imports and property access, classes, prototypes,
 reflection, `eval`, generators, shared mutable module state, and unbounded JavaScript
