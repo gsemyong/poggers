@@ -1,6 +1,7 @@
 node_modules/
 dist/
 target/
+*.tsbuildinfo
 .kit/
 .data/
 .DS_Store

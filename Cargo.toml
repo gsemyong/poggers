@@ -1,5 +1,6 @@
 [workspace]
 resolver = "3"
+exclude = ["dist"]
 members = [
   "src/features/data/providers/server/rust",
   "src/features/identity/providers/server/rust",

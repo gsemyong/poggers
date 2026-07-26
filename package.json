@@ -20,11 +20,16 @@
     "docs/features.md",
     "docs/portable-typescript.md",
     "docs/presentation.md",
+    "config",
+    "examples",
     "template",
     "template/.gitignore",
-    "tsconfig.json"
+    "tsconfig.json",
+    ".oxfmtrc.json",
+    ".oxlintrc.json"
   ],
   "type": "module",
+  "sideEffects": false,
   "types": "./dist/src/index.d.ts",
   "exports": {
     ".": {
@@ -105,27 +110,22 @@
     "./tsconfig": "./tsconfig.json"
   },
   "scripts": {
-    "api:check": "nub scripts/api.ts",
-    "api:update": "nub run build && nub scripts/api.ts --write",
     "build": "nub scripts/build.ts",
     "check:distribution": "tsc -p src/platforms/web/adapter/fixtures/request-render/tsconfig.json",
-    "check:workspaces": "tsc -p template/tsconfig.json && tsc -p examples/authenticated-crud/tsconfig.json && tsc -p playground/tsconfig.json",
+    "check:examples": "tsc --noEmit -p examples/basic && tsc --noEmit -p examples/authenticated-crud && tsc --noEmit -p examples/presentation && vitest run --tagsFilter='!production' examples && vitest run --tagsFilter=package src/cli.spec.ts",
     "check:compiler": "vitest run --tagsFilter=compiler src/compiler src/platforms/server/adapter/rust",
     "check:providers": "vitest run --tagsFilter=provider src/features src/platforms/server && cargo test --workspace",
-    "check:presentation": "nub run presentation:check && vitest run src/core/ui/presentation.spec.ts src/compiler/presentation.spec.ts src/platforms/web/presentation src/platforms/web/adapter/presentation",
-    "check:production": "KIT_NATIVE_PROFILE=release vitest run --tagsFilter=production",
-    "dev": "nub src/cli.ts dev --dir playground",
-    "dev:example": "nub src/cli.ts dev --dir examples/authenticated-crud",
+    "check:presentation": "vitest run src/core/ui/presentation.spec.ts src/compiler/presentation.spec.ts src/platforms/web/presentation src/platforms/web/adapter/presentation",
+    "check:production": "KIT_NATIVE_PROFILE=release vitest run --tagsFilter=production src examples",
+    "dev": "nub src/cli.ts dev --dir examples/basic",
     "fmt": "oxfmt",
     "fmt:check": "oxfmt --check",
-    "lint": "oxlint --disable-nested-config src scripts template examples playground vitest.config.ts",
-    "presentation:check": "nub scripts/presentation.ts",
-    "presentation:update": "nub scripts/presentation.ts --write",
+    "lint": "oxlint --disable-nested-config src scripts config template examples vitest.config.ts",
     "release": "nub scripts/release.ts",
     "release:check": "nub scripts/release.ts --check",
-    "test": "vitest run --tagsFilter='!compiler && !provider && !production'",
+    "test": "vitest run --tagsFilter='!compiler && !package && !provider && !production' --exclude='examples/**'",
     "typecheck": "tsc --noEmit",
-    "check": "nub run typecheck && nub run lint && nub run fmt:check && nub run test && nub run check:compiler && nub run check:providers && nub run check:presentation && nub run build && nub run check:workspaces && nub run api:check && nub run check:distribution && nub run check:production"
+    "check": "nub run typecheck && nub run lint && nub run fmt:check && nub run test && nub run check:compiler && nub run check:providers && nub run check:presentation && nub run build && nub run check:examples && nub run check:distribution && nub run check:production"
   },
   "dependencies": {
     "@nats-io/jetstream": "3.4.0",
@@ -140,14 +140,11 @@
     "vitest": "^4.1.10"
   },
   "devDependencies": {
-    "@mdn/browser-compat-data": "8.0.7",
     "@types/node": "^26.1.1",
-    "@webref/css": "8.7.0",
     "fast-check": "^4.9.0",
     "oxfmt": "^0.60.0",
     "oxlint": "^1.75.0",
-    "typescript": "^7.0.2",
-    "web-features": "3.34.1"
+    "typescript": "^7.0.2"
   },
   "engines": {
     "node": ">=26.0.0"

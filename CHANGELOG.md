@@ -1,12 +1,8 @@
 # Changes
 
-This is the single history of externally observable framework changes. When a
-public declaration changes, update this file and record a matching reviewed
-intent with:
-
-```sh
-nub run api:update -- --intent "feature: Describe the public change."
-```
+This is the single history of externally observable framework changes. Update
+it whenever public behavior, declarations, generated artifacts, or migration
+requirements change.
 
 ## Unreleased
 
@@ -37,3 +33,5 @@ nub run api:update -- --intent "feature: Describe the public change."
 - Organized Features, Platforms, adapters, deployment, and Rust providers by
   semantic ownership, and added reusable Dependency conformance suites for
   development and production providers.
+- Consolidated project creation around one shared scaffold and selectable,
+  executable example Systems.

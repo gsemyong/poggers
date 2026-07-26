@@ -12,8 +12,8 @@ import {
   type WebStyle,
 } from "kit/web";
 
-import type { Web } from "../apps/main/app";
-import type { SheetState } from "../features/dashboard";
+import type { Web } from "@/apps/main/app";
+import type { SheetState } from "@/features/dashboard";
 
 const workspaceContainer = createContainer("workspace");
 const sheetContainer = createContainer("sheet");

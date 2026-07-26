@@ -14,18 +14,20 @@ src/
   system.ts       the only compilation root
 ```
 
-Run it from the repository root:
+In a workspace created from this example, run:
 
 ```sh
-nub run dev:example
+nub run dev
 ```
 
 Open `http://localhost:3000/auth`. Development data is retained under `.data/`.
 
-Build the production System with:
+Build the production System with `nub run build`.
+
+While contributing to Kit itself, run the example from the repository root:
 
 ```sh
-nub src/cli.ts build --dir examples/authenticated-crud
+nub src/cli.ts dev --dir examples/authenticated-crud
 ```
 
 The System specification covers authentication, authorization isolation,
@@ -33,6 +35,3 @@ optimistic local-first CRUD, synchronization, persistence across restart,
 validated routing, production rendering, and generated native execution. The
 adjacent task specification tests the Entity semantics directly without HTTP
 or credentials.
-
-See [Architecture](../../docs/architecture.md) and
-[Feature Factories](../../docs/features.md) for the framework contracts.

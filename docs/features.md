@@ -181,7 +181,7 @@ The verification ladder follows ownership:
 | Native provider        | targeted Cargo check/test                         |
 | Web UI or Presentation | web lowering and browser conformance              |
 | Platform realization   | targeted development or production artifact test  |
-| Public package surface | API, template, example, and playground checks     |
+| Public package surface | package, creation, example, and release checks    |
 
 `nub run check` is the complete repository gate. It runs after a coherent
 milestone, not after every Feature edit.

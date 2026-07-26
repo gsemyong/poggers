@@ -2,6 +2,7 @@ node_modules/
 dist/
 target/
 Cargo.lock
+*.tsbuildinfo
 .kit/
 .data/
 .DS_Store

@@ -191,6 +191,7 @@ describe("architecture import graph", () => {
   test("keeps public package source resolution consistent", async () => {
     const root = resolve(import.meta.dirname, "..");
     const packageManifest = JSON.parse(await readFile(resolve(root, "package.json"), "utf8")) as {
+      sideEffects?: boolean;
       exports: Readonly<
         Record<string, string | Readonly<{ source?: string; types?: string; default?: string }>>
       >;
@@ -207,6 +208,7 @@ describe("architecture import graph", () => {
       .filter((name) => name === "kit" || name.startsWith("kit/"))
       .sort();
 
+    expect(packageManifest.sideEffects).toBe(false);
     expect(aliases).toEqual(sourceExports);
     expect(paths).toEqual(sourceExports);
     for (const [specifier, source] of Object.entries(packageSources)) {

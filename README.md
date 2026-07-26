@@ -24,16 +24,13 @@ executes its `kit` binary, and caches it. `kit create` also installs the new
 workspace. Passing the same immutable package URL to `--package` pins the
 generated System to the framework release that created it.
 
-The command creates the canonical System workspace:
+Creation combines the shared project scaffold with one executable example.
+`basic` is the default; select any shipped example explicitly:
 
-```text
-src/
-  features/
-    shell.tsx
-  presentations/
-    clean.ts
-  system.spec.ts
-  system.ts
+```sh
+nubx -y -p "$package" kit create my-system --package "$package" --example basic
+nubx -y -p "$package" kit create my-system --package "$package" --example authenticated-crud
+nubx -y -p "$package" kit create my-system --package "$package" --example presentation
 ```
 
 `system.ts` is the only compilation root. Apps and their platform interfaces
@@ -42,15 +39,14 @@ builds the System graph once and adapters realize only the requested outputs.
 
 ## Develop The Kit
 
-This repository keeps three workspace roles distinct:
+This repository keeps two source roles distinct:
 
-- `template/` is the single source copied by `kit create`;
-- `playground/` is the interactive lab for developing Features and
-  Presentations;
-- `examples/authenticated-crud/` is the one representative end-to-end System.
+- `template/` contains only package and toolchain setup shared by every System;
+- `examples/` contains complete Systems used for development, composition,
+  verification, and selectable project creation.
 
-They are not alternate project shapes. All three use the same public API and
-source convention.
+Examples are not throwaway demos. They are the canonical runnable compositions
+we test and polish, and the exact source overlaid by `kit create --example`.
 
 Develop the framework with:
 
@@ -68,11 +64,12 @@ nub run release -- 0.1.0 --dry-run
 nub run release -- 0.1.0
 ```
 
-Run the playground or the authenticated example:
+Run any example:
 
 ```sh
 nub run dev
-nub run dev:example
+nub src/cli.ts dev --dir examples/authenticated-crud
+nub src/cli.ts dev --dir examples/presentation
 ```
 
 See the [architecture](docs/architecture.md), [Feature convention](docs/features.md),

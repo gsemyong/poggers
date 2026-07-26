@@ -5,7 +5,7 @@ import {
   type WebStyle,
 } from "kit/web";
 
-import type { WorkspaceWeb } from "../apps/web";
+import type { WorkspaceWeb } from "@/apps/web";
 
 const parameters = {
   color: {

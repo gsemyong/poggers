@@ -303,17 +303,19 @@ Cross-system verification has an explicitly named `integration.spec.ts`; test
 names never encode incidental technologies through suffixes such as
 `.native.spec.ts`, `.full.spec.ts`, or `.extra.spec.ts`.
 
-The repository has one workspace for each external-development purpose:
+The repository separates shared project setup from executable product source:
 
 ```text
-template/                         source copied by kit create
-playground/                       interactive Feature and Presentation lab
-examples/authenticated-crud/      representative end-to-end System
+template/                         package and toolchain scaffold
+examples/basic/                   smallest complete System
+examples/authenticated-crud/      representative multi-Feature System
+examples/presentation/             difficult web Presentation fixture
 ```
 
-These are not alternate architectures. They use the same source convention and
-public API. Keeping the template in this repository lets one framework release
-atomically version and verify the exact workspace it creates.
+Every example is a canonical runnable composition used for development,
+verification, and `kit create --example`. Creation overlays one selected
+example onto the scaffold, so there is no separate demo implementation to
+drift.
 
 Platform adapters turn Program meaning into development sessions or immutable
 production artifacts. Deployment adapters consume those artifacts and realize
@@ -351,8 +353,8 @@ kit/deployment/oci
 ```
 
 Compiler and runtime implementation modules remain private. Public declarations
-are recorded in `docs/api.json`; an intentional change requires one
-`CHANGELOG.md` entry and a matching API intent.
+are covered by type fixtures, example compilation, package verification, and
+release smoke tests. Intentional public changes require a `CHANGELOG.md` entry.
 
 ## Verification
 
@@ -421,35 +423,6 @@ implementations.
 Generated databases, caches, Rust targets, build output, and temporary source
 are ignored and never part of the architecture.
 
-### Organization Migration Ledger
-
-The following checklist records migration evidence:
-
-- [x] move the shared Cargo workspace and lockfile from `src/` to the repository root;
-- [x] separate generic Rust lowering and the generated-code runtime from
-      server artifact assembly and its content-addressed cache;
-- [x] replace `development`, `production`, and `native` source ownership with
-      explicit Platform, adapter, and implementation-language ownership;
-- [x] turn every shipped Feature factory into one self-contained directory;
-- [x] place every Feature-owned Dependency provider under its Feature,
-      Platform, and implementation language;
-- [x] separate the local Deployment adapter from OCI artifact packaging;
-- [x] define reusable TypeScript conformance projections and run them against
-      development and production DataStore, AuthenticationBackend, and Timer providers;
-- [x] remove duplicated semantics from migrated Rust tests while retaining required
-      compile, safety, and implementation-internal checks;
-- [x] remove Feature tests that directly compile generated Rust Programs;
-- [x] replace technology-suffixed cross-system tests with one deliberately
-      owned integration/conformance fixture where the guarantee is unique;
-- [x] make validation commands follow affected ownership and keep Cargo out of
-      the ordinary TypeScript loop;
-- [x] update package exports, build packaging, documentation, examples, and
-      architecture checks to the final hierarchy;
-- [x] run focused gates after each ownership move, then one complete repository
-      and production release gate;
-- [x] review the final tree for obsolete aliases, compatibility shims,
-      duplicate fixtures, and superseded documentation.
-
 ## Compatibility
 
 Kit has three compatibility boundaries:
@@ -463,5 +436,6 @@ Platform contract it declares. Development and production realizations pass
 the same contract suites. Unsupported portable syntax is a compilation error,
 never a silent runtime fallback.
 
-The package is private and pre-1.0. Public declaration changes still require a
-`CHANGELOG.md` entry and an updated `docs/api.json`.
+The package is private and pre-1.0. Public changes still require a
+`CHANGELOG.md` entry and the affected type, package, example, and release
+checks.

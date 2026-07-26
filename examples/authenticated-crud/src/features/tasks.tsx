@@ -17,8 +17,8 @@ import {
   mountFeature,
 } from "kit/web";
 
-import type { WorkspaceWeb } from "../apps/web";
-import type { User } from "./identity";
+import type { WorkspaceWeb } from "@/apps/web";
+import type { User } from "@/features/identity";
 
 export type Task = Readonly<{
   id: string;

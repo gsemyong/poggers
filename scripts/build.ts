@@ -91,16 +91,19 @@ await build({
   },
 });
 const rustCompilerSource = resolve(sourceDir, "compiler/rust");
-const rustCompilerOutput = resolve(distDir, "src/compiler/rust");
 for (const pattern of ["runtime/Cargo.toml", "runtime/src/**/*.rs"]) {
   for await (const file of glob(pattern, { cwd: rustCompilerSource })) {
-    const output = resolve(rustCompilerOutput, file);
-    await mkdir(dirname(output), { recursive: true });
-    await copyFile(resolve(rustCompilerSource, file), output);
+    for (const outputRoot of [
+      resolve(distDir, "src/compiler/rust"),
+      resolve(distDir, "source/compiler/rust"),
+    ]) {
+      const output = resolve(outputRoot, file);
+      await mkdir(dirname(output), { recursive: true });
+      await copyFile(resolve(rustCompilerSource, file), output);
+    }
   }
 }
 const serverRustSource = resolve(sourceDir, "platforms/server/adapter/rust");
-const serverRustOutput = resolve(distDir, "src/platforms/server/adapter/rust");
 for (const pattern of [
   "providers/**/Cargo.toml",
   "providers/**/src/**/*.rs",
@@ -108,9 +111,14 @@ for (const pattern of [
   "distribution/src/**/*.rs",
 ]) {
   for await (const file of glob(pattern, { cwd: serverRustSource })) {
-    const output = resolve(serverRustOutput, file);
-    await mkdir(dirname(output), { recursive: true });
-    await copyFile(resolve(serverRustSource, file), output);
+    for (const outputRoot of [
+      resolve(distDir, "src/platforms/server/adapter/rust"),
+      resolve(distDir, "source/platforms/server/adapter/rust"),
+    ]) {
+      const output = resolve(outputRoot, file);
+      await mkdir(dirname(output), { recursive: true });
+      await copyFile(resolve(serverRustSource, file), output);
+    }
   }
 }
 await assertDistribution();

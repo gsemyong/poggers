@@ -1,8 +1,8 @@
 import type { Program } from "kit";
 import type { BrowserMainThread, Child, Navigation, WebFeature, WebRoute } from "kit/web";
 
-import type { WorkspaceWeb } from "../apps/web";
-import type { IdentityClient, Session } from "./identity";
+import type { WorkspaceWeb } from "@/apps/web";
+import type { IdentityClient, Session } from "@/features/identity";
 
 type AuthMode = "sign-in" | "sign-up";
 type AuthPhase = "loading" | "signed-out" | "signed-in";

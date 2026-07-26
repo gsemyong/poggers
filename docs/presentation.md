@@ -252,25 +252,23 @@ the single-way invariant unverifiable.
 
 ## Coverage Contract
 
-Future web Presentation work is driven by a checked coverage ledger:
+Future web Presentation work starts from a concrete visual or experiential
+outcome that the current language cannot express. CSS and web standards are
+research inputs for finding such gaps, not a property-by-property public
+vocabulary or a committed machine inventory.
 
-1. Inventory standards using the curated
-   [`@webref/css`](https://github.com/w3c/webref) data.
-2. Attach browser support and Baseline status using
-   [Web Features](https://github.com/web-platform-dx/web-features) and
-   [MDN browser compatibility data](https://github.com/mdn/browser-compat-data).
-3. Group standards records into relevant product outcomes and classify each
-   outcome as `complete`, `partial`, `missing`, or `delegated`.
-4. Link every `complete` outcome to its existing semantic declaration path,
-   lowering, realization, and test evidence.
-5. Generate a gap report that rejects conflicting public paths, unsupported
-   claims, and missing evidence without turning standards identifiers into API.
-6. Test authored meaning, canonical IR, emitted artifacts, support fallbacks,
-   and browser realization independently.
+Every claimed capability must link four pieces of executable evidence:
 
-The ledger is a build input, not a package dependency at runtime. Experimental
-features remain explicit and versioned. "Full parity" becomes a report against
-a named standards and support snapshot, not a permanent unqualified promise.
+1. one semantic declaration path;
+2. canonical compiler meaning;
+3. emitted web artifacts;
+4. browser realization for the difficult representative fixture.
+
+Responsive composition, typography, overlays, assets, accessibility, motion,
+interruption, layout continuity, and performance remain the standing
+falsification corpus. A new primitive is justified only by a failing fixture
+that cannot be expressed without it. This preserves one semantic language and
+keeps standards databases out of both the package and repository state.
 
 ## Compilation Principles
 

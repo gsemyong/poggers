@@ -8,9 +8,7 @@
     "deploy": "kit deploy",
     "typecheck": "kit typecheck",
     "test": "kit test",
-    "lint": "oxlint src",
-    "fmt": "oxfmt",
-    "fmt:check": "oxfmt --check",
+    "format": "kit format",
     "check": "kit check"
   },
   "dependencies": {

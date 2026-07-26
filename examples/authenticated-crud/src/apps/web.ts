@@ -1,10 +1,10 @@
 import type { PlatformInterfaceContract } from "kit";
 import { createWebInterface, type WebPlatform } from "kit/web";
 
-import { identity, type IdentityBrowserFeature } from "../features/identity";
-import { createShell, type ShellFeature } from "../features/shell";
-import { tasks, type TasksFeature } from "../features/tasks";
-import { clean } from "../presentations/clean";
+import { identity, type IdentityBrowserFeature } from "@/features/identity";
+import { createShell, type ShellFeature } from "@/features/shell";
+import { tasks, type TasksFeature } from "@/features/tasks";
+import { clean } from "@/presentations/clean";
 
 type WebContract = Readonly<{
   Features: {

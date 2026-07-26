@@ -5,7 +5,7 @@ import type { EntitySnapshot } from "kit";
 import { testSystem } from "kit/testing";
 import { expect } from "vitest";
 
-import type { Task } from "./features/tasks";
+import type { Task } from "@/features/tasks";
 
 testSystem({
   name: "authenticated CRUD System",

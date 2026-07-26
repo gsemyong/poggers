@@ -20,7 +20,15 @@ import { packageSourceAliases } from "@/package";
 import { platformAdapters } from "@/platforms";
 import { buildSystem, developSystem, resolveSystemRealization } from "@/realization";
 
-const valueFlags = new Set(["deployment", "dir", "name", "outdir", "outfile", "package"]);
+const valueFlags = new Set([
+  "deployment",
+  "dir",
+  "example",
+  "name",
+  "outdir",
+  "outfile",
+  "package",
+]);
 const ignoredTemplateEntries = new Set([
   ".data",
   ".kit",
@@ -30,6 +38,12 @@ const ignoredTemplateEntries = new Set([
   "nub.lock",
   "target",
 ]);
+const ignoredExampleEntries = new Set([
+  ...ignoredTemplateEntries,
+  "tsconfig.json",
+  "tsconfig.tsbuildinfo",
+]);
+const workspaceDirectories = ["src/apps", "src/features", "src/presentations"] as const;
 
 export async function runCli(
   arguments_ = process.argv.slice(2),
@@ -73,16 +87,54 @@ export async function runCli(
       resolveSystemRealization(directory, adapters, app ? { app } : {});
     }
   } else if (command === "test") {
+    const framework = await findPackageDirectory(import.meta.dirname);
     process.exitCode = await run(
-      [resolve(directory, "node_modules/.bin/vitest"), "run", "--passWithNoTests"],
+      [
+        resolve(directory, "node_modules/.bin/vitest"),
+        "run",
+        "--root",
+        directory,
+        "--config",
+        resolve(framework, "config/vitest.ts"),
+        "--passWithNoTests",
+      ],
+      directory,
+    );
+  } else if (command === "format") {
+    const framework = await findPackageDirectory(import.meta.dirname);
+    process.exitCode = await run(
+      [
+        resolve(directory, "node_modules/.bin/oxfmt"),
+        "--config",
+        resolve(framework, ".oxfmtrc.json"),
+      ],
       directory,
     );
   } else if (command === "check") {
+    const framework = await findPackageDirectory(import.meta.dirname);
     const commands = [
       [resolve(directory, "node_modules/.bin/tsc"), "-p", "tsconfig.json"],
-      [resolve(directory, "node_modules/.bin/oxlint"), "src"],
-      [resolve(directory, "node_modules/.bin/oxfmt"), "--check"],
-      [resolve(directory, "node_modules/.bin/vitest"), "run", "--passWithNoTests"],
+      [
+        resolve(directory, "node_modules/.bin/oxlint"),
+        "--config",
+        resolve(framework, ".oxlintrc.json"),
+        "src",
+      ],
+      [
+        resolve(directory, "node_modules/.bin/oxfmt"),
+        "--config",
+        resolve(framework, ".oxfmtrc.json"),
+        "--check",
+      ],
+      [
+        resolve(directory, "node_modules/.bin/vitest"),
+        "run",
+        "--root",
+        directory,
+        "--config",
+        resolve(framework, "config/vitest.ts"),
+        "--passWithNoTests",
+      ],
     ];
     for (const current of commands) {
       const code = await run(current, directory);
@@ -94,7 +146,7 @@ export async function runCli(
     resolveSystemRealization(directory, adapters, app ? { app } : {});
   } else {
     console.error(
-      "Usage: kit <dev [app]|build [app]|deploy [app] [--plan|--status|--remove]|typecheck|test|check|create>",
+      "Usage: kit <dev [app]|build [app]|deploy [app] [--plan|--status|--remove]|typecheck|test|format|check|create>",
     );
     process.exitCode = 1;
   }
@@ -214,6 +266,7 @@ export async function createProject(arguments_: readonly string[]): Promise<void
   const install = !arguments_.includes("--no-install");
   const packageLocation = readFlag(arguments_, "package") ?? "latest";
   const name = normalizeName(readFlag(arguments_, "name") ?? basename(target));
+  const exampleName = readFlag(arguments_, "example") ?? "basic";
 
   if (!name) throw new TypeError("Project name must contain a letter or number.");
 
@@ -227,16 +280,36 @@ export async function createProject(arguments_: readonly string[]): Promise<void
     }
   }
 
-  const source = await findTemplate(import.meta.dirname);
-  for (const path of await listFiles(source)) {
-    const file = resolve(target, path);
-    const contents = renderTemplate(path, await readFile(resolve(source, path), "utf8"), {
-      name,
-      packageLocation,
-    });
-    await mkdir(dirname(file), { recursive: true });
-    await writeFile(file, contents);
+  const framework = await findPackageDirectory(import.meta.dirname);
+  const examples = resolve(framework, "examples");
+  const available = (await readdir(examples, { withFileTypes: true }))
+    .filter((entry) => entry.isDirectory())
+    .map(({ name }) => name)
+    .sort();
+  if (!available.includes(exampleName)) {
+    throw new TypeError(
+      `Unknown example ${JSON.stringify(exampleName)}. Available examples: ${available.join(", ")}.`,
+    );
   }
+  const example = resolve(examples, exampleName);
+
+  for (const [source, ignored] of [
+    [resolve(framework, "template"), ignoredTemplateEntries],
+    [example, ignoredExampleEntries],
+  ] as const) {
+    for (const path of await listFiles(source, "", ignored)) {
+      const file = resolve(target, path);
+      const contents = renderTemplate(path, await readFile(resolve(source, path), "utf8"), {
+        name,
+        packageLocation,
+      });
+      await mkdir(dirname(file), { recursive: true });
+      await writeFile(file, contents);
+    }
+  }
+  await Promise.all(
+    workspaceDirectories.map((directory) => mkdir(resolve(target, directory), { recursive: true })),
+  );
 
   if (install) {
     const code = await run(["nub", "install"], target);
@@ -245,27 +318,33 @@ export async function createProject(arguments_: readonly string[]): Promise<void
   console.log(`created ${name} in ${target}`);
 }
 
-async function findTemplate(start: string): Promise<string> {
+async function findPackageDirectory(start: string): Promise<string> {
   for (let directory = start; ; directory = dirname(directory)) {
-    const candidate = resolve(directory, "template");
     try {
-      await readdir(candidate);
-      return candidate;
+      await Promise.all([
+        readdir(resolve(directory, "template")),
+        readdir(resolve(directory, "examples")),
+      ]);
+      return directory;
     } catch (error) {
       if (!hasCode(error, "ENOENT")) throw error;
     }
     const parent = dirname(directory);
-    if (parent === directory) throw new Error("Cannot locate the System template.");
+    if (parent === directory) throw new Error("Cannot locate Kit package resources.");
   }
 }
 
-async function listFiles(directory: string, prefix = ""): Promise<string[]> {
+async function listFiles(
+  directory: string,
+  prefix = "",
+  ignored = ignoredTemplateEntries,
+): Promise<string[]> {
   const files = await Promise.all(
     (await readdir(resolve(directory, prefix), { withFileTypes: true }))
-      .filter((entry) => !ignoredTemplateEntries.has(entry.name))
+      .filter((entry) => !ignored.has(entry.name))
       .map(async (entry) => {
         const path = prefix ? `${prefix}/${entry.name}` : entry.name;
-        return entry.isDirectory() ? listFiles(directory, path) : [path];
+        return entry.isDirectory() ? listFiles(directory, path, ignored) : [path];
       }),
   );
   return files.flat().sort();
@@ -285,23 +364,11 @@ function renderTemplate(
     manifest.dependencies["kit"] = values.packageLocation;
     return `${JSON.stringify(manifest, undefined, 2)}\n`;
   }
-  if (path === "tsconfig.json") {
-    return `{
-  "extends": "kit/tsconfig",
-  "compilerOptions": {
-    "paths": {
-      "@/*": ["\${configDir}/src/*"]
-    },
-    "types": ["node"]
-  }
-}
-`;
-  }
   if (path === "src/system.ts") {
-    return contents.replace('metadata: { name: "Basic" }', `metadata: { name: "${values.name}" }`);
-  }
-  if (path === "src/features/shell.tsx") {
-    return contents.replace("<Title>Basic</Title>", `<Title>${values.name}</Title>`);
+    return contents.replace(
+      /metadata:\s*{\s*name:\s*"[^"]*"\s*}/,
+      `metadata: { name: "${values.name}" }`,
+    );
   }
   return contents;
 }

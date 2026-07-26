@@ -1,6 +1,6 @@
 import { createSystem } from "kit";
 
-import { main } from "./apps/main/app";
+import { main } from "@/apps/main/app";
 
 export default createSystem({
   metadata: { name: "Web Presentation" },

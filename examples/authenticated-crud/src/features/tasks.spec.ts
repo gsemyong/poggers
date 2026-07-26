@@ -1,7 +1,7 @@
 import { createEntityFixture } from "kit/testing";
 import { describe, expect, test } from "vitest";
 
-import { taskEntity } from "./tasks";
+import { taskEntity } from "@/features/tasks";
 
 describe("tasks Feature", () => {
   test("exposes the generated semantic API without infrastructure", async () => {

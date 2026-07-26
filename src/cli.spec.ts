@@ -27,152 +27,160 @@ afterEach(async () => {
 });
 
 describe("project template", () => {
-  test("creates the complete minimal System convention", { timeout: 60_000 }, async () => {
-    const parent = await mkdtemp(resolve(tmpdir(), "kit-create-"));
-    directories.push(parent);
-    const target = resolve(parent, "example");
-    await createProject([target, "--no-install"]);
+  test(
+    "creates the complete minimal System convention",
+    { tags: ["package"], timeout: 60_000 },
+    async () => {
+      const parent = await mkdtemp(resolve(tmpdir(), "kit-create-"));
+      directories.push(parent);
+      const target = resolve(parent, "example");
+      await createProject([target, "--no-install"]);
 
-    expect((await readdir(target)).sort()).toEqual([
-      ".gitignore",
-      ".node-version",
-      ".oxfmtrc.json",
-      ".oxlintrc.json",
-      "mise.toml",
-      "package.json",
-      "src",
-      "tsconfig.json",
-      "vitest.config.ts",
-    ]);
-    expect((await readdir(resolve(target, "src"))).sort()).toEqual([
-      "apps",
-      "deployment.ts",
-      "features",
-      "presentations",
-      "system.spec.ts",
-      "system.ts",
-    ]);
-    expect(await readdir(resolve(target, "src/apps"))).toEqual(["main"]);
-    expect(await readdir(resolve(target, "src/apps/main"))).toEqual(["app.tsx"]);
-    expect(await readdir(resolve(target, "src/features"))).toEqual(["shell.tsx"]);
-    expect(await readdir(resolve(target, "src/presentations"))).toEqual(["clean.ts"]);
-    expect(await readFile(resolve(target, "src/system.ts"), "utf8")).toContain(
-      "export default createSystem({",
-    );
-    expect(await readFile(resolve(target, "src/system.spec.ts"), "utf8")).toContain("testSystem({");
-    expect(await readFile(resolve(target, "src/features/shell.tsx"), "utf8")).toContain(
-      "createFeature<ShellFeature>",
-    );
-    expect(await readFile(resolve(target, "src/presentations/clean.ts"), "utf8")).toContain(
-      "satisfies WebPresentation<Web, typeof parameters>",
-    );
-    const packageJson = JSON.parse(await readFile(resolve(target, "package.json"), "utf8")) as {
-      dependencies: Record<string, string>;
-      devDependencies: Record<string, string>;
-      engines: { node: string };
-      packageManager: string;
-      scripts: Record<string, string>;
-    };
-    expect(Object.keys(packageJson.scripts)).toEqual([
-      "dev",
-      "build",
-      "deploy",
-      "typecheck",
-      "test",
-      "lint",
-      "fmt",
-      "fmt:check",
-      "check",
-    ]);
-    expect(packageJson.dependencies).toEqual({ kit: "latest" });
-    expect(packageJson.devDependencies["@types/node"]).toBe("^26.1.1");
-    expect(packageJson.engines.node).toBe(">=26.0.0");
-    expect(packageJson.packageManager).toBe("nub@0.4.13");
-    expect(await readFile(resolve(target, ".node-version"), "utf8")).toBe("26.5.0\n");
-    expect(await readFile(resolve(target, "mise.toml"), "utf8")).toContain(
-      '"github:nubjs/nub" = "0.4.13"',
-    );
-    expect(await readFile(resolve(target, "mise.toml"), "utf8")).toContain(
-      'rust = { version = "1.97.1", components = ["rustfmt"] }',
-    );
-    expect(await readFile(resolve(target, ".gitignore"), "utf8")).not.toContain("app.d.ts");
-    expect(
-      await run(
-        resolve(import.meta.dirname, "../node_modules/.bin/oxfmt"),
-        ["--check", "."],
-        target,
-      ),
-    ).toBe(0);
+      expect((await readdir(target)).sort()).toEqual([
+        ".gitignore",
+        ".node-version",
+        "README.md",
+        "mise.toml",
+        "package.json",
+        "src",
+        "tsconfig.json",
+      ]);
+      expect((await readdir(resolve(target, "src"))).sort()).toEqual([
+        "apps",
+        "deployment.ts",
+        "features",
+        "presentations",
+        "system.spec.ts",
+        "system.ts",
+      ]);
+      expect(await readdir(resolve(target, "src/apps"))).toEqual(["main"]);
+      expect(await readdir(resolve(target, "src/apps/main"))).toEqual(["app.tsx"]);
+      expect(await readdir(resolve(target, "src/features"))).toEqual(["shell.tsx"]);
+      expect(await readdir(resolve(target, "src/presentations"))).toEqual(["clean.ts"]);
+      expect(await readFile(resolve(target, "src/system.ts"), "utf8")).toContain(
+        "export default createSystem({",
+      );
+      expect(await readFile(resolve(target, "src/system.spec.ts"), "utf8")).toContain(
+        "testSystem({",
+      );
+      expect(await readFile(resolve(target, "src/features/shell.tsx"), "utf8")).toContain(
+        "createFeature<ShellFeature>",
+      );
+      expect(await readFile(resolve(target, "src/presentations/clean.ts"), "utf8")).toContain(
+        "satisfies WebPresentation<Web, typeof parameters>",
+      );
+      const packageJson = JSON.parse(await readFile(resolve(target, "package.json"), "utf8")) as {
+        dependencies: Record<string, string>;
+        devDependencies: Record<string, string>;
+        engines: { node: string };
+        packageManager: string;
+        scripts: Record<string, string>;
+      };
+      expect(Object.keys(packageJson.scripts)).toEqual([
+        "dev",
+        "build",
+        "deploy",
+        "typecheck",
+        "test",
+        "format",
+        "check",
+      ]);
+      expect(packageJson.dependencies).toEqual({ kit: "latest" });
+      expect(packageJson.devDependencies["@types/node"]).toBe("^26.1.1");
+      expect(packageJson.engines.node).toBe(">=26.0.0");
+      expect(packageJson.packageManager).toBe("nub@0.4.13");
+      expect(await readFile(resolve(target, ".node-version"), "utf8")).toBe("26.5.0\n");
+      expect(await readFile(resolve(target, "mise.toml"), "utf8")).toContain(
+        '"github:nubjs/nub" = "0.4.13"',
+      );
+      expect(await readFile(resolve(target, "mise.toml"), "utf8")).toContain(
+        'rust = { version = "1.97.1", components = ["rustfmt"] }',
+      );
+      expect(await readFile(resolve(target, ".gitignore"), "utf8")).not.toContain("app.d.ts");
+      const modules = resolve(target, "node_modules");
+      await mkdir(modules, { recursive: true });
+      await mkdir(resolve(modules, ".bin"));
+      await symlink(
+        resolve(import.meta.dirname, "../node_modules/typescript/bin/tsc"),
+        resolve(modules, ".bin/tsc"),
+      );
+      for (const [executable, path] of [
+        ["oxfmt", "oxfmt/bin/oxfmt"],
+        ["oxlint", "oxlint/bin/oxlint"],
+        ["vitest", "vitest/vitest.mjs"],
+      ] as const) {
+        await symlink(
+          resolve(import.meta.dirname, `../node_modules/${path}`),
+          resolve(modules, `.bin/${executable}`),
+        );
+      }
+      await symlink(resolve(import.meta.dirname, ".."), resolve(modules, "kit"), "dir");
+      await mkdir(resolve(modules, "@types"), { recursive: true });
+      await symlink(
+        resolve(import.meta.dirname, "../node_modules/@types/node"),
+        resolve(modules, "@types/node"),
+        "dir",
+      );
+      await symlink(
+        resolve(import.meta.dirname, "../node_modules/vitest"),
+        resolve(modules, "vitest"),
+        "dir",
+      );
 
-    const modules = resolve(target, "node_modules");
-    await mkdir(modules, { recursive: true });
-    await mkdir(resolve(modules, ".bin"));
-    await symlink(
-      resolve(import.meta.dirname, "../node_modules/typescript/bin/tsc"),
-      resolve(modules, ".bin/tsc"),
-    );
-    await symlink(resolve(import.meta.dirname, ".."), resolve(modules, "kit"), "dir");
-    await mkdir(resolve(modules, "@types"), { recursive: true });
-    await symlink(
-      resolve(import.meta.dirname, "../node_modules/@types/node"),
-      resolve(modules, "@types/node"),
-      "dir",
-    );
-    await symlink(
-      resolve(import.meta.dirname, "../node_modules/vitest"),
-      resolve(modules, "vitest"),
-      "dir",
-    );
+      expect(
+        await run(resolve(import.meta.dirname, "../node_modules/.bin/oxlint"), ["src"], target),
+      ).toBe(0);
+      expect(
+        await run(
+          resolve(import.meta.dirname, "../node_modules/.bin/tsc"),
+          ["-p", "tsconfig.json"],
+          target,
+        ),
+      ).toBe(0);
+      await expect(runCli(["typecheck", "--dir", target])).resolves.toBeUndefined();
+      expect(process.exitCode).toBe(0);
+      await expect(runCli(["format", "--dir", target])).resolves.toBeUndefined();
+      expect(process.exitCode).toBe(0);
+      await expect(runCli(["test", "--dir", target])).resolves.toBeUndefined();
+      expect(process.exitCode).toBe(0);
 
-    expect(
-      await run(resolve(import.meta.dirname, "../node_modules/.bin/oxlint"), ["src"], target),
-    ).toBe(0);
-    expect(
-      await run(
-        resolve(import.meta.dirname, "../node_modules/.bin/tsc"),
-        ["-p", "tsconfig.json"],
-        target,
-      ),
-    ).toBe(0);
-    await expect(runCli(["typecheck", "--dir", target])).resolves.toBeUndefined();
-    expect(process.exitCode).toBe(0);
+      await runCli(["build", "--dir", target, "--outdir", "dist"]);
+      await expect(access(resolve(target, ".kit"))).rejects.toHaveProperty("code", "ENOENT");
+      await expect(access(resolve(target, "dist/system.ir.json"))).rejects.toHaveProperty(
+        "code",
+        "ENOENT",
+      );
+      const manifest = compileSystem(resolve(target, "src/system.ts"));
+      expect(manifest.version).toBe(SYSTEM_IR_VERSION);
+      expect(manifest.platforms).toEqual(["web"]);
+      expect(manifest.features.map(({ id }) => id)).toEqual([
+        "feature/main",
+        "feature/main.web",
+        "feature/main.web.shell",
+      ]);
+      expect(manifest.programs).toHaveLength(1);
+      expect(manifest.programs[0]).toMatchObject({
+        id: "program/main.web.browser",
+        environment: { name: "browser-main", platform: "web" },
+        ui: { root: { feature: "main.web.shell", component: "Root" } },
+      });
+      const webOutput = resolve(target, "dist/interfaces/main.web");
+      const html = await readFile(resolve(webOutput, "index.html"), "utf8");
+      expect(html).toContain("@layer kit.reset{");
+      expect(html).toContain(":where(dialog)::backdrop{background:transparent}");
+      expect(html).not.toContain("stylex");
+      expect(html).not.toContain('href="/styles.css"');
+      const entry = html.match(/<script type="module" async src="([^"]+)"/)?.[1];
+      expect(entry).toMatch(/^\/assets\/app-[A-Za-z0-9_-]+\.js$/);
+      await expect(access(resolve(webOutput, entry!.slice(1)))).resolves.toBeUndefined();
+      expect(html).toContain(`<link rel="modulepreload" href="${entry}">`);
+      expect(html.indexOf("@layer kit.reset{")).toBeLessThan(html.indexOf(`src="${entry}"`));
 
-    await runCli(["build", "--dir", target, "--outdir", "dist"]);
-    await expect(access(resolve(target, ".kit"))).rejects.toHaveProperty("code", "ENOENT");
-    await expect(access(resolve(target, "dist/system.ir.json"))).rejects.toHaveProperty(
-      "code",
-      "ENOENT",
-    );
-    const manifest = compileSystem(resolve(target, "src/system.ts"));
-    expect(manifest.version).toBe(SYSTEM_IR_VERSION);
-    expect(manifest.platforms).toEqual(["web"]);
-    expect(manifest.features.map(({ id }) => id)).toEqual([
-      "feature/main",
-      "feature/main.web",
-      "feature/main.web.shell",
-    ]);
-    expect(manifest.programs).toHaveLength(1);
-    expect(manifest.programs[0]).toMatchObject({
-      id: "program/main.web.browser",
-      environment: { name: "browser-main", platform: "web" },
-      ui: { root: { feature: "main.web.shell", component: "Root" } },
-    });
-    const webOutput = resolve(target, "dist/interfaces/main.web");
-    const html = await readFile(resolve(webOutput, "index.html"), "utf8");
-    expect(html).toContain("@layer kit.reset{");
-    expect(html).toContain(":where(dialog)::backdrop{background:transparent}");
-    expect(html).not.toContain("stylex");
-    expect(html).not.toContain('href="/styles.css"');
-    const entry = html.match(/<script type="module" async src="([^"]+)"/)?.[1];
-    expect(entry).toMatch(/^\/assets\/app-[A-Za-z0-9_-]+\.js$/);
-    await expect(access(resolve(webOutput, entry!.slice(1)))).resolves.toBeUndefined();
-    expect(html).toContain(`<link rel="modulepreload" href="${entry}">`);
-    expect(html.indexOf("@layer kit.reset{")).toBeLessThan(html.indexOf(`src="${entry}"`));
-
-    expect(() =>
-      validateUIProgramRoot({ features: { shell: { programs: { browser: {} } } } }, "browser"),
-    ).toThrow("exactly one root Component");
-  });
+      expect(() =>
+        validateUIProgramRoot({ features: { shell: { programs: { browser: {} } } } }, "browser"),
+      ).toThrow("exactly one root Component");
+    },
+  );
 
   test("force replaces the target instead of preserving residue", async () => {
     const parent = await mkdtemp(resolve(tmpdir(), "kit-create-force-"));
@@ -203,14 +211,48 @@ describe("project template", () => {
     expect(await readFile(resolve(target, "src/system.ts"), "utf8")).toContain('from "kit"');
   });
 
-  test("keeps every executable System on the canonical source convention", async () => {
-    const examples = resolve(import.meta.dirname, "../examples");
-    for (const name of await readdir(examples)) {
-      const source = resolve(examples, name, "src");
-      await expectCanonicalSourceRoot(source);
-      expect(compileSystem(resolve(source, "system.ts")).programs.length).toBeGreaterThan(0);
-    }
-  }, 30_000);
+  test("creates any shipped example through the same scaffold", async () => {
+    const parent = await mkdtemp(resolve(tmpdir(), "kit-create-example-"));
+    directories.push(parent);
+    const target = resolve(parent, "operations");
+
+    await createProject([target, "--no-install", "--example", "authenticated-crud"]);
+
+    expect((await readdir(resolve(target, "src/apps"))).sort()).toEqual([
+      "customer",
+      "operations",
+      "web.ts",
+    ]);
+    expect(await readFile(resolve(target, "src/system.ts"), "utf8")).toContain(
+      'metadata: { name: "operations" }',
+    );
+    await expect(access(resolve(target, "src/features/tasks.tsx"))).resolves.toBeUndefined();
+    expect(await readFile(resolve(target, "tsconfig.json"), "utf8")).toContain(
+      '"extends": "kit/tsconfig"',
+    );
+  });
+
+  test("reports the selectable examples", async () => {
+    const parent = await mkdtemp(resolve(tmpdir(), "kit-create-unknown-"));
+    directories.push(parent);
+
+    await expect(
+      createProject([resolve(parent, "example"), "--no-install", "--example", "missing"]),
+    ).rejects.toThrow("Available examples: authenticated-crud, basic, presentation");
+  });
+
+  test(
+    "keeps every executable System on the canonical source convention",
+    { tags: ["package"], timeout: 30_000 },
+    async () => {
+      const examples = resolve(import.meta.dirname, "../examples");
+      for (const name of await readdir(examples)) {
+        const source = resolve(examples, name, "src");
+        await expectCanonicalSourceRoot(source);
+        expect(compileSystem(resolve(source, "system.ts")).programs.length).toBeGreaterThan(0);
+      }
+    },
+  );
 
   test("realizes a custom process-only Platform through an injected adapter", async () => {
     const directory = await mkdtemp(resolve(tmpdir(), "kit-custom-platform-"));
@@ -342,7 +384,7 @@ while true; do sleep 1; done
 
   test(
     "builds one focused App with its shared Program and isolated interface",
-    { timeout: 30_000 },
+    { tags: ["package"], timeout: 30_000 },
     async () => {
       const output = await mkdtemp(resolve(tmpdir(), "kit-focused-cli-"));
       directories.push(output);
