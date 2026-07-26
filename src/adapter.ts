@@ -80,6 +80,15 @@ export type SystemRevisionSource = Readonly<{
 /** Framework development facts emitted by Platform Adapters without choosing a renderer. */
 export type DevelopmentEvent =
   | Readonly<{
+      kind: "phase";
+      phase: "compile" | "start";
+      status: "started" | "completed";
+      platform?: string;
+      durationMs?: number;
+      cache?: "hit" | "miss";
+      work?: SystemCompilationWork;
+    }>
+  | Readonly<{
       kind: "update";
       platform: string;
       scope: "interface" | "program" | "presentation";
@@ -95,6 +104,32 @@ export type DevelopmentEvent =
 
 export type DevelopmentReporter = (event: DevelopmentEvent) => void;
 
+/** Framework production facts emitted by Platform Adapters without choosing a renderer. */
+export type ProductionEvent =
+  | Readonly<{
+      kind: "phase";
+      phase: "compile" | "build" | "release";
+      status: "started" | "completed";
+      platform?: string;
+      durationMs?: number;
+    }>
+  | Readonly<{
+      kind: "artifact";
+      platform: string;
+      identity: string;
+      path: string;
+      cache?: "hit" | "miss";
+      durationMs?: number;
+    }>
+  | Readonly<{
+      kind: "diagnostic";
+      platform?: string;
+      severity: "error" | "warning";
+      message: string;
+    }>;
+
+export type ProductionReporter = (event: ProductionEvent) => void;
+
 export type PlatformDevelopmentInput<Platform extends PlatformContract = PlatformContract> =
   PlatformInput<Platform> &
     Readonly<{
@@ -103,7 +138,7 @@ export type PlatformDevelopmentInput<Platform extends PlatformContract = Platfor
     }>;
 
 export type PlatformProductionInput<Platform extends PlatformContract = PlatformContract> =
-  PlatformInput<Platform> & Readonly<{ output: string }>;
+  PlatformInput<Platform> & Readonly<{ output: string; report?: ProductionReporter }>;
 
 /** A live development realization with one framework-owned cleanup path. */
 export type DevelopmentSession = AsyncDisposable &

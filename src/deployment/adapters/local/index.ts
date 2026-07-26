@@ -34,6 +34,7 @@ type LocalGatewayState = Readonly<{
   pid: number;
   version: number;
   location: string;
+  hosts: readonly string[];
   targets: readonly string[];
   logs: Readonly<{ stdout: string; stderr: string }>;
 }>;
@@ -45,7 +46,7 @@ type PreparedLocalGateway = Omit<LocalGatewayState, "pid" | "targets"> &
     targets: readonly string[];
   }>;
 
-const LOCAL_GATEWAY_VERSION = 1;
+const LOCAL_GATEWAY_VERSION = 2;
 
 export type LocalDeploymentState = DeploymentState &
   Readonly<{
@@ -489,23 +490,32 @@ async function prepareGateways(
   const previous = new Map(
     (observed?.gateways ?? []).map((gateway) => [gateway.identity, gateway]),
   );
+  const interfaces = new Map(
+    plan.interfaces.map((interface_) => [interface_.identity, interface_]),
+  );
   const desired = await Promise.all(
     plan.release.artifacts
       .filter(({ deployment, kind }) => deployment === "asset" && kind === "interface")
       .sort((left, right) => left.identity.localeCompare(right.identity))
-      .map(async (artifact): Promise<PreparedLocalGateway> => {
+      .map(async (artifact, index): Promise<PreparedLocalGateway> => {
         const current = previous.get(artifact.identity);
         previous.delete(artifact.identity);
+        const hosts = Object.freeze([...(interfaces.get(artifact.identity)?.hosts ?? [])]);
         const reusable =
-          current?.version === LOCAL_GATEWAY_VERSION && processAlive(current.pid)
+          current?.version === LOCAL_GATEWAY_VERSION &&
+          JSON.stringify(current.hosts) === JSON.stringify(hosts) &&
+          processAlive(current.pid)
             ? current
             : undefined;
-        const location = reusable?.location ?? `http://127.0.0.1:${await availablePort()}`;
+        const location =
+          reusable?.location ??
+          `http://${hosts[0] ?? `web-${index + 1}.localhost`}:${await availablePort()}`;
         const directory = resolve(stateDirectory, "gateways", readableIdentity(artifact.identity));
         return Object.freeze({
           identity: artifact.identity,
           version: LOCAL_GATEWAY_VERSION,
           location,
+          hosts,
           root: resolve(artifacts, artifact.root),
           targets: reusable?.targets ?? [],
           ...(reusable ? { pid: reusable.pid } : {}),
@@ -616,6 +626,7 @@ async function realizeGateway(
       pid,
       version: LOCAL_GATEWAY_VERSION,
       location: gateway.location,
+      hosts: gateway.hosts,
       targets: Object.freeze(targets),
       logs: gateway.logs,
     }),
@@ -626,13 +637,27 @@ function publicArtifactLocations(
   artifacts: readonly DeploymentArtifactState[],
   gateways: readonly LocalGatewayState[],
 ): readonly DeploymentArtifactState[] {
-  const locations = new Map(gateways.map(({ identity, location }) => [identity, location]));
+  const locations = new Map(
+    gateways.map((gateway) => [gateway.identity, gatewayLocations(gateway)]),
+  );
   return Object.freeze(
     artifacts.map((artifact) => {
-      const location = locations.get(artifact.identity);
-      return location
-        ? Object.freeze({ ...artifact, locations: Object.freeze([location]) })
-        : artifact;
+      const assigned = locations.get(artifact.identity);
+      return assigned ? Object.freeze({ ...artifact, locations: assigned }) : artifact;
+    }),
+  );
+}
+
+function gatewayLocations(
+  gateway: Pick<LocalGatewayState, "hosts" | "location">,
+): readonly string[] {
+  if (!gateway.hosts.length) return Object.freeze([gateway.location]);
+  const base = new URL(gateway.location);
+  return Object.freeze(
+    gateway.hosts.map((host) => {
+      const location = new URL(base);
+      location.hostname = host;
+      return location.origin;
     }),
   );
 }
@@ -911,6 +936,46 @@ const status = async (value) => {
 };
 
 const configuration = async () => JSON.parse(await readFile(configurationFile, "utf8"));
+const routeManifests = new Map();
+const routeManifest = (root) => {
+  let manifest = routeManifests.get(root);
+  if (!manifest) {
+    manifest = readFile(resolve(root, "routes.ir.json"), "utf8")
+      .then(JSON.parse)
+      .catch(() => ({ routes: [] }));
+    routeManifests.set(root, manifest);
+  }
+  return manifest;
+};
+const durationSeconds = (value) => {
+  const match = /^(\\d+)(ms|s|m|h|d)$/.exec(value);
+  if (!match) return undefined;
+  const amount = Number(match[1]);
+  const factors = { ms: 0.001, s: 1, m: 60, h: 3600, d: 86400 };
+  return Math.ceil(amount * factors[match[2]]);
+};
+const routeCacheControl = async (root, pathname) => {
+  const manifest = await routeManifest(root);
+  const canonical = pathname === "/" ? "/" : pathname.replace(/\\/$/, "");
+  const entry = manifest.routes.find(({ request, route }) =>
+    request === false &&
+    route.path === canonical &&
+    route.params.length === 0 &&
+    route.search.length === 0
+  );
+  const cache = entry?.route.cache;
+  if (!cache) return "no-cache";
+  const directives = [cache.scope];
+  if (cache.maxAge === undefined) {
+    directives.push(cache.scope === "public" ? "max-age=0" : "no-store");
+  } else {
+    directives.push("max-age=" + durationSeconds(cache.maxAge));
+    if (cache.staleWhileRevalidate !== undefined) {
+      directives.push("stale-while-revalidate=" + durationSeconds(cache.staleWhileRevalidate));
+    }
+  }
+  return directives.join(", ");
+};
 const server = createServer(async (incoming, outgoing) => {
   try {
     const current = await configuration();
@@ -961,9 +1026,17 @@ const server = createServer(async (incoming, outgoing) => {
       ".wasm": "application/wasm",
       ".webmanifest": "application/manifest+json",
     };
+    const immutable = /^\\/(?:assets|workers)\\/.+-[A-Za-z0-9_-]{8,}\\.[^/]+$/.test(url.pathname);
+    const cacheControl = immutable
+      ? "public, max-age=31536000, immutable"
+      : extname(file) === ".html"
+        ? await routeCacheControl(current.root, url.pathname)
+        : "no-cache";
     outgoing.writeHead(200, {
+      "cache-control": cacheControl,
       "content-length": selected.size,
       "content-type": types[extname(file)] || "application/octet-stream",
+      "x-content-type-options": "nosniff",
     });
     if (incoming.method === "HEAD") outgoing.end();
     else createReadStream(file).pipe(outgoing);

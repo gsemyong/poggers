@@ -5,11 +5,12 @@ import { dirname, extname, isAbsolute, relative, resolve } from "node:path";
 import * as ts from "@typescript/typescript6";
 
 import type {
-  SystemSourceContext,
   FeatureSourceContext,
+  InterfaceSourceContext,
   ProgramSourceContext,
   SourceCompilerAPI,
   SourceCompilerExtension,
+  SystemSourceContext,
 } from "@/compiler/extension";
 import {
   SYSTEM_IR_VERSION,
@@ -217,7 +218,8 @@ export function systemCompilerIdentity(
   extensions: readonly SourceCompilerExtension[] = [],
 ): string {
   const hash = createHash("sha256");
-  hash.update(`${SYSTEM_COMPILER_CACHE_VERSION}\0${SYSTEM_IR_VERSION}\0${ts.version}\0`);
+  hash.update(JSON.stringify([SYSTEM_COMPILER_CACHE_VERSION, SYSTEM_IR_VERSION, ts.version]));
+  hash.update("\0");
   const extension = extname(import.meta.filename);
   for (const name of ["source", "presentation", "ir", "extension"]) {
     const file = resolve(dirname(import.meta.filename), `${name}${extension}`);
@@ -328,13 +330,22 @@ function extensionField(
 ): Readonly<{ extensions?: CompilerExtensionsIR }>;
 function extensionField(
   extensions: readonly SourceCompilerExtension[],
+  kind: "interface",
+  context: InterfaceSourceContext,
+): Readonly<{ extensions?: CompilerExtensionsIR }>;
+function extensionField(
+  extensions: readonly SourceCompilerExtension[],
   kind: "program",
   context: ProgramSourceContext,
 ): Readonly<{ extensions?: CompilerExtensionsIR }>;
 function extensionField(
   extensions: readonly SourceCompilerExtension[],
-  kind: "system" | "feature" | "program",
-  context: SystemSourceContext | FeatureSourceContext | ProgramSourceContext,
+  kind: "system" | "feature" | "interface" | "program",
+  context:
+    | SystemSourceContext
+    | FeatureSourceContext
+    | InterfaceSourceContext
+    | ProgramSourceContext,
 ): Readonly<{ extensions?: CompilerExtensionsIR }> {
   const values: Record<string, ExtensionIR> = Object.create(null);
   for (const extension of extensions) {
@@ -343,7 +354,9 @@ function extensionField(
         ? extension.system?.(context as SystemSourceContext)
         : kind === "feature"
           ? extension.feature?.(context as FeatureSourceContext)
-          : extension.program?.(context as ProgramSourceContext);
+          : kind === "interface"
+            ? extension.interface?.(context as InterfaceSourceContext)
+            : extension.program?.(context as ProgramSourceContext);
     if (value === undefined) continue;
     assertExtensionIR(value, extension.name, new Set());
     values[extension.name] = value;
@@ -502,7 +515,7 @@ function compileSystemProgram(
     }
     interfaces.push({
       id: `interface/${item.path}`,
-      feature: item.path,
+      path: item.path,
       app: item.app,
       platform: item.platform,
       programs: programs
@@ -510,6 +523,7 @@ function compileSystemProgram(
         .map(({ id }) => id)
         .sort(),
       presentationSources: [...sources].map((path) => relative(root, path)).sort(),
+      ...(item.extensions ? { extensions: item.extensions } : {}),
     });
   }
   const apps = features
@@ -853,7 +867,6 @@ type UnassembledProgramIR = ProgramContributionIR &
     logicalName: string;
     environment: ProgramIR["environment"];
     interface?: string;
-    placementInterface?: string;
   }>;
 
 type InterfaceSource = Readonly<{
@@ -861,6 +874,7 @@ type InterfaceSource = Readonly<{
   app: string;
   platform: string;
   presentationSources: readonly string[];
+  extensions?: CompilerExtensionsIR;
 }>;
 
 type InterfaceOwner = Readonly<{ path: string; platform: string }>;
@@ -901,7 +915,7 @@ function assemblePrograms(contributions: readonly UnassembledProgramIR[]): Progr
     const repeated = new Map<string, number>();
     const members: UnassembledProgramIR[] = [];
     for (const contribution of candidates) {
-      if (contribution.interface || !contribution.placementInterface) {
+      if (contribution.interface || !contribution.app) {
         members.push(contribution);
         continue;
       }
@@ -947,7 +961,6 @@ function assemblePrograms(contributions: readonly UnassembledProgramIR[]): Progr
           logicalName: _logicalName,
           environment: _environment,
           interface: _interface,
-          placementInterface: _placementInterface,
           instance: _instance,
           app: _app,
           ...member
@@ -1132,10 +1145,10 @@ function collectSystemOutputSources(input: {
       interface_.id,
       new Set([
         canonicalSourceFile(input.entry),
-        ...(input.featureSourceFiles.get(interface_.feature) ?? []),
-        ...(input.interfaceSourceFiles.get(interface_.feature) ?? []),
+        ...(input.featureSourceFiles.get(interface_.app) ?? []),
+        ...(input.interfaceSourceFiles.get(interface_.path) ?? []),
         ...input.programs
-          .filter(({ interface: owner }) => owner === interface_.feature)
+          .filter(({ interface: owner }) => owner === interface_.path)
           .flatMap(({ id }) => [...(output.get(id) ?? [])]),
       ]),
     );
@@ -1207,7 +1220,7 @@ function extractFeatures(
   at: ts.Node = values!,
   owner?: ts.Expression,
   app?: string,
-  interfaceOwner?: InterfaceOwner,
+  interfaceOwners: readonly InterfaceOwner[] = [],
   contractsAreFeatureValues = false,
   ownerStatic?: StaticValue,
   incremental?: IncrementalFeatureExtraction,
@@ -1285,13 +1298,6 @@ function extractFeatures(
     }
     const featureLocation = value ?? location;
     const isApp = booleanLiteralProperty(checker, contract, "App", location) === true;
-    const interfaceMarker = propertyType(checker, contract, "Interface", location);
-    if (isApp && interfaceMarker) {
-      throw diagnostic(
-        featureLocation,
-        `Feature ${JSON.stringify(path)} cannot be an App and an interface.`,
-      );
-    }
     if (isApp && app) {
       throw diagnostic(
         featureLocation,
@@ -1299,41 +1305,100 @@ function extractFeatures(
       );
     }
     const ownedApp = isApp ? path : app;
-    let ownedInterface = interfaceOwner;
-    let interfacePlatform: string | undefined;
-    if (interfaceMarker) {
-      if (!ownedApp) {
-        throw diagnostic(
-          featureLocation,
-          `Interface ${JSON.stringify(path)} must belong to an App.`,
+    let ownedInterfaces = interfaceOwners;
+    const appInterfaceContracts = isApp
+      ? propertyType(checker, contract, "Interfaces", location)
+      : undefined;
+    if (isApp && appInterfaceContracts) {
+      const staticInterfaces = staticFeature
+        ? resolveStaticMember(checker, staticFeature, "interfaces")
+        : undefined;
+      const appInterfaceValues = objectExpression(
+        checker,
+        objectMember(checker, featureValue, "interfaces"),
+      );
+      if (featureValue && !appInterfaceValues) {
+        throw diagnostic(featureValue, `App ${JSON.stringify(path)} needs interfaces.`);
+      }
+      const localInterfaces: InterfaceOwner[] = [];
+      for (const interfaceSymbol of sortedSymbols(appInterfaceContracts.getProperties())) {
+        const interfaceName = interfaceSymbol.getName();
+        const interfacePath = `${path}.${interfaceName}`;
+        const interfaceLocation = interfaceSymbol.valueDeclaration ?? featureLocation;
+        const interfaceContract = checker.getTypeOfSymbolAtLocation(
+          interfaceSymbol,
+          interfaceLocation,
         );
-      }
-      if (interfaceOwner) {
-        throw diagnostic(
-          featureLocation,
-          `Interface ${JSON.stringify(path)} cannot be nested in another interface.`,
+        const interfaceMarker = propertyType(
+          checker,
+          interfaceContract,
+          "Interface",
+          interfaceLocation,
         );
+        const platformContract = interfaceMarker
+          ? propertyType(checker, interfaceMarker, "Platform", interfaceLocation)
+          : undefined;
+        if (!platformContract) {
+          throw diagnostic(
+            interfaceLocation,
+            `Interface ${JSON.stringify(interfacePath)} has no Platform.`,
+          );
+        }
+        const platform = literalProperty(checker, platformContract, "Name", interfaceLocation);
+        if (localInterfaces.some((candidate) => candidate.platform === platform)) {
+          throw diagnostic(
+            interfaceLocation,
+            `App ${JSON.stringify(path)} has more than one ${JSON.stringify(platform)} interface.`,
+          );
+        }
+        const implementation = appInterfaceValues
+          ? resolveObjectMember(checker, appInterfaceValues, interfaceName)
+          : undefined;
+        const staticInterface = staticInterfaces
+          ? resolveStaticMember(checker, staticInterfaces, interfaceName)
+          : undefined;
+        const interfaceValue =
+          staticObjectValue(checker, staticInterface) ??
+          (implementation ? objectExpression(checker, implementation) : undefined);
+        if (appInterfaceValues && !interfaceValue) {
+          throw diagnostic(
+            implementation ?? appInterfaceValues,
+            `Interface ${JSON.stringify(interfacePath)} must expose compiler-readable metadata.`,
+          );
+        }
+        if (interfaceValue) {
+          const source = interfaceValue.getSourceFile();
+          if (!source.isDeclarationFile && inside(root, source.fileName)) {
+            sourceFiles.add(canonicalSourceFile(source.fileName));
+          }
+        }
+        const interfaceOwner = { path: interfacePath, platform };
+        localInterfaces.push(interfaceOwner);
+        interfaces.push({
+          path: interfacePath,
+          app: path,
+          platform,
+          presentationSources: interfaceValue
+            ? Object.freeze(
+                [
+                  ...presentationImplementationSources(program, checker, interfaceValue, root),
+                ].sort(),
+              )
+            : Object.freeze([]),
+          ...extensionField(extensions, "interface", {
+            checker,
+            source: sourceCompilerAPI(checker, staticInterface),
+            contract: interfaceContract,
+            implementation: interfaceValue,
+            location: implementation ?? interfaceLocation,
+            path: interfacePath,
+            root,
+            app: path,
+            platform,
+          }),
+        });
       }
-      const platform = propertyType(checker, interfaceMarker, "Platform", location);
-      if (!platform) {
-        throw diagnostic(featureLocation, `Interface ${JSON.stringify(path)} has no Platform.`);
-      }
-      interfacePlatform = literalProperty(checker, platform, "Name", location);
-      ownedInterface = { path, platform: interfacePlatform };
-      if (!featureValue) {
-        throw diagnostic(
-          featureLocation,
-          `Interface ${JSON.stringify(path)} must expose compiler-readable metadata.`,
-        );
-      }
-      interfaces.push({
-        path,
-        app: ownedApp,
-        platform: interfacePlatform,
-        presentationSources: Object.freeze(
-          [...presentationImplementationSources(program, checker, featureValue, root)].sort(),
-        ),
-      });
+      ownedInterfaces = localInterfaces;
     }
     const programContracts = propertyType(checker, contract, "Programs", location);
     const programValues = objectExpression(
@@ -1399,7 +1464,7 @@ function extractFeatures(
           expandedStart,
           extensions,
           root,
-          ownedInterface,
+          ownedInterfaces,
           staticValueIdentity(
             staticFeature ?? {
               node: value ?? featureLocation,
@@ -1438,7 +1503,7 @@ function extractFeatures(
         featureLocation,
         value,
         ownedApp,
-        ownedInterface,
+        ownedInterfaces,
         false,
         staticFeature,
         incremental,
@@ -1448,10 +1513,8 @@ function extractFeatures(
     features.push({
       id: `feature/${path}`,
       path,
-      kind: isApp ? "app" : interfaceMarker ? "interface" : "feature",
+      kind: isApp ? "app" : "feature",
       ...(ownedApp ? { app: ownedApp } : {}),
-      ...(ownedInterface ? { interface: ownedInterface.path } : {}),
-      ...(interfacePlatform ? { platform: interfacePlatform } : {}),
       children: childIds.sort(),
       programs: [...new Set(programIds)].sort(),
       ...(providers.length ? { providers } : {}),
@@ -1723,7 +1786,7 @@ function extractProgram(
   expandedStart?: StaticValue,
   extensions: readonly SourceCompilerExtension[] = [],
   sourceRoot = dirname(at.getSourceFile().fileName),
-  interfaceOwner?: InterfaceOwner,
+  interfaceOwners: readonly InterfaceOwner[] = [],
   instance = sourceIdentity(at),
   app?: string,
 ): UnassembledProgramIR {
@@ -1737,6 +1800,7 @@ function extractProgram(
     throw diagnostic(location, `Environment ${JSON.stringify(environmentName)} has no Platform.`);
   }
   const platform = literalProperty(checker, platformContract, "Name", location);
+  const interfaceOwner = interfaceOwners.find((candidate) => candidate.platform === platform);
   const concreteName =
     interfaceOwner && interfaceOwner.platform === platform
       ? `${interfaceOwner.path}.${name}`
@@ -1795,8 +1859,7 @@ function extractProgram(
     name: concreteName,
     logicalName: name,
     environment: { name: environmentName, platform, ...(ui ? { ui } : {}) },
-    ...(interfaceOwner?.platform === platform ? { interface: interfaceOwner.path } : {}),
-    ...(interfaceOwner ? { placementInterface: interfaceOwner.path } : {}),
+    ...(interfaceOwner ? { interface: interfaceOwner.path } : {}),
     requires,
     provides,
     ...(state || actions || components
@@ -1818,6 +1881,7 @@ function extractProgram(
       location,
       path: feature,
       root: sourceRoot,
+      ...(app ? { app } : {}),
       feature,
       ...(interfaceOwner ? { interface: interfaceOwner.path } : {}),
       name,

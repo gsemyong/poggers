@@ -8,6 +8,7 @@ describe("System authoring", () => {
     const leaf = createFeature<{}>({});
     const app = createApp({
       features: { leaf },
+      interfaces: {},
     });
     const system = createSystem({
       metadata: { name: "Company" },
@@ -16,7 +17,7 @@ describe("System authoring", () => {
 
     expect(system).toEqual({
       metadata: { name: "Company" },
-      features: { app: { features: { leaf: {} } } },
+      features: { app: { features: { leaf: {} }, interfaces: {} } },
     });
     expect(system.features.app).toBe(app);
     expect(app.features.leaf).toBe(leaf);

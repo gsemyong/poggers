@@ -8,7 +8,7 @@ testSystem({
   directory: new URL("..", import.meta.url).pathname,
   async verify({ location, locations, realization, metrics }) {
     const productLocation = locations["interface/product.web"]?.[0] ?? location;
-    const adminLocation = locations["interface/product.admin"]?.[0];
+    const adminLocation = locations["interface/administration.web"]?.[0];
     expect(adminLocation).toBeTruthy();
     expect(adminLocation).not.toBe(productLocation);
     expect(locations["program/server"]).toHaveLength(1);
@@ -95,7 +95,7 @@ testSystem({
         title: "Greeting",
       },
       params: { name: "Ada" },
-      route: { feature: "product.web.greeting", name: "greeting" },
+      route: { feature: "product.greeting", name: "greeting" },
       search: { punctuation: "!" },
       version: 1,
     });
@@ -145,7 +145,7 @@ testSystem({
     expect(hydration(loadedHtml)).toMatchObject({
       loader: { data: { message: "Loaded for Ada" } },
       params: { name: "Ada" },
-      route: { feature: "product.web.greeting", name: "loaded" },
+      route: { feature: "product.greeting", name: "loaded" },
     });
     expectDocumentParity(realization, "loader", loadedHtml);
 
@@ -169,7 +169,7 @@ testSystem({
           },
         },
       },
-      route: { feature: "product.web.greeting", name: "deferred" },
+      route: { feature: "product.greeting", name: "deferred" },
     });
 
     const streamStarted = performance.now();
@@ -410,7 +410,7 @@ async function verifyProductionPerformance(
   expect(preloads).toContain(entry);
   const routePreloads = preloads.filter((path) => path.includes("/route-"));
   expect(routePreloads).toHaveLength(1);
-  expect(routePreloads[0]).toContain("route-product-web-greeting-greeting-");
+  expect(routePreloads[0]).toContain("route-product-greeting-greeting-");
   const javascriptBytes = (
     await Promise.all(
       preloads.map(async (path) => {

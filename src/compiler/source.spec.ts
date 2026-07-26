@@ -148,7 +148,7 @@ describe("System compiler", { tags: ["compiler"] }, () => {
     expect(ir.interfaces).toEqual([
       {
         id: "interface/customer.web",
-        feature: "customer.web",
+        path: "customer.web",
         app: "customer",
         platform: "web",
         programs: ["program/customer.web.browser"],
@@ -156,7 +156,7 @@ describe("System compiler", { tags: ["compiler"] }, () => {
       },
       {
         id: "interface/operations.web",
-        feature: "operations.web",
+        path: "operations.web",
         app: "operations",
         platform: "web",
         programs: ["program/operations.web.browser"],
@@ -173,12 +173,10 @@ describe("System compiler", { tags: ["compiler"] }, () => {
         .find(({ id }) => id === "program/api")
         ?.contributions.map(({ feature }) => feature),
     ).toEqual(["customer.service", "operations.service", "shared"]);
-    expect(ir.features.find(({ path }) => path === "operations.web")).toMatchObject({
-      kind: "interface",
+    expect(ir.features.find(({ path }) => path === "operations.service")).toMatchObject({
+      kind: "feature",
       app: "operations",
-      interface: "operations.web",
-      platform: "web",
-      programs: ["program/operations.web.browser"],
+      programs: ["program/api", "program/operations.web.browser"],
     });
 
     const focused = selectSystemOutputs(ir, "operations");
@@ -259,11 +257,11 @@ describe("System compiler", { tags: ["compiler"] }, () => {
     );
   });
 
-  test("reports invalid App and interface ownership at the authored Feature", async () => {
+  test("reports invalid interface metadata at its authored App", async () => {
     const entry = await fixture(
       componentSystemSource().replace(
-        "type Product = { App: true; Features: { web: Web } };",
-        "type Product = { Features: { web: Web } };",
+        'type Web = { Interface: { Platform: { Name: "web" } } };',
+        "type Web = { Interface: {} };",
       ),
     );
 
@@ -274,9 +272,7 @@ describe("System compiler", { tags: ["compiler"] }, () => {
       failure = error;
     }
     expect(failure).toBeInstanceOf(SystemDiagnostic);
-    expect(String(failure)).toMatch(
-      /system\.ts:\d+:\d+: Interface "product\.web" must belong to an App/,
-    );
+    expect(String(failure)).toMatch(/system\.ts:\d+:\d+: Interface "product\.web" has no Platform/);
   });
 
   test("extracts deterministic Component state, actions, Elements, and lifecycle", async () => {
@@ -1743,6 +1739,12 @@ type Feature<C> = Readonly<{ readonly [featureContract]?: C }>;
 function createFeature<C>(definition: object): Feature<C> {
   return definition as Feature<C>;
 }
+function createApp<C>(definition: object): Feature<C> {
+  return definition as Feature<C>;
+}
+function createInterface<C>(definition: object): C {
+  return definition as C;
+}
 function createSystem(definition: object): object {
   return definition;
 }
@@ -2170,11 +2172,12 @@ type Shell = {
     >;
   };
 };
-type Web = {
-  Interface: { Platform: { Name: "web" } };
+type Web = { Interface: { Platform: { Name: "web" } } };
+type Product = {
+  App: true;
   Features: { shell: Shell };
+  Interfaces: { web: Web };
 };
-type Product = { App: true; Features: { web: Web } };
 
 const shell = createFeature<Shell>({
   programs: {
@@ -2196,11 +2199,13 @@ const presentation = {
     return { Shell: () => ({ Drawer: () => ({}) }) };
   },
 };
-const web = createFeature<Web>({
-  features: { shell },
+const web = createInterface<Web>({
   presentation,
 });
-const product = createFeature<Product>({ features: { web } });
+const product = createApp<Product>({
+  features: { shell },
+  interfaces: { web },
+});
 
 export default createSystem({
   metadata: { name: "Component fixture" },
@@ -2257,9 +2262,16 @@ function multiAppSystemSource(
   operationsOrder: readonly ("service" | "web")[] = ["service", "web"],
   customerOrder: readonly ("service" | "web")[] = ["service", "web"],
 ): string {
-  const fields = (order: readonly ("service" | "web")[]) =>
-    order.map((name) => `${name}: ${name === "service" ? "Service" : "Web"}`).join("; ");
-  const values = (order: readonly ("service" | "web")[]) => order.join(", ");
+  const values = (
+    order: readonly ("service" | "web")[],
+    service: "operationsService" | "customerService",
+    web: "operationsWeb" | "customerWeb",
+  ) =>
+    order
+      .map((name) =>
+        name === "service" ? `features: { service: ${service} }` : `interfaces: { web: ${web} }`,
+      )
+      .join(",\n    ");
   return `
 type Platform = { readonly Name: string };
 type Environment = { readonly Name: string; readonly Platform: Platform };
@@ -2269,44 +2281,33 @@ ${compositionTypes()}
 type Server = { Name: "server"; Platform: { Name: "server" } };
 type Browser = { Name: "browser-main"; Platform: { Name: "web" } };
 type Shared = { Programs: { api: Program<Server> } };
-type Service = { Programs: { api: Program<Server> } };
-type Web = {
-  Interface: { Platform: { Name: "web" } };
-  Programs: { browser: Program<Browser> };
-};
+type Service = { Programs: { api: Program<Server>; browser: Program<Browser> } };
+type Web = { Interface: { Platform: { Name: "web" } } };
 type Operations = {
   App: true;
-  Features: { ${fields(operationsOrder)} };
+  Features: { service: Service };
+  Interfaces: { web: Web };
 };
 type Customer = {
   App: true;
-  Features: { ${fields(customerOrder)} };
+  Features: { service: Service };
+  Interfaces: { web: Web };
 };
 
 const shared = createFeature<Shared>({ programs: { api: {} } });
-const operationsService = createFeature<Service>({ programs: { api: {} } });
-const operationsWeb = createFeature<Web>({
-  programs: { browser: {} },
+const operationsService = createFeature<Service>({ programs: { api: {}, browser: {} } });
+const operationsWeb = createInterface<Web>({
   presentation: { parameters: {}, create() { return {}; } },
 });
-const operations = createFeature<Operations>({
-  features: {
-    ${values(operationsOrder)
-      .replace("service", "service: operationsService")
-      .replace("web", "web: operationsWeb")}
-  },
+const operations = createApp<Operations>({
+    ${values(operationsOrder, "operationsService", "operationsWeb")}
 });
-const customerService = createFeature<Service>({ programs: { api: {} } });
-const customerWeb = createFeature<Web>({
-  programs: { browser: {} },
+const customerService = createFeature<Service>({ programs: { api: {}, browser: {} } });
+const customerWeb = createInterface<Web>({
   presentation: { parameters: {}, create() { return {}; } },
 });
-const customer = createFeature<Customer>({
-  features: {
-    ${values(customerOrder)
-      .replace("service", "service: customerService")
-      .replace("web", "web: customerWeb")}
-  },
+const customer = createApp<Customer>({
+    ${values(customerOrder, "customerService", "customerWeb")}
 });
 
 export default createSystem({

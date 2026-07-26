@@ -290,6 +290,64 @@ describe("local Deployment adapter", { tags: ["production"] }, () => {
     await removeDeployment(deployment);
   });
 
+  test("realizes typed interface hosts and production cache semantics locally", async () => {
+    const fixture = await localFixture();
+    const adapter = createLocalDeploymentAdapter({
+      artifacts: fixture.artifacts,
+      state: fixture.state,
+    });
+    const system = {} as System<{
+      Features: {
+        app: {
+          App: true;
+          Features: {};
+          Interfaces: {
+            web: { Interface: { Platform: { Name: "web" } } };
+          };
+        };
+      };
+    }>;
+    const deployment = createDeployment(system, {
+      adapter,
+      interfaces: {
+        "app.web": { hosts: ["workspace.localhost", "workspace-alt.localhost"] },
+      },
+    });
+    const release = {
+      ...fixture.release,
+      artifacts: fixture.release.artifacts
+        .filter(({ kind }) => kind === "interface")
+        .map((artifact) => ({ ...artifact, identity: "interface/app.web" })),
+    };
+
+    const result = await applyDeployment(deployment, release);
+    result.state.gateways.forEach(({ pid }) => pids.add(pid));
+    expect(result.plan.interfaces).toEqual([
+      {
+        identity: "interface/app.web",
+        hosts: ["workspace-alt.localhost", "workspace.localhost"],
+      },
+    ]);
+    const locations = result.state.artifacts[0]?.locations ?? [];
+    expect(locations).toHaveLength(2);
+    expect(locations.every((location) => new URL(location).hostname.endsWith(".localhost"))).toBe(
+      true,
+    );
+
+    const document = await fetch(locations[0]!);
+    expect(document.status).toBe(200);
+    expect(document.headers.get("cache-control")).toBe("no-cache");
+    const asset = await fetch(new URL("/assets/app-12345678.js", locations[0]));
+    expect(asset.status).toBe(200);
+    expect(asset.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+    const prebuilt = await fetch(new URL("/public", locations[0]));
+    expect(await prebuilt.text()).toContain("prebuilt delivery");
+    expect(prebuilt.headers.get("cache-control")).toBe(
+      "public, max-age=60, stale-while-revalidate=30",
+    );
+    await removeDeployment(deployment);
+  });
+
   test("replaces unchanged artifacts when runtime configuration changes", async () => {
     const fixture = await localFixture();
     const system = {} as System<{
@@ -343,7 +401,39 @@ async function localFixture(withSecret = false): Promise<{
   const artifacts = resolve(directory, "release");
   const state = resolve(directory, "state");
   const executable = resolve(artifacts, "server");
-  await mkdir(artifacts, { recursive: true });
+  await mkdir(resolve(artifacts, "assets"), { recursive: true });
+  await mkdir(resolve(artifacts, "public"), { recursive: true });
+  await writeFile(resolve(artifacts, "index.html"), "<main>local delivery</main>");
+  await writeFile(resolve(artifacts, "public/index.html"), "<main>prebuilt delivery</main>");
+  await writeFile(resolve(artifacts, "assets/app-12345678.js"), "export {};");
+  await writeFile(
+    resolve(artifacts, "routes.ir.json"),
+    JSON.stringify({
+      version: 3,
+      components: [],
+      routes: [
+        {
+          route: {
+            feature: "content",
+            name: "public",
+            path: "/public",
+            document: "content",
+            cache: {
+              scope: "public",
+              maxAge: "1m",
+              staleWhileRevalidate: "30s",
+            },
+            metadata: {},
+            params: [],
+            search: [],
+            deferred: [],
+          },
+          document: {},
+          request: false,
+        },
+      ],
+    }),
+  );
   await writeFile(
     executable,
     `#!/bin/sh
@@ -384,7 +474,7 @@ while true; do sleep 1; done
           environment: "browser-main",
           digest: "web-v1",
           root: ".",
-          files: [],
+          files: ["index.html", "public/index.html", "routes.ir.json", "assets/app-12345678.js"],
           dependencies: [],
           configuration: [],
         },

@@ -17,7 +17,7 @@ import {
   mountFeature,
 } from "kit/web";
 
-import type { WorkspaceWeb } from "@/apps/web";
+import type { Workspace } from "@/apps/workspace";
 import type { User } from "@/features/identity";
 
 export type Task = Readonly<{
@@ -61,7 +61,7 @@ export type TaskDestination = WebDestination<TaskRoutes>;
 type TasksBrowser = Program<
   BrowserMainThread,
   {
-    Requires: { navigation: Navigation<TaskRoutes, WorkspaceWeb> };
+    Requires: { navigation: Navigation<TaskRoutes, Workspace> };
     State: {
       error: string | undefined;
     };
@@ -139,7 +139,7 @@ export const taskEntity = createEntity<Tasks>({
 
 const placedTaskEntity = placePrograms(taskEntity, { server: "api", browser: "browser" });
 
-const taskFeature: WebFeature<TasksFeatureDefinition, WorkspaceWeb> = {
+const taskFeature: WebFeature<TasksFeatureDefinition, Workspace> = {
   features: { tasks: placedTaskEntity },
   programs: {
     browser: {

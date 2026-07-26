@@ -12,7 +12,7 @@ import {
   type WebStyle,
 } from "kit/web";
 
-import type { Web } from "@/apps/main/app";
+import type { Main } from "@/apps/main";
 import type { SheetState } from "@/features/dashboard";
 
 const workspaceContainer = createContainer("workspace");
@@ -392,12 +392,12 @@ const createEditorial = (({ parameters: values, environment }) => {
       };
     },
   };
-}) satisfies WebPresentation<Web, typeof parameters>;
+}) satisfies WebPresentation<Main, typeof parameters>;
 
 export const editorial = {
   parameters,
   create: createEditorial,
-} satisfies ConfiguredWebPresentation<Web, typeof parameters>;
+} satisfies ConfiguredWebPresentation<Main, typeof parameters>;
 
 function interpolate(from: number, to: number, progress: number): number {
   return from + (to - from) * progress;

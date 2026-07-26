@@ -301,14 +301,12 @@ const serverDataStoreProvider: ServerDependencyProvider<DataStore> = {
 const webDataStoreProvider: WebDependencyProvider<DataStore> = {
   requirements: { crossOriginIsolation: true },
   development() {
-    return createTursoDataStoreImplementation(
-      import("@tursodatabase/database-wasm/vite").then(
-        async ({ connect }) =>
-          (await connect("kit-data.db", {
-            experimental: ["index_method"],
-          })) as unknown as TursoDatabase,
-      ),
-    ) as DependencyImplementation<DataStore<EntityValue>> & AsyncDisposable;
+    return createTursoDataStoreImplementation(async () => {
+      const { connect } = await import("@tursodatabase/database-wasm/vite");
+      return (await connect("kit-data.db", {
+        experimental: ["index_method"],
+      })) as unknown as TursoDatabase;
+    }) as DependencyImplementation<DataStore<EntityValue>> & AsyncDisposable;
   },
 };
 
@@ -649,14 +647,19 @@ export type TursoDatabase = Readonly<{
   close(): Promise<void>;
 }>;
 
+type TursoDatabaseSource = Promise<TursoDatabase> | (() => Promise<TursoDatabase>);
+
 /** Implements the Data projection contract over the common Turso database API. */
 export function createTursoDataStore<Record extends EntityValue = EntityValue>(
-  database: Promise<TursoDatabase>,
+  source: TursoDatabaseSource,
 ): DataStore<Record> & AsyncDisposable {
   const collections = new Map<string, Promise<Collection<Record>>>();
+  const connect = typeof source === "function" ? source : () => source;
+  let database = typeof source === "function" ? undefined : source;
   let disposed = false;
   const requireDatabase = async () => {
     if (disposed) throw new Error("The Turso data store is disposed.");
+    database ??= connect();
     return database;
   };
   const ensure = (
@@ -688,7 +691,7 @@ export function createTursoDataStore<Record extends EntityValue = EntityValue>(
       if (disposed) return;
       disposed = true;
       collections.clear();
-      await (await database).close();
+      if (database) await (await database).close();
     },
   };
   return Object.freeze(store);
@@ -696,7 +699,7 @@ export function createTursoDataStore<Record extends EntityValue = EntityValue>(
 
 /** Implements the DataStore provider envelope for a host adapter. */
 function createTursoDataStoreImplementation<Record extends EntityValue = EntityValue>(
-  database: Promise<TursoDatabase>,
+  database: TursoDatabaseSource,
 ): DependencyImplementation<DataStore<Record>> & AsyncDisposable {
   const store = createTursoDataStore<Record>(database);
   return Object.freeze({

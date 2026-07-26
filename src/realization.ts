@@ -7,6 +7,7 @@ import {
   type DevelopmentSession,
   type DevelopmentReporter,
   type PlatformAdapterImplementation,
+  type ProductionReporter,
   type ProductionArtifacts,
   type SystemCompilationRevision,
   type SystemRevisionSource,
@@ -39,6 +40,8 @@ export type SystemRealization<Adapter extends PlatformAdapterImplementation> = R
 export type SystemRealizationOptions = Readonly<{ app?: string }>;
 export type SystemDevelopmentOptions = SystemRealizationOptions &
   Readonly<{ report?: DevelopmentReporter }>;
+export type SystemBuildOptions = SystemRealizationOptions &
+  Readonly<{ report?: ProductionReporter }>;
 
 export type RunningSystem = AsyncDisposable &
   Readonly<{
@@ -82,11 +85,27 @@ export async function developSystem<Adapter extends PlatformAdapterImplementatio
   adapters: Readonly<Record<string, Adapter>>,
   options: SystemDevelopmentOptions = {},
 ): Promise<RunningSystem> {
+  const compilationStarted = performance.now();
+  options.report?.({ kind: "phase", phase: "compile", status: "started" });
   const realization = resolveSystemRealization(directory, adapters, options, true);
+  options.report?.({
+    kind: "phase",
+    phase: "compile",
+    status: "completed",
+    durationMs: performance.now() - compilationStarted,
+    cache: realization.revisions.current.cache,
+    work: realization.revisions.current.work,
+  });
   const started = await Promise.allSettled(
-    realization.adapters.map(async (adapter) => ({
-      adapter,
-      session: await adapter.develop({
+    realization.adapters.map(async (adapter) => {
+      const platformStarted = performance.now();
+      options.report?.({
+        kind: "phase",
+        phase: "start",
+        status: "started",
+        platform: adapter.name,
+      });
+      const session = await adapter.develop({
         directory: realization.directory,
         system: realization.system,
         ir: realization.ir,
@@ -98,8 +117,16 @@ export async function developSystem<Adapter extends PlatformAdapterImplementatio
           ({ environment }) => environment.platform === adapter.name,
         ),
         interfaces: realization.interfaces.filter(({ platform }) => platform === adapter.name),
-      }),
-    })),
+      });
+      options.report?.({
+        kind: "phase",
+        phase: "start",
+        status: "completed",
+        platform: adapter.name,
+        durationMs: performance.now() - platformStarted,
+      });
+      return { adapter, session };
+    }),
   );
   const sessions = started.flatMap((result) =>
     result.status === "fulfilled" ? [result.value] : [],
@@ -403,7 +430,7 @@ function affectedOutputs(
   for (const ir of [previous.ir, current.ir]) {
     for (const program of ir.programs) {
       if (!programs.has(program.id) || !program.interface) continue;
-      const interface_ = ir.interfaces.find(({ feature }) => feature === program.interface);
+      const interface_ = ir.interfaces.find(({ path }) => path === program.interface);
       if (interface_) affected.add(interface_.id);
     }
   }
@@ -418,7 +445,7 @@ function outputMeaning(ir: SystemIR, identity: string): string {
   if (!interface_) return "undefined";
   return JSON.stringify({
     interface: interface_,
-    presentations: ir.presentations.filter(({ interface: owner }) => owner === interface_.feature),
+    presentations: ir.presentations.filter(({ interface: owner }) => owner === interface_.path),
   });
 }
 
@@ -435,11 +462,26 @@ export async function buildSystem(
   directory: string,
   output: string,
   adapters: Readonly<Record<string, PlatformAdapterImplementation>>,
-  options: SystemRealizationOptions = {},
+  options: SystemBuildOptions = {},
 ): Promise<BuiltSystem> {
+  const compilationStarted = performance.now();
+  options.report?.({ kind: "phase", phase: "compile", status: "started" });
   const realization = resolveSystemRealization(directory, adapters, options);
+  options.report?.({
+    kind: "phase",
+    phase: "compile",
+    status: "completed",
+    durationMs: performance.now() - compilationStarted,
+  });
   const results = await Promise.all(
     realization.adapters.map(async (adapter) => {
+      const platformStarted = performance.now();
+      options.report?.({
+        kind: "phase",
+        phase: "build",
+        status: "started",
+        platform: adapter.name,
+      });
       const platformOutput =
         realization.adapters.length === 1 ? output : resolve(output, adapter.name);
       const artifacts = await adapter.build({
@@ -453,16 +495,32 @@ export async function buildSystem(
         ),
         interfaces: realization.interfaces.filter(({ platform }) => platform === adapter.name),
         output: platformOutput,
+        ...(options.report ? { report: options.report } : {}),
+      });
+      options.report?.({
+        kind: "phase",
+        phase: "build",
+        status: "completed",
+        platform: adapter.name,
+        durationMs: performance.now() - platformStarted,
       });
       return [adapter.name, artifacts] as const;
     }),
   );
   const artifacts = Object.freeze(Object.fromEntries(results));
+  const releaseStarted = performance.now();
+  options.report?.({ kind: "phase", phase: "release", status: "started" });
   const release = await createRelease({
     directory: output,
     system: realization.ir.system.name,
     ...(realization.app ? { app: realization.app } : {}),
     artifacts,
+  });
+  options.report?.({
+    kind: "phase",
+    phase: "release",
+    status: "completed",
+    durationMs: performance.now() - releaseStarted,
   });
   return {
     ir: realization.ir,

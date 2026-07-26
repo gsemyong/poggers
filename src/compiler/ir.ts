@@ -1,6 +1,6 @@
 import type { PresentationSourceIR } from "@/compiler/presentation";
 
-export const SYSTEM_IR_VERSION = 28 as const;
+export const SYSTEM_IR_VERSION = 29 as const;
 
 /** Maps semantic source files to the generated outputs affected by each source. */
 export type SystemOutputSources = Readonly<Record<string, readonly string[]>>;
@@ -546,10 +546,8 @@ function canonicalTypeMeaning(type: TypeIR): unknown {
 export type FeatureIR = Readonly<{
   id: string;
   path: string;
-  kind: "app" | "feature" | "interface";
+  kind: "app" | "feature";
   app?: string;
-  interface?: string;
-  platform?: string;
   children: readonly string[];
   programs: readonly string[];
   providers?: readonly DependencyProviderIR[];
@@ -578,11 +576,12 @@ export type AppIR = Readonly<{
 
 export type PlatformInterfaceIR = Readonly<{
   id: string;
-  feature: string;
+  path: string;
   app: string;
   platform: string;
   programs: readonly string[];
   presentationSources: readonly string[];
+  extensions?: CompilerExtensionsIR;
 }>;
 
 export type InterfacePresentationIR = PresentationSourceIR &
@@ -690,10 +689,10 @@ export function selectSystemOutputs(ir: SystemIR, app?: string): SystemOutputSel
   }
 
   const interfaces = ir.interfaces.filter(({ app: owner }) => owner === selectedApp.feature);
-  const interfaceFeatures = new Set(interfaces.map(({ feature }) => feature));
+  const interfacePaths = new Set(interfaces.map(({ path }) => path));
   const features = new Map(ir.features.map((feature) => [feature.path, feature]));
   const programs = ir.programs.flatMap((program): ProgramIR[] => {
-    if (program.interface && !interfaceFeatures.has(program.interface)) return [];
+    if (program.interface && !interfacePaths.has(program.interface)) return [];
     const contributions = program.contributions.filter((contribution) => {
       if (contribution.apps) return contribution.apps.includes(selectedApp.feature);
       const feature = features.get(contribution.feature);

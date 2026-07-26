@@ -168,11 +168,16 @@ type Feature<Contract> = Readonly<{ readonly [featureContract]?: Contract }>;
 function createFeature<Contract>(definition: object): Feature<Contract> {
   return definition as Feature<Contract>;
 }
+function createApp<Contract>(definition: object): Feature<Contract> {
+  return definition as Feature<Contract>;
+}
+function createInterface<Contract>(definition: object): Contract {
+  return definition as Contract;
+}
 function createSystem(definition: object): object {
   return definition;
 }
-type Web = {
-  Interface: { Platform: Platform };
+type Runtime = {
   Providers: { web: { dataStore: object } };
   Programs: {
     browser: Program<Browser, {
@@ -184,9 +189,14 @@ type Web = {
     offline: Program<ServiceWorker>;
   };
 };
-type Product = { App: true; Features: { web: Web } };
+type Web = { Interface: { Platform: Platform } };
+type Product = {
+  App: true;
+  Features: { runtime: Runtime };
+  Interfaces: { web: Web };
+};
 type Root = { Features: { product: Product } };
-const web = createFeature<Web>({
+const runtime = createFeature<Runtime>({
   providers: {
     web: {
       dataStore: {
@@ -207,6 +217,8 @@ const web = createFeature<Web>({
     },
     offline: {},
   },
+});
+const web = createInterface<Web>({
   presentation: {
     parameters: {},
     create() {
@@ -214,7 +226,10 @@ const web = createFeature<Web>({
     },
   },
 });
-const product = createFeature<Product>({ features: { web } });
+const product = createApp<Product>({
+  features: { runtime },
+  interfaces: { web },
+});
 export default createSystem({
   metadata: { name: "web-programs" },
   features: { product },

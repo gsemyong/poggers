@@ -385,7 +385,11 @@ impl WebDocument {
         let object = document
             .as_object_mut()
             .ok_or_else(|| "web document must be an object".to_owned())?;
-        object.insert("rendering".to_owned(), Value::String("hydrate".to_owned()));
+        let interactive = object.get("entry").is_some_and(Value::is_string);
+        object.insert(
+            "rendering".to_owned(),
+            Value::String(if interactive { "hydrate" } else { "static" }.to_owned()),
+        );
         object.insert("root".to_owned(), Value::Array(root));
         let hydration = json!({
             "version": 1,
@@ -399,7 +403,14 @@ impl WebDocument {
             },
             "metadata": merged,
         });
-        object.insert("hydration".to_owned(), hydration.clone());
+        object.insert(
+            "hydration".to_owned(),
+            if interactive {
+                hydration.clone()
+            } else {
+                Value::Bool(false)
+            },
+        );
         let html = render(&document)?;
         let markdown = request
             .markdown
@@ -2718,11 +2729,11 @@ fn render(document: &Value) -> Result<String, String> {
         ],
         "web document",
     )?;
-    if document.get("version").and_then(Value::as_u64) != Some(4) {
+    if document.get("version").and_then(Value::as_u64) != Some(5) {
         return Err("unsupported web document version".to_owned());
     }
     let rendering = string(document, "rendering")?;
-    if rendering != "hydrate" && rendering != "client" {
+    if rendering != "static" && rendering != "hydrate" && rendering != "client" {
         return Err("unsupported web document rendering mode".to_owned());
     }
     let language = string(document, "language")?;
@@ -2733,10 +2744,11 @@ fn render(document: &Value) -> Result<String, String> {
     {
         return Err("invalid web document language".to_owned());
     }
-    let entry = string(document, "entry")?;
-    if !entry.starts_with('/') {
-        return Err("web document entry must be absolute".to_owned());
-    }
+    let entry = match document.get("entry") {
+        Some(Value::Bool(false)) => None,
+        Some(Value::String(value)) if value.starts_with('/') => Some(value.as_str()),
+        _ => return Err("web document entry must be false or an absolute path".to_owned()),
+    };
     let styles = document
         .get("styles")
         .and_then(Value::as_array)
@@ -2768,6 +2780,11 @@ fn render(document: &Value) -> Result<String, String> {
     if rendering == "client" && !root.is_empty() {
         return Err("client-rendered web document root must be empty".to_owned());
     }
+    if rendering == "static"
+        && (entry.is_some() || !preloads.is_empty() || hydration != &Value::Bool(false))
+    {
+        return Err("static web document cannot contain client runtime state".to_owned());
+    }
 
     let mut output = String::from("<!doctype html><html lang=\"");
     escape_attribute(&mut output, language);
@@ -2785,7 +2802,7 @@ fn render(document: &Value) -> Result<String, String> {
         }
         output.push_str("</style>");
     }
-    let mut modules = vec![entry];
+    let mut modules = entry.into_iter().collect::<Vec<_>>();
     for preload in preloads {
         let preload = preload.as_str().expect("validated preload");
         if !modules.contains(&preload) {
@@ -2807,7 +2824,7 @@ fn render(document: &Value) -> Result<String, String> {
     output.push_str("\">");
     let mut identities = HashSet::new();
     for node in root {
-        render_node(&mut output, node, &mut identities)?;
+        render_node(&mut output, node, &mut identities, rendering == "static")?;
     }
     output.push_str("</div>");
     if hydration != &Value::Bool(false) {
@@ -2817,9 +2834,12 @@ fn render(document: &Value) -> Result<String, String> {
         escape_embedded_json(&mut output, &payload);
         output.push_str("</script>");
     }
-    output.push_str("<script type=\"module\" async src=\"");
-    escape_attribute(&mut output, entry);
-    output.push_str("\"></script></body></html>");
+    if let Some(entry) = entry {
+        output.push_str("<script type=\"module\" async src=\"");
+        escape_attribute(&mut output, entry);
+        output.push_str("\"></script>");
+    }
+    output.push_str("</body></html>");
     Ok(output)
 }
 
@@ -3120,7 +3140,7 @@ fn render_deferred_frame(frame: &Value) -> Result<String, String> {
     output.push_str("\">");
     let mut identities = HashSet::new();
     for node in array(frame, "root")? {
-        render_node(&mut output, node, &mut identities)?;
+        render_node(&mut output, node, &mut identities, false)?;
     }
     output.push_str("</template><script type=\"application/json\" data-kit-deferred-state=\"");
     escape_attribute(&mut output, boundary);
@@ -3136,6 +3156,7 @@ fn render_node(
     output: &mut String,
     node: &Value,
     identities: &mut HashSet<String>,
+    static_document: bool,
 ) -> Result<(), String> {
     let kind = string(node, "kind")?;
     if kind == "boundary" {
@@ -3158,7 +3179,7 @@ fn render_node(
         escape_attribute(output, field);
         output.push_str("\"></template>");
         for child in array(node, "children")? {
-            render_node(output, child, identities)?;
+            render_node(output, child, identities, static_document)?;
         }
         output.push_str("<template data-kit-boundary-end=\"");
         escape_attribute(output, boundary);
@@ -3179,9 +3200,11 @@ fn render_node(
         {
             return Err("web text hydration identity must start with t".to_owned());
         }
-        output.push_str("<!--kit:");
-        output.push_str(hydration);
-        output.push_str("-->");
+        if !static_document {
+            output.push_str("<!--kit:");
+            output.push_str(hydration);
+            output.push_str("-->");
+        }
         escape_text(output, string(node, "value")?);
         return Ok(());
     }
@@ -3225,12 +3248,14 @@ fn render_node(
         if name == "data-kit-h" {
             hydration_attribute = Some(value);
         }
-        output.push(' ');
-        output.push_str(name);
-        if !value.is_empty() {
-            output.push_str("=\"");
-            escape_attribute(output, value);
-            output.push('"');
+        if !static_document || name != "data-kit-h" {
+            output.push(' ');
+            output.push_str(name);
+            if !value.is_empty() {
+                output.push_str("=\"");
+                escape_attribute(output, value);
+                output.push('"');
+            }
         }
     }
     if hydration_attribute != Some(hydration) {
@@ -3250,7 +3275,7 @@ fn render_node(
             .ok_or_else(|| format!("void web element {tag} cannot have children"));
     }
     for child in children {
-        render_node(output, child, identities)?;
+        render_node(output, child, identities, static_document)?;
     }
     write!(output, "</{tag}>").expect("write to String");
     Ok(())
@@ -3394,7 +3419,7 @@ mod tests {
 
     fn document() -> Value {
         json!({
-            "version": 4,
+            "version": 5,
             "rendering": "hydrate",
             "language": "en",
             "title": "A < B & C",
@@ -3442,6 +3467,20 @@ mod tests {
 
         client["root"] = document()["root"].clone();
         assert!(render(&client).is_err());
+    }
+
+    #[test]
+    fn renders_a_static_document_without_client_runtime_state() {
+        let mut static_document = document();
+        static_document["rendering"] = json!("static");
+        static_document["entry"] = json!(false);
+        static_document["preloads"] = json!([]);
+        let rendered = render(&static_document).expect("render static document");
+        assert!(rendered.contains("data-kit-rendering=\"static\""));
+        assert!(!rendered.contains("modulepreload"));
+        assert!(!rendered.contains("<script"));
+        assert!(!rendered.contains("data-kit-h"));
+        assert!(!rendered.contains("<!--kit:"));
     }
 
     #[test]

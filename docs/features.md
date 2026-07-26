@@ -116,12 +116,25 @@ Application workspaces use the same convention at every scale:
 ```text
 src/
   apps/
+    customer.tsx
+    operations.tsx
   features/
+    identity.tsx
+    tasks.tsx
   presentations/
+    web.ts
+    ios.ts
   deployment.ts
   system.ts
   system.spec.ts       optional cross-System behavior
 ```
+
+One App occupies one file until its own semantic content justifies a directory.
+The App selects concrete Feature values once and declares adapter-owned
+interfaces over that composition. Presentations are grouped by Platform because
+their authoring languages are Platform-specific. Reusable parameters, recipes,
+and typed Feature fragments stay in that Platform file until they become a
+genuine independently owned design system.
 
 Feature files are named by product meaning, such as `identity.tsx` or
 `tasks.tsx`; a mechanical `feature.tsx` layer adds no information. Feature

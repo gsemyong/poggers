@@ -3,7 +3,9 @@ import { access, copyFile, glob, mkdir, mkdtemp, readFile, rm, writeFile } from 
 import { tmpdir } from "node:os";
 import { dirname, relative, resolve } from "node:path";
 import process from "node:process";
+import { pathToFileURL } from "node:url";
 
+import * as ts from "@typescript/typescript6";
 import { build } from "vite";
 
 import { packageSources } from "@/package";
@@ -124,6 +126,8 @@ for (const pattern of [
   }
 }
 await assertDistribution();
+await assertJavaScriptSyntax();
+await assertCommandRuntimes();
 await assertGeneratedRuntimeEntrypoints();
 await assertNoPrivateAliases();
 await assertVocabulary();
@@ -144,6 +148,36 @@ async function assertDistribution(): Promise<void> {
   if (forbidden.length) {
     throw new Error(`Build output contains private files:\n${forbidden.sort().join("\n")}`);
   }
+}
+
+async function assertJavaScriptSyntax(): Promise<void> {
+  for await (const file of glob("**/*.js", { cwd: distDir })) {
+    const source = await readFile(resolve(distDir, file), "utf8");
+    const parsed = ts.createSourceFile(
+      file,
+      source,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.JS,
+    );
+    const diagnostic = (
+      parsed as ts.SourceFile & Readonly<{ parseDiagnostics: readonly ts.Diagnostic[] }>
+    ).parseDiagnostics[0];
+    if (!diagnostic) continue;
+    const message = ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n");
+    const location = parsed.getLineAndCharacterOfPosition(diagnostic.start ?? 0);
+    throw new Error(
+      `Invalid JavaScript in ${file}:${location.line + 1}:${location.character + 1}: ${message}`,
+    );
+  }
+}
+
+async function assertCommandRuntimes(): Promise<void> {
+  await Promise.all(
+    ["realization.js", "platforms.js"].map(
+      (file) => import(pathToFileURL(resolve(distDir, "src", file)).href),
+    ),
+  );
 }
 
 async function assertGeneratedRuntimeEntrypoints(): Promise<void> {

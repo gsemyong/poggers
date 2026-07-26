@@ -1,8 +1,8 @@
 import { createSystem } from "kit";
 
-import { product } from "@/product";
+import { administration, product } from "@/product";
 
 export default createSystem({
   metadata: { name: "Web request conformance" },
-  features: { product },
+  features: { administration, product },
 });

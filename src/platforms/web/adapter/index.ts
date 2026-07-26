@@ -1,9 +1,8 @@
 import type { PlatformAdapter } from "@/adapter";
 import type { WebPlatform } from "@/platforms/web";
 import { webCompilerExtension } from "@/platforms/web/adapter/compiler";
-import { developWebSystem, type WebDevelopmentOptions } from "@/platforms/web/adapter/development";
+import type { WebDevelopmentOptions } from "@/platforms/web/adapter/development";
 import { createWebPresentationAdapter } from "@/platforms/web/adapter/presentation/adapter";
-import { buildWebSystem } from "@/platforms/web/adapter/production";
 import { createWebUIAdapter, type WebUIAdapter } from "@/platforms/web/adapter/ui/adapter";
 
 export type WebPlatformAdapter = PlatformAdapter<WebPlatform, WebUIAdapter>;
@@ -19,10 +18,12 @@ export function createWebPlatformAdapter(
     ui: createWebUIAdapter(createWebPresentationAdapter()),
     async develop(input) {
       assertWebInput(input.platform, input.programs, input.interfaces);
+      const { developWebSystem } = await import("@/platforms/web/adapter/development");
       return developWebSystem(input, options);
     },
     async build(input) {
       assertWebInput(input.platform, input.programs, input.interfaces);
+      const { buildWebSystem } = await import("@/platforms/web/adapter/production");
       return buildWebSystem(input);
     },
   };

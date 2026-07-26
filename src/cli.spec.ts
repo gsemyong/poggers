@@ -14,7 +14,7 @@ import {
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { createProject, runCli } from "@/cli";
 import { SYSTEM_IR_VERSION } from "@/compiler/ir";
@@ -52,13 +52,12 @@ describe("project template", () => {
         "presentations",
         "system.ts",
       ]);
-      expect(await readdir(resolve(target, "src/apps"))).toEqual(["main"]);
-      expect(await readdir(resolve(target, "src/apps/main"))).toEqual(["app.tsx"]);
+      expect(await readdir(resolve(target, "src/apps"))).toEqual(["main.tsx"]);
       expect((await readdir(resolve(target, "src/features"))).sort()).toEqual([
         "shell.spec.ts",
         "shell.tsx",
       ]);
-      expect(await readdir(resolve(target, "src/presentations"))).toEqual(["clean.ts"]);
+      expect(await readdir(resolve(target, "src/presentations"))).toEqual(["web.ts"]);
       expect(await readFile(resolve(target, "src/system.ts"), "utf8")).toContain(
         "export default createSystem({",
       );
@@ -68,8 +67,8 @@ describe("project template", () => {
       expect(await readFile(resolve(target, "src/features/shell.tsx"), "utf8")).toContain(
         "createFeature<ShellFeature>",
       );
-      expect(await readFile(resolve(target, "src/presentations/clean.ts"), "utf8")).toContain(
-        "satisfies WebPresentation<Web, typeof parameters>",
+      expect(await readFile(resolve(target, "src/presentations/web.ts"), "utf8")).toContain(
+        "satisfies WebPresentation<Main, typeof parameters>",
       );
       const packageJson = JSON.parse(await readFile(resolve(target, "package.json"), "utf8")) as {
         dependencies: Record<string, string>;
@@ -150,16 +149,12 @@ describe("project template", () => {
       const manifest = compileSystem(resolve(target, "src/system.ts"));
       expect(manifest.version).toBe(SYSTEM_IR_VERSION);
       expect(manifest.platforms).toEqual(["web"]);
-      expect(manifest.features.map(({ id }) => id)).toEqual([
-        "feature/main",
-        "feature/main.web",
-        "feature/main.web.shell",
-      ]);
+      expect(manifest.features.map(({ id }) => id)).toEqual(["feature/main", "feature/main.shell"]);
       expect(manifest.programs).toHaveLength(1);
       expect(manifest.programs[0]).toMatchObject({
         id: "program/main.web.browser",
         environment: { name: "browser-main", platform: "web" },
-        ui: { root: { feature: "main.web.shell", component: "Root" } },
+        ui: { root: { feature: "main.shell", component: "Root" } },
       });
       const webOutput = resolve(target, "dist/interfaces/main.web");
       const html = await readFile(resolve(webOutput, "index.html"), "utf8");
@@ -172,6 +167,9 @@ describe("project template", () => {
       await expect(access(resolve(webOutput, entry!.slice(1)))).resolves.toBeUndefined();
       expect(html).toContain(`<link rel="modulepreload" href="${entry}">`);
       expect(html.indexOf("@layer kit.reset{")).toBeLessThan(html.indexOf(`src="${entry}"`));
+      const webFiles = await readdir(webOutput, { recursive: true });
+      expect(webFiles.some((file) => file.endsWith(".wasm"))).toBe(false);
+      expect(webFiles.some((file) => file.startsWith("workers/"))).toBe(false);
 
       expect(() =>
         validateUIProgramRoot({ features: { shell: { programs: { browser: {} } } } }, "browser"),
@@ -216,9 +214,9 @@ describe("project template", () => {
     await createProject([target, "--no-install", "--example", "authenticated-crud"]);
 
     expect((await readdir(resolve(target, "src/apps"))).sort()).toEqual([
-      "customer",
-      "operations",
-      "web.ts",
+      "customer.tsx",
+      "operations.tsx",
+      "workspace.tsx",
     ]);
     expect(await readFile(resolve(target, "src/system.ts"), "utf8")).toContain(
       'metadata: { name: "operations" }',
@@ -259,38 +257,95 @@ describe("project template", () => {
     await mkdir(source, { recursive: true });
     await writeFile(system, customPlatformSystem());
     let program = "";
-
-    await runCli(["build", "--dir", directory], {
-      edge: {
-        name: "edge",
-        async develop() {
-          throw new Error("The build fixture must not start development.");
-        },
-        async build(input) {
-          program = input.programs[0]?.name ?? "";
-          await mkdir(input.output, { recursive: true });
-          const artifact = resolve(input.output, "worker.bin");
-          await writeFile(artifact, "custom-platform");
-          return {
-            directory: input.output,
-            entries: [
-              {
-                identity: input.programs[0]!.id,
-                kind: "program",
-                deployment: "process",
-                environment: "edge-worker",
-                path: artifact,
-              },
-            ],
-          };
-        },
-      },
+    const output: string[] = [];
+    const write = vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
+      output.push(String(chunk));
+      return true;
     });
+
+    try {
+      await runCli(["build", "--json", "--dir", directory], {
+        edge: {
+          name: "edge",
+          async develop() {
+            throw new Error("The build fixture must not start development.");
+          },
+          async build(input) {
+            program = input.programs[0]?.name ?? "";
+            await mkdir(input.output, { recursive: true });
+            const artifact = resolve(input.output, "worker.bin");
+            await writeFile(artifact, "custom-platform");
+            return {
+              directory: input.output,
+              entries: [
+                {
+                  identity: input.programs[0]!.id,
+                  kind: "program",
+                  deployment: "process",
+                  environment: "edge-worker",
+                  path: artifact,
+                },
+              ],
+            };
+          },
+        },
+      });
+    } finally {
+      write.mockRestore();
+    }
 
     expect(program).toBe("indexer");
     await expect(readFile(resolve(directory, "dist/worker.bin"), "utf8")).resolves.toBe(
       "custom-platform",
     );
+    const records = output
+      .join("")
+      .trim()
+      .split("\n")
+      .map(
+        (record) =>
+          JSON.parse(record) as Readonly<{
+            kind: string;
+            id?: string;
+            status?: string;
+            platform?: string;
+          }>,
+      );
+    expect(records).toEqual([
+      expect.objectContaining({ kind: "phase", id: "runtime", status: "started" }),
+      expect.objectContaining({ kind: "phase", id: "runtime", status: "completed" }),
+      expect.objectContaining({
+        kind: "phase",
+        id: "production:compile:system",
+        status: "started",
+      }),
+      expect.objectContaining({
+        kind: "phase",
+        id: "production:compile:system",
+        status: "completed",
+      }),
+      expect.objectContaining({
+        kind: "phase",
+        id: "production:build:edge",
+        status: "started",
+      }),
+      expect.objectContaining({
+        kind: "phase",
+        id: "production:build:edge",
+        status: "completed",
+      }),
+      expect.objectContaining({
+        kind: "phase",
+        id: "production:release:system",
+        status: "started",
+      }),
+      expect.objectContaining({
+        kind: "phase",
+        id: "production:release:system",
+        status: "completed",
+      }),
+      expect.objectContaining({ kind: "built", platform: "edge" }),
+    ]);
   });
 
   test("plans, applies, inspects, and removes through one Deployment command", async () => {

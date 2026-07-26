@@ -23,6 +23,14 @@ import system from "@/system";
 
 export default createDeployment(system, {
   adapter: createLocalDeploymentAdapter(),
+  interfaces: {
+    "customer.web": {
+      hosts: ["app.localhost"],
+    },
+    "operations.web": {
+      hosts: ["operations.localhost"],
+    },
+  },
   programs: {
     api: { replicas: 3 },
   },
@@ -32,6 +40,13 @@ export default createDeployment(system, {
 Program and Dependency names are inferred from the composed System. Adapter
 packages construct typed Dependency bindings, so product code does not provide
 environment maps, provider manifests, or transport configuration.
+
+Interface names are inferred too. A Deployment assigns hostnames; its adapter
+owns DNS records, certificates, gateways, and any CDN realization required to
+make those hostnames converge. These concerns do not enter Feature or Route
+definitions. The local adapter realizes the same contract with `.localhost`
+hostnames, allowing multi-App host routing to be tested without provider
+credentials.
 
 Use `secret("name")` when an adapter configuration or Dependency binding needs
 a secret. The reference is safe to retain in source and plans; its value is
@@ -53,6 +68,11 @@ compares that Release and the desired definition with observed state, then
 applies the resulting create, replace, scale, or remove operations. Applying
 the same desired state is idempotent. Applying an older immutable Release is
 the rollback path.
+
+Interactive terminals show build and deployment phases in place, followed by
+the resulting artifacts, replica readiness, locations, and failures. Add
+`--json` to `kit build` or any `kit deploy` command for newline-delimited
+structured events instead of the human renderer.
 
 Every adapter implements the same lifecycle:
 
@@ -95,6 +115,14 @@ to see only their semantic Dependency APIs. Provider-specific regions,
 credentials, placement, resource classes, DNS, certificates, and autoscaling
 metrics stay in the selected adapter's typed configuration. They do not enter
 Features, Programs, the portable compiler, or the generic Release format.
+
+The web Platform emits the delivery evidence a deployment needs. Content-hashed
+assets are immutable for one year. Request-independent literal Routes are
+materialized as static documents. Route freshness and stale-revalidation
+declarations become standard HTTP cache policy. A production CDN adapter may
+translate that evidence to provider rules and purge mutable document entries
+when replacing a Release; it must not invent a second product-level cache
+language.
 
 Replica recommendation is metric-specific and adapter-owned. The framework's
 `reconcileReplicas` utility applies only universal safety constraints such as

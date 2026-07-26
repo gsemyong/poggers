@@ -17,9 +17,10 @@ export async function buildWebSystem(
     interfaces.map((interface_) =>
       buildWebInterface({
         directory: input.directory,
-        outdir: resolve(input.output, "interfaces", encodeURIComponent(interface_.feature)),
+        outdir: resolve(input.output, "interfaces", encodeURIComponent(interface_.path)),
         interface: interface_.id,
         ir: input.ir,
+        report: input.report,
       }),
     ),
   );

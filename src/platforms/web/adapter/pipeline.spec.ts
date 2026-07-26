@@ -20,6 +20,7 @@ import {
   productionPresentationAssetPlugin,
   routeSourcePlugin,
   validateProductionWebRoute,
+  webInterfaceRequiresClientRuntime,
   webDevelopmentWorkspace,
   writeDevelopmentWebStream,
 } from "@/platforms/web/adapter/pipeline";
@@ -56,7 +57,7 @@ describe("web development workspace", () => {
     expect(handler).toBeTypeOf("function");
 
     const authored = await readFile(source, "utf8");
-    const result = await handler(authored, `${source}?kit-route=customer.web.shell.auth&lang.tsx`);
+    const result = await handler(authored, `${source}?kit-route=customer.shell.auth&lang.tsx`);
     const code = (typeof result === "string" ? result : result?.code) ?? authored;
 
     expect(code).toContain("view({ components: { Shell } })");
@@ -74,7 +75,7 @@ describe("web Presentation dependency manifest", () => {
     const manifest = collectPresentationDependencies(systemIR(), "browser");
 
     expect(manifest).toEqual({
-      "@feature/dashboard/component/Animated": [
+      "@feature/product.dashboard/component/Animated": [
         {
           destination: "Dashboard/Animated/Root/paint/opacity",
           animations: [
@@ -86,7 +87,7 @@ describe("web Presentation dependency manifest", () => {
         },
       ],
     });
-    expect(manifest["@feature/dashboard/component/Static"]).toBeUndefined();
+    expect(manifest["@feature/product.dashboard/component/Static"]).toBeUndefined();
     expect(Object.isFrozen(manifest)).toBe(true);
   });
 
@@ -106,10 +107,43 @@ describe("web Presentation dependency manifest", () => {
     );
 
     expect(Object.keys(manifest)).toEqual([
-      "@feature/dashboard/component/Animated",
-      "@feature/dashboard/component/Static",
+      "@feature/product.dashboard/component/Animated",
+      "@feature/product.dashboard/component/Static",
     ]);
-    expect(manifest["@feature/dashboard/component/Static"]?.[0]?.destination).toBe("*");
+    expect(manifest["@feature/product.dashboard/component/Static"]?.[0]?.destination).toBe("*");
+  });
+});
+
+describe("web client runtime classification", () => {
+  it("omits JavaScript only for an Interface proven inert", () => {
+    const animated = systemIR();
+    expect(webInterfaceRequiresClientRuntime(animated, "interface/product.web")).toBe(true);
+
+    const inert = {
+      ...animated,
+      presentations: animated.presentations.map((presentation) => ({
+        ...presentation,
+        animations: [],
+        declarations: [],
+      })),
+    };
+    expect(webInterfaceRequiresClientRuntime(inert, "interface/product.web")).toBe(false);
+
+    expect(
+      webInterfaceRequiresClientRuntime(
+        {
+          ...inert,
+          programs: inert.programs.map((program) => ({
+            ...program,
+            contributions: program.contributions.map((contribution) => ({
+              ...contribution,
+              ui: contribution.ui ? { ...contribution.ui, actions: ["open"] } : undefined,
+            })),
+          })),
+        },
+        "interface/product.web",
+      ),
+    ).toBe(true);
   });
 });
 
@@ -118,6 +152,9 @@ describe("web client build manifest", () => {
     expect(
       inspectClientManifest({
         "src/system.ts": {
+          assets: ["assets/shell-icon-a1b2c3d4.svg"],
+          css: ["assets/app-a1b2c3d4.css"],
+          dynamicImports: ["src/route.ts"],
           file: "assets/app-content.js",
           imports: ["_shared.js", "_vendor.js"],
           isEntry: true,
@@ -161,6 +198,15 @@ describe("web client build manifest", () => {
           "/assets/shared-content.js",
         ],
       },
+      resources: [
+        "/assets/app-a1b2c3d4.css",
+        "/assets/app-content.js",
+        "/assets/route-content.js",
+        "/assets/shared-content.js",
+        "/assets/shell-icon-a1b2c3d4.svg",
+        "/assets/vendor-content.js",
+        "/workers/01-indexer-content.js",
+      ],
     });
   });
 
@@ -362,6 +408,7 @@ export const audio = web.createAudioAsset(new URL("./assets/control.wav", import
         });
         const firstFiles = await snapshotFiles(first.directory);
         expect(await snapshotFiles(second.directory)).toEqual(firstFiles);
+        expect(firstFiles["files/new/index.html"]).toBeDefined();
         const textualArtifacts = Object.entries(firstFiles)
           .filter(([name]) => /\.(?:html|js|json)$/.test(name))
           .map(([, value]) => Buffer.from(value, "base64").toString("utf8"));
@@ -378,7 +425,7 @@ export const audio = web.createAudioAsset(new URL("./assets/control.wav", import
           javascript
             .filter(([, source]) => source.includes("Rendered in the browser"))
             .map(([name]) => name),
-        ).toEqual([expect.stringContaining("route-product-web-greeting-client-")]);
+        ).toEqual([expect.stringContaining("route-product-greeting-client-")]);
         expect(
           javascript.every(([, source]) => !source.includes("sensitive fixture failure")),
         ).toBe(true);
@@ -443,29 +490,29 @@ export const audio = web.createAudioAsset(new URL("./assets/control.wav", import
           .filter(([name]) => name.endsWith(".js"))
           .map(([name, value]) => [name, Buffer.from(value, "base64").toString("utf8")] as const);
         const baselineClient = javascript.find(([name]) =>
-          name.includes("route-product-web-greeting-client-"),
+          name.includes("route-product-greeting-client-"),
         );
         const variantClient = variantJavascript.find(([name]) =>
-          name.includes("route-product-web-greeting-client-"),
+          name.includes("route-product-greeting-client-"),
         );
-        expect(baselineClient?.[0]).toContain("route-product-web-greeting-client-");
-        expect(variantClient?.[0]).toContain("route-product-web-greeting-client-");
+        expect(baselineClient?.[0]).toContain("route-product-greeting-client-");
+        expect(variantClient?.[0]).toContain("route-product-greeting-client-");
         const baselineClientBytes = await initialRouteClosureBytes(
           first.directory,
-          "product.web.greeting.client",
+          "product.greeting.client",
         );
         const variantClientBytes = await initialRouteClosureBytes(
           variantBuild.directory,
-          "product.web.greeting.client",
+          "product.greeting.client",
         );
         expect(variantClientBytes).toBeGreaterThan(baselineClientBytes + 150_000);
         const baselineInitialBytes = await initialRouteClosureBytes(
           first.directory,
-          "product.web.greeting.greeting",
+          "product.greeting.greeting",
         );
         const variantInitialBytes = await initialRouteClosureBytes(
           variantBuild.directory,
-          "product.web.greeting.greeting",
+          "product.greeting.greeting",
         );
         expect(Math.abs(variantInitialBytes - baselineInitialBytes)).toBeLessThan(1_024);
       } finally {
@@ -576,12 +623,15 @@ async function initialRouteClosureBytes(directory: string, identity: string): Pr
   const artifact = JSON.parse(await readFile(resolve(directory, "routes.ir.json"), "utf8")) as {
     routes: Array<{
       route: { feature: string; name: string };
-      document: { entry: string; preloads: string[] };
+      document: { entry: false | string; preloads: string[] };
     }>;
   };
   const entry = artifact.routes.find(({ route }) => `${route.feature}.${route.name}` === identity);
   if (!entry) throw new Error(`Missing Route artifact ${JSON.stringify(identity)}.`);
-  const files = new Set([entry.document.entry, ...entry.document.preloads]);
+  const files = new Set([
+    ...(entry.document.entry === false ? [] : [entry.document.entry]),
+    ...entry.document.preloads,
+  ]);
   const sizes = await Promise.all(
     [...files].map(async (file) => (await stat(resolve(directory, file.replace(/^\//, "")))).size),
   );
@@ -594,11 +644,11 @@ function systemIR(): SystemIR {
     version: SYSTEM_IR_VERSION,
     system: { id: "system", name: "test" },
     platforms: ["web"],
-    apps: [{ id: "app/product", feature: "product", interfaces: ["interface/dashboard"] }],
+    apps: [{ id: "app/product", feature: "product", interfaces: ["interface/product.web"] }],
     interfaces: [
       {
-        id: "interface/dashboard",
-        feature: "dashboard",
+        id: "interface/product.web",
+        path: "product.web",
         app: "product",
         platform: "web",
         programs: ["program/browser"],
@@ -607,12 +657,18 @@ function systemIR(): SystemIR {
     ],
     features: [
       {
-        id: "feature/dashboard",
-        path: "dashboard",
-        kind: "interface",
+        id: "feature/product",
+        path: "product",
+        kind: "app",
         app: "product",
-        interface: "dashboard",
-        platform: "web",
+        children: ["feature/product.dashboard"],
+        programs: [],
+      },
+      {
+        id: "feature/product.dashboard",
+        path: "product.dashboard",
+        kind: "feature",
+        app: "product",
         children: [],
         programs: ["program/browser"],
       },
@@ -622,13 +678,13 @@ function systemIR(): SystemIR {
         id: "program/browser",
         name: "browser",
         logicalName: "browser",
-        interface: "dashboard",
+        interface: "product.web",
         environment: { name: "browser-main", platform: "web", ui: "web" },
-        ui: { root: { feature: "dashboard", component: "Animated" } },
+        ui: { root: { feature: "product.dashboard", component: "Animated" } },
         contributions: [
           {
-            id: "feature/dashboard/program/browser",
-            feature: "dashboard",
+            id: "feature/product.dashboard/program/browser",
+            feature: "product.dashboard",
             requires: [],
             provides: [],
             ui: {
@@ -662,7 +718,7 @@ function systemIR(): SystemIR {
     ],
     presentations: [
       {
-        interface: "dashboard",
+        interface: "product.web",
         file: "src/presentation.ts",
         animations: [
           {

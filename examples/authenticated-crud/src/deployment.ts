@@ -5,6 +5,10 @@ import system from "@/system";
 
 export default createDeployment(system, {
   adapter: createLocalDeploymentAdapter(),
+  interfaces: {
+    "customer.web": { hosts: ["customer.localhost"] },
+    "operations.web": { hosts: ["operations.localhost"] },
+  },
   programs: {
     api: { replicas: 1 },
   },

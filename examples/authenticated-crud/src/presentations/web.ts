@@ -5,7 +5,7 @@ import {
   type WebStyle,
 } from "kit/web";
 
-import type { WorkspaceWeb } from "@/apps/web";
+import type { Workspace } from "@/apps/workspace";
 
 const parameters = {
   color: {
@@ -323,9 +323,9 @@ const createClean = (({ parameters: values }) => {
       }),
     }),
   };
-}) satisfies WebPresentation<WorkspaceWeb, typeof parameters>;
+}) satisfies WebPresentation<Workspace, typeof parameters>;
 
 export const clean = { parameters, create: createClean } satisfies ConfiguredWebPresentation<
-  WorkspaceWeb,
+  Workspace,
   typeof parameters
 >;

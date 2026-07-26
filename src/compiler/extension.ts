@@ -49,9 +49,16 @@ export type FeatureSourceContext = Readonly<{
 
 export type ProgramSourceContext = FeatureSourceContext &
   Readonly<{
+    app?: string;
     feature: string;
     interface?: string;
     name: string;
+  }>;
+
+export type InterfaceSourceContext = FeatureSourceContext &
+  Readonly<{
+    app: string;
+    platform: string;
   }>;
 
 export type SystemSourceContext = Readonly<{
@@ -69,6 +76,7 @@ export type SourceCompilerExtension = Readonly<{
   cacheSources?: readonly string[];
   system?(context: SystemSourceContext): ExtensionIR | undefined;
   feature?(context: FeatureSourceContext): ExtensionIR | undefined;
+  interface?(context: InterfaceSourceContext): ExtensionIR | undefined;
   program?(context: ProgramSourceContext): ExtensionIR | undefined;
   validate?(ir: SystemIR): void;
 }>;

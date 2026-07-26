@@ -1,6 +1,6 @@
 import type { ConfiguredWebPresentation, WebPresentation, WebStyle } from "kit/web";
 
-import type { Web } from "@/apps/main/app";
+import type { Main } from "@/apps/main";
 
 const parameters = {
   color: {
@@ -47,9 +47,9 @@ const createClean = (({ parameters: values }) => {
       }),
     }),
   };
-}) satisfies WebPresentation<Web, typeof parameters>;
+}) satisfies WebPresentation<Main, typeof parameters>;
 
 export const clean = {
   parameters,
   create: createClean,
-} satisfies ConfiguredWebPresentation<Web, typeof parameters>;
+} satisfies ConfiguredWebPresentation<Main, typeof parameters>;

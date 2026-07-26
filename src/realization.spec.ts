@@ -5,9 +5,11 @@ import { resolve } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 
 import type {
+  DevelopmentEvent,
   PlatformDevelopmentInput,
-  PlatformProductionInput,
   PlatformAdapterImplementation,
+  PlatformProductionInput,
+  ProductionEvent,
 } from "@/adapter";
 import type { SourceCompilerExtension } from "@/compiler/extension";
 import { serializeSystemIR } from "@/compiler/ir";
@@ -71,6 +73,7 @@ describe("System realization", { tags: ["compiler"] }, () => {
   test("compiles once, starts independent adapters concurrently, and disposes in reverse order", async () => {
     const directory = await fixture();
     const events: string[] = [];
+    const reports: DevelopmentEvent[] = [];
     let compilations = 0;
     let waiting = 0;
     let release!: () => void;
@@ -102,13 +105,57 @@ describe("System realization", { tags: ["compiler"] }, () => {
         },
       });
 
-    const running = await developSystem(directory, {
-      server: concurrent("server", [extension]),
-      web: concurrent("web"),
-    });
+    const running = await developSystem(
+      directory,
+      {
+        server: concurrent("server", [extension]),
+        web: concurrent("web"),
+      },
+      {
+        report: (event) => reports.push(event),
+      },
+    );
 
     expect(compilations).toBe(1);
     expect(events).toEqual(["start:server", "start:web"]);
+    expect(reports.slice(0, 4)).toEqual([
+      { kind: "phase", phase: "compile", status: "started" },
+      expect.objectContaining({
+        kind: "phase",
+        phase: "compile",
+        status: "completed",
+        cache: "miss",
+      }),
+      {
+        kind: "phase",
+        phase: "start",
+        status: "started",
+        platform: "server",
+      },
+      {
+        kind: "phase",
+        phase: "start",
+        status: "started",
+        platform: "web",
+      },
+    ]);
+    expect(reports.slice(4)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "phase",
+          phase: "start",
+          status: "completed",
+          platform: "server",
+        }),
+        expect.objectContaining({
+          kind: "phase",
+          phase: "start",
+          status: "completed",
+          platform: "web",
+        }),
+      ]),
+    );
+    expect(reports.slice(4)).toHaveLength(2);
     expect(Object.keys(running.locations)).toEqual([
       "interface/customer.web",
       "interface/operations.web",
@@ -157,7 +204,7 @@ describe("System realization", { tags: ["compiler"] }, () => {
     expect(operationsRevision.work.presentations).toEqual({ compiled: 1, reused: 5 });
     expect(operationsRevision.change?.outputs).toEqual([
       "interface/operations.web",
-      "program/operations.web.operations.web.browser",
+      "program/operations.web.browser",
     ]);
     expect(serializeSystemIR(operationsRevision.ir)).toBe(
       serializeSystemIR(compileSystem(fixture.system)),
@@ -173,7 +220,7 @@ describe("System realization", { tags: ["compiler"] }, () => {
     expect(typeRevision.work.presentations).toEqual({ compiled: 0, reused: 6 });
     expect(typeRevision.change?.outputs).toEqual([
       "interface/operations.web",
-      "program/operations.web.operations.web.browser",
+      "program/operations.web.browser",
     ]);
     expect(serializeSystemIR(typeRevision.ir)).toBe(
       serializeSystemIR(compileSystem(fixture.system)),
@@ -187,8 +234,8 @@ describe("System realization", { tags: ["compiler"] }, () => {
     expect(sharedUIRevision.change?.outputs).toEqual([
       "interface/customer.web",
       "interface/operations.web",
-      "program/customer.web.customer.web.browser",
-      "program/operations.web.operations.web.browser",
+      "program/customer.web.browser",
+      "program/operations.web.browser",
     ]);
     expect(serializeSystemIR(sharedUIRevision.ir)).toBe(
       serializeSystemIR(compileSystem(fixture.system)),
@@ -281,7 +328,7 @@ describe("System realization", { tags: ["compiler"] }, () => {
     const initial = serializeSystemIR(revisions.current.ir);
 
     const revision = revisions.compile(
-      resolve(import.meta.dirname, "../examples/authenticated-crud/src/apps/operations/app.tsx"),
+      resolve(import.meta.dirname, "../examples/authenticated-crud/src/apps/operations.tsx"),
     );
 
     expect(serializeSystemIR(revision.ir)).toBe(initial);
@@ -293,8 +340,8 @@ describe("System realization", { tags: ["compiler"] }, () => {
     const revisions = createSystemRevisionSource(resolve(root, "system.ts"), [
       webCompilerExtension,
     ]);
-    const customer = resolve(root, "apps/customer/app.tsx");
-    const operations = resolve(root, "apps/operations/app.tsx");
+    const customer = resolve(root, "apps/customer.tsx");
+    const operations = resolve(root, "apps/operations.tsx");
 
     expect(revisions.current.outputSources["interface/customer.web"]).toContain(customer);
     expect(revisions.current.outputSources["program/customer.web.browser"]).toContain(customer);
@@ -338,6 +385,7 @@ describe("System realization", { tags: ["compiler"] }, () => {
     const directory = await fixture();
     const development: string[] = [];
     const production: string[] = [];
+    const reports: ProductionEvent[] = [];
     const semantic = (programs: PlatformDevelopmentInput["programs"]) =>
       programs.map((program) => JSON.stringify(linkProgram(program)));
     const adapters = {
@@ -376,9 +424,55 @@ describe("System realization", { tags: ["compiler"] }, () => {
     void running;
     const built = await buildSystem(directory, resolve(directory, "dist"), adapters, {
       app: "operations",
+      report: (event) => reports.push(event),
     });
 
     expect(development).toEqual(production);
+    expect(reports.slice(0, 4)).toEqual([
+      { kind: "phase", phase: "compile", status: "started" },
+      expect.objectContaining({
+        kind: "phase",
+        phase: "compile",
+        status: "completed",
+      }),
+      {
+        kind: "phase",
+        phase: "build",
+        status: "started",
+        platform: "server",
+      },
+      {
+        kind: "phase",
+        phase: "build",
+        status: "started",
+        platform: "web",
+      },
+    ]);
+    expect(reports.slice(4, 6)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "phase",
+          phase: "build",
+          status: "completed",
+          platform: "server",
+        }),
+        expect.objectContaining({
+          kind: "phase",
+          phase: "build",
+          status: "completed",
+          platform: "web",
+        }),
+      ]),
+    );
+    expect(reports.slice(4, 6)).toHaveLength(2);
+    expect(reports.slice(6)).toEqual([
+      { kind: "phase", phase: "release", status: "started" },
+      expect.objectContaining({
+        kind: "phase",
+        phase: "release",
+        status: "completed",
+      }),
+    ]);
     expect(built.artifacts.server?.entries.map(({ identity }) => identity)).toEqual([
       "program/api",
     ]);
@@ -440,6 +534,12 @@ type Feature<Contract> = Readonly<{ readonly [featureContract]?: Contract }>;
 function createFeature<Contract>(definition: object): Feature<Contract> {
   return definition as Feature<Contract>;
 }
+function createApp<Contract>(definition: object): Feature<Contract> {
+  return definition as Feature<Contract>;
+}
+function createInterface<Contract>(definition: object): Contract {
+  return definition as Contract;
+}
 function createSystem(definition: object): object {
   return definition;
 }
@@ -448,31 +548,29 @@ type Program<Environment, Contract extends object = {}> =
 type Server = { Name: "server"; Platform: { Name: "server" } };
 type Browser = { Name: "browser-main"; Platform: { Name: "web" } };
 type Shared = { Programs: { api: Program<Server> } };
-type Service = { Programs: { api: Program<Server> } };
-type Web = {
-  Interface: { Platform: { Name: "web" } };
-  Programs: { browser: Program<Browser> };
-};
+type Service = { Programs: { api: Program<Server>; browser: Program<Browser> } };
+type Web = { Interface: { Platform: { Name: "web" } } };
 type Product = {
   App: true;
-  Features: { service: Service; web: Web };
+  Features: { service: Service };
+  Interfaces: { web: Web };
 };
 const shared = createFeature<Shared>({ programs: { api: {} } });
-const operationsService = createFeature<Service>({ programs: { api: {} } });
-const operationsWeb = createFeature<Web>({
-  programs: { browser: {} },
+const operationsService = createFeature<Service>({ programs: { api: {}, browser: {} } });
+const operationsWeb = createInterface<Web>({
   presentation: { parameters: {}, create() { return {}; } },
 });
-const operations = createFeature<Product>({
-  features: { service: operationsService, web: operationsWeb },
+const operations = createApp<Product>({
+  features: { service: operationsService },
+  interfaces: { web: operationsWeb },
 });
-const customerService = createFeature<Service>({ programs: { api: {} } });
-const customerWeb = createFeature<Web>({
-  programs: { browser: {} },
+const customerService = createFeature<Service>({ programs: { api: {}, browser: {} } });
+const customerWeb = createInterface<Web>({
   presentation: { parameters: {}, create() { return {}; } },
 });
-const customer = createFeature<Product>({
-  features: { service: customerService, web: customerWeb },
+const customer = createApp<Product>({
+  features: { service: customerService },
+  interfaces: { web: customerWeb },
 });
 export default createSystem({
   metadata: { name: "Company" },
@@ -504,6 +602,12 @@ export type Feature<Contract> = Readonly<{ readonly [featureContract]?: Contract
 export function createFeature<Contract>(definition: object): Feature<Contract> {
   return definition as Feature<Contract>;
 }
+export function createApp<Contract>(definition: object): Feature<Contract> {
+  return definition as Feature<Contract>;
+}
+export function createInterface<Contract>(definition: object): Contract {
+  return definition as Contract;
+}
 export function createSystem(definition: object): object {
   return definition;
 }
@@ -519,25 +623,34 @@ type Shared = { Programs: { api: Program<Server, { State: { label: "shared" } }>
 export const shared = createFeature<Shared>({ programs: { api: {} } });
 `;
   const appSource = (name: "operations" | "customer") => `
-import { createFeature, type Browser, type Program } from "./contracts";
+import { createApp, createFeature, createInterface, type Browser, type Program } from "./contracts";
 import { marker } from "./shared-ui";
 ${name === "operations" ? 'import type { OperationsLabel } from "./operations-label";' : ""}
 void marker;
-type Web = {
-  Interface: { Platform: { Name: "web" } };
+type Service = {
   Programs: {
-    "${name}.web.browser": Program<Browser, { State: {
+    browser: Program<Browser, { State: {
       label: "${name}";
       ${name === "operations" ? "typed: OperationsLabel;" : ""}
     } }>;
   };
 };
-type App = { App: true; Features: { web: Web } };
-const web = createFeature<Web>({
-  programs: { "${name}.web.browser": {} },
+type Web = { Interface: { Platform: { Name: "web" } } };
+type App = {
+  App: true;
+  Features: { service: Service };
+  Interfaces: { web: Web };
+};
+const service = createFeature<Service>({
+  programs: { browser: {} },
+});
+const web = createInterface<Web>({
   presentation: { parameters: {}, create() { return {}; } },
 });
-export const ${name} = createFeature<App>({ features: { web } });
+export const ${name} = createApp<App>({
+  features: { service },
+  interfaces: { web },
+});
 `;
   const operationsSource = appSource("operations");
   const operationsTypeSource = 'export type OperationsLabel = "operations";\n';

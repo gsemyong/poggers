@@ -26,6 +26,35 @@ type UnionToIntersection<Union> = (Union extends unknown ? (value: Union) => voi
   : never;
 
 type ProgramNames<Contract extends FeatureContract> = Extract<ProgramName<Contract>, string>;
+type FeaturesOf<Contract> = Contract extends {
+  Features: infer Features extends Record<string, FeatureContract>;
+}
+  ? Features
+  : Empty;
+type InterfacesOf<Contract> = Contract extends {
+  Interfaces: infer Interfaces extends Record<string, object>;
+}
+  ? Interfaces
+  : Empty;
+type InterfaceNamesIn<
+  Contract extends FeatureContract,
+  Prefix extends string = "",
+  Depth extends readonly unknown[] = [],
+> = Depth["length"] extends 8
+  ? never
+  :
+      | (keyof InterfacesOf<Contract> extends never
+          ? never
+          : Prefix extends ""
+            ? Extract<keyof InterfacesOf<Contract>, string>
+            : `${Prefix}.${Extract<keyof InterfacesOf<Contract>, string>}`)
+      | {
+          [Name in Extract<keyof FeaturesOf<Contract>, string>]: InterfaceNamesIn<
+            Extract<FeaturesOf<Contract>[Name], FeatureContract>,
+            Prefix extends "" ? Name : `${Prefix}.${Name}`,
+            [...Depth, unknown]
+          >;
+        }[Extract<keyof FeaturesOf<Contract>, string>];
 
 type ExternalDependencyContributions<Contract extends FeatureContract> = {
   [Name in ProgramNames<Contract>]: ProgramExternalDependencies<Contract, Name>;
@@ -151,6 +180,11 @@ export type DeploymentTarget = Readonly<{
   configuration: Readonly<object>;
 }>;
 
+export type DeploymentInterfacePlan = Readonly<{
+  identity: string;
+  hosts: readonly string[];
+}>;
+
 export type ReplicaPolicy = Readonly<{
   minimum: number;
   maximum: number;
@@ -182,6 +216,7 @@ export type DeploymentPlan = Readonly<{
   artifacts: readonly DeploymentArtifactState[];
   operations: readonly DeploymentOperation[];
   dependencies: readonly DeploymentDependencyPlan[];
+  interfaces: readonly DeploymentInterfacePlan[];
 }>;
 
 /** One configured implementation of the Deployment lifecycle. */
@@ -226,6 +261,17 @@ export type DeploymentDependencies<Contract extends FeatureContract> = Readonly<
   }>
 >;
 
+export type DeploymentInterface = Readonly<{
+  hosts?: readonly string[];
+}>;
+
+/** Public hostnames bound to each independently addressable Platform interface. */
+export type DeploymentInterfaces<Contract extends FeatureContract> = Readonly<
+  Partial<{
+    [Name in InterfaceNamesIn<Contract>]: DeploymentInterface;
+  }>
+>;
+
 /** An opaque secret name resolved by a Deployment adapter at apply time. */
 export type SecretReference<Name extends string = string> = Readonly<{
   kind: "secret";
@@ -240,6 +286,7 @@ export type DeploymentDefinition<
   adapter: Adapter;
   programs?: DeploymentPrograms<Contract>;
   dependencies?: DeploymentDependencies<Contract>;
+  interfaces?: DeploymentInterfaces<Contract>;
 }>;
 
 export type Deployment<
@@ -270,6 +317,9 @@ export function createDeployment<
       );
     }
   }
+  validateDeploymentInterfaces(
+    definition.interfaces as Readonly<Record<string, DeploymentInterface>> | undefined,
+  );
   return Object.freeze({ system, ...definition });
 }
 
@@ -400,6 +450,7 @@ export function planDeployment<
   desiredArtifacts.sort((left, right) => left.identity.localeCompare(right.identity));
 
   const dependencies = deploymentDependencyPlan(deployment, release);
+  const interfaces = deploymentInterfacePlan(deployment, release);
   const target = Object.freeze({
     adapter: deployment.adapter.name,
     configuration: canonicalDeploymentObject(
@@ -410,6 +461,7 @@ export function planDeployment<
   const runtime = digest({
     target,
     dependencies,
+    interfaces,
   });
   const desired = digest({
     release: release.digest,
@@ -425,6 +477,7 @@ export function planDeployment<
     artifacts: Object.freeze(desiredArtifacts),
     operations: Object.freeze(operations),
     dependencies,
+    interfaces,
   };
   return Object.freeze({ ...meaning, digest: digest(meaning) });
 }
@@ -572,6 +625,77 @@ function deploymentDependencyPlan<
     }
   }
   return Object.freeze(result);
+}
+
+function deploymentInterfacePlan<
+  SystemValue extends System<SystemContract>,
+  Adapter extends DeploymentAdapter,
+>(
+  deployment: Deployment<SystemValue, Adapter>,
+  release: Release,
+): readonly DeploymentInterfacePlan[] {
+  const available = new Set(
+    release.artifacts.filter(({ kind }) => kind === "interface").map(({ identity }) => identity),
+  );
+  const configured = deployment.interfaces as
+    | Readonly<Record<string, DeploymentInterface>>
+    | undefined;
+  validateDeploymentInterfaces(configured);
+  for (const name of Object.keys(configured ?? {})) {
+    const identity = `interface/${name}`;
+    if (!available.has(identity)) {
+      throw new Error(`Deployment configures unknown interface ${JSON.stringify(name)}.`);
+    }
+  }
+  const claimed = new Map<string, string>();
+  const result = [...available].sort().map((identity): DeploymentInterfacePlan => {
+    const name = identity.slice("interface/".length);
+    const hosts = Object.freeze(
+      [...new Set((configured?.[name]?.hosts ?? []).map(canonicalHost))].sort(),
+    );
+    for (const host of hosts) {
+      const owner = claimed.get(host);
+      if (owner && owner !== identity) {
+        throw new Error(
+          `Deployment host ${JSON.stringify(host)} is claimed by ${JSON.stringify(owner)} and ${JSON.stringify(identity)}.`,
+        );
+      }
+      claimed.set(host, identity);
+    }
+    return Object.freeze({ identity, hosts });
+  });
+  return Object.freeze(result);
+}
+
+function validateDeploymentInterfaces(
+  interfaces: Readonly<Record<string, DeploymentInterface>> | undefined,
+): void {
+  for (const [name, interface_] of Object.entries(interfaces ?? {})) {
+    if (!name.trim()) throw new TypeError("Deployment interface name cannot be empty.");
+    if (!interface_ || typeof interface_ !== "object" || Array.isArray(interface_)) {
+      throw new TypeError(`Deployment interface ${JSON.stringify(name)} must be an object.`);
+    }
+    for (const host of interface_.hosts ?? []) canonicalHost(host);
+  }
+}
+
+function canonicalHost(value: string): string {
+  if (typeof value !== "string" || !value.trim() || value !== value.trim()) {
+    throw new TypeError("Deployment hosts must be non-empty canonical hostnames.");
+  }
+  if (value.includes("/") || value.includes("@") || value.includes("?") || value.includes("#")) {
+    throw new TypeError(`Invalid Deployment host ${JSON.stringify(value)}.`);
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(`http://${value}`);
+  } catch {
+    throw new TypeError(`Invalid Deployment host ${JSON.stringify(value)}.`);
+  }
+  if (parsed.port || parsed.username || parsed.password || parsed.pathname !== "/") {
+    throw new TypeError(`Invalid Deployment host ${JSON.stringify(value)}.`);
+  }
+  return parsed.hostname.startsWith("[") ? parsed.hostname : parsed.hostname.toLowerCase();
 }
 
 function canonicalDeploymentObject(value: object, label: string): Readonly<object> {

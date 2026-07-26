@@ -33,8 +33,7 @@ export function planWebInstallation(
 ): WebInstallationPlan | undefined {
   const interface_ = system.interfaces.find(({ id }) => id === interfaceId);
   if (!interface_) throw new Error(`Unknown web interface ${JSON.stringify(interfaceId)}.`);
-  const feature = system.features.find(({ path }) => path === interface_.feature);
-  const extension = feature?.extensions?.web;
+  const extension = interface_.extensions?.web;
   if (!extension) return undefined;
   const installation = webFeatureCompilerIR(extension).installation;
   if (!installation) return undefined;
@@ -94,7 +93,10 @@ export type WebServiceWorkerPlan = Readonly<{
   caching: "always" | "preview";
   assets: readonly string[];
   precache: readonly string[];
+  warmAssets: readonly string[];
   documents: readonly string[];
+  installDocuments: readonly string[];
+  warmDocuments: readonly string[];
   fallback?: string;
   modules: readonly string[];
 }>;
@@ -103,16 +105,18 @@ export function createWebServiceWorkerPlan(input: {
   installation?: WebInstallationPlan;
   assets: readonly string[];
   precache?: readonly string[];
+  warmAssets?: readonly string[];
   routes: readonly WebRouteIR[];
   modules?: readonly string[];
   caching?: "always" | "preview";
 }): WebServiceWorkerPlan {
   const assets = uniquePaths(input.assets);
   const precache = uniquePaths(input.precache ?? assets);
+  const warmAssets = uniquePaths(input.warmAssets ?? []);
   const available = new Set(assets);
-  for (const path of precache) {
+  for (const path of [...precache, ...warmAssets]) {
     if (!available.has(path)) {
-      throw new Error(`Precached web asset ${JSON.stringify(path)} is not cacheable.`);
+      throw new Error(`Planned web asset ${JSON.stringify(path)} is not cacheable.`);
     }
   }
   const cacheable = input.routes.filter(
@@ -127,15 +131,17 @@ export function createWebServiceWorkerPlan(input: {
       "The web installation offline fallback must be a public document or a client shell.",
     );
   }
-  const documents = uniquePaths([
-    ...(input.installation
+  const documents = uniquePaths(cacheable.map(({ path }) => path));
+  const installDocuments = uniquePaths(
+    input.installation
       ? [
           ...(cacheablePaths.has(input.installation.start) ? [input.installation.start] : []),
           input.installation.offline.fallback,
         ]
-      : []),
-    ...cacheable.map(({ path }) => path),
-  ]);
+      : [],
+  );
+  const installed = new Set(installDocuments);
+  const warmDocuments = documents.filter((path) => !installed.has(path));
   const modules = uniquePaths(input.modules ?? []);
   const caching = input.caching ?? "always";
   const version = createHash("sha256")
@@ -143,7 +149,10 @@ export function createWebServiceWorkerPlan(input: {
       JSON.stringify({
         assets,
         precache,
+        warmAssets,
         documents,
+        installDocuments,
+        warmDocuments,
         fallback: input.installation?.offline.fallback,
         modules,
         caching,
@@ -156,7 +165,10 @@ export function createWebServiceWorkerPlan(input: {
     caching,
     assets: Object.freeze(assets),
     precache: Object.freeze(precache),
+    warmAssets: Object.freeze(warmAssets),
     documents: Object.freeze(documents),
+    installDocuments: Object.freeze(installDocuments),
+    warmDocuments: Object.freeze(warmDocuments),
     ...(input.installation ? { fallback: input.installation.offline.fallback } : {}),
     modules: Object.freeze(modules),
   });
@@ -172,7 +184,10 @@ const ASSET_CACHE = "kit-assets-" + VERSION;
 const DOCUMENT_CACHE = "kit-documents-" + VERSION;
 const ASSETS = ${JSON.stringify(plan.assets)};
 const PRECACHE = ${JSON.stringify(plan.precache)};
+const WARM_ASSETS = ${JSON.stringify(plan.warmAssets)};
 const DOCUMENTS = ${JSON.stringify(plan.documents)};
+const INSTALL_DOCUMENTS = ${JSON.stringify(plan.installDocuments)};
+const WARM_DOCUMENTS = ${JSON.stringify(plan.warmDocuments)};
 const FALLBACK = ${JSON.stringify(plan.fallback ?? null)};
 
 self.addEventListener("install", (event) => {
@@ -180,7 +195,7 @@ self.addEventListener("install", (event) => {
     Promise.all(PROGRAMS),
     ...(CACHE_ENABLED ? [
       caches.open(ASSET_CACHE).then((cache) => cache.addAll(PRECACHE)),
-      caches.open(DOCUMENT_CACHE).then((cache) => cache.addAll(DOCUMENTS)),
+      caches.open(DOCUMENT_CACHE).then((cache) => cache.addAll(INSTALL_DOCUMENTS)),
     ] : []),
   ]));
 });
@@ -192,11 +207,21 @@ self.addEventListener("activate", (event) => {
       .filter((name) => name.startsWith("kit-") && name !== ASSET_CACHE && name !== DOCUMENT_CACHE)
       .map((name) => caches.delete(name)))),
     self.registration.navigationPreload?.enable(),
+    self.clients.claim(),
   ]));
 });
 
 self.addEventListener("message", (event) => {
-  if (event.data === "kit:activate") event.waitUntil(self.skipWaiting());
+  if (event.data === "kit:activate") {
+    event.waitUntil(self.skipWaiting());
+    return;
+  }
+  if (event.data === "kit:warm" && CACHE_ENABLED) {
+    event.waitUntil(Promise.all([
+      warm(ASSET_CACHE, WARM_ASSETS),
+      warm(DOCUMENT_CACHE, WARM_DOCUMENTS),
+    ]));
+  }
 });
 
 self.addEventListener("fetch", (event) => {
@@ -233,6 +258,15 @@ self.addEventListener("fetch", (event) => {
     return response;
   })());
 });
+
+const warm = async (name, paths) => {
+  const cache = await caches.open(name);
+  await Promise.allSettled(paths.map(async (path) => {
+    if (await cache.match(path, { ignoreVary: true })) return;
+    const response = await fetch(path, { credentials: "same-origin" });
+    if (response.ok) await cache.put(path, response);
+  }));
+};
 `;
 }
 

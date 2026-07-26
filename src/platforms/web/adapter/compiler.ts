@@ -34,23 +34,31 @@ export const webCompilerExtension: SourceCompilerExtension = Object.freeze({
     const { contract, implementation, location, source } = context;
     const routePath = source.optionalLiteral(contract, "RoutePath", location);
     const interfaceContract = source.property(contract, "Interface", location);
-    const platform = interfaceContract
+    const interfacePlatform = interfaceContract
       ? source.property(interfaceContract, "Platform", location)
       : undefined;
-    const isWebInterface =
-      platform !== undefined && source.literal(platform, "Name", location) === "web";
-    const installationValue = isWebInterface
-      ? source.member(implementation, "installation")
-      : undefined;
-    if (routePath === undefined && !isWebInterface) return undefined;
-    const result: WebFeatureCompilerIR = {
+    const legacyWebInterface =
+      interfacePlatform !== undefined &&
+      source.literal(interfacePlatform, "Name", location) === "web";
+    const installation =
+      legacyWebInterface && implementation
+        ? source.member(implementation, "installation")
+        : undefined;
+    if (routePath === undefined && !installation) return undefined;
+    return {
       version: WEB_COMPILER_IR_VERSION,
       ...(routePath === undefined ? {} : { routePath }),
-      ...(installationValue
-        ? { installation: compileWebInstallation(context, installationValue) }
-        : {}),
-    };
-    return result;
+      ...(installation ? { installation: compileWebInstallation(context, installation) } : {}),
+    } satisfies WebFeatureCompilerIR;
+  },
+  interface(context) {
+    if (context.platform !== "web") return undefined;
+    const installation = context.source.member(context.implementation, "installation");
+    if (!installation) return undefined;
+    return {
+      version: WEB_COMPILER_IR_VERSION,
+      installation: compileWebInstallation(context, installation),
+    } satisfies WebFeatureCompilerIR;
   },
   program(context) {
     if (platformName(context) !== "web") return undefined;
@@ -70,7 +78,7 @@ export const webCompilerExtension: SourceCompilerExtension = Object.freeze({
         const program = ir.programs.find((candidate) => candidate.id === id);
         if (!program) {
           throw new Error(
-            `Web interface ${JSON.stringify(interface_.feature)} owns unknown Program ${JSON.stringify(id)}.`,
+            `Web interface ${JSON.stringify(interface_.path)} owns unknown Program ${JSON.stringify(id)}.`,
           );
         }
         try {
@@ -91,7 +99,7 @@ export const webCompilerExtension: SourceCompilerExtension = Object.freeze({
 });
 
 function compileWebInstallation(
-  context: Parameters<NonNullable<SourceCompilerExtension["feature"]>>[0],
+  context: Readonly<{ source: SourceCompilerAPI }>,
   expression: ts.Expression,
 ): NonNullable<WebFeatureCompilerIR["installation"]> {
   const value = context.source.constant(expression);
@@ -211,7 +219,7 @@ function routeList(
             })
           : false,
         view: compileRenderFunction(context, renderView, {
-          feature: context.interface ?? "",
+          feature: context.app ?? context.interface ?? "",
           global: true,
           elements: {},
         }),

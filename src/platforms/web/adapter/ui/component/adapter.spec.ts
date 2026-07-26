@@ -28,7 +28,7 @@ function testSystem(features: Readonly<Record<string, unknown>>): System {
     features: {
       web: {
         features,
-        presentation: emptyPresentation,
+        interfaces: { main: { presentation: emptyPresentation } },
       },
     },
   } as unknown as System;
@@ -152,7 +152,7 @@ describe("Program UI composition", () => {
     ];
     const ui = await createInterfaceUI({
       system,
-      interface: "web",
+      interface: "web.main",
       program: "web.browser",
       logicalProgram: "browser",
       presentation: emptyPresentation,
@@ -261,7 +261,7 @@ describe("Program UI composition", () => {
     });
     const creating = createInterfaceUI({
       system,
-      interface: "web",
+      interface: "web.main",
       program: "web.browser",
       logicalProgram: "browser",
       presentation: emptyPresentation,
@@ -338,7 +338,7 @@ describe("Program UI composition", () => {
     const system = testSystem({ shell });
     const ui = await createInterfaceUI({
       system,
-      interface: "web",
+      interface: "web.main",
       program: "web.browser",
       logicalProgram: "browser",
       presentation: emptyPresentation,
@@ -371,7 +371,7 @@ describe("Program UI composition", () => {
     await expect(
       createInterfaceUI({
         system,
-        interface: "web",
+        interface: "web.main",
         program: "web.browser",
         logicalProgram: "browser",
         presentation: emptyPresentation,
@@ -402,7 +402,7 @@ describe("Program UI composition", () => {
     const system = testSystem({ shell });
     const ui = await createInterfaceUI({
       system,
-      interface: "web",
+      interface: "web.main",
       program: "web.browser",
       logicalProgram: "browser",
       presentation: family,
@@ -445,7 +445,7 @@ describe("Program UI composition", () => {
     const system = testSystem({ shell });
     const ui = await createInterfaceUI({
       system,
-      interface: "web",
+      interface: "web.main",
       program: "web.browser",
       logicalProgram: "browser",
       presentation: family,
@@ -482,7 +482,7 @@ describe("Program UI composition", () => {
     await expect(
       createInterfaceUI({
         system,
-        interface: "web",
+        interface: "web.main",
         program: "web.browser",
         logicalProgram: "browser",
         presentation: emptyPresentation,
@@ -539,7 +539,7 @@ describe("Program UI composition", () => {
     const system = testSystem({ consumer });
     const ui = await createInterfaceUI({
       system,
-      interface: "web",
+      interface: "web.main",
       program: "web.browser",
       logicalProgram: "browser",
       programManifest: {
@@ -581,7 +581,7 @@ describe("Program UI composition", () => {
     const hotState = {};
     const first = await createInterfaceUI({
       system,
-      interface: "web",
+      interface: "web.main",
       program: "web.browser",
       logicalProgram: "browser",
       presentation: emptyPresentation,
@@ -598,7 +598,7 @@ describe("Program UI composition", () => {
 
     const second = await createInterfaceUI({
       system,
-      interface: "web",
+      interface: "web.main",
       program: "web.browser",
       logicalProgram: "browser",
       presentation: emptyPresentation,
@@ -681,7 +681,7 @@ test("evaluates each interface and child Feature Presentation scope once per roo
         },
       },
     }),
-    interface: "web",
+    interface: "web.main",
     logicalProgram: "browser",
     presentation: () => presentation,
     adapter,
@@ -742,7 +742,7 @@ test("invalidates only compiler-identified consumers of shared Presentation moti
         programs: { browser: { components: { First: {}, Second: {} } } },
       },
     }),
-    interface: "web",
+    interface: "web.main",
     logicalProgram: "browser",
     presentation: () => presentation,
     adapter,
@@ -809,7 +809,7 @@ test("invalidates every component after replacing the authored Presentation", as
         programs: { browser: { components: { First: {}, Second: {} } } },
       },
     }),
-    interface: "web",
+    interface: "web.main",
     logicalProgram: "browser",
     presentation: () => presentation,
     adapter,
@@ -870,7 +870,7 @@ test("coalesces shared-scope invalidation when the consumer already rendered tha
     system: testSystem({
       dashboard: { programs: { browser: { components: { Panel: {} } } } },
     }),
-    interface: "web",
+    interface: "web.main",
     logicalProgram: "browser",
     presentation: () => presentation,
     adapter,
@@ -958,7 +958,7 @@ test("does not reevaluate unrelated Feature Presentation scopes on adapter-owned
       dashboard: { programs: { browser: { components: { First: {} } } } },
       analytics: { programs: { browser: { components: { Report: {} } } } },
     }),
-    interface: "web",
+    interface: "web.main",
     logicalProgram: "browser",
     presentation: () => presentation,
     adapter,

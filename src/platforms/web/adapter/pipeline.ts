@@ -6,6 +6,7 @@ import type { ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { basename, dirname, extname, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
+import { stripVTControlCharacters } from "node:util";
 
 import * as ts from "@typescript/typescript6";
 import {
@@ -14,6 +15,7 @@ import {
   defaultClientConditions,
   defaultServerConditions,
   type HmrContext,
+  type Logger,
   type ModuleNode,
   type Plugin,
   type ViteDevServer,
@@ -22,6 +24,7 @@ import {
 import type {
   DevelopmentReporter,
   ProductionArtifact,
+  ProductionReporter,
   SystemCompilationRevision,
   SystemRevisionSource,
 } from "@/adapter";
@@ -183,7 +186,7 @@ function webInterfaceContract(
   if (!interface_ || interface_.platform !== "web") {
     throw new Error(`Unknown web interface ${JSON.stringify(interfaceId)}.`);
   }
-  const programs = ir.programs.filter(({ interface: owner }) => owner === interface_.feature);
+  const programs = ir.programs.filter(({ interface: owner }) => owner === interface_.path);
   const names = new Set(
     programs
       .filter(
@@ -244,7 +247,7 @@ function webInterfaceRequiresCrossOriginIsolation(ir: SystemIR, interfaceId: str
   return ir.programs
     .filter(
       ({ interface: owner, environment }) =>
-        owner === interface_.feature && environment.platform === "web",
+        owner === interface_.path && environment.platform === "web",
     )
     .some((program) =>
       selectDependencyProviders(
@@ -301,6 +304,76 @@ function componentEnvironmentContract(component: ComponentIR): WebComponentEnvir
   };
 }
 
+/**
+ * Proves whether one web Interface needs a browser runtime.
+ *
+ * This is intentionally conservative: an unknown view or any authored lifecycle,
+ * dependency, state, action, worker, installation, shell, deferred boundary, or
+ * temporal Presentation keeps the client runtime.
+ */
+export function webInterfaceRequiresClientRuntime(
+  ir: SystemIR,
+  interfaceId: string,
+  compiledComponents = collectCompiledWebComponents(
+    ir,
+    webInterfaceContract(ir, interfaceId).uiProgram,
+  ),
+): boolean {
+  const contract = webInterfaceContract(ir, interfaceId);
+  if (
+    contract.installation ||
+    contract.headless.length ||
+    contract.workers.length ||
+    contract.routes.some(({ deferred, document }) => document === "shell" || deferred.length) ||
+    compiledComponents.some(({ view }) => view === false)
+  ) {
+    return true;
+  }
+  const programs = ir.programs.filter(
+    ({ name, environment }) =>
+      name === contract.uiProgram &&
+      environment.name === "browser-main" &&
+      environment.platform === "web",
+  );
+  for (const { contributions } of programs) {
+    for (const contribution of contributions) {
+      const ui = contribution.ui;
+      if (!ui) continue;
+      if (
+        contribution.requires.length ||
+        contribution.provides.length ||
+        typeCarriesRuntimeState(ui.state) ||
+        ui.actions.length
+      ) {
+        return true;
+      }
+      if (
+        ui.components.some(
+          (component) =>
+            typeCarriesRuntimeState(component.state) ||
+            component.actions.length > 0 ||
+            component.propCallbacks.length > 0 ||
+            component.implementation.state ||
+            component.implementation.actions ||
+            component.implementation.mount,
+        )
+      ) {
+        return true;
+      }
+    }
+  }
+  return ir.presentations
+    .filter(
+      ({ interface: owner }) =>
+        owner === contract.interface.path || owner === contract.interface.id,
+    )
+    .some(({ animations }) => animations.length > 0);
+}
+
+function typeCarriesRuntimeState(type: ComponentIR["state"]): boolean {
+  return type.kind !== "record" || type.fields.length > 0;
+}
+
 /** Builds one independently deployable web interface from already compiled System meaning. */
 export async function buildWebInterface(options: {
   directory: string;
@@ -308,6 +381,7 @@ export async function buildWebInterface(options: {
   interface: string;
   ir: SystemIR;
   development?: boolean;
+  report?: ProductionReporter;
 }): Promise<WebBuild> {
   const paths = resolveSystem(options.directory);
   const outdir = resolve(paths.directory, options.outdir);
@@ -342,6 +416,11 @@ export async function buildWebInterface(options: {
       prepared.interface,
     );
     let compiledComponents = collectCompiledWebComponents(prepared.ir, contract.uiProgram);
+    const clientRequired = webInterfaceRequiresClientRuntime(
+      prepared.ir,
+      prepared.interface,
+      compiledComponents,
+    );
     const preparedDocuments = await prepareProductionDocuments(
       paths,
       work,
@@ -349,6 +428,7 @@ export async function buildWebInterface(options: {
       prepared.interface,
       compiledComponents,
       presentationAssets,
+      options.report,
     );
     let routeDocuments = preparedDocuments.routes;
     compiledComponents = compiledComponents.map((component) => {
@@ -362,13 +442,19 @@ export async function buildWebInterface(options: {
       prepared.workers.map(({ output, source }) => [output, source]),
     );
     await build({
-      ...viteConfiguration(paths, options.development, prepared.ir, presentationAssets),
+      ...viteConfiguration(
+        paths,
+        options.development,
+        prepared.ir,
+        presentationAssets,
+        options.report,
+      ),
       build: {
         emptyOutDir: false,
         manifest: "manifest.json",
         minify: options.development ? false : "oxc",
         outDir: outdir,
-        rollupOptions: {
+        rolldownOptions: {
           input: { app: prepared.entry, ...workerInputs },
           output: {
             assetFileNames: (asset) =>
@@ -386,17 +472,29 @@ export async function buildWebInterface(options: {
     });
     await writeProductionPresentationAssets(outdir, presentationAssets);
     const client = await readClientBuild(outdir);
+    await pruneUnreachableClientAssets(
+      outdir,
+      new Set([...(clientRequired ? client.resources : []), ...presentationAssets.files.keys()]),
+    );
     routeDocuments = routeDocuments.map(({ route, document, request }) => ({
       route,
       request,
-      document: Object.freeze({
-        ...document,
-        entry: client.entry,
-        preloads: Object.freeze([
-          ...client.preloads,
-          ...(client.chunks[`${routeModuleName(routeIdentity(route))}.generated`] ?? []),
-        ]),
-      }),
+      document: clientRequired
+        ? Object.freeze({
+            ...document,
+            entry: client.entry,
+            preloads: Object.freeze([
+              ...client.preloads,
+              ...(client.chunks[`${routeModuleName(routeIdentity(route))}.generated`] ?? []),
+            ]),
+          })
+        : Object.freeze({
+            ...document,
+            rendering: "static" as const,
+            entry: false as const,
+            preloads: Object.freeze([]),
+            hydration: false as const,
+          }),
     }));
     const serviceWorkerModules = prepared.workers
       .filter(({ environment }) => environment === "browser-service-worker")
@@ -411,15 +509,22 @@ export async function buildWebInterface(options: {
     if (contract.installation || serviceWorkerModules.length) {
       const assets = await createWebAssetManifest(outdir, crossOriginIsolated);
       const cacheable = assets.assets.filter(({ immutable }) => immutable).map(({ path }) => path);
-      const eagerScripts = new Set([
-        client.entry,
-        ...client.preloads,
-        ...routeDocuments.flatMap(({ document }) => [document.entry, ...document.preloads]),
-      ]);
+      const criticalScripts = new Set([client.entry, ...client.preloads]);
+      const routeScripts = new Set(
+        routeDocuments.flatMap(({ document }) => [
+          ...(document.entry === false ? [] : [document.entry]),
+          ...document.preloads,
+        ]),
+      );
       const plan = createWebServiceWorkerPlan({
         installation: contract.installation,
         assets: cacheable,
-        precache: cacheable.filter((path) => !/\.(?:m?js)$/i.test(path) || eagerScripts.has(path)),
+        precache: cacheable.filter((path) => criticalScripts.has(path)),
+        warmAssets: cacheable.filter(
+          (path) =>
+            !criticalScripts.has(path) &&
+            (Boolean(contract.installation) || routeScripts.has(path)),
+        ),
         routes: contract.routes,
         modules: serviceWorkerModules,
       });
@@ -435,6 +540,7 @@ export async function buildWebInterface(options: {
       `${JSON.stringify({ version: WEB_ROUTE_ARTIFACT_VERSION, components: compiledComponents, routes: routeDocuments })}\n`,
     );
     await writeFile(resolve(outdir, "index.html"), renderWebDocument(document));
+    await writePrebuiltWebDocuments(outdir, routeDocuments);
     await rm(resolve(outdir, "manifest.json"), { force: true });
     await writeFile(
       resolve(outdir, "assets.ir.json"),
@@ -463,6 +569,47 @@ export async function buildWebInterface(options: {
     };
   } finally {
     await removeWorkDirectory(work);
+  }
+}
+
+/** Materializes request-independent Routes for direct static delivery. */
+async function writePrebuiltWebDocuments(
+  directory: string,
+  routes: readonly PreparedRouteDocument[],
+): Promise<void> {
+  for (const { document, request, route } of routes) {
+    if (
+      request !== false ||
+      route.path === "/" ||
+      route.params.length > 0 ||
+      route.search.length > 0
+    ) {
+      continue;
+    }
+    const segments = route.path
+      .split("/")
+      .filter(Boolean)
+      .map((segment) => decodeURIComponent(segment));
+    if (
+      !segments.length ||
+      segments.some(
+        (segment) =>
+          !segment ||
+          segment === "." ||
+          segment === ".." ||
+          segment.includes("/") ||
+          segment.includes("\\"),
+      )
+    ) {
+      throw new Error(`Web Route ${JSON.stringify(routeIdentity(route))} has an unsafe path.`);
+    }
+    const output = resolve(directory, ...segments, "index.html");
+    const boundary = relative(resolve(directory), output);
+    if (boundary === ".." || boundary.startsWith(`..${sep}`)) {
+      throw new Error(`Web Route ${JSON.stringify(routeIdentity(route))} escapes its output.`);
+    }
+    await mkdir(dirname(output), { recursive: true });
+    await writeFile(output, renderWebDocument(document));
   }
 }
 
@@ -523,6 +670,9 @@ export async function createWebAssetManifest(
 }
 
 type ClientManifestChunk = Readonly<{
+  assets?: readonly string[];
+  css?: readonly string[];
+  dynamicImports?: readonly string[];
   file: string;
   imports?: readonly string[];
   isDynamicEntry?: boolean;
@@ -536,6 +686,7 @@ async function readClientBuild(outdir: string): Promise<
     preloads: readonly string[];
     entries: Readonly<Record<string, string>>;
     chunks: Readonly<Record<string, readonly string[]>>;
+    resources: readonly string[];
   }>
 > {
   const manifest = JSON.parse(await readFile(resolve(outdir, "manifest.json"), "utf8")) as Readonly<
@@ -552,6 +703,7 @@ export function inspectClientManifest(
   preloads: readonly string[];
   entries: Readonly<Record<string, string>>;
   chunks: Readonly<Record<string, readonly string[]>>;
+  resources: readonly string[];
 }> {
   const entries = Object.fromEntries(
     Object.values(manifest)
@@ -581,12 +733,60 @@ export function inspectClientManifest(
       .filter((chunk) => chunk.name && (chunk.isEntry || chunk.isDynamicEntry))
       .map((chunk) => [chunk.name!, Object.freeze([`/${chunk.file}`, ...imports(chunk)])]),
   );
+  const resources = new Set<string>();
+  const visited = new Set<string>();
+  const visit = (name: string): void => {
+    if (visited.has(name)) return;
+    visited.add(name);
+    const chunk = manifest[name];
+    if (!chunk) throw new Error(`Web client manifest references missing chunk ${name}.`);
+    resources.add(`/${chunk.file}`);
+    for (const file of [...(chunk.css ?? []), ...(chunk.assets ?? [])]) {
+      resources.add(`/${file}`);
+    }
+    for (const dependency of [...(chunk.imports ?? []), ...(chunk.dynamicImports ?? [])]) {
+      visit(dependency);
+    }
+  };
+  for (const [name, chunk] of Object.entries(manifest)) {
+    if (chunk.isEntry) visit(name);
+  }
   return Object.freeze({
     entry: `/${entry.file}`,
     preloads: imports(entry),
     entries: Object.freeze(entries),
     chunks: Object.freeze(chunks),
+    resources: Object.freeze([...resources].sort()),
   });
+}
+
+/** Removes assets emitted while transforming modules that final tree-shaking discarded. */
+async function pruneUnreachableClientAssets(
+  directory: string,
+  resources: ReadonlySet<string>,
+): Promise<void> {
+  const prune = async (root: string): Promise<void> => {
+    for (const entry of await readdir(root, { withFileTypes: true })) {
+      const file = resolve(root, entry.name);
+      if (entry.isDirectory()) {
+        await prune(file);
+      } else if (entry.isFile()) {
+        const path = `/${relative(directory, file).split(sep).join("/")}`;
+        if (!resources.has(path)) await rm(file);
+      }
+    }
+  };
+  for (const name of ["assets", "workers"]) {
+    const root = resolve(directory, name);
+    try {
+      await prune(root);
+    } catch (error) {
+      if (error !== null && typeof error === "object" && Reflect.get(error, "code") === "ENOENT") {
+        continue;
+      }
+      throw error;
+    }
+  }
 }
 
 /** Runs one web interface while sharing the caller-owned System revision source. */
@@ -619,7 +819,7 @@ export async function runWebInterface(options: {
   await pruneGeneratedSources(work, prepared);
 
   const server = await createServer({
-    ...viteConfiguration(paths, true, prepared.ir),
+    ...viteConfiguration(paths, true, prepared.ir, undefined, options.report),
     appType: "spa",
     cacheDir: resolve(work, ".vite"),
     plugins: [
@@ -737,7 +937,7 @@ async function prepareInterface(
       documentEvaluator,
       developmentDocumentEvaluatorSource({
         system: paths.system,
-        interface: contract.interface.feature,
+        interface: contract.interface.path,
         document: resolve(import.meta.dirname, `document${moduleExtension()}`),
         revision,
       }),
@@ -831,7 +1031,7 @@ async function prepareInterface(
         import.meta.dirname,
         `../../../execution/process${moduleExtension()}`,
       ),
-      interface: contract.interface.feature,
+      interface: contract.interface.path,
       program: ui,
       programManifest,
       dependencies: projectDependencyContracts(linkProgram(ui).external),
@@ -905,11 +1105,13 @@ function viteConfiguration(
   development = false,
   ir?: SystemIR,
   presentationAssets?: ProductionPresentationAssets,
+  report?: DevelopmentReporter | ProductionReporter,
 ) {
   return {
     configFile: false as const,
     mode: development ? "development" : "production",
-    ...(development ? { logLevel: "warn" as const } : {}),
+    logLevel: "silent" as const,
+    customLogger: viteReporter(report),
     oxc: { jsx: { development } },
     ...(development ? { optimizeDeps: { include: [], noDiscovery: true } } : {}),
     plugins: vitePlugins(paths, ir, presentationAssets),
@@ -918,6 +1120,45 @@ function viteConfiguration(
       conditions: ["source", ...defaultClientConditions],
     },
     root: paths.directory,
+  };
+}
+
+function viteReporter(report?: DevelopmentReporter | ProductionReporter): Logger {
+  const warnings = new Set<string>();
+  const errors = new WeakSet<object>();
+  let hasWarned = false;
+  const diagnostic = (severity: "error" | "warning", raw: string) => {
+    if (!report) return;
+    report({
+      kind: "diagnostic",
+      platform: "web",
+      severity,
+      message: stripVTControlCharacters(raw).trim(),
+    });
+  };
+  return {
+    info() {},
+    warn(message) {
+      hasWarned = true;
+      diagnostic("warning", message);
+    },
+    warnOnce(message) {
+      if (warnings.has(message)) return;
+      warnings.add(message);
+      hasWarned = true;
+      diagnostic("warning", message);
+    },
+    error(message, options) {
+      if (options?.error && typeof options.error === "object") errors.add(options.error);
+      diagnostic("error", message);
+    },
+    clearScreen() {},
+    hasErrorLogged(error) {
+      return errors.has(error);
+    },
+    get hasWarned() {
+      return hasWarned;
+    },
   };
 }
 
@@ -2233,6 +2474,7 @@ async function prepareProductionDocuments(
   interfaceId: string,
   components: readonly CompiledWebComponentIR[],
   presentationAssets: ProductionPresentationAssets,
+  report?: ProductionReporter,
 ): Promise<PreparedProductionDocuments> {
   const contract = webInterfaceContract(ir, interfaceId);
   const program = ir.programs.find(({ name }) => name === contract.uiProgram);
@@ -2260,12 +2502,14 @@ async function prepareProductionDocuments(
       `import system from ${JSON.stringify(paths.system)};
 import { prepareClientWebDocument, prepareInitialWebPresentation, prepareWebDocument } from ${JSON.stringify(resolve(import.meta.dirname, `document${moduleExtension()}`))};
 
-let interfaceFeature = system;
-for (const name of ${JSON.stringify(contract.interface.feature.split(".").filter(Boolean))}) {
-  interfaceFeature = interfaceFeature.features?.[name];
+let appFeature = system;
+for (const name of ${JSON.stringify(contract.interface.app.split(".").filter(Boolean))}) {
+  appFeature = appFeature.features?.[name];
 }
+const interfaceFeature =
+  appFeature?.interfaces?.[${JSON.stringify(contract.interface.path.slice(contract.interface.app.length + 1))}];
 if (!interfaceFeature?.presentation) {
-  throw new Error(${JSON.stringify(`Web interface ${contract.interface.feature} has no Presentation.`)});
+  throw new Error(${JSON.stringify(`Web interface ${contract.interface.path} has no Presentation.`)});
 }
 const routes = ${JSON.stringify(staticRoutes)};
 const documents = await Promise.all((routes.length ? routes : ${contract.routes.length ? "[]" : "[undefined]"}).map(async (route) => ({
@@ -2279,7 +2523,7 @@ const documents = await Promise.all((routes.length ? routes : ${contract.routes.
       })
     : await prepareWebDocument({
         system,
-        interface: ${JSON.stringify(contract.interface.feature)},
+        interface: ${JSON.stringify(contract.interface.path)},
         program: ${JSON.stringify(contract.uiProgram)},
         logicalProgram: ${JSON.stringify(program.logicalName)},
         presentation: interfaceFeature.presentation,
@@ -2298,7 +2542,7 @@ const documents = await Promise.all((routes.length ? routes : ${contract.routes.
 })));
 const presentation = await prepareInitialWebPresentation({
   system,
-  interface: ${JSON.stringify(contract.interface.feature)},
+  interface: ${JSON.stringify(contract.interface.path)},
   program: ${JSON.stringify(contract.uiProgram)},
   logicalProgram: ${JSON.stringify(program.logicalName)},
   presentation: interfaceFeature.presentation,
@@ -2314,6 +2558,8 @@ export default { documents, presentation };
     await rm(output, { recursive: true, force: true });
     await build({
       configFile: false,
+      logLevel: "silent",
+      customLogger: viteReporter(report),
       root: paths.directory,
       resolve: {
         alias: packageSourceAliases(resolve(import.meta.dirname, "../../.."), moduleExtension()),
@@ -2324,7 +2570,7 @@ export default { documents, presentation };
         emptyOutDir: true,
         minify: false,
         outDir: output,
-        rollupOptions: {
+        rolldownOptions: {
           input: source,
           output: { entryFileNames: "document.js", format: "es" },
         },
@@ -2713,10 +2959,12 @@ import { createWebUIAdapter, render } from ${JSON.stringify(input.runtime)};
 import { startProcess } from ${JSON.stringify(input.processRuntime)};
 
 export const manifest = ${JSON.stringify(input.hotManifest)};
-let interfaceFeature = system;
-for (const name of ${JSON.stringify(input.interface.split(".").filter(Boolean))}) {
-  interfaceFeature = interfaceFeature.features?.[name];
+let appFeature = system;
+for (const name of ${JSON.stringify(input.interface.split(".").slice(0, -1).filter(Boolean))}) {
+  appFeature = appFeature.features?.[name];
 }
+const interfaceFeature =
+  appFeature?.interfaces?.[${JSON.stringify(input.interface.split(".").at(-1))}];
 if (!interfaceFeature?.presentation) {
   throw new Error(${JSON.stringify(`Web interface ${input.interface} has no Presentation.`)});
 }
@@ -2730,8 +2978,7 @@ const routeModules = {
 };
 const routeDefinitions = new Map();
 
-const loadRoute = (route) => {
-  const identity = route.feature + "." + route.name;
+const loadRouteIdentity = (identity) => {
   let pending = routeDefinitions.get(identity);
   if (pending) return pending;
   const load = routeModules[identity];
@@ -2745,6 +2992,8 @@ const loadRoute = (route) => {
   routeDefinitions.set(identity, pending);
   return pending;
 };
+const loadRoute = (route) =>
+  loadRouteIdentity(route.feature + "." + route.name);
 
 const hostOptions = (definition) => ({
   dependencies: definition.dependencies,
@@ -2794,6 +3043,55 @@ const serviceWorkerRequested = () =>
 
 const serviceWorkerSupported = () =>
   typeof navigator.serviceWorker?.register === "function";
+
+const backgroundLoadingAllowed = () => {
+  const connection = navigator.connection;
+  return !connection?.saveData &&
+    connection?.effectiveType !== "slow-2g" &&
+    connection?.effectiveType !== "2g";
+};
+
+const registerServiceWorkerAfterRender = () => {
+  if (!serviceWorkerRequested() || !serviceWorkerSupported()) return () => {};
+  let cancelled = false;
+  let timer;
+  let idle;
+  const warm = (registration) => {
+    if (cancelled || !backgroundLoadingAllowed()) return;
+    const run = () => {
+      if (!cancelled) registration.active?.postMessage("kit:warm");
+    };
+    if (typeof requestIdleCallback === "function") {
+      idle = requestIdleCallback(run, { timeout: 4000 });
+    } else {
+      timer = setTimeout(run, 1000);
+    }
+  };
+  const register = async () => {
+    if (cancelled) return;
+    try {
+      await navigator.serviceWorker.register(serviceWorkerUrl(), {
+        type: "module",
+        scope: "/",
+      });
+      warm(await navigator.serviceWorker.ready);
+    } catch (error) {
+      console.error("[kit] Service worker registration failed.", error);
+    }
+  };
+  const frame = requestAnimationFrame(() => {
+    clearTimeout(fallback);
+    timer = setTimeout(() => void register(), 0);
+  });
+  const fallback = setTimeout(() => void register(), 1000);
+  return () => {
+    cancelled = true;
+    cancelAnimationFrame(frame);
+    if (idle !== undefined && typeof cancelIdleCallback === "function") cancelIdleCallback(idle);
+    clearTimeout(fallback);
+    clearTimeout(timer);
+  };
+};
 
 const resetDevelopmentWorker = async () => {
   if (!development || !("serviceWorker" in navigator)) return;
@@ -2854,12 +3152,6 @@ export async function activate(root, previous = {}) {
       const worker = new Worker(url, { type: "module", name: "kit" });
       cleanups.push(() => disposeWorker(worker));
     }
-    if (serviceWorkerRequested() && serviceWorkerSupported()) {
-      await navigator.serviceWorker.register(serviceWorkerUrl(), {
-        type: "module",
-        scope: "/",
-      });
-    }
   } catch (error) {
     await disposeAll(cleanups);
     throw error;
@@ -2901,6 +3193,7 @@ export async function activate(root, previous = {}) {
   let disposeRender;
   try {
     disposeRender = render(() => ui.renderRoot(), root, hotState);
+    cleanups.push(registerServiceWorkerAfterRender());
   } catch (error) {
     await ui.dispose();
     await disposeAll(cleanups);
@@ -2941,10 +3234,12 @@ function developmentDocumentEvaluatorSource(input: {
   return `import system from ${JSON.stringify(system)};
 import { prepareWebDocument } from ${JSON.stringify(input.document)};
 
-let interfaceFeature = system;
-for (const name of ${JSON.stringify(input.interface.split(".").filter(Boolean))}) {
-  interfaceFeature = interfaceFeature.features?.[name];
+let appFeature = system;
+for (const name of ${JSON.stringify(input.interface.split(".").slice(0, -1).filter(Boolean))}) {
+  appFeature = appFeature.features?.[name];
 }
+const interfaceFeature =
+  appFeature?.interfaces?.[${JSON.stringify(input.interface.split(".").at(-1))}];
 if (!interfaceFeature?.presentation) {
   throw new Error(${JSON.stringify(`Web interface ${input.interface} has no Presentation.`)});
 }
@@ -2973,6 +3268,9 @@ export function collectPresentationDependencies(
   >
 > {
   const selected = ir.programs.find(({ name }) => name === programName);
+  const interface_ = selected?.interface
+    ? ir.interfaces.find(({ path }) => path === selected.interface)
+    : undefined;
   const presentationSources = selected?.interface
     ? ir.presentations.filter(({ interface: owner }) => owner === selected.interface)
     : [];
@@ -2984,8 +3282,12 @@ export function collectPresentationDependencies(
     .flatMap((program) =>
       program.contributions.flatMap((contribution) =>
         (contribution.ui?.components ?? []).map((component) => {
+          const feature =
+            interface_ && contribution.feature.startsWith(`${interface_.app}.`)
+              ? contribution.feature.slice(interface_.app.length + 1)
+              : contribution.feature;
           const semantic = [
-            ...contribution.feature.split(".").filter(Boolean).map(capitalize),
+            ...feature.split(".").filter(Boolean).map(capitalize),
             component.name,
           ].join("/");
           return {

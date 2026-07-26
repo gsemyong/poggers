@@ -382,6 +382,29 @@ describe("web document IR", () => {
     ).toThrow("empty root");
   });
 
+  test("renders a static document without client runtime state", () => {
+    const document = {
+      ...prepareClientWebDocument({ title: "Static guide" }),
+      rendering: "static" as const,
+      entry: false as const,
+      root: [
+        {
+          kind: "element" as const,
+          hydration: "e0",
+          tag: "main",
+          attributes: [{ name: "data-kit-h", value: "e0" }],
+          children: [{ kind: "text" as const, hydration: "t0", value: "Read instantly" }],
+        },
+      ],
+    };
+    const html = renderWebDocument(document);
+    expect(html).toContain('<div id="app" data-kit-rendering="static"><main>Read instantly</main>');
+    expect(html).not.toContain("modulepreload");
+    expect(html).not.toContain("<script");
+    expect(html).not.toContain("data-kit-h");
+    expect(html).not.toContain("<!--kit:");
+  });
+
   test("derives Markdown and frontmatter from the canonical document tree", () => {
     const base = prepareClientWebDocument({
       title: "Public guide",
@@ -470,6 +493,7 @@ Read [the reference](/reference).
       metadata: { name: "A <safe> title" },
       features: {
         shell: {
+          interfaces: { web: { presentation: emptyPresentation } },
           features: {
             items: {
               programs: {
@@ -524,7 +548,7 @@ Read [the reference](/reference).
 
     const first = await prepareWebDocument({
       system,
-      interface: "shell",
+      interface: "shell.web",
       program: "browser",
       presentation: emptyPresentation,
       manifest,
@@ -532,7 +556,7 @@ Read [the reference](/reference).
     });
     const second = await prepareWebDocument({
       system,
-      interface: "shell",
+      interface: "shell.web",
       program: "browser",
       presentation: emptyPresentation,
       manifest,
@@ -559,6 +583,7 @@ Read [the reference](/reference).
       metadata: { name: "Fallback" },
       features: {
         shell: {
+          interfaces: { web: { presentation: emptyPresentation } },
           programs: {
             browser: {
               state: {},
@@ -583,7 +608,7 @@ Read [the reference](/reference).
     };
     const document = await prepareWebDocument({
       system,
-      interface: "shell",
+      interface: "shell.web",
       program: "browser",
       presentation: emptyPresentation,
       manifest: {
@@ -654,6 +679,7 @@ Read [the reference](/reference).
     const system = {
       features: {
         shell: {
+          interfaces: { web: { presentation: emptyPresentation } },
           programs: {
             browser: {
               state: {},
@@ -686,7 +712,7 @@ Read [the reference](/reference).
     const target = "@feature/shell/component/Root";
     const prepared = await prepareInitialWebPresentation({
       system,
-      interface: "shell",
+      interface: "shell.web",
       program: "browser",
       presentation: {
         parameters: {},
@@ -711,7 +737,7 @@ Read [the reference](/reference).
 
     const dependent = prepareInitialWebPresentation({
       system,
-      interface: "shell",
+      interface: "shell.web",
       program: "browser",
       presentation: {
         parameters: {},
@@ -772,6 +798,7 @@ Read [the reference](/reference).
     const system = {
       features: {
         shell: {
+          interfaces: { web: { presentation: emptyPresentation } },
           programs: {
             browser: {
               state: {},
@@ -795,7 +822,7 @@ Read [the reference](/reference).
     };
     const document = await prepareWebDocument({
       system,
-      interface: "shell",
+      interface: "shell.web",
       program: "browser",
       presentation: emptyPresentation,
       manifest: shellManifest,
@@ -820,7 +847,7 @@ Read [the reference](/reference).
     fc.assert(
       fc.property(fc.string(), fc.string(), fc.string(), (title, text, attribute) => {
         const document = {
-          version: 4 as const,
+          version: 5 as const,
           rendering: "hydrate" as const,
           language: "en",
           title,
@@ -852,7 +879,7 @@ Read [the reference](/reference).
 
   test("rejects ambiguous or executable document data", () => {
     const document = {
-      version: 4 as const,
+      version: 5 as const,
       rendering: "hydrate" as const,
       language: "en",
       title: "Safe",

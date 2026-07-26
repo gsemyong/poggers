@@ -1,7 +1,7 @@
 import type { Program } from "kit";
 import type { BrowserMainThread, Child, Navigation, WebFeature, WebRoute } from "kit/web";
 
-import type { WorkspaceWeb } from "@/apps/web";
+import type { Workspace } from "@/apps/workspace";
 import type { IdentityClient, Session } from "@/features/identity";
 
 type AuthMode = "sign-in" | "sign-up";
@@ -20,7 +20,7 @@ export type ShellFeature = Readonly<{
       {
         Requires: {
           identity: IdentityClient;
-          navigation: Navigation<ShellRoutes, WorkspaceWeb>;
+          navigation: Navigation<ShellRoutes, Workspace>;
         };
         State: {
           phase: AuthPhase;
@@ -77,7 +77,7 @@ export type ShellFeature = Readonly<{
 
 export function createShell(
   input: Readonly<{ name: string }>,
-): WebFeature<ShellFeature, WorkspaceWeb> {
+): WebFeature<ShellFeature, Workspace> {
   return {
     programs: {
       browser: {
@@ -315,7 +315,7 @@ export function createShell(
 }
 
 function redirectForSession(
-  navigation: Navigation<ShellRoutes, WorkspaceWeb>,
+  navigation: Navigation<ShellRoutes, Workspace>,
   authenticated: boolean,
 ) {
   const current = navigation.current();

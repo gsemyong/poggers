@@ -324,6 +324,7 @@ describe("Deployment planning", () => {
         },
       },
     ]);
+    expect(initial.interfaces).toEqual([{ identity: "interface/web", hosts: [] }]);
 
     const applied = await applyDeployment(deployment, first);
     expect(applied.state).toMatchObject({
@@ -417,6 +418,63 @@ describe("Deployment planning", () => {
         release,
       ),
     ).toThrow("unsupported function data");
+  });
+
+  test("plans canonical interface hosts and rejects ambiguous ownership", () => {
+    const adapter = memoryAdapter();
+    const release = {
+      ...deploymentRelease("release-1", "program-1", true),
+      artifacts: [
+        ...deploymentRelease("release-1", "program-1", true).artifacts.filter(
+          ({ kind }) => kind === "interface",
+        ),
+        {
+          identity: "interface/admin",
+          kind: "interface" as const,
+          deployment: "asset" as const,
+          platform: "web",
+          environment: "browser-main",
+          digest: "interface-admin",
+          root: "admin",
+          files: [],
+          dependencies: [],
+          configuration: [],
+        },
+      ],
+    };
+    const configured = createDeployment(system, {
+      adapter,
+      interfaces: {
+        web: { hosts: ["WWW.EXAMPLE.COM", "example.com"] },
+      } as never,
+    });
+
+    expect(planDeployment(configured, release).interfaces).toEqual([
+      { identity: "interface/admin", hosts: [] },
+      { identity: "interface/web", hosts: ["example.com", "www.example.com"] },
+    ]);
+
+    expect(() =>
+      planDeployment(
+        createDeployment(system, {
+          adapter,
+          interfaces: {
+            admin: { hosts: ["example.com"] },
+            web: { hosts: ["example.com"] },
+          } as never,
+        }),
+        release,
+      ),
+    ).toThrow("claimed by");
+    expect(() =>
+      planDeployment(
+        createDeployment(system, {
+          adapter,
+          interfaces: { missing: { hosts: ["missing.example.com"] } } as never,
+        }),
+        release,
+      ),
+    ).toThrow("unknown interface");
   });
 
   test("rejects false convergence and stale observed state", async () => {

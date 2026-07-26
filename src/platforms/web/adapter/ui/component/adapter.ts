@@ -223,6 +223,8 @@ export async function createInterfaceUI<Contract extends SystemContract>({
   presentationAdapter,
 }: CreateInterfaceUIOptions<Contract>): Promise<InterfaceUI> {
   const runtimeSystem = system as RuntimeSystem;
+  const appPath = interfaceAppPath(interfacePath);
+  const appFeature = requireRuntimeFeature(runtimeSystem, appPath);
   let configuredPresentation = presentation;
   validatePresentation(configuredPresentation);
   const presentationInstance = presentationAdapter.mount({
@@ -272,10 +274,9 @@ export async function createInterfaceUI<Contract extends SystemContract>({
     featureAPIs: programUI.apis,
     featureEvents: programUI.events,
     eventRevision,
-    rootComponents: Object.keys(
-      requireRuntimeFeature(runtimeSystem, interfacePath).programs?.[logicalProgram]?.components ??
-        {},
-    ).map((name) => featureComponentName(interfacePath, name)),
+    rootComponents: Object.keys(appFeature.programs?.[logicalProgram]?.components ?? {}).map(
+      (name) => featureComponentName(appPath, name),
+    ),
     dependencies: presentationDependencies,
   });
 
@@ -293,26 +294,23 @@ export async function createInterfaceUI<Contract extends SystemContract>({
       })(props as Props);
   }
 
-  const interfaceFeature = requireRuntimeFeature(runtimeSystem, interfacePath);
   const localComponents: Record<string, (props?: RuntimeComponentProps) => Child> =
     Object.create(null);
-  for (const name of Object.keys(
-    interfaceFeature.programs?.[logicalProgram]?.components ?? {},
-  ).sort()) {
-    const renderer = renderers[featureComponentName(interfacePath, name)];
-    if (!renderer) throw new Error(`Missing renderer for Component ${interfacePath}.${name}.`);
+  for (const name of Object.keys(appFeature.programs?.[logicalProgram]?.components ?? {}).sort()) {
+    const renderer = renderers[featureComponentName(appPath, name)];
+    if (!renderer) throw new Error(`Missing renderer for Component ${appPath}.${name}.`);
     localComponents[name] = renderer;
   }
-  componentGroups[interfacePath] = localComponents;
+  componentGroups[appPath] = localComponents;
   const childComponents = collectFeatureComponentScopes(
-    interfaceFeature.features,
+    appFeature.features,
     logicalProgram,
     renderers,
     componentGroups,
     componentNamespaces,
-    interfacePath,
+    appPath,
   );
-  componentNamespaces[interfacePath] = childComponents;
+  componentNamespaces[appPath] = childComponents;
   componentNamespaces[""] = Object.assign(Object.create(null), localComponents, childComponents);
   const router = routes.length
     ? await createRouteRuntime({
@@ -874,6 +872,7 @@ function inferEmptyProgramManifest(
   name: string,
   logicalName: string,
 ): ProgramManifest {
+  const appPath = interfaceAppPath(interfacePath);
   const contributions: Array<ProgramManifest["contributions"][number]> = [];
   const visit = (feature: RuntimeFeature, path: string): void => {
     if (feature.programs?.[logicalName]) {
@@ -884,7 +883,7 @@ function inferEmptyProgramManifest(
       visit(child, childPath);
     }
   };
-  visit(requireRuntimeFeature(system, interfacePath), interfacePath);
+  visit(requireRuntimeFeature(system, appPath), appPath);
   return { name, bindings: [], contributions };
 }
 
@@ -1143,8 +1142,16 @@ function resolveRuntimeFeature(system: RuntimeSystem, path: string): RuntimeFeat
 
 function requireRuntimeFeature(system: RuntimeSystem, path: string): RuntimeFeature {
   const feature = resolveRuntimeFeature(system, path);
-  if (!feature) throw new Error(`Missing interface Feature ${JSON.stringify(path)}.`);
+  if (!feature) throw new Error(`Missing runtime Feature ${JSON.stringify(path)}.`);
   return feature;
+}
+
+function interfaceAppPath(path: string): string {
+  const segments = path.split(".").filter(Boolean);
+  if (segments.length < 2) {
+    throw new TypeError(`Invalid interface identity ${JSON.stringify(path)}.`);
+  }
+  return segments.slice(0, -1).join(".");
 }
 
 function resolveComponentDefinition(
@@ -1329,8 +1336,9 @@ export function createPresentationGraph(options: {
   rootComponents: readonly string[];
   dependencies?: PresentationDependencyManifest;
 }): RuntimePresentationGraph {
-  const interfaceFeature = requireRuntimeFeature(options.system, options.interface);
-  const scopeIdentities = collectPresentationScopes(interfaceFeature, options.interface);
+  const appPath = interfaceAppPath(options.interface);
+  const appFeature = requireRuntimeFeature(options.system, appPath);
+  const scopeIdentities = collectPresentationScopes(appFeature, appPath);
   const scopePaths = Object.keys(scopeIdentities).sort();
   const scopeIndexes = new Map(scopePaths.map((path, index) => [path, index]));
   const revisions = new Map<string, Signal<number>>();
@@ -1383,8 +1391,8 @@ export function createPresentationGraph(options: {
         configured.create({
           parameters: configured.parameters,
           environment: options.adapter.environment,
-          state: createPresentationState(options.featureAPIs[options.interface] ?? {}, {}),
-          events: options.featureEvents[options.interface] ?? {},
+          state: createPresentationState(options.featureAPIs[appPath] ?? {}, {}),
+          events: options.featureEvents[appPath] ?? {},
         }),
       );
       for (const name of options.rootComponents) {
@@ -1394,10 +1402,10 @@ export function createPresentationGraph(options: {
         }
       }
       collectPresentationComponents({
-        features: interfaceFeature.features,
+        features: appFeature.features,
         logicalProgram: options.logicalProgram,
         tree,
-        parent: options.interface,
+        parent: appPath,
         scopeIndexes,
         scopes,
         featureAPIs: options.featureAPIs,
@@ -1731,8 +1739,9 @@ async function createProgramUI(
 
   const root = collectProgramRoots(system, interfacePath, logicalProgram, !routed);
   const owner = root ? componentOwner(root) : undefined;
-  const api = apis[owner ?? interfacePath] ?? Object.freeze({});
-  const interfaceFeature = requireRuntimeFeature(system, interfacePath);
+  const appPath = interfaceAppPath(interfacePath);
+  const api = apis[owner ?? appPath] ?? Object.freeze({});
+  const appFeature = requireRuntimeFeature(system, appPath);
 
   let disposed = false;
   const captureHotState = (): HotRenderState => {
@@ -1747,9 +1756,9 @@ async function createProgramUI(
   return {
     api,
     features: Object.fromEntries(
-      Object.keys(interfaceFeature.features ?? {}).map((name) => [
+      Object.keys(appFeature.features ?? {}).map((name) => [
         name,
-        apis[`${interfacePath}.${name}`] ?? {},
+        apis[`${appPath}.${name}`] ?? {},
       ]),
     ),
     apis,
@@ -1771,6 +1780,7 @@ function collectProgramRoots(
   program: string,
   required = true,
 ): string | undefined {
+  const appPath = interfaceAppPath(interfacePath);
   const roots: string[] = [];
   const visit = (feature: RuntimeFeature, path: string) => {
     const root = feature.programs?.[program]?.root;
@@ -1782,7 +1792,7 @@ function collectProgramRoots(
       visit(feature, `${path}.${name}`);
     }
   };
-  visit(requireRuntimeFeature(system, interfacePath), interfacePath);
+  visit(requireRuntimeFeature(system, appPath), appPath);
   if (roots.length !== 1 && (required || roots.length > 1)) {
     throw new Error(
       `UI Program "${program}" must define exactly one root Component; found ${roots.length}.`,

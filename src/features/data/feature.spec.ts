@@ -99,6 +99,35 @@ dataStoreConformance.test({
 });
 
 describe("semantic data Feature", () => {
+  test("opens a lazy browser database only when Data is first used", async () => {
+    let opens = 0;
+    let closes = 0;
+    const database = (): Promise<TursoDatabase> => {
+      opens += 1;
+      return Promise.resolve({
+        exec: async () => undefined,
+        batch: async () => undefined,
+        all: async () => [],
+        close: async () => {
+          closes += 1;
+        },
+      });
+    };
+    const store = createTursoDataStore<Note>(database);
+
+    expect(opens).toBe(0);
+    await expect(store.query({ collection: "notes", query: {} })).resolves.toEqual([]);
+    await expect(store.query({ collection: "notes", query: {} })).resolves.toEqual([]);
+    expect(opens).toBe(1);
+
+    await store[Symbol.asyncDispose]();
+    expect(closes).toBe(1);
+
+    const unused = createTursoDataStore<Note>(database);
+    await unused[Symbol.asyncDispose]();
+    expect(opens).toBe(1);
+  });
+
   test("lowers a specialized factory through the production semantic compiler", async () => {
     const directory = await mkdtemp(resolve(tmpdir(), "data-compiler-"));
     try {

@@ -9,6 +9,7 @@ import type { PlatformContract } from "@/core/program";
 
 type Empty = Record<never, never>;
 declare const systemContract: unique symbol;
+declare const platformInterfaceContract: unique symbol;
 
 type FeatureValue = Readonly<{ [Name in keyof Feature<FeatureContract>]?: unknown }>;
 
@@ -71,27 +72,80 @@ export function createSystem<const Features extends FeatureValues>(
   return definition as unknown as System<InferredSystemContract<Features>>;
 }
 
-/** Type-only marker added to an ordinary Feature contract by `createApp`. */
-export type AppFeatureContract<Contract extends FeatureContract> = Readonly<
-  Contract & { App: true }
+/** Compiler-readable meaning retained by every adapter-defined Platform interface. */
+export type PlatformInterfaceContract<Platform extends PlatformContract> = Readonly<{
+  Interface: { Platform: Platform };
+}>;
+
+/**
+ * Adapter configuration for one Platform over one exact App contract.
+ *
+ * The marker is type-only. Adapter factories return the configuration value
+ * unchanged while preserving its owner and Platform for composition tooling.
+ */
+export type PlatformInterface<
+  Owner extends FeatureContract,
+  Platform extends PlatformContract,
+  Definition extends object = Empty,
+> = Readonly<
+  Definition & {
+    [platformInterfaceContract]: {
+      Owner: Owner;
+      Contract: PlatformInterfaceContract<Platform>;
+    };
+  }
 >;
 
-export type AppFeature<Contract extends FeatureContract> = Feature<AppFeatureContract<Contract>>;
+type PlatformInterfaceValue = PlatformInterface<
+  FeatureContract,
+  PlatformContract,
+  Readonly<Record<string, unknown>>
+>;
+type PlatformInterfaceValues = Readonly<Record<string, PlatformInterfaceValue>>;
+type PlatformInterfaceOwner<Value> =
+  Value extends PlatformInterface<infer Owner, PlatformContract, object> ? Owner : never;
+type PlatformInterfaceMeaning<Value> =
+  Value extends PlatformInterface<FeatureContract, infer Platform, object>
+    ? PlatformInterfaceContract<Platform>
+    : never;
+type PlatformInterfaceMeanings<Interfaces extends PlatformInterfaceValues> = {
+  readonly [Name in keyof Interfaces]: PlatformInterfaceMeaning<Interfaces[Name]>;
+};
+type InvalidPlatformInterfaceOwners<
+  Contract extends FeatureContract,
+  Interfaces extends PlatformInterfaceValues,
+> = {
+  [Name in keyof Interfaces]: [Contract] extends [PlatformInterfaceOwner<Interfaces[Name]>]
+    ? [PlatformInterfaceOwner<Interfaces[Name]>] extends [Contract]
+      ? never
+      : Name
+    : Name;
+}[keyof Interfaces];
 
-/** Marks an inferred Feature composition as one product App. */
-export function createApp<const Features extends FeatureValues>(
-  feature: Readonly<{ features: Features }>,
-): AppFeature<InferredSystemContract<Features>> {
-  return feature as unknown as AppFeature<InferredSystemContract<Features>>;
+/** Type-only markers added to an ordinary Feature contract by `createApp`. */
+export type AppFeatureContract<
+  Contract extends FeatureContract,
+  Interfaces extends Readonly<Record<string, PlatformInterfaceContract<PlatformContract>>> = Empty,
+> = Readonly<Contract & { App: true; Interfaces: Interfaces }>;
+
+export type AppFeature<
+  Contract extends FeatureContract,
+  Interfaces extends PlatformInterfaceValues = PlatformInterfaceValues,
+> = Feature<AppFeatureContract<Contract, PlatformInterfaceMeanings<Interfaces>>> &
+  Readonly<{ interfaces: Interfaces }>;
+
+/**
+ * Defines one product App from concrete Feature instances and Platform
+ * interfaces. Reusing a Feature value preserves its semantic instance.
+ */
+export function createApp<
+  const Features extends FeatureValues,
+  const Interfaces extends PlatformInterfaceValues,
+>(
+  app: Readonly<{ features: Features; interfaces: Interfaces }> &
+    ([InvalidPlatformInterfaceOwners<InferredSystemContract<Features>, Interfaces>] extends [never]
+      ? unknown
+      : never),
+): AppFeature<InferredSystemContract<Features>, Interfaces> {
+  return app as unknown as AppFeature<InferredSystemContract<Features>, Interfaces>;
 }
-
-/** Type-only ownership marker added by a Platform's interface Feature factory. */
-export type PlatformInterfaceContract<
-  Contract extends FeatureContract,
-  Platform extends PlatformContract,
-> = Readonly<Contract & { Interface: { Platform: Platform } }>;
-
-export type PlatformInterfaceFeature<
-  Contract extends FeatureContract,
-  Platform extends PlatformContract,
-> = Feature<PlatformInterfaceContract<Contract, Platform>>;

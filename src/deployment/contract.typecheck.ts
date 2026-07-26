@@ -1,6 +1,6 @@
 import type { FeatureContract } from "@/core/feature";
 import type { Program } from "@/core/program";
-import type { AppFeatureContract, System } from "@/core/system";
+import type { AppFeatureContract, PlatformInterfaceContract, System } from "@/core/system";
 import {
   createDeployment,
   secret,
@@ -10,7 +10,7 @@ import {
   type DeploymentPrograms,
 } from "@/deployment";
 import type { ServerProcess } from "@/platforms/server";
-import type { BrowserMainThread } from "@/platforms/web";
+import type { BrowserMainThread, WebPlatform } from "@/platforms/web";
 
 type Clock = Readonly<{ now(input: {}): number }>;
 type Store = Readonly<{ read(input: { key: string }): Promise<string | undefined> }>;
@@ -28,18 +28,15 @@ type Product = Readonly<{
   };
 }>;
 
-type BrowserInterface = Readonly<{
+type PortalFeature = Readonly<{
   Programs: {
     browser: Program<BrowserMainThread, { Requires: { clock: Clock } }>;
   };
 }>;
 
 type Portal = AppFeatureContract<
-  Readonly<{
-    Features: {
-      interface: BrowserInterface;
-    };
-  }>
+  PortalFeature,
+  Readonly<{ web: PlatformInterfaceContract<WebPlatform> }>
 >;
 
 type Contract = Readonly<{
@@ -124,6 +121,9 @@ const localDeployment = createDeployment(system, {
   adapter: local,
   programs,
   dependencies,
+  interfaces: {
+    "portal.web": { hosts: ["portal.example.com"] },
+  },
 });
 const providerDeployment = createDeployment(system, {
   adapter: provider,
@@ -173,6 +173,14 @@ createDeployment(system, {
   dependencies: {
     // @ts-expect-error Feature-provided Dependencies are not host bindings.
     session,
+  },
+});
+
+createDeployment(system, {
+  adapter: local,
+  interfaces: {
+    // @ts-expect-error Interface names come from the composed System.
+    unknown: { hosts: ["unknown.example.com"] },
   },
 });
 

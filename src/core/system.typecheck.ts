@@ -4,22 +4,17 @@ import {
   createApp,
   createSystem,
   type AppFeatureContract,
-  type PlatformInterfaceContract,
+  type PlatformInterface,
   type SystemContractOf,
 } from "@/core/system";
 import type { UIElement } from "@/core/ui/language";
-import type {
-  ConfiguredPresentationFor,
-  PresentationFactory,
-  PresentationRecipe,
-} from "@/core/ui/presentation";
+import type { ConfiguredPresentationFor, PresentationRecipe } from "@/core/ui/presentation";
 import {
   createWebInterface,
   type BrowserMainThread,
-  type ConfiguredWebPresentation,
+  type WebFeature,
   type WebPresentationLanguage,
   type WebRoute,
-  type WebPlatform,
 } from "@/platforms/web";
 
 type ServerPlatform = Readonly<{ Name: "server" }>;
@@ -30,15 +25,9 @@ type NativeUI = Readonly<{
   Elements: { View: UIElement<{}, unknown> };
 }>;
 type NativePlatform = Readonly<{ Name: "native"; UI: NativeUI }>;
-type NativeMain = Readonly<{
-  Name: "native-main";
-  Platform: NativePlatform;
-}>;
 
 type Principal = Readonly<{ id: string }>;
-type Identity = Readonly<{
-  current(input: {}): Promise<Principal | undefined>;
-}>;
+type Identity = Readonly<{ current(input: {}): Promise<Principal | undefined> }>;
 type Tasks = Readonly<{
   list(input: {}): Promise<readonly Readonly<{ id: string; title: string }>[]>;
 }>;
@@ -61,7 +50,7 @@ type TasksFeature = {
   };
 };
 
-type OperationsWebContract = {
+type ShellFeature = {
   Programs: {
     browser: Program<
       BrowserMainThread,
@@ -76,46 +65,13 @@ type OperationsWebContract = {
   };
 };
 
-type OperationsWeb = PlatformInterfaceContract<OperationsWebContract, WebPlatform>;
-
-type OperationsNative = PlatformInterfaceContract<
-  {
-    Programs: {
-      native: Program<
-        NativeMain,
-        {
-          Requires: { identity: Identity; tasks: Tasks };
-          Components: { Root: { Elements: { Root: "View" } } };
-        }
-      >;
-    };
-  },
-  NativePlatform
->;
-
 type Operations = {
   Features: {
-    web: OperationsWeb;
-    native: OperationsNative;
+    identity: IdentityFeature;
+    tasks: TasksFeature;
+    shell: ShellFeature;
   };
 };
-
-type CustomerWebContract = {
-  Programs: {
-    browser: Program<
-      BrowserMainThread,
-      {
-        Requires: { identity: Identity };
-        Components: { CustomerRoot: { Elements: { Root: "main" } } };
-        Routes: { home: WebRoute<{ Path: "" }> };
-      }
-    >;
-  };
-};
-
-type CustomerWeb = PlatformInterfaceContract<CustomerWebContract, WebPlatform>;
-
-type Customer = { Features: { web: CustomerWeb } };
 
 const identity = createFeature<IdentityFeature>({
   programs: {
@@ -145,19 +101,7 @@ const tasks = createFeature<TasksFeature>({
   },
 });
 
-const operationsPresentationFactory: PresentationFactory<
-  OperationsWeb,
-  WebPresentationLanguage,
-  {}
-> = (parameters) => ({
-  parameters,
-  create: () => ({
-    Root: () => ({ Root: {} }),
-  }),
-});
-const operationsPresentation = operationsPresentationFactory({});
-
-const operationsWeb = createWebInterface<OperationsWebContract>({
+const shell: WebFeature<ShellFeature, Operations> = {
   programs: {
     browser: {
       state: { ready: false },
@@ -178,89 +122,43 @@ const operationsWeb = createWebInterface<OperationsWebContract>({
       root: "Root",
       routes: {
         home: {
-          view({ components: { Root } }) {
-            return Root({});
+          view({ components: { Shell } }) {
+            return Shell.Root({});
           },
         },
       },
     },
   },
-  presentation: operationsPresentation,
-  installation: {
-    start: { to: "home" },
-    icons: [],
-    offline: { fallback: { to: "home" } },
-  },
-});
+};
 
-const operationsNative = createFeature<OperationsNative>({
-  programs: {
-    native: {
-      components: {
-        Root: {
-          view() {
-            return null;
-          },
-        },
-      },
-      root: "Root",
-    },
-  },
-});
-
-const operations = createApp({
-  features: { web: operationsWeb, native: operationsNative },
-});
-
-const customerPresentation = {
+const operationsPresentation = {
   parameters: {},
   create: () => ({
-    CustomerRoot: () => ({ Root: {} }),
+    Shell: () => ({
+      Root: () => ({ Root: {} }),
+    }),
   }),
-} satisfies ConfiguredWebPresentation<CustomerWeb>;
+} satisfies ConfiguredPresentationFor<Operations, WebPresentationLanguage>;
 
-const customerWeb = createWebInterface<CustomerWebContract>({
-  programs: {
-    browser: {
-      components: {
-        CustomerRoot: {
-          view({ elements: { Root } }) {
-            return Root({});
-          },
-        },
-      },
-      root: "CustomerRoot",
-      routes: {
-        home: {
-          view({ components: { CustomerRoot } }) {
-            return CustomerRoot({});
-          },
-        },
-      },
-    },
-  },
-  presentation: customerPresentation,
+const web = createWebInterface<Operations>({
+  presentation: operationsPresentation,
   installation: {
-    start: { to: "home" },
+    start: { to: "shell.home" },
     icons: [],
-    offline: { fallback: { to: "home" } },
+    offline: { fallback: { to: "shell.home" } },
   },
 });
 
-const customer = createApp({ features: { web: customerWeb } });
+const native = {} as PlatformInterface<Operations, NativePlatform>;
 
-export type SystemConflictProbe = FeatureEnvironmentConflict<{
-  Features: {
-    identity: IdentityFeature;
-    tasks: TasksFeature;
-    operations: AppFeatureContract<Operations>;
-    customer: AppFeatureContract<Customer>;
-  };
-}>;
+const operations = createApp({
+  features: { identity, tasks, shell },
+  interfaces: { web, native },
+});
 
 const system = createSystem({
   metadata: { name: "Company" },
-  features: { identity, tasks, operations, customer },
+  features: { operations },
 });
 
 type Contract = SystemContractOf<typeof system>;
@@ -269,6 +167,12 @@ type OperationsProof =
 const operationsProof: OperationsProof = true;
 void operationsProof;
 
+export type SystemConflictProbe = FeatureEnvironmentConflict<{
+  Features: {
+    operations: AppFeatureContract<Operations>;
+  };
+}>;
+
 const surface: PresentationRecipe<
   Readonly<{ emphasized: boolean }>,
   Readonly<{ opacity: number }>
@@ -276,31 +180,22 @@ const surface: PresentationRecipe<
 const emphasized = { ...surface({ emphasized: false }), opacity: 1 };
 emphasized.opacity satisfies number;
 
-// A Presentation is owned by one exact interface Component contract.
-// @ts-expect-error CustomerRoot cannot present the operations Root contract.
-const incompatiblePresentation: ConfiguredPresentationFor<OperationsWeb, WebPresentationLanguage> =
-  customerPresentation;
-void incompatiblePresentation;
+type Other = { Features: { identity: IdentityFeature } };
+const wrongOwner = createWebInterface<Other>({
+  presentation: {
+    parameters: {},
+    create: () => ({ Identity: () => ({}) }),
+  },
+});
 
-// Ordinary reusable Features have no ambient access to their consuming System.
+// @ts-expect-error An interface is bound to one exact App Feature contract.
+createApp({ features: { identity, tasks, shell }, interfaces: { web: wrongOwner } });
+
+// Ordinary reusable Features have no ambient access to the consuming System.
 // @ts-expect-error Identity declares no sibling or System-wide task API.
 void identity.features.tasks;
 
-// @ts-expect-error App is a Feature factory, not a second nested App registry.
+// @ts-expect-error App is a Feature composition, not a second nested App registry.
 createApp({ apps: { nested: operations } });
-
-type DuplicateAppIdentity = { operations: typeof operations } & {
-  operations: typeof customer;
-};
-// @ts-expect-error One Feature key cannot identify two incompatible Apps.
-const duplicateApps: DuplicateAppIdentity = { operations };
-void duplicateApps;
-
-type DuplicateInterfaceIdentity = { web: typeof operationsWeb } & {
-  web: typeof customerWeb;
-};
-// @ts-expect-error One Feature key cannot identify two incompatible interfaces.
-const duplicateInterfaces: DuplicateInterfaceIdentity = { web: operationsWeb };
-void duplicateInterfaces;
 
 void system;

@@ -30,7 +30,7 @@ export const shell = createFeature<ShellFeature>({
           view({ feature, elements: { Root, Title, Increment } }) {
             return (
               <Root>
-                <Title>Basic</Title>
+                <Title>Hi</Title>
                 <Increment type="button" onPointerDown={() => feature.increment()}>
                   {() => `Count ${feature.count}`}
                 </Increment>

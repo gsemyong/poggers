@@ -1,11 +1,4 @@
-import {
-  createApp,
-  createFeature,
-  type Dependency,
-  type Feature,
-  type PlatformInterfaceContract,
-  type Program,
-} from "kit";
+import { createApp, type Dependency, type Feature, type Program } from "kit";
 import type { HttpServer, ServerProcess } from "kit/server";
 import {
   Await,
@@ -16,7 +9,6 @@ import {
   type Navigation,
   type Validate,
   type WebFeature,
-  type WebPlatform,
   type WebPresentation,
   type WebRoute,
   type WebServiceWorkerRuntime,
@@ -203,17 +195,7 @@ type AdminContract = Readonly<{
 }>;
 
 export type WebContract = Readonly<{
-  Features: { background: Background; greeting: Greeting };
-}>;
-
-type ProductWeb = PlatformInterfaceContract<WebContract, WebPlatform>;
-
-export type Product = Readonly<{
-  Features: {
-    admin: PlatformInterfaceContract<AdminContract, WebPlatform>;
-    origin: Origin;
-    web: PlatformInterfaceContract<WebContract, WebPlatform>;
-  };
+  Features: { background: Background; greeting: Greeting; origin: Origin };
 }>;
 
 const greeting: WebFeature<Greeting, WebContract> = {
@@ -452,7 +434,6 @@ const dashboard: WebFeature<AdminDashboard, AdminContract> = {
 };
 
 const admin = createWebInterface<AdminContract>({
-  features: { background, dashboard },
   presentation: {
     parameters: {},
     create() {
@@ -497,11 +478,10 @@ const webPresentation = {
         },
       }),
     }),
-  })) satisfies WebPresentation<ProductWeb, typeof webPresentationParameters>,
-} satisfies ConfiguredWebPresentation<ProductWeb, typeof webPresentationParameters>;
+  })) satisfies WebPresentation<WebContract, typeof webPresentationParameters>,
+} satisfies ConfiguredWebPresentation<WebContract, typeof webPresentationParameters>;
 
 const web = createWebInterface<WebContract>({
-  features: { background, greeting },
   presentation: webPresentation,
   installation: {
     shortName: "Conformance",
@@ -522,8 +502,12 @@ const web = createWebInterface<WebContract>({
   },
 });
 
-export const product = createApp(
-  createFeature<Product>({
-    features: { admin, origin, web },
-  }),
-);
+export const product = createApp({
+  features: { background, greeting, origin },
+  interfaces: { web },
+});
+
+export const administration = createApp({
+  features: { background, dashboard },
+  interfaces: { web: admin },
+});

@@ -80,6 +80,7 @@ export async function buildServerProgram(input: {
 }): Promise<ServerProductionBuild> {
   const started = performance.now();
   const profile = input.profile ?? "debug";
+  const nativeRoot = await packageNativeSourceRoot();
   const web = rustWebLoaders(planWebRouteLoaders(input.program, input.ir));
   const linked = linkProgram({
     ...input.program,
@@ -87,7 +88,13 @@ export async function buildServerProgram(input: {
   });
   assertPortableProgram(linked);
   const featureDependencies = input.ir
-    ? featureProductionDependencies(input.ir, input.program, linked.external, input.directory)
+    ? featureProductionDependencies(
+        input.ir,
+        input.program,
+        linked.external,
+        input.directory,
+        nativeRoot,
+      )
     : [];
   const overrides = new Set((input.dependencies ?? []).map(({ dependency }) => dependency));
   const featureProvided = new Set(featureDependencies.map(({ dependency }) => dependency));
@@ -99,7 +106,7 @@ export async function buildServerProgram(input: {
       ),
       ...featureDependencies.filter(({ dependency }) => !overrides.has(dependency)),
       ...(input.dependencies ?? []),
-    ],
+    ].map((implementation) => canonicalProductionDependency(implementation, nativeRoot)),
   });
   const requirements = dependencies.map(({ dependency, implementation }) => ({
     dependency: dependency.name,
@@ -111,6 +118,7 @@ export async function buildServerProgram(input: {
     dependencies,
     web,
     packageName(input.program.name),
+    nativeRoot,
   );
   const project = digest(JSON.stringify(canonicalGeneratedInputs(seed.inputs))).slice(0, 16);
   const generated = await generateRustWorkspace(
@@ -118,6 +126,7 @@ export async function buildServerProgram(input: {
     dependencies,
     web,
     packageName(`${input.program.name}_${project}`),
+    nativeRoot,
   );
   const toolchain = await rustToolchain();
   const semanticHash = digest(
@@ -233,6 +242,7 @@ function featureProductionDependencies(
   program: ProgramIR,
   dependencies: readonly Readonly<{ name: string }>[],
   directory: string,
+  nativeRoot: string,
 ): readonly ServerProductionDependency[] {
   return selectDependencyProviders(
     ir,
@@ -268,7 +278,10 @@ function featureProductionDependencies(
       dependency: provider.dependency,
       crate: {
         ...production.crate,
-        directory: resolve(dirname(source), production.crate.directory),
+        directory: canonicalNativeDirectory(
+          resolve(dirname(source), production.crate.directory),
+          nativeRoot,
+        ),
       },
     });
   });
@@ -340,13 +353,14 @@ async function generateRustWorkspace(
   dependencies: readonly ResolvedServerProductionDependency[],
   web: RustWebLoaders,
   binary: string,
+  nativeRoot: string,
 ): Promise<RustWorkspace> {
   duplicate(
     dependencies.map(({ implementation }) => implementation.crate.package),
     "production Cargo package",
   );
-  const runtimeDirectory = resolve(import.meta.dirname, "../../../../compiler/rust/runtime");
-  const distributionDirectory = resolve(import.meta.dirname, "distribution");
+  const runtimeDirectory = resolve(nativeRoot, "compiler/rust/runtime");
+  const distributionDirectory = resolve(nativeRoot, "platforms/server/adapter/rust/distribution");
   const distribution = rustDistributionContracts(linked);
   const nativeInputs = [
     ...(await crateFiles(runtimeDirectory, "native/runtime")),
@@ -1095,6 +1109,53 @@ function packageName(program: string): string {
 
 function fileName(value: string): string {
   return rustName(value).replaceAll("_", "-") || "program";
+}
+
+async function packageNativeSourceRoot(): Promise<string> {
+  let directory = import.meta.dirname;
+  while (true) {
+    if (await exists(resolve(directory, "package.json"))) {
+      for (const source of [resolve(directory, "src"), resolve(directory, "dist/source")]) {
+        if (await exists(resolve(source, "compiler/rust/runtime/Cargo.toml"))) return source;
+      }
+      throw new Error(`Package ${JSON.stringify(directory)} has no native compiler source tree.`);
+    }
+    const parent = dirname(directory);
+    if (parent === directory) {
+      throw new Error("Cannot locate the package root for native compilation.");
+    }
+    directory = parent;
+  }
+}
+
+function canonicalProductionDependency(
+  implementation: ServerProductionDependency,
+  nativeRoot: string,
+): ServerProductionDependency {
+  return defineServerProductionDependency({
+    ...implementation,
+    crate: {
+      ...implementation.crate,
+      directory: canonicalNativeDirectory(implementation.crate.directory, nativeRoot),
+    },
+  });
+}
+
+function canonicalNativeDirectory(directory: string, nativeRoot: string): string {
+  const root = nativeRoot.endsWith("/dist/source")
+    ? dirname(dirname(nativeRoot))
+    : dirname(nativeRoot);
+  const absolute = resolve(directory);
+  for (const source of [
+    resolve(root, "src"),
+    resolve(root, "dist/source"),
+    resolve(root, "dist/src"),
+  ]) {
+    const path = relative(source, absolute);
+    if (path === "") return nativeRoot;
+    if (!path.startsWith("../") && !isAbsolute(path)) return resolve(nativeRoot, path);
+  }
+  return absolute;
 }
 
 function rustName(value: string): string {

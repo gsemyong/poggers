@@ -184,7 +184,7 @@ export type {
   WebFeature,
   WebInstallation,
   WebInstallationIcon,
-  WebInterfaceFeature,
+  WebInterface,
   WebJSON,
   WebNavigation,
   WebRoute,

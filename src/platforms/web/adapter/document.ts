@@ -25,7 +25,7 @@ import type {
 import type { WebRouteMetadataResult } from "@/platforms/web/routing";
 import { activateWebUIRuntime } from "@/platforms/web/ui";
 
-export const WEB_DOCUMENT_IR_VERSION = 4 as const;
+export const WEB_DOCUMENT_IR_VERSION = 5 as const;
 export const WEB_ROUTE_DATA_MEDIA_TYPE = "application/vnd.kit.route+json";
 export const WEB_MARKDOWN_MEDIA_TYPE = "text/markdown";
 
@@ -93,11 +93,11 @@ export function isWebDeferredData(value: unknown): value is WebDeferredDataIR {
 /** A deterministic static or client-owned document realized by the web/server adapter pair. */
 export type WebDocumentIR = Readonly<{
   version: typeof WEB_DOCUMENT_IR_VERSION;
-  rendering: "hydrate" | "client";
+  rendering: "static" | "hydrate" | "client";
   language: string;
   title: string;
   metadata: WebDocumentMetadataIR;
-  entry: string;
+  entry: false | string;
   preloads: readonly string[];
   root: readonly WebDocumentNodeIR[];
   styles: readonly string[];
@@ -224,6 +224,7 @@ type RuntimeComponentDefinition = Readonly<{
 type RuntimeFeature = Readonly<{
   programs?: Readonly<Record<string, RuntimeProgramDefinition>>;
   features?: Readonly<Record<string, RuntimeFeature>>;
+  interfaces?: Readonly<Record<string, unknown>>;
 }>;
 
 type RuntimeSystem = Readonly<{
@@ -650,22 +651,25 @@ export function prepareCompiledWebDocumentStream(
   const metadata = documentMetadata(input.metadata);
   const language = input.metadata.language ?? input.document.language;
   const title = input.metadata.title ?? input.document.title;
+  const interactive = input.document.entry !== false;
   const document = Object.freeze({
     ...input.document,
-    rendering: "hydrate" as const,
+    rendering: interactive ? ("hydrate" as const) : ("static" as const),
     language,
     title,
     metadata: Object.freeze(metadata),
     root: Object.freeze(pending.map((node) => lowerPendingNode(node, sequence))),
-    hydration: Object.freeze({
-      version: 1 as const,
-      route: Object.freeze({ ...input.route }),
-      location: input.location,
-      params: Object.freeze({ ...input.params }),
-      search: Object.freeze({ ...input.search }),
-      loader: input.loader === false ? false : Object.freeze({ data: deferred.hydration }),
-      metadata: webRouteHydrationMetadata({ language, metadata, title }),
-    }),
+    hydration: interactive
+      ? Object.freeze({
+          version: 1 as const,
+          route: Object.freeze({ ...input.route }),
+          location: input.location,
+          params: Object.freeze({ ...input.params }),
+          search: Object.freeze({ ...input.search }),
+          loader: input.loader === false ? false : Object.freeze({ data: deferred.hydration }),
+          metadata: webRouteHydrationMetadata({ language, metadata, title }),
+        })
+      : false,
   });
   validateWebDocument(document);
   return Object.freeze({
@@ -1134,8 +1138,7 @@ export function renderWebDocument(document: WebDocumentIR): string {
   const styles = document.styles.length
     ? `<style data-kit-ssr>${document.styles.join("")}</style>`
     : "";
-  const entry = escapeAttribute(document.entry);
-  const preloads = [document.entry, ...document.preloads]
+  const preloads = [...(document.entry === false ? [] : [document.entry]), ...document.preloads]
     .filter((value, index, values) => values.indexOf(value) === index)
     .map((value) => `<link rel="modulepreload" href="${escapeAttribute(value)}">`)
     .join("");
@@ -1143,7 +1146,12 @@ export function renderWebDocument(document: WebDocumentIR): string {
   const hydration = document.hydration
     ? `<script id="kit-hydration" type="application/json">${escapeEmbeddedJson(JSON.stringify(document.hydration))}</script>`
     : "";
-  return `<!doctype html><html lang="${escapeAttribute(document.language)}"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">${styles}${preloads}<title>${escapeText(document.title)}</title>${metadata}</head><body><div id="app" data-kit-rendering="${document.rendering}">${document.root.map(renderNode).join("")}</div>${hydration}<script type="module" async src="${entry}"></script></body></html>`;
+  const script =
+    document.entry === false
+      ? ""
+      : `<script type="module" async src="${escapeAttribute(document.entry)}"></script>`;
+  const staticDocument = document.rendering === "static";
+  return `<!doctype html><html lang="${escapeAttribute(document.language)}"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">${styles}${preloads}<title>${escapeText(document.title)}</title>${metadata}</head><body><div id="app" data-kit-rendering="${document.rendering}">${document.root.map((node) => renderNode(node, staticDocument)).join("")}</div>${hydration}${script}</body></html>`;
 }
 
 /** Renders the public text representation from the same semantic document tree as HTML. */
@@ -1296,7 +1304,7 @@ export function renderWebDeferredFrame(frame: WebDeferredFrameIR): string {
   const boundary = escapeAttribute(frame.boundary);
   const field = escapeAttribute(frame.field);
   const state = escapeEmbeddedJson(JSON.stringify(frame.state));
-  return `<template data-kit-deferred-frame="${boundary}" data-kit-deferred-field="${field}">${frame.root.map(renderNode).join("")}</template><script type="application/json" data-kit-deferred-state="${boundary}">${state}</script>`;
+  return `<template data-kit-deferred-frame="${boundary}" data-kit-deferred-field="${field}">${frame.root.map((node) => renderNode(node)).join("")}</template><script type="application/json" data-kit-deferred-state="${boundary}">${state}</script>`;
 }
 
 /** Applies the same route-owned head meaning to a live browser document. */
@@ -1381,10 +1389,17 @@ export function validateWebDocument(document: WebDocumentIR): void {
   if (document.version !== WEB_DOCUMENT_IR_VERSION) {
     throw new TypeError(`Unsupported Web Document IR version ${String(document.version)}.`);
   }
-  if (document.rendering !== "hydrate" && document.rendering !== "client") {
+  if (
+    document.rendering !== "static" &&
+    document.rendering !== "hydrate" &&
+    document.rendering !== "client"
+  ) {
     throw new TypeError(`Unsupported web rendering kind ${JSON.stringify(document.rendering)}.`);
   }
-  if (typeof document.entry !== "string" || !document.entry.startsWith("/")) {
+  if (
+    document.entry !== false &&
+    (typeof document.entry !== "string" || !document.entry.startsWith("/"))
+  ) {
     throw new TypeError("Web document entry must be absolute.");
   }
   if (
@@ -1415,6 +1430,12 @@ export function validateWebDocument(document: WebDocumentIR): void {
   if (!Array.isArray(document.root)) throw new TypeError("Web document root must be an array.");
   if (document.rendering === "client" && document.root.length) {
     throw new TypeError("A client-rendered web document must have an empty root.");
+  }
+  if (
+    document.rendering === "static" &&
+    (document.entry !== false || document.preloads.length || document.hydration !== false)
+  ) {
+    throw new TypeError("A static web document cannot contain client runtime state.");
   }
   if (document.hydration !== false) validateRouteHydration(document.hydration);
   validateWebDocumentNodes(document.root, "");
@@ -1759,7 +1780,9 @@ function createComponentComposition(input: {
     Object.create(null);
   const localGroups: Record<string, Record<string, unknown>> = { "": Object.create(null) };
   const namespaces: Record<string, Record<string, unknown>> = { "": Object.create(null) };
-  const interfaceFeature = requireRuntimeFeature(input.system, input.interface);
+  const owner = runtimeInterfaceOwner(input.system, input.interface);
+  const appPath = owner.path;
+  const appFeature = owner.feature;
 
   for (const name of Object.keys(input.contracts).sort()) {
     renderers[name] = (props = {}) =>
@@ -1767,26 +1790,25 @@ function createComponentComposition(input: {
   }
   const local: Record<string, unknown> = Object.create(null);
   for (const component of Object.keys(
-    interfaceFeature.programs?.[input.program]?.components ?? {},
+    appFeature.programs?.[input.program]?.components ?? {},
   ).sort()) {
-    const name = featureComponentName(input.interface, component);
+    const name = featureComponentName(appPath, component);
     const renderer = renderers[name];
-    if (!renderer)
-      throw new TypeError(`Missing Component renderer ${input.interface}.${component}.`);
+    if (!renderer) throw new TypeError(`Missing Component renderer ${appPath}.${component}.`);
     local[component] = renderer;
   }
-  localGroups[input.interface] = local;
+  localGroups[appPath] = local;
   const children = collectNamespaces(
-    interfaceFeature.features,
+    appFeature.features,
     input.program,
     renderers,
     localGroups,
     namespaces,
-    input.interface,
+    appPath,
   );
   namespaces[""] = Object.assign(Object.create(null), local, children);
-  namespaces[input.interface] = children;
-  const roots = collectRoots(interfaceFeature, input.program, input.interface);
+  namespaces[appPath] = children;
+  const roots = collectRoots(appFeature, input.program, appPath);
   if ((input.routed && roots.length !== 0) || (!input.routed && roots.length !== 1)) {
     throw new TypeError(
       input.routed
@@ -2003,20 +2025,21 @@ function lowerElement(
   });
 }
 
-function renderNode(node: WebDocumentNodeIR): string {
+function renderNode(node: WebDocumentNodeIR, staticDocument = false): string {
   if (node.kind === "text") {
-    return `<!--kit:${escapeComment(node.hydration)}-->${escapeText(node.value)}`;
+    return `${staticDocument ? "" : `<!--kit:${escapeComment(node.hydration)}-->`}${escapeText(node.value)}`;
   }
   if (node.kind === "boundary") {
     const boundary = escapeAttribute(node.boundary);
     const field = escapeAttribute(node.field);
-    return `<template data-kit-boundary-start="${boundary}" data-kit-deferred-field="${field}"></template>${node.children.map(renderNode).join("")}<template data-kit-boundary-end="${boundary}"></template>`;
+    return `<template data-kit-boundary-start="${boundary}" data-kit-deferred-field="${field}"></template>${node.children.map((child) => renderNode(child, staticDocument)).join("")}<template data-kit-boundary-end="${boundary}"></template>`;
   }
   const attributes = node.attributes
+    .filter(({ name }) => !staticDocument || name !== "data-kit-h")
     .map(({ name, value }) => (value ? ` ${name}="${escapeAttribute(value)}"` : ` ${name}`))
     .join("");
   if (voidElements.has(node.tag)) return `<${node.tag}${attributes}>`;
-  return `<${node.tag}${attributes}>${node.children.map(renderNode).join("")}</${node.tag}>`;
+  return `<${node.tag}${attributes}>${node.children.map((child) => renderNode(child, staticDocument)).join("")}</${node.tag}>`;
 }
 
 function collectNamespaces(
@@ -2101,7 +2124,9 @@ function createPreparedPresentation(
   configured: RuntimeConfiguredPresentation,
   apis: Readonly<Record<string, Readonly<Record<string, unknown>>>>,
 ): PreparedPresentation {
-  const interfaceFeature = requireRuntimeFeature(system, interfacePath);
+  const owner = runtimeInterfaceOwner(system, interfacePath);
+  const appPath = owner.path;
+  const appFeature = owner.feature;
   const hosts: WebAnimationHost[] = [];
   const createScope = (parent?: WebAnimationHost) => {
     const host = createWebAnimationHost({
@@ -2118,7 +2143,7 @@ function createPreparedPresentation(
     configured.create({
       parameters: configured.parameters,
       environment: initialEnvironment,
-      state: presentationState(apis[interfacePath] ?? {}, {}),
+      state: presentationState(apis[appPath] ?? {}, {}),
       events: {},
     }),
   );
@@ -2126,10 +2151,10 @@ function createPreparedPresentation(
     string,
     Readonly<{ render: RuntimePresentationComponent; parent: WebAnimationHost }>
   >();
-  for (const component of Object.keys(interfaceFeature.programs?.[program]?.components ?? {})) {
+  for (const component of Object.keys(appFeature.programs?.[program]?.components ?? {})) {
     const value = root[component];
     if (typeof value === "function") {
-      components.set(featureComponentName(interfacePath, component), {
+      components.set(featureComponentName(appPath, component), {
         render: value as RuntimePresentationComponent,
         parent: rootHost,
       });
@@ -2172,7 +2197,7 @@ function createPreparedPresentation(
       visit(feature.features, next, path, featureHost);
     }
   };
-  visit(interfaceFeature.features, root, interfacePath, rootHost);
+  visit(appFeature.features, root, appPath, rootHost);
   return {
     components,
     dispose() {
@@ -2197,8 +2222,29 @@ function resolveRuntimeFeature(system: RuntimeSystem, path: string): RuntimeFeat
 
 function requireRuntimeFeature(system: RuntimeSystem, path: string): RuntimeFeature {
   const feature = resolveRuntimeFeature(system, path);
-  if (!feature) throw new TypeError(`Missing interface Feature ${JSON.stringify(path)}.`);
+  if (!feature) throw new TypeError(`Missing runtime Feature ${JSON.stringify(path)}.`);
   return feature;
+}
+
+function interfaceAppPath(path: string): string {
+  const segments = path.split(".").filter(Boolean);
+  if (segments.length < 2) {
+    throw new TypeError(`Invalid interface identity ${JSON.stringify(path)}.`);
+  }
+  return segments.slice(0, -1).join(".");
+}
+
+function runtimeInterfaceOwner(
+  system: RuntimeSystem,
+  interfacePath: string,
+): Readonly<{ path: string; feature: RuntimeFeature }> {
+  const appPath = interfaceAppPath(interfacePath);
+  const app = requireRuntimeFeature(system, appPath);
+  const name = interfacePath.slice(appPath.length + 1);
+  if (!app.interfaces?.[name]) {
+    throw new TypeError(`Missing runtime interface ${JSON.stringify(interfacePath)}.`);
+  }
+  return { path: appPath, feature: app };
 }
 
 function componentsForOwner(

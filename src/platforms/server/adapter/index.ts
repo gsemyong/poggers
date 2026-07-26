@@ -6,12 +6,8 @@ import type { SourceCompilerExtension } from "@/compiler/extension";
 import type { ProgramIR } from "@/compiler/ir";
 import { SystemDiagnostic } from "@/compiler/source";
 import type { ServerPlatform } from "@/platforms/server";
-import { buildServerProgram } from "@/platforms/server/adapter/rust/compiler";
 import type { ServerProductionDependency } from "@/platforms/server/adapter/rust/providers";
-import {
-  developServerPrograms,
-  type ServerDevelopmentOptions,
-} from "@/platforms/server/adapter/typescript/session";
+import type { ServerDevelopmentOptions } from "@/platforms/server/adapter/typescript/session";
 
 export {
   defineServerProductionDependency,
@@ -43,8 +39,13 @@ export function createServerPlatformAdapter(
   return {
     name: "server",
     compiler: [serverCompilerExtension],
-    develop: (input) => developServerPrograms(input, options),
+    async develop(input) {
+      const { developServerPrograms } =
+        await import("@/platforms/server/adapter/typescript/session");
+      return developServerPrograms(input, options);
+    },
     async build(input) {
+      const { buildServerProgram } = await import("@/platforms/server/adapter/rust/compiler");
       const programs = [...input.programs].sort((left, right) =>
         left.name.localeCompare(right.name),
       );
@@ -53,6 +54,7 @@ export function createServerPlatformAdapter(
       const entries = [];
       for (const program of programs) {
         const path = resolve(input.output, artifactName(program.name));
+        const started = performance.now();
         const result = await buildServerProgram({
           dependencies: options.productionDependencies,
           system: input.ir.system.name,
@@ -96,7 +98,14 @@ export function createServerPlatformAdapter(
             architecture: process.arch,
           },
         });
-        console.log(`[kit] production ${program.name}: cache ${result.cache}`);
+        input.report?.({
+          kind: "artifact",
+          platform: "server",
+          identity: program.id,
+          path,
+          cache: result.cache,
+          durationMs: performance.now() - started,
+        });
       }
       return { directory: input.output, entries };
     },

@@ -8,7 +8,7 @@ import type {
   UIContributionAPI,
 } from "@/core/feature";
 import type { ProgramContract } from "@/core/program";
-import type { PlatformInterfaceContract, PlatformInterfaceFeature } from "@/core/system";
+import type { PlatformInterface } from "@/core/system";
 import type { ComponentComposition, ComponentUI } from "@/core/ui/component";
 import type { ConfiguredPresentationFor } from "@/core/ui/presentation";
 import type { WebPlatform } from "@/platforms/web";
@@ -110,29 +110,23 @@ export type WebInstallation<Contract extends FeatureContract> = Readonly<{
   }>;
 }>;
 
-type WebInterfaceContract<Contract extends FeatureContract> = PlatformInterfaceContract<
-  Contract,
-  WebPlatform
+type WebInterfaceDefinition<Owner extends FeatureContract> = Readonly<{
+  presentation: ConfiguredPresentationFor<Owner, WebPresentationLanguage>;
+  installation?: WebInstallation<Owner>;
+}>;
+
+/** Web-owned realization configuration for one exact App Feature contract. */
+export type WebInterface<Owner extends FeatureContract> = PlatformInterface<
+  Owner,
+  WebPlatform,
+  WebInterfaceDefinition<Owner>
 >;
 
-/** One independently addressable web interface, represented by an ordinary Feature. */
-export type WebInterfaceFeature<Contract extends FeatureContract> = WebFeature<
-  WebInterfaceContract<Contract>,
-  WebInterfaceContract<Contract>
-> &
-  Readonly<{
-    presentation: ConfiguredPresentationFor<
-      WebInterfaceContract<Contract>,
-      WebPresentationLanguage
-    >;
-    installation?: WebInstallation<WebInterfaceContract<Contract>>;
-  }>;
-
-/** Adds web-interface ownership without creating a second composition tree. */
-export function createWebInterface<Contract extends FeatureContract>(
-  feature: WebInterfaceFeature<Contract>,
-): PlatformInterfaceFeature<Contract, WebPlatform> & WebInterfaceFeature<Contract> {
-  return feature as PlatformInterfaceFeature<Contract, WebPlatform> & WebInterfaceFeature<Contract>;
+/** Retains typed web configuration without owning or repeating App Features. */
+export function createWebInterface<Owner extends FeatureContract>(
+  definition: WebInterfaceDefinition<Owner>,
+): WebInterface<Owner> {
+  return definition as WebInterface<Owner>;
 }
 
 type ProgramsOf<Owner> = Owner extends {
@@ -195,7 +189,7 @@ type ValidWebRoutes<Routes> = {
   >;
 };
 
-/** Every qualified web Route contributed by one web-interface Feature contract. */
+/** Every qualified web Route contributed by one App Feature contract. */
 export type WebRoutes<Owner extends FeatureContract> = Readonly<
   ValidWebRoutes<WebRoutesIn<Owner, "">>
 >;

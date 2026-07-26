@@ -39,26 +39,33 @@ describe("web installation planning", () => {
     const installation = planWebInstallation(system(), interfaceId, routes)!;
     const plan = createWebServiceWorkerPlan({
       installation,
-      assets: ["/assets/app-a1b2c3d4.js", "/assets/lazy-a1b2c3d4.js"],
+      assets: ["/assets/app-a1b2c3d4.js", "/assets/database-a1b2c3d4.wasm"],
       precache: ["/assets/app-a1b2c3d4.js", "/assets/app-a1b2c3d4.js"],
+      warmAssets: ["/assets/database-a1b2c3d4.wasm"],
       routes,
       modules: ["/workers/search-a1b2c3d4.js", "/workers/sync-a1b2c3d4.js"],
     });
     const source = renderWebServiceWorker(plan);
 
-    expect(plan.assets).toEqual(["/assets/app-a1b2c3d4.js", "/assets/lazy-a1b2c3d4.js"]);
+    expect(plan.assets).toEqual(["/assets/app-a1b2c3d4.js", "/assets/database-a1b2c3d4.wasm"]);
     expect(plan.precache).toEqual(["/assets/app-a1b2c3d4.js"]);
+    expect(plan.warmAssets).toEqual(["/assets/database-a1b2c3d4.wasm"]);
     expect(plan.documents).toEqual(["/auth", "/tasks"]);
+    expect(plan.installDocuments).toEqual(["/auth", "/tasks"]);
+    expect(plan.warmDocuments).toEqual([]);
     expect(source.match(/^import /gm)).toHaveLength(2);
     expect(source).toContain('event.data === "kit:activate"');
+    expect(source).toContain('event.data === "kit:warm"');
     expect(source).toContain("navigationPreload?.enable()");
-    expect(source).not.toContain("clients.claim()");
+    expect(source).toContain("clients.claim()");
     expect(source).not.toContain('"install", (event) => event.waitUntil(self.skipWaiting())');
     expect(source).toContain("DOCUMENTS.includes(url.pathname)");
     expect(source).toContain("documents.match(FALLBACK, { ignoreVary: true })");
     expect(source).toContain("assets.match(request, { ignoreVary: true })");
     expect(source).toContain("assets.put(request, response.clone())");
     expect(source).toContain('const PRECACHE = ["/assets/app-a1b2c3d4.js"]');
+    expect(source).toContain('const WARM_ASSETS = ["/assets/database-a1b2c3d4.wasm"]');
+    expect(source).toContain('"/assets/database-a1b2c3d4.wasm"');
 
     const changed = createWebServiceWorkerPlan({
       installation,
@@ -78,6 +85,18 @@ describe("web installation planning", () => {
         routes,
       }),
     ).toThrow(/not cacheable/);
+  });
+
+  it("installs only the application entry and warms other public documents afterward", () => {
+    const plan = createWebServiceWorkerPlan({
+      installation: planWebInstallation(system(), interfaceId, routes)!,
+      assets: [],
+      routes: [...routes, route("help.index", "/help", { scope: "public", maxAge: "1d" })],
+    });
+
+    expect(plan.documents).toEqual(["/auth", "/help", "/tasks"]);
+    expect(plan.installDocuments).toEqual(["/auth", "/tasks"]);
+    expect(plan.warmDocuments).toEqual(["/help"]);
   });
 
   it("refuses to persist a private content document as the offline fallback", () => {
@@ -102,23 +121,11 @@ function system(): SystemIR {
     interfaces: [
       {
         id: interfaceId,
-        feature: "app.web",
+        path: "app.web",
         app: "app",
         platform: "web",
         programs: [],
         presentationSources: [],
-      },
-    ],
-    features: [
-      {
-        id: "feature/app.web",
-        path: "app.web",
-        kind: "interface",
-        app: "app",
-        interface: "app.web",
-        platform: "web",
-        children: [],
-        programs: [],
         extensions: {
           web: {
             version: 8,
@@ -135,6 +142,16 @@ function system(): SystemIR {
             },
           },
         },
+      },
+    ],
+    features: [
+      {
+        id: "feature/app",
+        path: "app",
+        kind: "app",
+        app: "app",
+        children: [],
+        programs: [],
       },
     ],
     programs: [],

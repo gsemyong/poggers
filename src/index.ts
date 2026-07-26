@@ -15,6 +15,7 @@ export type { Feature, FeatureContract, FeatureContractOf, PlacedFeature } from 
 export { createFeature, placePrograms } from "@/core/feature";
 export type {
   AppFeatureContract,
+  PlatformInterface,
   PlatformInterfaceContract,
   System,
   SystemContractOf,

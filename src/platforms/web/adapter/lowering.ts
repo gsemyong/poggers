@@ -271,9 +271,11 @@ export function collectWebRoutes(ir: SystemIR, program: string): readonly WebRou
   const selected = ir.programs.find(
     ({ name, environment }) => name === program && environment.platform === "web",
   );
-  const interfaceFeature = selected?.interface ? features.get(selected.interface) : undefined;
-  const manifest = interfaceFeature?.extensions?.web
-    ? Boolean(webFeatureCompilerIR(interfaceFeature.extensions.web).installation)
+  const interface_ = selected?.interface
+    ? ir.interfaces.find((candidate) => candidate.path === selected.interface)
+    : undefined;
+  const manifest = interface_?.extensions?.web
+    ? Boolean(webFeatureCompilerIR(interface_.extensions.web).installation)
     : false;
   const routes = (selected ? [selected] : []).flatMap(({ contributions }) =>
     contributions.flatMap((contribution) =>
