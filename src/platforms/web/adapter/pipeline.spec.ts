@@ -396,7 +396,7 @@ export const audio = web.createAudioAsset(new URL("./assets/control.wav", import
           extends: resolve(import.meta.dirname, "../../../..", "tsconfig.json"),
           compilerOptions: {
             paths: {
-              "@/*": ["./src/*"],
+              "@/*": ["${configDir}/src/*"],
               kit: [resolve(import.meta.dirname, "../../../..", "dist/source/index.ts")],
               "kit/jsx-runtime": [
                 resolve(import.meta.dirname, "../../../..", "dist/source/jsx/runtime.ts"),

@@ -6,7 +6,7 @@ import process from "node:process";
 
 import { build } from "vite";
 
-import { packageSources } from "../src/package";
+import { packageSources } from "@/package";
 
 const packageDir = resolve(import.meta.dirname, "..");
 const distDir = resolve(packageDir, "dist");
@@ -279,6 +279,7 @@ async function emitDeclarations(): Promise<number> {
           files: entrypoints,
           compilerOptions: {
             rootDir: packageDir,
+            typeRoots: [resolve(packageDir, "node_modules/@types")],
             paths: {
               "@/*": [resolve(packageDir, "src/*")],
               ...Object.fromEntries(

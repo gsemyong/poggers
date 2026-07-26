@@ -1,13 +1,13 @@
 {
   "compilerOptions": {
-    "lib": ["ES2024", "ESNext.Disposable", "DOM", "DOM.Iterable"],
+    "lib": ["ES2025", "ESNext.Disposable", "DOM", "DOM.Iterable"],
     "target": "ESNext",
     "module": "Preserve",
     "moduleDetection": "force",
     "jsx": "react-jsx",
     "jsxImportSource": "kit",
     "allowImportingTsExtensions": true,
-    "types": [],
+    "types": ["node"],
     "moduleResolution": "bundler",
     "customConditions": ["source"],
     "paths": {

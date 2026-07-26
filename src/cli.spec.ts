@@ -50,18 +50,20 @@ describe("project template", () => {
         "deployment.ts",
         "features",
         "presentations",
-        "system.spec.ts",
         "system.ts",
       ]);
       expect(await readdir(resolve(target, "src/apps"))).toEqual(["main"]);
       expect(await readdir(resolve(target, "src/apps/main"))).toEqual(["app.tsx"]);
-      expect(await readdir(resolve(target, "src/features"))).toEqual(["shell.tsx"]);
+      expect((await readdir(resolve(target, "src/features"))).sort()).toEqual([
+        "shell.spec.ts",
+        "shell.tsx",
+      ]);
       expect(await readdir(resolve(target, "src/presentations"))).toEqual(["clean.ts"]);
       expect(await readFile(resolve(target, "src/system.ts"), "utf8")).toContain(
         "export default createSystem({",
       );
-      expect(await readFile(resolve(target, "src/system.spec.ts"), "utf8")).toContain(
-        "testSystem({",
+      expect(await readFile(resolve(target, "src/features/shell.spec.ts"), "utf8")).toContain(
+        "program.actions.increment",
       );
       expect(await readFile(resolve(target, "src/features/shell.tsx"), "utf8")).toContain(
         "createFeature<ShellFeature>",
@@ -88,7 +90,10 @@ describe("project template", () => {
         "check",
       ]);
       expect(packageJson.dependencies).toEqual({ kit: "latest" });
-      expect(packageJson.devDependencies).toEqual({ vitest: "^4.1.10" });
+      expect(packageJson.devDependencies).toEqual({
+        "@types/node": "^26.1.1",
+        vitest: "^4.1.10",
+      });
       expect(packageJson.engines.node).toBe(">=26.0.0");
       expect(packageJson.devEngines.packageManager).toEqual({
         name: "nub",
@@ -106,6 +111,12 @@ describe("project template", () => {
       const modules = resolve(target, "node_modules");
       await mkdir(modules, { recursive: true });
       await symlink(resolve(import.meta.dirname, ".."), resolve(modules, "kit"), "dir");
+      await mkdir(resolve(modules, "@types"));
+      await symlink(
+        resolve(import.meta.dirname, "../node_modules/@types/node"),
+        resolve(modules, "@types/node"),
+        "dir",
+      );
       await symlink(
         resolve(import.meta.dirname, "../node_modules/vitest"),
         resolve(modules, "vitest"),
@@ -434,7 +445,7 @@ while true; do sleep 1; done
 async function expectCanonicalSourceRoot(source: string): Promise<void> {
   const entries = await readdir(source, { withFileTypes: true });
   expect(entries.map(({ name }) => name).sort()).toEqual(
-    expect.arrayContaining(["apps", "features", "presentations", "system.spec.ts", "system.ts"]),
+    expect.arrayContaining(["apps", "features", "presentations", "system.ts"]),
   );
 
   const unexpected = entries

@@ -119,12 +119,14 @@ src/
   features/
   presentations/
   deployment.ts
-  system.spec.ts
   system.ts
+  system.spec.ts       optional cross-System behavior
 ```
 
 Feature files are named by product meaning, such as `identity.tsx` or
-`tasks.tsx`; a mechanical `feature.tsx` layer adds no information.
+`tasks.tsx`; a mechanical `feature.tsx` layer adds no information. Feature
+behavior stays in adjacent Feature tests. `system.spec.ts` exists only when a
+guarantee genuinely spans Programs or realizations.
 
 ## Dependencies
 

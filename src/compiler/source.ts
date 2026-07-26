@@ -257,6 +257,7 @@ function compileSystemProgram(
       skipLibCheck: true,
       strict: true,
       target: ts.ScriptTarget.ESNext,
+      types: [],
     },
     oldProgram: previous,
   });

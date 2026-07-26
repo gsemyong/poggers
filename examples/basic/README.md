@@ -1,7 +1,7 @@
 # Basic
 
 The smallest complete web System. It demonstrates one App, one Feature, one
-Presentation, local deployment, and an end-to-end System test.
+Presentation, local deployment, and a focused Feature behavior test.
 
 Run it from the repository root:
 
