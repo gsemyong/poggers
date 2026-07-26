@@ -1,5 +1,4 @@
-import type { Feature } from "@/core/feature";
-import type { Program } from "@/core/program";
+import { createFeature } from "@/core/feature";
 import {
   Await,
   type BrowserMainThread,
@@ -12,7 +11,6 @@ import type {
   Validate,
   ValidationInput,
   ValidationOutput,
-  WebFeature,
   WebRoute,
   WebRoutes,
 } from "@/platforms/web/routing";
@@ -103,11 +101,22 @@ type DeferredKeysProof = Expect<Equal<keyof DeferredRoute["Deferred"], "activity
 
 type DeferredFeature = {
   Programs: {
-    browser: Program<BrowserMainThread, { Routes: { activity: DeferredRoute } }>;
+    browser: {
+      Environment: BrowserMainThread;
+      Routes: {
+        activity: {
+          Path: "activity";
+          Data: Readonly<{
+            title: string;
+            activity: Deferred<readonly string[]>;
+          }>;
+        };
+      };
+    };
   };
 };
 
-const deferred = {
+const deferred = createFeature<DeferredFeature>({
   programs: {
     browser: {
       routes: {
@@ -132,32 +141,38 @@ const deferred = {
       },
     },
   },
-} satisfies WebFeature<DeferredFeature>;
+});
 
 type RoutedFeature = {
   Programs: {
-    browser: Program<
-      BrowserMainThread,
-      {
-        Routes: { edit: EditRoute };
-      }
-    >;
+    browser: {
+      Environment: BrowserMainThread;
+      Routes: {
+        edit: {
+          Path: ":id";
+          Params: { id: Validate<string, { Format: "uuid" }> };
+          Search: SearchSchema;
+          Data: Readonly<{ title: string }>;
+          Dependencies: {
+            tasks: { get(input: { id: string }): Promise<{ title: string }> };
+          };
+        };
+      };
+    };
   };
 };
 
 type IdentityFeature = {
   Programs: {
-    browser: Program<
-      BrowserMainThread,
-      {
-        Routes: {
-          signIn: WebRoute<{
-            Path: "sign-in";
-            Search: { returnTo?: Validate<string> };
-          }>;
+    browser: {
+      Environment: BrowserMainThread;
+      Routes: {
+        signIn: {
+          Path: "sign-in";
+          Search: { returnTo?: Validate<string> };
         };
-      }
-    >;
+      };
+    };
   };
 };
 
@@ -175,7 +190,7 @@ navigation.navigate({ to: "identity.signIn", search: { returnTo: "/tasks" } });
 // @ts-expect-error Unknown cross-Feature destinations are rejected.
 navigation.navigate({ to: "identity.missing" });
 
-const routed = {
+const routed = createFeature<RoutedFeature>({
   programs: {
     browser: {
       routes: {
@@ -196,18 +211,18 @@ const routed = {
       },
     },
   },
-} satisfies WebFeature<RoutedFeature>;
+});
 
 type OfflineFeature = {
   Programs: {
-    offline: Program<
-      BrowserServiceWorker,
-      { Requires: { serviceWorker: WebServiceWorkerRuntime } }
-    >;
+    offline: {
+      Environment: BrowserServiceWorker;
+      Requires: { serviceWorker: WebServiceWorkerRuntime };
+    };
   };
 };
 
-const offline = {
+const offline = createFeature<OfflineFeature>({
   programs: {
     offline: {
       start({ dependencies }) {
@@ -222,7 +237,7 @@ const offline = {
       },
     },
   },
-} satisfies Feature<OfflineFeature>;
+});
 
 void routed;
 void deferred;

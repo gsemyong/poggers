@@ -168,7 +168,7 @@ type Feature<Contract> = Readonly<{ readonly [featureContract]?: Contract }>;
 function createFeature<Contract>(definition: object): Feature<Contract> {
   return definition as Feature<Contract>;
 }
-function createApp<Contract>(definition: object): Feature<Contract> {
+function createApplication<Contract>(definition: object): Feature<Contract> {
   return definition as Feature<Contract>;
 }
 function createInterface<Contract>(definition: object): Contract {
@@ -226,7 +226,7 @@ const web = createInterface<Web>({
     },
   },
 });
-const product = createApp<Product>({
+const product = createApplication<Product>({
   features: { runtime },
   interfaces: { web },
 });

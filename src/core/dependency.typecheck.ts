@@ -7,8 +7,11 @@ import type {
   ProgramRequiredDependencies,
 } from "@/core/dependency";
 import type { Feature } from "@/core/feature";
-import type { Program } from "@/core/program";
 import type { BrowserMainThread } from "@/platforms/web";
+
+type Program<Environment, Contract extends object = object> = Readonly<
+  Contract & { Environment: Environment }
+>;
 
 type Reader = Readonly<{ read(): string }>;
 type Clock = Readonly<{ now(): number }>;

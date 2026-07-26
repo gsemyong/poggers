@@ -1,7 +1,6 @@
 import type { JSXElement, JSXPlatformRegistration } from "kit/jsx-runtime";
 
 import { createFeature } from "@/core/feature";
-import type { Program } from "@/core/program";
 import type { UIElement } from "@/core/ui/language";
 import type { BrowserMainThread } from "@/platforms/web";
 
@@ -24,6 +23,9 @@ type NativeMain = Readonly<{
   Name: "native-main";
   Platform: NativePlatform;
 }>;
+type Program<Environment, Contract extends object = object> = Readonly<
+  Contract & { Environment: Environment }
+>;
 
 declare module "kit/jsx-runtime" {
   interface JSXPlatforms {

@@ -6,7 +6,7 @@ import { afterEach, describe, expect, test } from "vitest";
 
 import { compileSystem, SystemDiagnostic } from "@/compiler/source";
 import { webCompilerExtension } from "@/platforms/web/adapter/compiler";
-import { webFeatureCompilerIR, webProgramCompilerIR } from "@/platforms/web/adapter/lowering";
+import { webInterfaceCompilerIR, webProgramCompilerIR } from "@/platforms/web/adapter/lowering";
 
 const directories: string[] = [];
 
@@ -24,8 +24,9 @@ describe("web compiler extension", () => {
     const ir = compileSystem(entry, [webCompilerExtension]);
     const webInterface = ir.interfaces.find(({ path }) => path === "product.web");
     const tasks = ir.features.find(({ path }) => path === "product.tasks");
-    expect(webFeatureCompilerIR(webInterface?.extensions?.web)).toEqual({
+    expect(webInterfaceCompilerIR(webInterface?.extensions?.web)).toEqual({
       version: 8,
+      routes: { "product.tasks": "admin" },
       installation: {
         display: "standalone",
         icons: [
@@ -37,10 +38,7 @@ describe("web compiler extension", () => {
         start: { to: "tasks.edit", params: { id: "start" } },
       },
     });
-    expect(webFeatureCompilerIR(tasks?.extensions?.web)).toEqual({
-      version: 8,
-      routePath: "admin",
-    });
+    expect(tasks?.extensions).toBeUndefined();
     const web = webProgramCompilerIR(ir.programs[0]?.contributions[0]?.extensions?.web);
     expect(web.routes).toEqual([
       expect.objectContaining({
@@ -115,7 +113,7 @@ describe("web compiler extension", () => {
     const ir = compileSystem(await fixture(parameterizedInterfaceSource()), [webCompilerExtension]);
     const interface_ = ir.interfaces.find(({ path }) => path === "operations.web");
 
-    expect(webFeatureCompilerIR(interface_?.extensions?.web).installation).toMatchObject({
+    expect(webInterfaceCompilerIR(interface_?.extensions?.web).installation).toMatchObject({
       shortName: "Operations",
       start: { to: "home" },
       offline: { fallback: { to: "home" } },
@@ -183,7 +181,7 @@ type Feature<Contract> = Readonly<{ readonly [featureContract]?: Contract }>;
 function createFeature<Contract>(definition: object): Feature<Contract> {
   return definition as Feature<Contract>;
 }
-function createApp<Contract>(definition: object): Feature<Contract> {
+function createApplication<Contract>(definition: object): Feature<Contract> {
   return definition as Feature<Contract>;
 }
 function createInterface<Contract>(definition: object): Contract {
@@ -224,7 +222,6 @@ type Route = {
   ParamSchema: {};
   SearchSchema: {};
   Data: { title: string; activity: Deferred<string> };
-  Deferred: { activity: true };
   Dependencies: { feed: { read(input: {}): Promise<string> } };
 };
 type Activity = {
@@ -265,7 +262,7 @@ const activity = createFeature<Activity>({
 const web = createInterface<Web>({
   presentation: { parameters: {}, create() { return {}; } },
 });
-const product = createApp<Product>({
+const product = createApplication<Product>({
   features: { activity },
   interfaces: { web },
 });
@@ -309,7 +306,6 @@ type Route = {
   Dependencies: { tasks: { get(input: { id: string }): Promise<{ title: string }> } };
 };
 type Tasks = {
-  RoutePath: "admin";
   Programs: {
     browser: Program<
       Environment,
@@ -327,7 +323,6 @@ type Product = {
 };
 type Root = { Features: { product: Product } };
 const tasks = createFeature<Tasks>({
-  routePath: "admin",
   programs: {
     browser: {
       routes: {
@@ -351,13 +346,14 @@ const icons = [
 ];
 const web = createInterface<Web>({
   presentation: { parameters: {}, create() { return {}; } },
+  routes: { tasks: "admin" },
   installation: {
     start: { to: "tasks.edit", params: { id: "start" } },
     icons,
     offline: { fallback: { to: "tasks.edit", params: { id: "offline" } } },
   },
 });
-const product = createApp<Product>({
+const product = createApplication<Product>({
   features: { tasks },
   interfaces: { web },
 });
@@ -387,7 +383,7 @@ function createWeb(input: { shortName: string }): Web {
   });
 }
 const web = createWeb({ shortName: "Operations" });
-const operations = createApp<Operations>({ features: {}, interfaces: { web } });
+const operations = createApplication<Operations>({ features: {}, interfaces: { web } });
 export default createSystem({ features: { operations } });
 `;
 }
@@ -440,11 +436,11 @@ const operationsWeb = createInterface<OperationsWeb>({
 const customerWeb = createInterface<CustomerWeb>({
   presentation: { parameters: {}, create() { return {}; } },
 });
-const operations = createApp<Operations>({
+const operations = createApplication<Operations>({
   features: { primary${extraValue} },
   interfaces: { web: operationsWeb },
 });
-const customer = createApp<Customer>({
+const customer = createApplication<Customer>({
   features: { primary },
   interfaces: { web: customerWeb },
 });

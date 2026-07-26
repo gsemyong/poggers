@@ -1,8 +1,12 @@
 import { createSystem } from "kit";
 
-import { main } from "@/apps/main";
+import { main, type Main } from "@/apps/main";
 
-export default createSystem({
+type PresentationSystem = {
+  Applications: { main: Main };
+};
+
+export default createSystem<PresentationSystem>({
   metadata: { name: "Web Presentation" },
-  features: { main },
+  applications: { main },
 });

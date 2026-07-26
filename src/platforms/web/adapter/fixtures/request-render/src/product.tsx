@@ -1,4 +1,4 @@
-import { createApp, type Dependency, type Feature, type Program } from "kit";
+import { createApplication, createFeature, type Dependency } from "kit";
 import type { HttpServer, ServerProcess } from "kit/server";
 import {
   Await,
@@ -8,16 +8,14 @@ import {
   type Deferred,
   type Navigation,
   type Validate,
-  type WebFeature,
   type WebPresentation,
-  type WebRoute,
+  type WebPlatform,
   type WebServiceWorkerRuntime,
-  createWebInterface,
   createImageAsset,
 } from "kit/web";
 
 type GreetingRoutes = {
-  greeting: WebRoute<{
+  greeting: {
     Path: "hello/:name";
     Metadata: {
       Title: "Greeting";
@@ -42,34 +40,34 @@ type GreetingRoutes = {
     };
     Params: { name: Validate<string, { MinimumLength: 1; MaximumLength: 40 }> };
     Search: { punctuation?: Validate<"!" | "?", { Default: "!" }> };
-  }>;
-  loaded: WebRoute<{
+  };
+  loaded: {
     Path: "loaded/:name";
     Params: { name: Validate<string, { MinimumLength: 1; MaximumLength: 40 }> };
     Data: { message: string };
     Dependencies: { greetings: Greetings };
-  }>;
-  redirect: WebRoute<{
+  };
+  redirect: {
     Path: "go";
     Data: { message: string };
-  }>;
-  failure: WebRoute<{
+  };
+  failure: {
     Path: "failure";
     Data: { message: string };
     Dependencies: { greetings: Greetings };
-  }>;
-  deferred: WebRoute<{
+  };
+  deferred: {
     Path: "deferred/:name";
     Params: { name: Validate<string, { MinimumLength: 1; MaximumLength: 40 }> };
     Data: { message: string; activity: Deferred<string> };
     Dependencies: { greetings: Greetings };
-  }>;
-  privateRequest: WebRoute<{
+  };
+  privateRequest: {
     Path: "private";
     Cache: { Scope: "private"; MaxAge: "1m" };
     Data: { message: string };
-  }>;
-  typed: WebRoute<{
+  };
+  typed: {
     Path: "typed/:count/:enabled";
     Cache: { Scope: "public"; MaxAge: "1m"; StaleWhileRevalidate: "30s" };
     Params: {
@@ -80,22 +78,22 @@ type GreetingRoutes = {
       mode?: Validate<"compact" | "full", { Default: "compact" }>;
       tag?: Validate<readonly string[], { MaximumLength: 12 }>;
     };
-  }>;
-  cached: WebRoute<{
+  };
+  cached: {
     Path: "cached/:name";
     Cache: { Scope: "public"; MaxAge: "500ms"; StaleWhileRevalidate: "2s" };
     Params: { name: Validate<string, { MinimumLength: 1; MaximumLength: 40 }> };
     Data: { message: string };
     Dependencies: { greetings: Greetings };
-  }>;
-  typedRedirect: WebRoute<{
+  };
+  typedRedirect: {
     Path: "typed-go";
     Data: { message: string };
-  }>;
-  fileNew: WebRoute<{ Path: "files/new" }>;
-  file: WebRoute<{ Path: "files/:id" }>;
-  files: WebRoute<{ Path: "files/*rest" }>;
-  client: WebRoute<{ Path: "client"; Metadata: { Title: "Client"; Robots: "noindex" } }>;
+  };
+  fileNew: { Path: "files/new" };
+  file: { Path: "files/:id" };
+  files: { Path: "files/*rest" };
+  client: { Path: "client"; Metadata: { Title: "Client"; Robots: "noindex" } };
 };
 
 type Greetings = Dependency<{
@@ -107,83 +105,80 @@ type Greetings = Dependency<{
 
 type Greeting = Readonly<{
   Programs: {
-    browser: Program<
-      BrowserMainThread,
-      {
-        Requires: { navigation: Navigation<GreetingRoutes, WebContract> };
-        Actions: { goClient(): void };
-        Components: {
-          Message: {
-            Props: { message: string };
-            State: { count: number };
-            Actions: { increment(): void };
-            Elements: {
-              Root: "main";
-              Icon: "img";
-              Title: "h1";
-              Input: "input";
-              Increment: "button";
-              Count: "output";
-              Navigate: "button";
-              Link: "a";
-            };
+    browser: {
+      Environment: BrowserMainThread;
+      Requires: { navigation: Navigation<GreetingRoutes> };
+      Actions: { goClient(): void };
+      Components: {
+        Message: {
+          Props: { message: string };
+          State: { count: number };
+          Actions: { increment(): void };
+          Elements: {
+            Root: "main";
+            Icon: "img";
+            Title: "h1";
+            Input: "input";
+            Increment: "button";
+            Count: "output";
+            Navigate: "button";
+            Link: "a";
           };
         };
-        Routes: GreetingRoutes;
-      }
-    >;
+      };
+      Routes: GreetingRoutes;
+    };
   };
 }>;
 
 type Origin = Readonly<{
   Programs: {
-    server: Program<
-      ServerProcess,
-      { Requires: { http: HttpServer }; Provides: { greetings: Greetings } }
-    >;
+    server: {
+      Environment: ServerProcess;
+      Requires: { http: HttpServer };
+      Provides: { greetings: Greetings };
+    };
   };
 }>;
 
 type Background = Readonly<{
   Programs: {
-    offline: Program<
-      BrowserServiceWorker,
-      { Requires: { serviceWorker: WebServiceWorkerRuntime } }
-    >;
-    diagnostics: Program<
-      BrowserServiceWorker,
-      { Requires: { serviceWorker: WebServiceWorkerRuntime } }
-    >;
+    offline: {
+      Environment: BrowserServiceWorker;
+      Requires: { serviceWorker: WebServiceWorkerRuntime };
+    };
+    diagnostics: {
+      Environment: BrowserServiceWorker;
+      Requires: { serviceWorker: WebServiceWorkerRuntime };
+    };
   };
 }>;
 
 type AdminRoutes = {
-  dashboard: WebRoute<{
+  dashboard: {
     Path: "";
     Metadata: {
       Title: "Admin";
       Description: "Independent administration interface";
       Robots: "noindex";
     };
-  }>;
+  };
 };
 
 type AdminDashboard = Readonly<{
   Programs: {
-    browser: Program<
-      BrowserMainThread,
-      {
-        Components: {
-          Dashboard: {
-            Elements: {
-              Root: "main";
-              Title: "h1";
-            };
+    browser: {
+      Environment: BrowserMainThread;
+      Components: {
+        Dashboard: {
+          Elements: {
+            Root: "main";
+            Title: "h1";
           };
         };
-        Routes: AdminRoutes;
-      }
-    >;
+      };
+      Routes: AdminRoutes;
+    };
   };
 }>;
 
@@ -198,7 +193,7 @@ export type WebContract = Readonly<{
   Features: { background: Background; greeting: Greeting; origin: Origin };
 }>;
 
-const greeting: WebFeature<Greeting, WebContract> = {
+const greeting = createFeature<Greeting>({
   programs: {
     browser: {
       actions: {
@@ -241,8 +236,8 @@ const greeting: WebFeature<Greeting, WebContract> = {
       },
       routes: {
         greeting: {
-          view({ components: { Greeting }, params, search }) {
-            return <Greeting.Message message={`Hello, ${params.name}${search.punctuation}`} />;
+          view({ components: { Message }, params, search }) {
+            return <Message message={`Hello, ${params.name}${search.punctuation}`} />;
           },
         },
         loaded: {
@@ -252,24 +247,24 @@ const greeting: WebFeature<Greeting, WebContract> = {
               metadata: { title: `Loaded ${params.name}` },
             };
           },
-          view({ components: { Greeting }, data }) {
-            return <Greeting.Message message={data.message} />;
+          view({ components: { Message }, data }) {
+            return <Message message={data.message} />;
           },
         },
         redirect: {
           load() {
-            return { redirect: { to: "greeting.client" as const } };
+            return { redirect: { to: "client" as const } };
           },
-          view({ components: { Greeting }, data }) {
-            return <Greeting.Message message={data.message} />;
+          view({ components: { Message }, data }) {
+            return <Message message={data.message} />;
           },
         },
         failure: {
           load({ dependencies }) {
             return { data: { message: dependencies.greetings.message({ name: "Failure" }) } };
           },
-          view({ components: { Greeting }, data }) {
-            return <Greeting.Message message={data.message} />;
+          view({ components: { Message }, data }) {
+            return <Message message={data.message} />;
           },
         },
         deferred: {
@@ -281,10 +276,10 @@ const greeting: WebFeature<Greeting, WebContract> = {
               },
             };
           },
-          view({ components: { Greeting }, data }) {
+          view({ components: { Message }, data }) {
             return (
               <>
-                <Greeting.Message message={data.message} />
+                <Message message={data.message} />
                 <Await
                   value={data.activity}
                   fallback="Loading activity"
@@ -300,17 +295,13 @@ const greeting: WebFeature<Greeting, WebContract> = {
           load({ request }) {
             return { data: { message: `Request ${request.headers.cookie ?? "anonymous"}` } };
           },
-          view({ components: { Greeting }, data }) {
-            return <Greeting.Message message={data.message} />;
+          view({ components: { Message }, data }) {
+            return <Message message={data.message} />;
           },
         },
         typed: {
-          view({ components: { Greeting }, params, search }) {
-            return (
-              <Greeting.Message
-                message={`Typed ${params.count}/${params.enabled}/${search.mode}`}
-              />
-            );
+          view({ components: { Message }, params, search }) {
+            return <Message message={`Typed ${params.count}/${params.enabled}/${search.mode}`} />;
           },
         },
         cached: {
@@ -319,51 +310,51 @@ const greeting: WebFeature<Greeting, WebContract> = {
               data: { message: await dependencies.greetings.cached({ name: params.name }) },
             };
           },
-          view({ components: { Greeting }, data }) {
-            return <Greeting.Message message={data.message} />;
+          view({ components: { Message }, data }) {
+            return <Message message={data.message} />;
           },
         },
         typedRedirect: {
           load() {
             return {
               redirect: {
-                to: "greeting.typed" as const,
+                to: "typed" as const,
                 params: { count: 2, enabled: true },
                 search: { mode: "compact", tag: ["one", "two"] },
                 hash: "details",
               },
             };
           },
-          view({ components: { Greeting }, data }) {
-            return <Greeting.Message message={data.message} />;
+          view({ components: { Message }, data }) {
+            return <Message message={data.message} />;
           },
         },
         fileNew: {
-          view({ components: { Greeting } }) {
-            return <Greeting.Message message="Literal file" />;
+          view({ components: { Message } }) {
+            return <Message message="Literal file" />;
           },
         },
         file: {
-          view({ components: { Greeting }, params }) {
-            return <Greeting.Message message={`File ${params.id}`} />;
+          view({ components: { Message }, params }) {
+            return <Message message={`File ${params.id}`} />;
           },
         },
         files: {
-          view({ components: { Greeting }, params }) {
-            return <Greeting.Message message={`Files ${params.rest}`} />;
+          view({ components: { Message }, params }) {
+            return <Message message={`Files ${params.rest}`} />;
           },
         },
         client: {
-          view({ components: { Greeting } }) {
-            return <Greeting.Message message="Rendered in the browser" />;
+          view({ components: { Message } }) {
+            return <Message message="Rendered in the browser" />;
           },
         },
       },
     },
   },
-};
+});
 
-const origin: Feature<Origin> = {
+const origin = createFeature<Origin>({
   programs: {
     server: {
       start() {
@@ -383,9 +374,9 @@ const origin: Feature<Origin> = {
       },
     },
   },
-};
+});
 
-const background: Feature<Background> = {
+const background = createFeature<Background>({
   programs: {
     offline: {
       start({ dependencies }) {
@@ -406,9 +397,9 @@ const background: Feature<Background> = {
       },
     },
   },
-};
+});
 
-const dashboard: WebFeature<AdminDashboard, AdminContract> = {
+const dashboard = createFeature<AdminDashboard>({
   programs: {
     browser: {
       components: {
@@ -425,15 +416,15 @@ const dashboard: WebFeature<AdminDashboard, AdminContract> = {
       routes: {
         dashboard: {
           view({ components: { Dashboard } }) {
-            return <Dashboard.Dashboard />;
+            return <Dashboard />;
           },
         },
       },
     },
   },
-};
+});
 
-const admin = createWebInterface<AdminContract>({
+const admin = {
   presentation: {
     parameters: {},
     create() {
@@ -461,7 +452,7 @@ const admin = createWebInterface<AdminContract>({
     ],
     offline: { fallback: { to: "dashboard.dashboard" } },
   },
-});
+} as const;
 
 const webPresentationParameters = {
   icon: createImageAsset(new URL("./presentation-icon.svg", import.meta.url)),
@@ -481,7 +472,7 @@ const webPresentation = {
   })) satisfies WebPresentation<WebContract, typeof webPresentationParameters>,
 } satisfies ConfiguredWebPresentation<WebContract, typeof webPresentationParameters>;
 
-const web = createWebInterface<WebContract>({
+const web = {
   presentation: webPresentation,
   installation: {
     shortName: "Conformance",
@@ -500,14 +491,17 @@ const web = createWebInterface<WebContract>({
     ],
     offline: { fallback: { to: "greeting.client" } },
   },
-});
+} as const;
 
-export const product = createApp({
+type ProductApplication = WebContract & { Interfaces: WebPlatform };
+type AdministrationApplication = AdminContract & { Interfaces: WebPlatform };
+
+export const product = createApplication<ProductApplication>({
   features: { background, greeting, origin },
   interfaces: { web },
 });
 
-export const administration = createApp({
+export const administration = createApplication<AdministrationApplication>({
   features: { background, dashboard },
   interfaces: { web: admin },
 });

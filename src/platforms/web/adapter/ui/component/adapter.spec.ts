@@ -2,7 +2,6 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 
 import type { PresentationAdapterInstance } from "@/adapter";
 import type { Feature } from "@/core/feature";
-import type { Program } from "@/core/program";
 import type { System } from "@/core/system";
 import type { BrowserMainThread } from "@/platforms/web";
 import type { WebRouteIR } from "@/platforms/web/adapter/lowering";
@@ -14,6 +13,10 @@ import {
 } from "@/platforms/web/adapter/ui/component/adapter";
 import { readScoped } from "@/platforms/web/adapter/ui/component/runtime";
 import type { WebPresentationLanguage } from "@/platforms/web/presentation";
+
+type Program<Environment, Contract extends object = object> = Readonly<
+  Contract & { Environment: Environment }
+>;
 
 const createInterfaceUI = createWebUIAdapter(createWebPresentationAdapter()).component
   .createInterfaceUI;
@@ -188,6 +191,66 @@ describe("Program UI composition", () => {
     await ui.dispose();
     expect(slowSignals[1]?.aborted).toBe(true);
     expect(subscribers.size).toBe(0);
+  });
+
+  test("gives a Route its owning Feature component scope", async () => {
+    vi.stubGlobal("Element", class {});
+    vi.stubGlobal("document", {
+      title: "",
+      documentElement: { dataset: {}, lang: "" },
+      head: { querySelectorAll: () => [], append() {} },
+      createElement: () => ({ setAttribute() {}, textContent: "" }),
+      getElementById: () => null,
+    });
+    const navigation = {
+      current: () => new URL("https://example.test/auth"),
+      navigate() {},
+      subscribe(): Disposable {
+        return { [Symbol.dispose]() {} };
+      },
+    };
+    const system = testSystem({
+      shell: {
+        programs: {
+          browser: {
+            components: {
+              Layout: { view: () => "feature layout" },
+            },
+            routes: {
+              auth: {
+                view({ components: { Layout } }: { components: Record<string, unknown> }) {
+                  return (Layout as () => string)();
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+    const ui = await createInterfaceUI({
+      system,
+      interface: "web.main",
+      program: "web.browser",
+      logicalProgram: "browser",
+      presentation: emptyPresentation,
+      dependencies: { navigation },
+      programManifest: {
+        name: "web.browser",
+        bindings: [],
+        contributions: [{ feature: "web.shell", requires: ["navigation"], provides: [] }],
+      },
+      components: componentMetadata("web.shell.Layout"),
+      routes: [
+        {
+          ...route("auth", "/auth", "Sign in"),
+          feature: "web.shell",
+        },
+      ],
+      boundary,
+    });
+
+    expect(readScoped(ui.renderRoot())).toBe("feature layout");
+    await ui.dispose();
   });
 
   test("awaits a navigation that supersedes initial Route resolution", async () => {

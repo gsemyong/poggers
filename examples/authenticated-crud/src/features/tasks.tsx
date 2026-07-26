@@ -1,23 +1,12 @@
-import {
-  createEntity,
-  type EntityModel,
-  type FeatureContractOf,
-  placePrograms,
-  type Program,
-} from "kit";
+import { createFeature, createEntity, type EntityModel, type FeatureContractOf } from "kit";
 import {
   For,
   type BrowserMainThread,
-  type MountedWebFeature,
   type Navigation,
   type Validate,
   type WebDestination,
-  type WebFeature,
-  type WebRoute,
-  mountFeature,
 } from "kit/web";
 
-import type { Workspace } from "@/apps/workspace";
 import type { User } from "@/features/identity";
 
 export type Task = Readonly<{
@@ -37,89 +26,87 @@ export type Tasks = EntityModel<{
 }>;
 
 type TaskRoutes = {
-  list: WebRoute<{
+  list: {
     Path: "";
     Metadata: {
       Title: "Tasks";
       Description: "Manage workspace tasks";
       Robots: "noindex";
     };
-  }>;
-  create: WebRoute<{
+  };
+  create: {
     Path: "new";
     Metadata: { Title: "New task"; Robots: "noindex" };
-  }>;
-  edit: WebRoute<{
+  };
+  edit: {
     Path: ":id";
     Metadata: { Title: "Edit task"; Robots: "noindex" };
     Params: { id: Validate<string, { Format: "uuid" }> };
-  }>;
+  };
 };
 
 export type TaskDestination = WebDestination<TaskRoutes>;
 
-type TasksBrowser = Program<
-  BrowserMainThread,
-  {
-    Requires: { navigation: Navigation<TaskRoutes, Workspace> };
-    State: {
-      error: string | undefined;
-    };
-    Actions: {
-      create(): void;
-      edit(input: { id: string }): void;
-      back(): void;
-      save(input: { destination: TaskDestination; title: string }): void;
-      toggle(input: { id: string; completed: boolean }): void;
-      remove(input: { id: string }): void;
-    };
-    Components: {
-      Admin: {
-        Props: { destination: TaskDestination };
-        State: { title: string | undefined };
-        Actions: { changeTitle(input: { title: string }): void };
-        Elements: {
-          Root: "section";
-          Header: "header";
-          Heading: "div";
-          Eyebrow: "p";
-          Title: "h2";
-          Copy: "p";
-          New: "button";
-          Status: "p";
-          Empty: "div";
-          EmptyTitle: "h3";
-          EmptyCopy: "p";
-          List: "div";
-          Row: "article";
-          TaskBody: "div";
-          TaskTitle: "h3";
-          TaskState: "p";
-          Actions: "div";
-          Edit: "button";
-          Toggle: "button";
-          Remove: "button";
-          Form: "form";
-          FormHeader: "div";
-          FormTitle: "h3";
-          Label: "label";
-          Input: "input";
-          FormActions: "div";
-          Save: "button";
-          Back: "button";
-        };
+type TasksBrowser = {
+  Environment: BrowserMainThread;
+  Requires: { navigation: Navigation<TaskRoutes> };
+  State: {
+    error: string | undefined;
+  };
+  Actions: {
+    create(): void;
+    edit(input: { id: string }): void;
+    back(): void;
+    save(input: { destination: TaskDestination; title: string }): void;
+    toggle(input: { id: string; completed: boolean }): void;
+    remove(input: { id: string }): void;
+  };
+  Components: {
+    Admin: {
+      Props: { destination: TaskDestination };
+      State: { title: string | undefined };
+      Actions: { changeTitle(input: { title: string }): void };
+      Elements: {
+        Root: "section";
+        Header: "header";
+        Heading: "div";
+        Eyebrow: "p";
+        Title: "h2";
+        Copy: "p";
+        New: "button";
+        Status: "p";
+        Empty: "div";
+        EmptyTitle: "h3";
+        EmptyCopy: "p";
+        List: "div";
+        Row: "article";
+        TaskBody: "div";
+        TaskTitle: "h3";
+        TaskState: "p";
+        Actions: "div";
+        Edit: "button";
+        Toggle: "button";
+        Remove: "button";
+        Form: "form";
+        FormHeader: "div";
+        FormTitle: "h3";
+        Label: "label";
+        Input: "input";
+        FormActions: "div";
+        Save: "button";
+        Back: "button";
       };
     };
-    Routes: TaskRoutes;
-  }
->;
+  };
+  Routes: TaskRoutes;
+};
 
 type TasksFeatureDefinition = Readonly<{
-  Features: { tasks: FeatureContractOf<typeof placedTaskEntity> };
+  Features: { tasks: FeatureContractOf<typeof taskEntity> };
   Programs: { browser: TasksBrowser };
 }>;
 
-export type TasksFeature = MountedWebFeature<TasksFeatureDefinition, "tasks">;
+export type TasksFeature = TasksFeatureDefinition;
 
 export const taskEntity = createEntity<Tasks>({
   create: (value) => ({
@@ -137,10 +124,8 @@ export const taskEntity = createEntity<Tasks>({
   authorize: (value) => value.principal.id === value.entity.ownerId,
 });
 
-const placedTaskEntity = placePrograms(taskEntity, { server: "api", browser: "browser" });
-
-const taskFeature: WebFeature<TasksFeatureDefinition, Workspace> = {
-  features: { tasks: placedTaskEntity },
+export const tasks = createFeature<TasksFeatureDefinition>({
+  features: { tasks: taskEntity },
   programs: {
     browser: {
       state: { error: undefined },
@@ -356,30 +341,24 @@ const taskFeature: WebFeature<TasksFeatureDefinition, Workspace> = {
       },
       routes: {
         list: {
-          view({ components: { Shell, Tasks } }) {
-            return <Shell.Layout Content={<Tasks.Admin destination={{ to: "list" }} />} />;
+          view({ components: { Admin } }) {
+            return <Admin destination={{ to: "list" }} />;
           },
         },
         create: {
-          view({ components: { Shell, Tasks } }) {
-            return <Shell.Layout Content={<Tasks.Admin destination={{ to: "create" }} />} />;
+          view({ components: { Admin } }) {
+            return <Admin destination={{ to: "create" }} />;
           },
         },
         edit: {
-          view({ components: { Shell, Tasks }, params }) {
-            return (
-              <Shell.Layout
-                Content={<Tasks.Admin destination={{ to: "edit", params: { id: params.id } }} />}
-              />
-            );
+          view({ components: { Admin }, params }) {
+            return <Admin destination={{ to: "edit", params: { id: params.id } }} />;
           },
         },
       },
     },
   },
-};
-
-export const tasks = mountFeature(taskFeature, { path: "tasks" });
+});
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);

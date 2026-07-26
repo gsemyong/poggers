@@ -70,6 +70,8 @@ export type SystemTestDefinition = Readonly<{
   name: string;
   /** Workspace root containing the canonical src/system.ts. Defaults to the current directory. */
   directory?: string | URL;
+  /** Optional ownership tags used by the repository verification ladder. */
+  tags?: readonly string[];
   timeout?: number;
   verify(context: SystemTestContext): void | PromiseLike<void>;
 }>;
@@ -105,9 +107,12 @@ export function createHttpTestSession(origin: string): HttpTestSession {
 /** Runs one black-box System specification through development and production realizations. */
 export function testSystem(definition: SystemTestDefinition): void {
   const timeout = definition.timeout ?? 240_000;
+  const tags = [...(definition.tags ?? [])];
   describe.sequential(definition.name, () => {
-    test("development", { timeout }, () => verifyDevelopment(definition));
-    test("production", { tags: ["production"], timeout }, () => verifyProduction(definition));
+    test("development", { tags, timeout }, () => verifyDevelopment(definition));
+    test("production", { tags: [...tags, "production"], timeout }, () =>
+      verifyProduction(definition),
+    );
   });
 }
 

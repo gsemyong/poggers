@@ -11,7 +11,7 @@ testSystem({
     expect(locations["interface/customer.web"]).toHaveLength(1);
     expect(locations["interface/operations.web"]).toHaveLength(1);
     expect(locations["interface/customer.web"]).not.toEqual(locations["interface/operations.web"]);
-    expect(locations["program/api"]).toHaveLength(1);
+    expect(locations["program/server"]).toHaveLength(1);
 
     const invalidRoute = await page(location, "/tasks/not-a-uuid");
     expect(invalidRoute.status).toBe(400);
@@ -41,7 +41,7 @@ testSystem({
     expect(asset.status).toBe(200);
     expect(asset.headers.get("content-type")).toContain("javascript");
 
-    const origin = locations["program/api"]?.[0] ?? location;
+    const origin = locations["program/server"]?.[0] ?? location;
     const alice = createHttpTestSession(origin);
     const bob = createHttpTestSession(origin);
 

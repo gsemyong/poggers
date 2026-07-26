@@ -5,6 +5,19 @@ export const SYSTEM_IR_VERSION = 29 as const;
 /** Maps semantic source files to the generated outputs affected by each source. */
 export type SystemOutputSources = Readonly<Record<string, readonly string[]>>;
 
+/** Work performed by one semantic compilation, reported to development adapters. */
+export type SystemCompilationWork = Readonly<{
+  features: Readonly<{ compiled: number; reused: number }>;
+  presentations: Readonly<{ compiled: number; reused: number }>;
+  durations?: Readonly<{
+    diagnostics: number;
+    extraction: number;
+    linking: number;
+    sources: number;
+    total: number;
+  }>;
+}>;
+
 /**
  * Orders providers before consumers while retaining mutually dependent
  * contributions as one deterministic, lazily bound component.
@@ -364,7 +377,7 @@ export type ComponentIR = Readonly<{
 export type ProgramContributionIR = Readonly<{
   id: string;
   feature: string;
-  /** Present when one exact contribution instance is shared by several Apps. */
+  /** Present when one exact contribution instance is shared by several Applications. */
   apps?: readonly string[];
   requires: readonly DependencyIR[];
   provides: readonly DependencyIR[];
@@ -675,11 +688,11 @@ export type SystemOutputSelection = Readonly<{
   interfaces: readonly PlatformInterfaceIR[];
 }>;
 
-/** Selects whole-System outputs or one App plus every System-shared contribution. */
+/** Selects whole-System outputs or one Application plus every System-shared contribution. */
 export function selectSystemOutputs(ir: SystemIR, app?: string): SystemOutputSelection {
   assertSystemIRVersion(ir);
   const selectedApp = app ? ir.apps.find(({ feature }) => feature === app) : undefined;
-  if (app && !selectedApp) throw new Error(`Unknown App ${JSON.stringify(app)}.`);
+  if (app && !selectedApp) throw new Error(`Unknown Application ${JSON.stringify(app)}.`);
   if (!selectedApp) {
     return {
       platforms: ir.platforms,

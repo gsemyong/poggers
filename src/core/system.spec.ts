@@ -1,25 +1,43 @@
 import { describe, expect, it } from "vitest";
 
 import { createFeature } from "@/core/feature";
-import { createApp, createSystem } from "@/core/system";
+import { createApplication, createSystem } from "@/core/system";
+import type { WebPlatform } from "@/platforms/web";
 
 describe("System authoring", () => {
-  it("retains one ordinary Feature tree without runtime wrappers", () => {
+  it("retains explicit Feature and Application roots without runtime wrappers", () => {
     const leaf = createFeature<{}>({});
-    const app = createApp({
+    type Product = {
+      Features: { leaf: {} };
+      Interfaces: WebPlatform;
+    };
+    const app = createApplication<Product>({
       features: { leaf },
-      interfaces: {},
+      interfaces: {
+        web: {
+          presentation: { parameters: {}, create: () => ({ Leaf: () => ({}) }) },
+        },
+      },
     });
     const system = createSystem({
       metadata: { name: "Company" },
-      features: { app },
+      applications: { app },
     });
 
     expect(system).toEqual({
       metadata: { name: "Company" },
-      features: { app: { features: { leaf: {} }, interfaces: {} } },
+      applications: {
+        app: {
+          features: { leaf: {} },
+          interfaces: {
+            web: {
+              presentation: { parameters: {}, create: expect.any(Function) },
+            },
+          },
+        },
+      },
     });
-    expect(system.features.app).toBe(app);
+    expect(system.applications.app).toBe(app);
     expect(app.features.leaf).toBe(leaf);
   });
 });

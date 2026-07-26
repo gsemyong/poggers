@@ -101,9 +101,9 @@
   },
   "scripts": {
     "build": "nub scripts/build.ts",
-    "check:distribution": "tsc -p src/platforms/web/adapter/fixtures/request-render/tsconfig.json",
+    "check:distribution": "tsc -p src/platforms/web/adapter/fixtures/request-render/tsconfig.json && vitest run --tagsFilter='package && !production' src/realization.spec.ts src/platforms/web/adapter/pipeline.spec.ts src/platforms/web/adapter/fixtures/request-render/src/system.spec.ts",
     "check:examples": "tsc --noEmit -p examples/basic && tsc --noEmit -p examples/authenticated-crud && tsc --noEmit -p examples/presentation && vitest run --tagsFilter='!production' examples && vitest run --tagsFilter=package src/cli.spec.ts",
-    "check:compiler": "vitest run --tagsFilter=compiler src/compiler src/realization.spec.ts src/platforms/server/adapter/rust",
+    "check:compiler": "vitest run --tagsFilter='compiler && !package' src/compiler src/realization.spec.ts src/platforms/server/adapter/rust",
     "check:providers": "vitest run --tagsFilter=provider src/features src/platforms/server && cargo test --workspace",
     "check:presentation": "vitest run src/core/ui/presentation.spec.ts src/compiler/presentation.spec.ts src/platforms/web/presentation src/platforms/web/adapter/presentation src/platforms/web/adapter/ui/component/adapter.spec.ts",
     "check:production": "KIT_NATIVE_PROFILE=release vitest run --tagsFilter=production src examples",

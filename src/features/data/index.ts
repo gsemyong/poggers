@@ -5,7 +5,6 @@ import {
   type DependencyImplementations,
 } from "@/core/dependency";
 import { createFeature, type Feature } from "@/core/feature";
-import type { Program } from "@/core/program";
 import { distinctStream, mapStream } from "@/core/stream";
 import { startFeatureFixture } from "@/execution/process";
 import {
@@ -243,20 +242,16 @@ type BrowserProvision<Model extends DataModelDefinition> = Readonly<{
 
 export type DataFeature<Model extends DataModelDefinition> = Readonly<{
   Programs: {
-    server: Program<
-      ServerProcess,
-      {
-        Requires: SourceServer<Model> & { dataStore: DataStore<RecordOf<Model>> };
-        Provides: ServerProvision<Model>;
-      }
-    >;
-    browser: Program<
-      BrowserMainThread,
-      {
-        Requires: SourceBrowser<Model> & { dataStore: DataStore<RecordOf<Model>> };
-        Provides: BrowserProvision<Model>;
-      }
-    >;
+    server: {
+      Environment: ServerProcess;
+      Requires: SourceServer<Model> & { dataStore: DataStore<RecordOf<Model>> };
+      Provides: ServerProvision<Model>;
+    };
+    browser: {
+      Environment: BrowserMainThread;
+      Requires: SourceBrowser<Model> & { dataStore: DataStore<RecordOf<Model>> };
+      Provides: BrowserProvision<Model>;
+    };
   };
   Providers: {
     server: { dataStore: ServerDependencyProvider<DataStore<RecordOf<Model>>> };

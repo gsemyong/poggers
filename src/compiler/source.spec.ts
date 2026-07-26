@@ -130,7 +130,7 @@ describe("System compiler", { tags: ["compiler"] }, () => {
     expect(generatedMeaning(changedProgram)).toBe(generatedMeaning(originalProgram));
   });
 
-  test("lowers two Apps into one shared Program and independent interface outputs", async () => {
+  test("lowers two Applications into one shared Program and independent interface outputs", async () => {
     const ir = compileSystem(await fixture(multiAppSystemSource()));
 
     expect(ir.apps).toEqual([
@@ -191,10 +191,38 @@ describe("System compiler", { tags: ["compiler"] }, () => {
         ?.contributions.map(({ feature }) => feature),
     ).toEqual(["operations.service", "shared"]);
     expect(focused.platforms).toEqual(["server", "web"]);
-    expect(() => selectSystemOutputs(ir, "missing")).toThrow('Unknown App "missing".');
+    expect(() => selectSystemOutputs(ir, "missing")).toThrow('Unknown Application "missing".');
   });
 
-  test("emits byte-identical System IR for Feature and App placement permutations", async () => {
+  test("retains one exact Feature instance shared by several Applications", async () => {
+    const ir = compileSystem(await fixture(sharedApplicationFeatureSystemSource()));
+    const program = ir.programs.find(({ id }) => id === "program/api");
+
+    expect(program?.contributions).toEqual([
+      expect.objectContaining({
+        feature: "customer.shared",
+        apps: ["customer", "operations"],
+      }),
+    ]);
+    expect(
+      selectSystemOutputs(ir, "operations").programs.find(({ id }) => id === "program/api")
+        ?.contributions,
+    ).toEqual(program?.contributions);
+  });
+
+  test("retains shared Feature identity across Application factory calls", async () => {
+    const ir = compileSystem(await fixture(sharedFactoryApplicationFeatureSystemSource()));
+    const program = ir.programs.find(({ id }) => id === "program/api");
+
+    expect(program?.contributions).toEqual([
+      expect.objectContaining({
+        feature: "customer.shared",
+        apps: ["customer", "operations"],
+      }),
+    ]);
+  });
+
+  test("emits byte-identical System IR for Feature and Application placement permutations", async () => {
     const top = ["shared", "operations", "customer"] as const;
     const app = ["service", "web"] as const;
     const expected = serializeSystemIR(
@@ -257,7 +285,7 @@ describe("System compiler", { tags: ["compiler"] }, () => {
     );
   });
 
-  test("reports invalid interface metadata at its authored App", async () => {
+  test("reports invalid interface metadata at its authored Application", async () => {
     const entry = await fixture(
       componentSystemSource().replace(
         'type Web = { Interface: { Platform: { Name: "web" } } };',
@@ -1150,7 +1178,7 @@ const child = createFeature<Child>`,
     });
   });
 
-  test("expands nested Feature factories through mounting and Program placement", async () => {
+  test("expands nested Feature factories without compiler-specific wrappers", async () => {
     const ir = compileSystem(await fixture(nestedFactorySystemSource()));
     const contribution = programContribution(ir, "feature/parent.child/program/api");
 
@@ -1739,7 +1767,7 @@ type Feature<C> = Readonly<{ readonly [featureContract]?: C }>;
 function createFeature<C>(definition: object): Feature<C> {
   return definition as Feature<C>;
 }
-function createApp<C>(definition: object): Feature<C> {
+function createApplication<C>(definition: object): Feature<C> {
   return definition as Feature<C>;
 }
 function createInterface<C>(definition: object): C {
@@ -1753,7 +1781,7 @@ function createSystem(definition: object): object {
 
 function typeLiteralFactorySystemSource(): string {
   return `
-import { createSystem, type Feature, type Program } from "@/index";
+import { createSystem, type Feature } from "@/index";
 import { typeLiteral } from "@/factory";
 
 type Server = { Name: "server"; Platform: { Name: "server" } };
@@ -1761,7 +1789,10 @@ type Reader = { read(input: {}): Promise<string> };
 type Model = { Name: string };
 type NamedFeature<Definition extends Model> = {
   Programs: {
-    server: Program<Server, { Provides: { [Name in Definition["Name"]]: Reader } }>;
+    server: {
+      Environment: Server;
+      Provides: { [Name in Definition["Name"]]: Reader };
+    };
   };
 };
 
@@ -1805,7 +1836,6 @@ function typeSchemaFactorySystemSource(): string {
 import {
   createSystem,
   type Feature,
-  type Program,
 } from "@/index";
 import { typeLiteral, typeSchema } from "@/factory";
 
@@ -1814,7 +1844,10 @@ type Reader = { describe(input: {}): Promise<object> };
 type Model = { Name: string; Data: object };
 type SchemaFeature<Definition extends Model> = {
   Programs: {
-    server: Program<Server, { Provides: { [Name in Definition["Name"]]: Reader } }>;
+    server: {
+      Environment: Server;
+      Provides: { [Name in Definition["Name"]]: Reader };
+    };
   };
 };
 
@@ -1854,7 +1887,6 @@ import {
   createSystem,
   type Dependency,
   type Feature,
-  type Program,
 } from "@/index";
 
 type Server = { Name: "server"; Platform: { Name: "server" } };
@@ -1868,11 +1900,11 @@ type Output = {
   write(input: { doubled: number; tripled: number }): Promise<void>;
 };
 type Provider = {
-  Programs: { server: Program<Server, { Provides: { math: Math } }> };
+  Programs: { server: { Environment: Server; Provides: { math: Math } } };
 };
 type Consumer = {
   Programs: {
-    server: Program<Server, { Requires: { math: Math; output: Output } }>;
+    server: { Environment: Server; Requires: { math: Math; output: Output } };
   };
 };
 
@@ -1931,7 +1963,7 @@ export default createSystem({
 
 function sharedHostDependencySystemSource(): string {
   return `
-import { createSystem, type Feature, type Program } from "@/index";
+import { createSystem, type Feature } from "@/index";
 
 type Server = { Name: "server"; Platform: { Name: "server" } };
 type EventStore<Event = object> = {
@@ -1940,7 +1972,7 @@ type EventStore<Event = object> = {
 type Model = { Event: object };
 type Slice<Definition extends Model> = {
   Programs: {
-    server: Program<Server, { Requires: { events: EventStore } }>;
+    server: { Environment: Server; Requires: { events: EventStore } };
   };
 };
 
@@ -2022,13 +2054,13 @@ export default createSystem({ features: { worker } });
 
 function throwingSystemSource(): string {
   return `
-import { createFeature, createSystem, type Program } from "@/index";
+import { createFeature, createSystem } from "@/index";
 
 type Server = { Name: "server"; Platform: { Name: "server" } };
 type Output = { write(input: { value: string }): Promise<void> };
 type Worker = {
   Programs: {
-    server: Program<Server, { Requires: { output: Output } }>;
+    server: { Environment: Server; Requires: { output: Output } };
   };
 };
 
@@ -2202,7 +2234,7 @@ const presentation = {
 const web = createInterface<Web>({
   presentation,
 });
-const product = createApp<Product>({
+const product = createApplication<Product>({
   features: { shell },
   interfaces: { web },
 });
@@ -2299,14 +2331,14 @@ const operationsService = createFeature<Service>({ programs: { api: {}, browser:
 const operationsWeb = createInterface<Web>({
   presentation: { parameters: {}, create() { return {}; } },
 });
-const operations = createApp<Operations>({
+const operations = createApplication<Operations>({
     ${values(operationsOrder, "operationsService", "operationsWeb")}
 });
 const customerService = createFeature<Service>({ programs: { api: {}, browser: {} } });
 const customerWeb = createInterface<Web>({
   presentation: { parameters: {}, create() { return {}; } },
 });
-const customer = createApp<Customer>({
+const customer = createApplication<Customer>({
     ${values(customerOrder, "customerService", "customerWeb")}
 });
 
@@ -2315,6 +2347,65 @@ export default createSystem({
   features: {
     ${topOrder.join(", ")}
   },
+});
+`;
+}
+
+function sharedApplicationFeatureSystemSource(): string {
+  return `
+declare const featureContract: unique symbol;
+type Feature<Contract> = Readonly<{ readonly [featureContract]?: Contract }>;
+function createFeature<Contract>(definition: object): Feature<Contract> {
+  return definition as Feature<Contract>;
+}
+function createApplication<Contract>(definition: object): Feature<Contract & { App: true }> {
+  return definition as Feature<Contract & { App: true }>;
+}
+function createSystem(definition: object): object {
+  return definition;
+}
+
+type Server = { Name: "server"; Platform: { Name: "server" } };
+type Shared = { Programs: { api: { Environment: Server } } };
+type Product = { Features: { shared: Shared }; Interfaces: {} };
+
+const shared = createFeature<Shared>({ programs: { api: {} } });
+const customer = createApplication<Product>({ features: { shared }, interfaces: {} });
+const operations = createApplication<Product>({ features: { shared }, interfaces: {} });
+
+export default createSystem({
+  applications: { customer, operations },
+});
+`;
+}
+
+function sharedFactoryApplicationFeatureSystemSource(): string {
+  return `
+declare const featureContract: unique symbol;
+type Feature<Contract> = Readonly<{ readonly [featureContract]?: Contract }>;
+function createFeature<Contract>(definition: object): Feature<Contract> {
+  return definition as Feature<Contract>;
+}
+function createApplication<Contract>(definition: object): Feature<Contract & { App: true }> {
+  return definition as Feature<Contract & { App: true }>;
+}
+function createSystem(definition: object): object {
+  return definition;
+}
+
+type Server = { Name: "server"; Platform: { Name: "server" } };
+type Shared = { Programs: { api: { Environment: Server } } };
+type Product = { Features: { shared: Shared }; Interfaces: {} };
+
+const shared = createFeature<Shared>({ programs: { api: {} } });
+function createProduct(_name: string) {
+  return createApplication<Product>({ features: { shared }, interfaces: {} });
+}
+const customer = createProduct("customer");
+const operations = createProduct("operations");
+
+export default createSystem({
+  applications: { customer, operations },
 });
 `;
 }
@@ -2408,28 +2499,26 @@ type Repository = { read(input: {}): Promise<readonly string[]> };
 type Child = {
   Programs: { api: Program<Environment, { Requires: { repository: Repository } }> };
 };
-type Parent = { Features: { child: Child }; RoutePath: "parent" };
+type Parent = { Features: { child: Child } };
 type App = { Features: { parent: Parent } };
 
 function createChild() {
-  return {
+  return createFeature<Child>({
     programs: {
-      server: {
+      api: {
         async start({ dependencies }: { dependencies: { repository: Repository } }) {
           await dependencies.repository.read({});
         },
       },
     },
-  };
+  });
 }
-declare function placePrograms(value: unknown, placement: { server: "api" }): Feature<Child>;
-declare function mountFeature(value: unknown, input: { path: "parent" }): Feature<Parent>;
-const parent = {
-  features: { child: placePrograms(createChild(), { server: "api" }) },
-};
+const parent = createFeature<Parent>({
+  features: { child: createChild() },
+});
 
 export default createSystem({
-  features: { parent: mountFeature(parent, { path: "parent" }) },
+  features: { parent },
 });
 `;
 }
@@ -2526,7 +2615,6 @@ import {
   createSystem,
   type Dependency,
   type DependencyReference,
-  type Program,
 } from "@/index";
 
 type Server = { Name: "server"; Platform: { Name: "server" } };
@@ -2559,7 +2647,7 @@ type Counter = Dependency<
 >;
 type Worker = {
   Programs: {
-    server: Program<Server, { Requires: { counter: Counter } }>;
+    server: { Environment: Server; Requires: { counter: Counter } };
   };
 };
 

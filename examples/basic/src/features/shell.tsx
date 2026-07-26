@@ -1,18 +1,16 @@
-import { createFeature, type Program } from "kit";
+import { createFeature } from "kit";
 import type { BrowserMainThread } from "kit/web";
 
 export type ShellFeature = {
   Programs: {
-    browser: Program<
-      BrowserMainThread,
-      {
-        State: { count: number };
-        Actions: { increment(): void };
-        Components: {
-          Root: { Elements: { Root: "main"; Title: "h1"; Increment: "button" } };
-        };
-      }
-    >;
+    browser: {
+      Environment: BrowserMainThread;
+      State: { count: number };
+      Actions: { increment(): void };
+      Components: {
+        Root: { Elements: { Root: "main"; Title: "h1"; Increment: "button" } };
+      };
+    };
   };
 };
 

@@ -1,6 +1,5 @@
 import type { FeatureContract } from "@/core/feature";
-import type { Program } from "@/core/program";
-import type { AppFeatureContract, PlatformInterfaceContract, System } from "@/core/system";
+import type { ApplicationFeatureContract, System } from "@/core/system";
 import {
   createDeployment,
   secret,
@@ -18,26 +17,36 @@ type Session = Readonly<{ current(input: {}): string | undefined }>;
 
 type Infrastructure = Readonly<{
   Programs: {
-    server: Program<ServerProcess, { Provides: { session: Session } }>;
+    server: {
+      Environment: ServerProcess;
+      Provides: { session: Session };
+    };
   };
 }>;
 
 type Product = Readonly<{
   Programs: {
-    server: Program<ServerProcess, { Requires: { clock: Clock; store: Store; session: Session } }>;
+    server: {
+      Environment: ServerProcess;
+      Requires: { clock: Clock; store: Store; session: Session };
+    };
   };
 }>;
 
 type PortalFeature = Readonly<{
   Programs: {
-    browser: Program<BrowserMainThread, { Requires: { clock: Clock } }>;
+    browser: {
+      Environment: BrowserMainThread;
+      Requires: { clock: Clock };
+    };
   };
 }>;
 
-type Portal = AppFeatureContract<
-  PortalFeature,
-  Readonly<{ web: PlatformInterfaceContract<WebPlatform> }>
->;
+type PortalApplication = Readonly<{
+  Features: { portal: PortalFeature };
+  Interfaces: WebPlatform;
+}>;
+type Portal = ApplicationFeatureContract<PortalApplication>;
 
 type Contract = Readonly<{
   Features: {
@@ -45,6 +54,7 @@ type Contract = Readonly<{
     product: Product;
     portal: Portal;
   };
+  Applications: { portal: Portal };
 }>;
 
 declare const system: System<Contract>;
@@ -122,7 +132,9 @@ const localDeployment = createDeployment(system, {
   programs,
   dependencies,
   interfaces: {
-    "portal.web": { hosts: ["portal.example.com"] },
+    portal: {
+      web: { hosts: ["portal.example.com"] },
+    },
   },
 });
 const providerDeployment = createDeployment(system, {
@@ -180,7 +192,7 @@ createDeployment(system, {
   adapter: local,
   interfaces: {
     // @ts-expect-error Interface names come from the composed System.
-    unknown: { hosts: ["unknown.example.com"] },
+    unknown: { web: { hosts: ["unknown.example.com"] } },
   },
 });
 

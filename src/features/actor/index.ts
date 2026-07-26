@@ -8,7 +8,6 @@ import {
 } from "@/core/dependency";
 import { createFeature, type Feature } from "@/core/feature";
 import { typeLiteral, typeSchema, type TypeSchema } from "@/core/intrinsic";
-import type { Program } from "@/core/program";
 import type {
   Alarm,
   Clock,
@@ -301,13 +300,11 @@ type ActorProvision<Model extends ActorModelDefinition> = Readonly<{
 
 type ActorFeatureContract<Model extends ActorModelDefinition> = Readonly<{
   Programs: {
-    server: Program<
-      ServerProcess,
-      {
-        Requires: ActorRequirements<Model>;
-        Provides: ActorProvision<Model>;
-      }
-    >;
+    server: {
+      Environment: ServerProcess;
+      Requires: ActorRequirements<Model>;
+      Provides: ActorProvision<Model>;
+    };
   };
 }>;
 

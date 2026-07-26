@@ -31,6 +31,7 @@ import {
   type ProgramIR,
   type SourceSpan,
   type StatementIR,
+  type SystemCompilationWork,
   type SystemOutputSources,
   type TypeIR,
 } from "@/compiler/ir";
@@ -69,18 +70,6 @@ export type SystemCompiler = Readonly<{
   prepare(): void;
   restore(compilation: SystemCompilation): void;
   compile(changedFile?: string): SystemCompilation;
-}>;
-
-export type SystemCompilationWork = Readonly<{
-  features: Readonly<{ compiled: number; reused: number }>;
-  presentations: Readonly<{ compiled: number; reused: number }>;
-  durations?: Readonly<{
-    diagnostics: number;
-    extraction: number;
-    linking: number;
-    sources: number;
-    total: number;
-  }>;
 }>;
 
 type FeatureCompilationUnit = Readonly<{
@@ -422,11 +411,35 @@ function compileSystemProgram(
   if (!systemObject) throw diagnostic(exported, "The default export must be a System object.");
   const contract = checker.getTypeAtLocation(exported);
   const featuresValue = objectMember(checker, systemObject, "features");
-  if (!featuresValue) {
-    throw diagnostic(systemObject, "The System must compose Features.");
+  const applicationsValue = objectMember(checker, systemObject, "applications");
+  if (!featuresValue && !applicationsValue) {
+    throw diagnostic(systemObject, "The System must compose Features or Applications.");
   }
-  const featureValues = requireObject(checker, featuresValue, "System features must be an object.");
-  const featuresContract = checker.getTypeAtLocation(featureValues);
+  const featureValues = featuresValue
+    ? requireObject(checker, featuresValue, "System features must be an object.")
+    : undefined;
+  const applicationValues = applicationsValue
+    ? requireObject(checker, applicationsValue, "System applications must be an object.")
+    : undefined;
+  if (featureValues && applicationValues) {
+    const featureNames = new Set(
+      checker
+        .getTypeAtLocation(featureValues)
+        .getProperties()
+        .map((symbol) => symbol.getName()),
+    );
+    const duplicate = checker
+      .getTypeAtLocation(applicationValues)
+      .getProperties()
+      .map((symbol) => symbol.getName())
+      .find((name) => featureNames.has(name));
+    if (duplicate) {
+      throw diagnostic(
+        applicationValues,
+        `System cannot use ${JSON.stringify(duplicate)} for both a Feature and an Application.`,
+      );
+    }
+  }
 
   const metadata = objectExpression(checker, objectMember(checker, systemObject, "metadata"));
   const systemName =
@@ -450,35 +463,39 @@ function compileSystemProgram(
     presentations: { compiled: 0, reused: 0 },
   };
   const extractionStarted = performance.now();
-  extractFeatures(
-    program,
-    checker,
-    featuresContract,
-    featureValues,
-    "",
-    features,
-    featureSourceFiles,
-    contributions,
-    interfaceSources,
-    extensions,
-    root,
-    new Set([file]),
-    featureValues,
-    undefined,
-    undefined,
-    undefined,
-    true,
-    undefined,
-    {
-      entry: file,
-      changedFile: changedFile ? canonicalSourceFile(changedFile) : undefined,
-      reuse: incremental,
-      previous: new Map(previous?.semanticGraph.features.map((unit) => [unit.id, unit])),
-      semanticSources: new Map(),
-      units: featureUnits,
-      work: work.features,
-    },
-  );
+  const previousFeatures = new Map(previous?.semanticGraph.features.map((unit) => [unit.id, unit]));
+  for (const values of [featureValues, applicationValues]) {
+    if (!values) continue;
+    extractFeatures(
+      program,
+      checker,
+      checker.getTypeAtLocation(values),
+      values,
+      "",
+      features,
+      featureSourceFiles,
+      contributions,
+      interfaceSources,
+      extensions,
+      root,
+      new Set([file]),
+      values,
+      undefined,
+      undefined,
+      undefined,
+      true,
+      undefined,
+      {
+        entry: file,
+        changedFile: changedFile ? canonicalSourceFile(changedFile) : undefined,
+        reuse: incremental,
+        previous: previousFeatures,
+        semanticSources: new Map(),
+        units: featureUnits,
+        work: work.features,
+      },
+    );
+  }
   const extractionCompleted = performance.now();
   validateProgramEnvironments(contributions);
   const programs = assemblePrograms(contributions);
@@ -1301,7 +1318,7 @@ function extractFeatures(
     if (isApp && app) {
       throw diagnostic(
         featureLocation,
-        `App ${JSON.stringify(path)} cannot be nested in another App.`,
+        `Application ${JSON.stringify(path)} cannot be nested in another Application.`,
       );
     }
     const ownedApp = isApp ? path : app;
@@ -1318,7 +1335,7 @@ function extractFeatures(
         objectMember(checker, featureValue, "interfaces"),
       );
       if (featureValue && !appInterfaceValues) {
-        throw diagnostic(featureValue, `App ${JSON.stringify(path)} needs interfaces.`);
+        throw diagnostic(featureValue, `Application ${JSON.stringify(path)} needs interfaces.`);
       }
       const localInterfaces: InterfaceOwner[] = [];
       for (const interfaceSymbol of sortedSymbols(appInterfaceContracts.getProperties())) {
@@ -1348,7 +1365,7 @@ function extractFeatures(
         if (localInterfaces.some((candidate) => candidate.platform === platform)) {
           throw diagnostic(
             interfaceLocation,
-            `App ${JSON.stringify(path)} has more than one ${JSON.stringify(platform)} interface.`,
+            `Application ${JSON.stringify(path)} has more than one ${JSON.stringify(platform)} interface.`,
           );
         }
         const implementation = appInterfaceValues
@@ -5005,23 +5022,6 @@ function resolveFeatureProgram(
         ? resolveFeatureProgram(checker, declaration.initializer, program, active)
         : undefined;
     }
-    if (ts.isCallExpression(node) && resolvedCallName(checker, node) === "placePrograms") {
-      const feature = node.arguments[0];
-      const placement = objectExpression(checker, node.arguments[1]);
-      if (!feature || !placement) return undefined;
-      const mapped = placement.properties.find(
-        (property) =>
-          ts.isPropertyAssignment(property) &&
-          ts.isStringLiteral(property.initializer) &&
-          property.initializer.text === program,
-      );
-      return resolveFeatureProgram(
-        checker,
-        feature,
-        (mapped ? memberName(mapped) : undefined) ?? program,
-        active,
-      );
-    }
     if (ts.isCallExpression(node) && node.arguments[0]) {
       const feature = node.arguments[0];
       const unwrapped = resolveFeatureProgram(checker, feature, program, active);
@@ -5054,10 +5054,6 @@ function resolveFeatureMember(
       return declaration?.initializer
         ? resolveFeatureMember(checker, declaration.initializer, member, active)
         : undefined;
-    }
-    if (ts.isCallExpression(node) && resolvedCallName(checker, node) === "placePrograms") {
-      const feature = node.arguments[0];
-      return feature ? resolveFeatureMember(checker, feature, member, active) : undefined;
     }
     return resolveStaticPath(checker, node, [member]);
   } finally {
@@ -5100,18 +5096,6 @@ function resolveFeatureChild(
   } finally {
     active.delete(node);
   }
-}
-
-function resolvedCallName(checker: ts.TypeChecker, call: ts.CallExpression): string | undefined {
-  const target = ts.isPropertyAccessExpression(call.expression)
-    ? call.expression.name
-    : call.expression;
-  if (!ts.isIdentifier(target)) return undefined;
-  let symbol = checker.getSymbolAtLocation(target);
-  if (symbol?.flags && symbol.flags & ts.SymbolFlags.Alias) {
-    symbol = checker.getAliasedSymbol(symbol);
-  }
-  return symbol?.getName() ?? target.text;
 }
 
 function resolveStaticMember(
@@ -5185,7 +5169,11 @@ function resolveStaticValue(
       return declaration?.initializer
         ? resolveStaticValue(
             checker,
-            { node: declaration.initializer, bindings: source.bindings, types: source.types },
+            {
+              node: declaration.initializer,
+              bindings: visibleStaticBindings(source.bindings, declaration),
+              types: source.types,
+            },
             active,
           )
         : undefined;
@@ -5235,6 +5223,24 @@ function resolveStaticValue(
   } finally {
     active.delete(node);
   }
+}
+
+function visibleStaticBindings(
+  bindings: ReadonlyMap<ts.Symbol, StaticValue>,
+  node: ts.Node,
+): ReadonlyMap<ts.Symbol, StaticValue> {
+  return new Map(
+    [...bindings].filter(([symbol]) =>
+      symbol.declarations?.some((declaration) => {
+        const owner = enclosingFunction(declaration);
+        return (
+          owner !== undefined &&
+          owner.getSourceFile() === node.getSourceFile() &&
+          containsNode(owner, node)
+        );
+      }),
+    ),
+  );
 }
 
 function staticConstant(

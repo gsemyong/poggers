@@ -1,13 +1,10 @@
-import {
-  createFeature,
-  placePrograms,
-  type Feature,
-  type FeatureContractOf,
-  type PlacedFeature,
-} from "@/core/feature";
-import type { Program } from "@/core/program";
+import { createFeature, type Feature } from "@/core/feature";
 import { createSystem } from "@/core/system";
 import type { BrowserMainThread, BrowserServiceWorker } from "@/platforms/web";
+
+type Program<Environment, Contract extends object = object> = Readonly<
+  Contract & { Environment: Environment }
+>;
 
 type Message = Readonly<{ id: string; text: string }>;
 type ServerPlatform = { readonly Name: "server" };
@@ -201,14 +198,19 @@ const system = createSystem({
 
 void system;
 
-type InvalidHeadlessUI = Program<Server, { Components: {} }>;
-// @ts-expect-error Headless Environments cannot own UI.
-const invalidHeadlessUI: InvalidHeadlessUI = {
-  Environment: { Name: "server", Platform: { Name: "server" } },
-  Components: {},
+type InvalidHeadlessUI = {
+  Programs: {
+    server: {
+      Environment: Server;
+      Components: {};
+    };
+  };
 };
 
-void invalidHeadlessUI;
+createFeature<InvalidHeadlessUI>({
+  // @ts-expect-error Headless Environments cannot own UI.
+  programs: { server: {} },
+});
 
 type BrokenProvider = {
   Programs: {
@@ -315,30 +317,3 @@ const invalidCleanupCallback = {
 } satisfies Feature<OwnedStartResource>;
 
 void invalidCleanupCallback;
-
-type LogicalPlacement = {
-  Programs: {
-    server: Program<Server>;
-    browser: Program<BrowserMainThread>;
-  };
-  Features: {
-    child: { Programs: { server: Program<Server> } };
-  };
-};
-
-const logicalPlacement: Feature<LogicalPlacement> = {
-  programs: { server: {}, browser: {} },
-  features: { child: { programs: { server: {} } } },
-};
-const placedPrograms = placePrograms(logicalPlacement, { server: "api" });
-const placedProgramsProof: Feature<PlacedFeature<LogicalPlacement, { server: "api" }>> =
-  placedPrograms;
-const inferredPlacedProgramsProof: Feature<FeatureContractOf<typeof placedPrograms>> =
-  placedPrograms;
-void placedPrograms.programs.api;
-void placedPrograms.programs.browser;
-void placedPrograms.features.child.programs.api;
-// @ts-expect-error Placement removes the logical role from the realized Feature contract.
-void placedPrograms.programs.server;
-void placedProgramsProof;
-void inferredPlacedProgramsProof;

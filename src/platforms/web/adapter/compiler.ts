@@ -3,6 +3,7 @@ import { extname, relative, resolve } from "node:path";
 import * as ts from "@typescript/typescript6";
 
 import type {
+  InterfaceSourceContext,
   ProgramSourceContext,
   SourceCompilerAPI,
   SourceCompilerExtension,
@@ -13,7 +14,7 @@ import {
   WEB_COMPILER_IR_VERSION,
   type CompiledWebComponentIR,
   type CompiledWebRouteIR,
-  type WebFeatureCompilerIR,
+  type WebInterfaceCompilerIR,
   type WebProgramCompilerIR,
   type WebRenderNodeIR,
   type WebRenderValueIR,
@@ -30,35 +31,16 @@ export const webCompilerExtension: SourceCompilerExtension = Object.freeze({
     import.meta.filename,
     resolve(import.meta.dirname, `lowering${extname(import.meta.filename)}`),
   ],
-  feature(context) {
-    const { contract, implementation, location, source } = context;
-    const routePath = source.optionalLiteral(contract, "RoutePath", location);
-    const interfaceContract = source.property(contract, "Interface", location);
-    const interfacePlatform = interfaceContract
-      ? source.property(interfaceContract, "Platform", location)
-      : undefined;
-    const legacyWebInterface =
-      interfacePlatform !== undefined &&
-      source.literal(interfacePlatform, "Name", location) === "web";
-    const installation =
-      legacyWebInterface && implementation
-        ? source.member(implementation, "installation")
-        : undefined;
-    if (routePath === undefined && !installation) return undefined;
-    return {
-      version: WEB_COMPILER_IR_VERSION,
-      ...(routePath === undefined ? {} : { routePath }),
-      ...(installation ? { installation: compileWebInstallation(context, installation) } : {}),
-    } satisfies WebFeatureCompilerIR;
-  },
   interface(context) {
     if (context.platform !== "web") return undefined;
     const installation = context.source.member(context.implementation, "installation");
-    if (!installation) return undefined;
+    const routes = context.source.member(context.implementation, "routes");
+    if (!installation && !routes) return undefined;
     return {
       version: WEB_COMPILER_IR_VERSION,
-      installation: compileWebInstallation(context, installation),
-    } satisfies WebFeatureCompilerIR;
+      ...(installation ? { installation: compileWebInstallation(context, installation) } : {}),
+      ...(routes ? { routes: compileWebRouteMounts(context, routes) } : {}),
+    } satisfies WebInterfaceCompilerIR;
   },
   program(context) {
     if (platformName(context) !== "web") return undefined;
@@ -98,10 +80,37 @@ export const webCompilerExtension: SourceCompilerExtension = Object.freeze({
   },
 });
 
+function compileWebRouteMounts(
+  context: InterfaceSourceContext,
+  expression: ts.Expression,
+): Readonly<Record<string, string>> {
+  const value = context.source.constant(expression);
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return context.source.fail(expression, "Web Route mounts must be compiler-readable data.");
+  }
+  const routes: Record<string, string> = {};
+  for (const [feature, path] of Object.entries(value)) {
+    if (typeof path !== "string") {
+      return context.source.fail(
+        expression,
+        `Web Route mount ${JSON.stringify(feature)} must be a relative path.`,
+      );
+    }
+    if (path.startsWith("/")) {
+      return context.source.fail(
+        expression,
+        `Web Route mount ${JSON.stringify(feature)} must not start with "/".`,
+      );
+    }
+    routes[`${context.app}.${feature}`] = path;
+  }
+  return routes;
+}
+
 function compileWebInstallation(
   context: Readonly<{ source: SourceCompilerAPI }>,
   expression: ts.Expression,
-): NonNullable<WebFeatureCompilerIR["installation"]> {
+): NonNullable<WebInterfaceCompilerIR["installation"]> {
   const value = context.source.constant(expression);
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return context.source.fail(expression, "The web installation must be compiler-readable data.");
@@ -119,30 +128,32 @@ function compileWebInstallation(
     ...(installation.shortName !== undefined
       ? { shortName: installation.shortName as string }
       : {}),
-    start: installation.start as NonNullable<WebFeatureCompilerIR["installation"]>["start"],
+    start: installation.start as NonNullable<WebInterfaceCompilerIR["installation"]>["start"],
     display: (installation.display ?? "standalone") as NonNullable<
-      WebFeatureCompilerIR["installation"]
+      WebInterfaceCompilerIR["installation"]
     >["display"],
-    icons: (installation.icons ?? []) as NonNullable<WebFeatureCompilerIR["installation"]>["icons"],
+    icons: (installation.icons ?? []) as NonNullable<
+      WebInterfaceCompilerIR["installation"]
+    >["icons"],
     shortcuts: Array.isArray(installation.shortcuts)
       ? installation.shortcuts.map((value) => {
           const shortcut = value as Readonly<Record<string, unknown>>;
           return {
             name: shortcut.name as string,
             destination: shortcut.destination as NonNullable<
-              WebFeatureCompilerIR["installation"]
+              WebInterfaceCompilerIR["installation"]
             >["start"],
             icons: (shortcut.icons ?? []) as NonNullable<
-              WebFeatureCompilerIR["installation"]
+              WebInterfaceCompilerIR["installation"]
             >["icons"],
           };
         })
       : installation.shortcuts === undefined
         ? []
         : (installation.shortcuts as NonNullable<
-            WebFeatureCompilerIR["installation"]
+            WebInterfaceCompilerIR["installation"]
           >["shortcuts"]),
-    offline: installation.offline as NonNullable<WebFeatureCompilerIR["installation"]>["offline"],
+    offline: installation.offline as NonNullable<WebInterfaceCompilerIR["installation"]>["offline"],
   };
 }
 
@@ -183,22 +194,20 @@ function routeList(
     const renderView = view;
     const load = source.memberDeclaration(implementation, "load");
     const data = source.property(route, "Data", location);
-    const params = routeParameterList(
-      context,
-      source.property(route, "ParamSchema", location),
-      location,
-    );
+    const parameterSchema =
+      source.property(route, "ParamSchema", location) ?? source.property(route, "Params", location);
+    const params = parameterSchema
+      ? routeParameterList(context, parameterSchema, location)
+      : defaultPathParameters(path);
     const search = routeParameterList(
       context,
-      source.property(route, "SearchSchema", location),
+      source.property(route, "SearchSchema", location) ??
+        source.property(route, "Search", location),
       location,
     );
     const cache = routeCache(source, source.property(route, "Cache", location), location);
     const metadata = routeMetadata(context, source.property(route, "Metadata", location), location);
-    const deferred = source
-      .properties(source.property(route, "Deferred", location))
-      .map((field) => field.getName())
-      .sort();
+    const deferred = routeDeferredFields(context, route, data, location);
     return {
       feature: context.feature,
       name,
@@ -219,8 +228,7 @@ function routeList(
             })
           : false,
         view: compileRenderFunction(context, renderView, {
-          feature: context.app ?? context.interface ?? "",
-          global: true,
+          feature: context.feature,
           elements: {},
         }),
       },
@@ -228,6 +236,49 @@ function routeList(
       span: relativeSpan(context.root, source.span(location)),
     };
   });
+}
+
+function routeDeferredFields(
+  context: ProgramSourceContext,
+  route: ts.Type,
+  data: ts.Type | undefined,
+  at: ts.Node,
+): readonly string[] {
+  const declared = context.source.property(route, "Deferred", at);
+  if (declared) {
+    return context.source
+      .properties(declared)
+      .map((field) => field.getName())
+      .sort();
+  }
+  if (!data) return [];
+  return context.source
+    .properties(data)
+    .filter((field) => {
+      const location = field.valueDeclaration ?? at;
+      return isDeferredType(context.checker.getTypeOfSymbolAtLocation(field, location));
+    })
+    .map((field) => field.getName())
+    .sort();
+}
+
+function isDeferredType(type: ts.Type): boolean {
+  if (type.isUnionOrIntersection()) return type.types.some(isDeferredType);
+  return type.getProperties().some((property) => property.getName().startsWith("__@deferred"));
+}
+
+function defaultPathParameters(path: string): WebRouteIR["params"] {
+  return path.split("/").flatMap((segment) =>
+    segment.startsWith(":") || segment.startsWith("*")
+      ? [
+          {
+            name: segment.slice(1),
+            kind: "string" as const,
+            optional: false,
+          },
+        ]
+      : [],
+  );
 }
 
 function routeDependencies(

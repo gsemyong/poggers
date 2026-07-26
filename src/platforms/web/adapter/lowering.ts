@@ -66,6 +66,7 @@ export type WebInstallationIconIR = Readonly<{
 
 export type WebInterfaceCompilerIR = Readonly<{
   version: typeof WEB_COMPILER_IR_VERSION;
+  routes?: Readonly<Record<string, string>>;
   installation?: Readonly<{
     shortName?: string;
     start: WebDestinationIR;
@@ -209,34 +210,32 @@ export type CompiledWebRouteIR = WebRouteIR &
     span: SourceSpan;
   }>;
 
-export type WebFeatureCompilerIR = Readonly<{
-  version: typeof WEB_COMPILER_IR_VERSION;
-  routePath?: string;
-}> &
-  Omit<WebInterfaceCompilerIR, "version">;
-
 export type WebProgramCompilerIR = Readonly<{
   version: typeof WEB_COMPILER_IR_VERSION;
   components: readonly CompiledWebComponentIR[];
   routes: readonly CompiledWebRouteIR[];
 }>;
 
-export function webFeatureCompilerIR(value: ExtensionIR | undefined): WebFeatureCompilerIR {
-  const record = extensionRecord(value, "Feature");
+export function webInterfaceCompilerIR(value: ExtensionIR | undefined): WebInterfaceCompilerIR {
+  const record = extensionRecord(value, "Interface");
   assertExtensionKeys(
     record,
     ["version"],
-    ["installation", "routePath"],
-    "web Feature compiler meaning",
+    ["installation", "routes"],
+    "web interface compiler meaning",
   );
   if (
     record.version !== WEB_COMPILER_IR_VERSION ||
-    (record.routePath !== undefined && typeof record.routePath !== "string")
+    (record.routes !== undefined &&
+      (!record.routes ||
+        typeof record.routes !== "object" ||
+        Array.isArray(record.routes) ||
+        Object.values(record.routes).some((path) => typeof path !== "string")))
   ) {
-    throw new Error("Unsupported web Feature compiler meaning.");
+    throw new Error("Unsupported web interface compiler meaning.");
   }
   if (record.installation !== undefined) validateInstallationIR(record.installation);
-  return record as WebFeatureCompilerIR;
+  return record as WebInterfaceCompilerIR;
 }
 
 export function webProgramCompilerIR(value: ExtensionIR | undefined): WebProgramCompilerIR {
@@ -267,16 +266,17 @@ export type WebRouteMatch = Readonly<{
 
 /** Composes compiler Route entries into the deterministic manifest owned by the web adapter. */
 export function collectWebRoutes(ir: SystemIR, program: string): readonly WebRouteIR[] {
-  const features = new Map(ir.features.map((feature) => [feature.path, feature]));
   const selected = ir.programs.find(
     ({ name, environment }) => name === program && environment.platform === "web",
   );
   const interface_ = selected?.interface
     ? ir.interfaces.find((candidate) => candidate.path === selected.interface)
     : undefined;
-  const manifest = interface_?.extensions?.web
-    ? Boolean(webFeatureCompilerIR(interface_.extensions.web).installation)
-    : false;
+  const interfaceMeaning = interface_?.extensions?.web
+    ? webInterfaceCompilerIR(interface_.extensions.web)
+    : undefined;
+  const manifest = Boolean(interfaceMeaning?.installation);
+  const routePaths = interfaceMeaning?.routes ?? {};
   const routes = (selected ? [selected] : []).flatMap(({ contributions }) =>
     contributions.flatMap((contribution) =>
       (contribution.extensions?.web
@@ -286,7 +286,7 @@ export function collectWebRoutes(ir: SystemIR, program: string): readonly WebRou
         return {
           feature: contribution.feature,
           name: route.name,
-          path: composeWebRoutePath(featureRouteBase(features, contribution.feature), route.path),
+          path: composeWebRoutePath(featureRouteBase(contribution.feature, routePaths), route.path),
           document: route.document,
           cache: route.cache,
           metadata: manifest
@@ -949,17 +949,13 @@ function decode(value: string): string {
   }
 }
 
-function featureRouteBase(
-  features: ReadonlyMap<string, SystemIR["features"][number]>,
-  path: string,
-): string {
+function featureRouteBase(path: string, routePaths: Readonly<Record<string, string>>): string {
   let base = "/";
   const segments = path.split(".");
   for (let index = 0; index < segments.length; index++) {
-    const feature = features.get(segments.slice(0, index + 1).join("."));
-    if (!feature?.extensions?.web) continue;
-    const routePath = webFeatureCompilerIR(feature.extensions.web).routePath;
-    if (routePath !== undefined) base = composeWebRoutePath(base, routePath);
+    const featurePath = segments.slice(0, index + 1).join(".");
+    const mountedPath = routePaths[featurePath];
+    if (mountedPath !== undefined) base = composeWebRoutePath(base, mountedPath);
   }
   return base;
 }

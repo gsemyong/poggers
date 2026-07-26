@@ -1,18 +1,17 @@
-import { createApp } from "kit";
-import { createWebInterface } from "kit/web";
+import { createApplication } from "kit";
+import type { WebPlatform } from "kit/web";
 
 import { dashboard, type DashboardFeature } from "@/features/dashboard";
 import { editorial } from "@/presentations/web";
 
 export type Main = {
   Features: { dashboard: DashboardFeature };
+  Interfaces: WebPlatform;
 };
 
-const web = createWebInterface<Main>({
-  presentation: editorial,
-});
-
-export const main = createApp({
+export const main = createApplication<Main>({
   features: { dashboard },
-  interfaces: { web },
+  interfaces: {
+    web: { presentation: editorial },
+  },
 });

@@ -1,30 +1,20 @@
 import { createFeature, type FeatureEnvironmentConflict } from "@/core/feature";
-import type { Program } from "@/core/program";
 import {
-  createApp,
+  createApplication,
   createSystem,
-  type AppFeatureContract,
-  type PlatformInterface,
+  type ApplicationFeatureContract,
   type SystemContractOf,
 } from "@/core/system";
-import type { UIElement } from "@/core/ui/language";
 import type { ConfiguredPresentationFor, PresentationRecipe } from "@/core/ui/presentation";
 import {
-  createWebInterface,
   type BrowserMainThread,
-  type WebFeature,
+  type Validate,
+  type WebPlatform,
   type WebPresentationLanguage,
-  type WebRoute,
 } from "@/platforms/web";
 
 type ServerPlatform = Readonly<{ Name: "server" }>;
 type Server = Readonly<{ Name: "server"; Platform: ServerPlatform }>;
-type NativeUI = Readonly<{
-  Name: "native";
-  Child: unknown;
-  Elements: { View: UIElement<{}, unknown> };
-}>;
-type NativePlatform = Readonly<{ Name: "native"; UI: NativeUI }>;
 
 type Principal = Readonly<{ id: string }>;
 type Identity = Readonly<{ current(input: {}): Promise<Principal | undefined> }>;
@@ -34,34 +24,39 @@ type Tasks = Readonly<{
 
 type IdentityFeature = {
   Programs: {
-    api: Program<Server, { Provides: { identity: Identity } }>;
+    server: {
+      Environment: Server;
+      Provides: { identity: Identity };
+    };
   };
 };
 
 type TasksFeature = {
   Programs: {
-    api: Program<
-      Server,
-      {
-        Requires: { identity: Identity };
-        Provides: { tasks: Tasks };
-      }
-    >;
+    server: {
+      Environment: Server;
+      Requires: { identity: Identity };
+      Provides: { tasks: Tasks };
+    };
   };
 };
 
 type ShellFeature = {
   Programs: {
-    browser: Program<
-      BrowserMainThread,
-      {
-        Requires: { identity: Identity; tasks: Tasks };
-        State: { ready: boolean };
-        Actions: { refresh(): void };
-        Components: { Root: { Elements: { Root: "main" } } };
-        Routes: { home: WebRoute<{ Path: "" }> };
-      }
-    >;
+    browser: {
+      Environment: BrowserMainThread;
+      Requires: { identity: Identity; tasks: Tasks };
+      State: { ready: boolean };
+      Actions: { refresh(): void };
+      Components: { Root: { Elements: { Root: "main" } } };
+      Routes: {
+        home: { Path: "" };
+        task: {
+          Path: "tasks/:id";
+          Params: { id: Validate<string, { Format: "uuid" }> };
+        };
+      };
+    };
   };
 };
 
@@ -71,11 +66,12 @@ type Operations = {
     tasks: TasksFeature;
     shell: ShellFeature;
   };
+  Interfaces: WebPlatform;
 };
 
 const identity = createFeature<IdentityFeature>({
   programs: {
-    api: {
+    server: {
       start: () => ({
         identity: {
           async current() {
@@ -89,7 +85,7 @@ const identity = createFeature<IdentityFeature>({
 
 const tasks = createFeature<TasksFeature>({
   programs: {
-    api: {
+    server: {
       start: () => ({
         tasks: {
           async list() {
@@ -101,7 +97,7 @@ const tasks = createFeature<TasksFeature>({
   },
 });
 
-const shell: WebFeature<ShellFeature, Operations> = {
+const shell = createFeature<ShellFeature>({
   programs: {
     browser: {
       state: { ready: false },
@@ -122,14 +118,20 @@ const shell: WebFeature<ShellFeature, Operations> = {
       root: "Root",
       routes: {
         home: {
-          view({ components: { Shell } }) {
-            return Shell.Root({});
+          view({ components: { Root } }) {
+            return Root({});
+          },
+        },
+        task: {
+          view({ components: { Root }, params }) {
+            params.id satisfies string;
+            return Root({});
           },
         },
       },
     },
   },
-};
+});
 
 const operationsPresentation = {
   parameters: {},
@@ -140,38 +142,35 @@ const operationsPresentation = {
   }),
 } satisfies ConfiguredPresentationFor<Operations, WebPresentationLanguage>;
 
-const web = createWebInterface<Operations>({
-  presentation: operationsPresentation,
-  installation: {
-    start: { to: "shell.home" },
-    icons: [],
-    offline: { fallback: { to: "shell.home" } },
-  },
-});
-
-const native = {} as PlatformInterface<Operations, NativePlatform>;
-
-const operations = createApp({
+const operations = createApplication<Operations>({
   features: { identity, tasks, shell },
-  interfaces: { web, native },
+  interfaces: {
+    web: {
+      presentation: operationsPresentation,
+      routes: { shell: "" },
+      installation: {
+        start: { to: "shell.home" },
+        icons: [],
+        offline: { fallback: { to: "shell.home" } },
+      },
+    },
+  },
 });
 
 const system = createSystem({
   metadata: { name: "Company" },
-  features: { operations },
+  applications: { operations },
 });
 
 type Contract = SystemContractOf<typeof system>;
 type OperationsProof =
-  Contract["Features"]["operations"] extends AppFeatureContract<Operations> ? true : never;
+  Contract["Applications"]["operations"] extends ApplicationFeatureContract<Operations>
+    ? true
+    : never;
 const operationsProof: OperationsProof = true;
 void operationsProof;
 
-export type SystemConflictProbe = FeatureEnvironmentConflict<{
-  Features: {
-    operations: AppFeatureContract<Operations>;
-  };
-}>;
+export type SystemConflictProbe = FeatureEnvironmentConflict<Contract>;
 
 const surface: PresentationRecipe<
   Readonly<{ emphasized: boolean }>,
@@ -180,22 +179,44 @@ const surface: PresentationRecipe<
 const emphasized = { ...surface({ emphasized: false }), opacity: 1 };
 emphasized.opacity satisfies number;
 
-type Other = { Features: { identity: IdentityFeature } };
-const wrongOwner = createWebInterface<Other>({
-  presentation: {
-    parameters: {},
-    create: () => ({ Identity: () => ({}) }),
+type WrongApplication = {
+  Features: { identity: IdentityFeature };
+  Interfaces: WebPlatform;
+};
+
+createApplication<WrongApplication>({
+  // @ts-expect-error The declared Feature roles must all have concrete implementations.
+  features: {},
+  interfaces: {
+    web: {
+      presentation: {
+        parameters: {},
+        create: () => ({ Identity: () => ({}) }),
+      },
+    },
   },
 });
-
-// @ts-expect-error An interface is bound to one exact App Feature contract.
-createApp({ features: { identity, tasks, shell }, interfaces: { web: wrongOwner } });
 
 // Ordinary reusable Features have no ambient access to the consuming System.
 // @ts-expect-error Identity declares no sibling or System-wide task API.
 void identity.features.tasks;
 
-// @ts-expect-error App is a Feature composition, not a second nested App registry.
-createApp({ apps: { nested: operations } });
+createApplication<Operations>({
+  features: { identity, tasks, shell },
+  interfaces: {
+    web: { presentation: operationsPresentation },
+  },
+  // @ts-expect-error Applications are composed only by a System, never recursively.
+  applications: { nested: operations },
+});
+
+createApplication<Operations>({
+  features: { identity, tasks, shell },
+  interfaces: {
+    web: { presentation: operationsPresentation },
+  },
+  // @ts-expect-error Programs belong to Features, not Applications.
+  programs: {},
+});
 
 void system;

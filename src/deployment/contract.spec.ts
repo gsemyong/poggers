@@ -6,7 +6,6 @@ import fc from "fast-check";
 import { afterEach, describe, expect, test } from "vitest";
 
 import type { ProductionArtifacts } from "@/adapter";
-import type { Program } from "@/core/program";
 import type { System } from "@/core/system";
 import {
   applyDeployment,
@@ -23,6 +22,10 @@ import {
   type Release,
 } from "@/deployment";
 import type { ServerProcess } from "@/platforms/server";
+
+type Program<Environment, Contract extends object = object> = Readonly<
+  Contract & { Environment: Environment }
+>;
 
 const directories: string[] = [];
 
@@ -425,11 +428,11 @@ describe("Deployment planning", () => {
     const release = {
       ...deploymentRelease("release-1", "program-1", true),
       artifacts: [
-        ...deploymentRelease("release-1", "program-1", true).artifacts.filter(
-          ({ kind }) => kind === "interface",
-        ),
+        ...deploymentRelease("release-1", "program-1", true)
+          .artifacts.filter(({ kind }) => kind === "interface")
+          .map((artifact) => ({ ...artifact, identity: "interface/application.web" })),
         {
-          identity: "interface/admin",
+          identity: "interface/application.admin",
           kind: "interface" as const,
           deployment: "asset" as const,
           platform: "web",
@@ -445,13 +448,18 @@ describe("Deployment planning", () => {
     const configured = createDeployment(system, {
       adapter,
       interfaces: {
-        web: { hosts: ["WWW.EXAMPLE.COM", "example.com"] },
+        application: {
+          web: { hosts: ["WWW.EXAMPLE.COM", "example.com"] },
+        },
       } as never,
     });
 
     expect(planDeployment(configured, release).interfaces).toEqual([
-      { identity: "interface/admin", hosts: [] },
-      { identity: "interface/web", hosts: ["example.com", "www.example.com"] },
+      { identity: "interface/application.admin", hosts: [] },
+      {
+        identity: "interface/application.web",
+        hosts: ["example.com", "www.example.com"],
+      },
     ]);
 
     expect(() =>
@@ -459,8 +467,10 @@ describe("Deployment planning", () => {
         createDeployment(system, {
           adapter,
           interfaces: {
-            admin: { hosts: ["example.com"] },
-            web: { hosts: ["example.com"] },
+            application: {
+              admin: { hosts: ["example.com"] },
+              web: { hosts: ["example.com"] },
+            },
           } as never,
         }),
         release,
@@ -470,7 +480,9 @@ describe("Deployment planning", () => {
       planDeployment(
         createDeployment(system, {
           adapter,
-          interfaces: { missing: { hosts: ["missing.example.com"] } } as never,
+          interfaces: {
+            application: { missing: { hosts: ["missing.example.com"] } },
+          } as never,
         }),
         release,
       ),

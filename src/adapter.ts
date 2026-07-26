@@ -1,6 +1,11 @@
 import type { SourceCompilerExtension } from "@/compiler/extension";
-import type { PlatformInterfaceIR, ProgramIR, SystemIR, SystemOutputSources } from "@/compiler/ir";
-import type { SystemCompilationWork } from "@/compiler/source";
+import type {
+  PlatformInterfaceIR,
+  ProgramIR,
+  SystemCompilationWork,
+  SystemIR,
+  SystemOutputSources,
+} from "@/compiler/ir";
 import type { PlatformContract } from "@/core/program";
 import type { UIChild, UIContract, UIDefinition, UITarget } from "@/core/ui/language";
 import type {
@@ -8,6 +13,8 @@ import type {
   PresentationElement,
   PresentationLanguage,
 } from "@/core/ui/presentation";
+
+export type { ApplicationInterfaceKind, ProgramDefinitionKind } from "@/core/program";
 
 /** Adapter-owned runtime configuration required by one production artifact. */
 export type ProductionConfiguration = Readonly<{
@@ -342,29 +349,3 @@ export function selectPlatformAdapters<Adapter extends PlatformAdapterImplementa
     return adapter;
   });
 }
-
-export type {
-  DependencyBinding,
-  DeploymentAdapter,
-  DeploymentArtifactState,
-  DeploymentDependencyPlan,
-  DeploymentFailure,
-  DeploymentOperation,
-  DeploymentPlan,
-  DeploymentProcessState,
-  DeploymentState,
-  DeploymentTarget,
-  Release,
-  ReleaseArtifact,
-  ReleaseFile,
-  ReplicaDecision,
-  ReplicaObservation,
-  ReplicaPolicy,
-} from "@/deployment";
-export {
-  applyDeployment,
-  inspectDeployment,
-  planDeployment,
-  reconcileReplicas,
-  removeDeployment,
-} from "@/deployment";

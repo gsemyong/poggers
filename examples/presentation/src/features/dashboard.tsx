@@ -1,4 +1,4 @@
-import { createFeature, type Program } from "kit";
+import { createFeature } from "kit";
 import { createPress, For, mountDialog, mountDrag, type BrowserMainThread } from "kit/web";
 
 type SheetView = "summary" | "detail";
@@ -23,73 +23,71 @@ export type SheetState =
 
 export type DashboardFeature = {
   Programs: {
-    browser: Program<
-      BrowserMainThread,
-      {
-        State: {
-          compact: boolean;
-          reversed: boolean;
-          warm: boolean;
-          sheet: SheetState;
-        };
-        Actions: {
-          toggleDensity(): void;
-          reorderMetrics(): void;
-          toggleAccent(): void;
-          openSheet(): void;
-          closeSheet(input: { source: "button" | "backdrop" | "escape" }): void;
-          toggleSheetView(): void;
-          beginSheetDrag(): void;
-          updateSheetDrag(input: { offset: number; velocity: number }): void;
-          releaseSheet(input: { offset: number; velocity: number }): void;
-          cancelSheetDrag(): void;
-        };
-        Components: {
-          Overview: {
-            Elements: {
-              Root: "main";
-              Header: "header";
-              Kicker: "p";
-              Title: "h1";
-              Summary: "p";
-              Toolbar: "div";
-              Density: "button";
-              Accent: "button";
-              AccentIcon: "img";
-              AccentMode: "output";
-              Reorder: "button";
-              OpenSheet: "button";
-              Sheet: "dialog";
-              SheetBackdrop: "div";
-              SheetPanel: "section";
-              SheetHandle: "button";
-              SheetTitle: "h2";
-              SheetContent: "div";
-              SheetSummary: "p";
-              SheetDetail: "p";
-              SheetSwitch: "button";
-              SheetClose: "button";
-              Gallery: "section";
-            };
-          };
-          Metric: {
-            Props: {
-              label: string;
-              value: string;
-              detail: string;
-              tone: "accent" | "neutral";
-            };
-            Elements: {
-              Root: "article";
-              Label: "p";
-              Value: "strong";
-              Detail: "p";
-              Rule: "div";
-            };
+    browser: {
+      Environment: BrowserMainThread;
+      State: {
+        compact: boolean;
+        reversed: boolean;
+        warm: boolean;
+        sheet: SheetState;
+      };
+      Actions: {
+        toggleDensity(): void;
+        reorderMetrics(): void;
+        toggleAccent(): void;
+        openSheet(): void;
+        closeSheet(input: { source: "button" | "backdrop" | "escape" }): void;
+        toggleSheetView(): void;
+        beginSheetDrag(): void;
+        updateSheetDrag(input: { offset: number; velocity: number }): void;
+        releaseSheet(input: { offset: number; velocity: number }): void;
+        cancelSheetDrag(): void;
+      };
+      Components: {
+        Overview: {
+          Elements: {
+            Root: "main";
+            Header: "header";
+            Kicker: "p";
+            Title: "h1";
+            Summary: "p";
+            Toolbar: "div";
+            Density: "button";
+            Accent: "button";
+            AccentIcon: "img";
+            AccentMode: "output";
+            Reorder: "button";
+            OpenSheet: "button";
+            Sheet: "dialog";
+            SheetBackdrop: "div";
+            SheetPanel: "section";
+            SheetHandle: "button";
+            SheetTitle: "h2";
+            SheetContent: "div";
+            SheetSummary: "p";
+            SheetDetail: "p";
+            SheetSwitch: "button";
+            SheetClose: "button";
+            Gallery: "section";
           };
         };
-      }
-    >;
+        Metric: {
+          Props: {
+            label: string;
+            value: string;
+            detail: string;
+            tone: "accent" | "neutral";
+          };
+          Elements: {
+            Root: "article";
+            Label: "p";
+            Value: "strong";
+            Detail: "p";
+            Rule: "div";
+          };
+        };
+      };
+    };
   };
 };
 

@@ -8,7 +8,6 @@ import {
   type DependencyImplementations,
 } from "@/core/dependency";
 import { createFeature, type Feature, type ProgramDefinition } from "@/core/feature";
-import type { Program } from "@/core/program";
 import { mapStream } from "@/core/stream";
 import { startFeatureFixture, type Process } from "@/execution/process";
 import type {
@@ -231,24 +230,23 @@ type BrowserRequirements<Model extends EntityModelDefinition> = Readonly<{
 
 export type EntityServerFeature<Model extends EntityModelDefinition> = Readonly<{
   Programs: {
-    server: Program<
-      ServerProcess,
-      { Requires: Requirements<Model>; Provides: ServerProvision<Model> }
-    >;
+    server: {
+      Environment: ServerProcess;
+      Requires: Requirements<Model>;
+      Provides: ServerProvision<Model>;
+    };
   };
 }>;
 
 export type EntityBrowserFeature<Model extends EntityModelDefinition> = Readonly<{
   Programs: {
-    browser: Program<
-      BrowserMainThread,
-      {
-        Requires: BrowserRequirements<Model>;
-        Provides: BrowserProvision<Model>;
-        State: EntityState<Model>;
-        Actions: EntityActions<Model>;
-      }
-    >;
+    browser: {
+      Environment: BrowserMainThread;
+      Requires: BrowserRequirements<Model>;
+      Provides: BrowserProvision<Model>;
+      State: EntityState<Model>;
+      Actions: EntityActions<Model>;
+    };
   };
 }>;
 

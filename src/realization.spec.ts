@@ -32,7 +32,7 @@ afterEach(async () => {
 });
 
 describe("System realization", { tags: ["compiler"] }, () => {
-  test("selects whole-System and focused-App outputs without duplicating shared Programs", async () => {
+  test("selects whole-System and focused-Application outputs without duplicating shared Programs", async () => {
     const directory = await fixture();
     const adapters = {
       server: adapter("server"),
@@ -168,7 +168,7 @@ describe("System realization", { tags: ["compiler"] }, () => {
     expect(events.slice(-2)).toEqual(["dispose:web", "dispose:server"]);
   });
 
-  test("identifies exact shared and App-private outputs from one retained graph", async () => {
+  test("identifies exact shared and Application-private outputs from one retained graph", async () => {
     const fixture = await incrementalFixture();
     const revisions = createSystemRevisionSource(fixture.system, []);
     expect(revisions.current.revision).toBe(0);
@@ -322,41 +322,51 @@ describe("System realization", { tags: ["compiler"] }, () => {
     );
   });
 
-  test("keeps unchanged multi-App meaning stable across retained compilations", () => {
-    const system = resolve(import.meta.dirname, "../examples/authenticated-crud/src/system.ts");
-    const revisions = createSystemRevisionSource(system, [webCompilerExtension]);
-    const initial = serializeSystemIR(revisions.current.ir);
+  test(
+    "keeps unchanged multi-Application meaning stable across retained compilations",
+    { tags: ["package"], timeout: 30_000 },
+    () => {
+      const system = resolve(import.meta.dirname, "../examples/authenticated-crud/src/system.ts");
+      const revisions = createSystemRevisionSource(system, [webCompilerExtension]);
+      const initial = serializeSystemIR(revisions.current.ir);
 
-    const revision = revisions.compile(
-      resolve(import.meta.dirname, "../examples/authenticated-crud/src/apps/operations.tsx"),
-    );
+      const revision = revisions.compile(
+        resolve(import.meta.dirname, "../examples/authenticated-crud/src/apps/operations.tsx"),
+      );
 
-    expect(serializeSystemIR(revision.ir)).toBe(initial);
-    expect(revision.change).toBeUndefined();
-  }, 30_000);
+      expect(serializeSystemIR(revision.ir)).toBe(initial);
+      expect(revision.change).toBeUndefined();
+    },
+  );
 
-  test("assigns App composition sources only to their owned outputs", () => {
-    const root = resolve(import.meta.dirname, "../examples/authenticated-crud/src");
-    const revisions = createSystemRevisionSource(resolve(root, "system.ts"), [
-      webCompilerExtension,
-    ]);
-    const customer = resolve(root, "apps/customer.tsx");
-    const operations = resolve(root, "apps/operations.tsx");
+  test(
+    "assigns Application composition sources only to their owned outputs",
+    { tags: ["package"], timeout: 30_000 },
+    () => {
+      const root = resolve(import.meta.dirname, "../examples/authenticated-crud/src");
+      const revisions = createSystemRevisionSource(resolve(root, "system.ts"), [
+        webCompilerExtension,
+      ]);
+      const customer = resolve(root, "apps/customer.tsx");
+      const operations = resolve(root, "apps/operations.tsx");
 
-    expect(revisions.current.outputSources["interface/customer.web"]).toContain(customer);
-    expect(revisions.current.outputSources["program/customer.web.browser"]).toContain(customer);
-    expect(revisions.current.outputSources["interface/customer.web"]).not.toContain(operations);
-    expect(revisions.current.outputSources["program/customer.web.browser"]).not.toContain(
-      operations,
-    );
+      expect(revisions.current.outputSources["interface/customer.web"]).toContain(customer);
+      expect(revisions.current.outputSources["program/customer.web.browser"]).toContain(customer);
+      expect(revisions.current.outputSources["interface/customer.web"]).not.toContain(operations);
+      expect(revisions.current.outputSources["program/customer.web.browser"]).not.toContain(
+        operations,
+      );
 
-    expect(revisions.current.outputSources["interface/operations.web"]).toContain(operations);
-    expect(revisions.current.outputSources["program/operations.web.browser"]).toContain(operations);
-    expect(revisions.current.outputSources["interface/operations.web"]).not.toContain(customer);
-    expect(revisions.current.outputSources["program/operations.web.browser"]).not.toContain(
-      customer,
-    );
-  }, 30_000);
+      expect(revisions.current.outputSources["interface/operations.web"]).toContain(operations);
+      expect(revisions.current.outputSources["program/operations.web.browser"]).toContain(
+        operations,
+      );
+      expect(revisions.current.outputSources["interface/operations.web"]).not.toContain(customer);
+      expect(revisions.current.outputSources["program/operations.web.browser"]).not.toContain(
+        customer,
+      );
+    },
+  );
 
   test("disposes every successful owner once when concurrent startup fails", async () => {
     const directory = await fixture();
@@ -534,7 +544,7 @@ type Feature<Contract> = Readonly<{ readonly [featureContract]?: Contract }>;
 function createFeature<Contract>(definition: object): Feature<Contract> {
   return definition as Feature<Contract>;
 }
-function createApp<Contract>(definition: object): Feature<Contract> {
+function createApplication<Contract>(definition: object): Feature<Contract> {
   return definition as Feature<Contract>;
 }
 function createInterface<Contract>(definition: object): Contract {
@@ -560,7 +570,7 @@ const operationsService = createFeature<Service>({ programs: { api: {}, browser:
 const operationsWeb = createInterface<Web>({
   presentation: { parameters: {}, create() { return {}; } },
 });
-const operations = createApp<Product>({
+const operations = createApplication<Product>({
   features: { service: operationsService },
   interfaces: { web: operationsWeb },
 });
@@ -568,7 +578,7 @@ const customerService = createFeature<Service>({ programs: { api: {}, browser: {
 const customerWeb = createInterface<Web>({
   presentation: { parameters: {}, create() { return {}; } },
 });
-const customer = createApp<Product>({
+const customer = createApplication<Product>({
   features: { service: customerService },
   interfaces: { web: customerWeb },
 });
@@ -602,7 +612,7 @@ export type Feature<Contract> = Readonly<{ readonly [featureContract]?: Contract
 export function createFeature<Contract>(definition: object): Feature<Contract> {
   return definition as Feature<Contract>;
 }
-export function createApp<Contract>(definition: object): Feature<Contract> {
+export function createApplication<Contract>(definition: object): Feature<Contract> {
   return definition as Feature<Contract>;
 }
 export function createInterface<Contract>(definition: object): Contract {
@@ -623,7 +633,7 @@ type Shared = { Programs: { api: Program<Server, { State: { label: "shared" } }>
 export const shared = createFeature<Shared>({ programs: { api: {} } });
 `;
   const appSource = (name: "operations" | "customer") => `
-import { createApp, createFeature, createInterface, type Browser, type Program } from "./contracts";
+import { createApplication, createFeature, createInterface, type Browser, type Program } from "./contracts";
 import { marker } from "./shared-ui";
 ${name === "operations" ? 'import type { OperationsLabel } from "./operations-label";' : ""}
 void marker;
@@ -647,7 +657,7 @@ const service = createFeature<Service>({
 const web = createInterface<Web>({
   presentation: { parameters: {}, create() { return {}; } },
 });
-export const ${name} = createApp<App>({
+export const ${name} = createApplication<App>({
   features: { service },
   interfaces: { web },
 });

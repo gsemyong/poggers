@@ -59,7 +59,7 @@ describe("project template", () => {
       ]);
       expect(await readdir(resolve(target, "src/presentations"))).toEqual(["web.ts"]);
       expect(await readFile(resolve(target, "src/system.ts"), "utf8")).toContain(
-        "export default createSystem({",
+        "export default createSystem<Basic>({",
       );
       expect(await readFile(resolve(target, "src/features/shell.spec.ts"), "utf8")).toContain(
         "program.actions.increment",
@@ -435,7 +435,7 @@ while true; do sleep 1; done
   });
 
   test(
-    "builds one focused App with its shared Program and isolated interface",
+    "builds one focused Application with its shared Program and isolated interface",
     { tags: ["package"], timeout: 30_000 },
     async () => {
       const output = await mkdtemp(resolve(tmpdir(), "kit-focused-cli-"));
@@ -471,7 +471,7 @@ while true; do sleep 1; done
         { server: adapter("server"), web: adapter("web") },
       );
 
-      expect(observed.get("server")).toEqual(["program/api"]);
+      expect(observed.get("server")).toEqual(["program/server"]);
       expect(observed.get("web")).toEqual([
         "program/operations.web.browser",
         "interface/operations.web",

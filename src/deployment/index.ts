@@ -26,35 +26,16 @@ type UnionToIntersection<Union> = (Union extends unknown ? (value: Union) => voi
   : never;
 
 type ProgramNames<Contract extends FeatureContract> = Extract<ProgramName<Contract>, string>;
-type FeaturesOf<Contract> = Contract extends {
-  Features: infer Features extends Record<string, FeatureContract>;
-}
-  ? Features
-  : Empty;
 type InterfacesOf<Contract> = Contract extends {
   Interfaces: infer Interfaces extends Record<string, object>;
 }
   ? Interfaces
   : Empty;
-type InterfaceNamesIn<
-  Contract extends FeatureContract,
-  Prefix extends string = "",
-  Depth extends readonly unknown[] = [],
-> = Depth["length"] extends 8
-  ? never
-  :
-      | (keyof InterfacesOf<Contract> extends never
-          ? never
-          : Prefix extends ""
-            ? Extract<keyof InterfacesOf<Contract>, string>
-            : `${Prefix}.${Extract<keyof InterfacesOf<Contract>, string>}`)
-      | {
-          [Name in Extract<keyof FeaturesOf<Contract>, string>]: InterfaceNamesIn<
-            Extract<FeaturesOf<Contract>[Name], FeatureContract>,
-            Prefix extends "" ? Name : `${Prefix}.${Name}`,
-            [...Depth, unknown]
-          >;
-        }[Extract<keyof FeaturesOf<Contract>, string>];
+type ApplicationsOf<Contract> = Contract extends {
+  Applications: infer Applications extends Record<string, FeatureContract>;
+}
+  ? Applications
+  : Empty;
 
 type ExternalDependencyContributions<Contract extends FeatureContract> = {
   [Name in ProgramNames<Contract>]: ProgramExternalDependencies<Contract, Name>;
@@ -97,7 +78,7 @@ export type ReleaseArtifact = Readonly<{
   target?: ProductionTarget;
 }>;
 
-/** Immutable, content-addressed production output for one selected System/App. */
+/** Immutable, content-addressed production output for one selected System/Application. */
 export type Release = Readonly<{
   version: typeof RELEASE_MANIFEST_VERSION;
   system: string;
@@ -268,7 +249,13 @@ export type DeploymentInterface = Readonly<{
 /** Public hostnames bound to each independently addressable Platform interface. */
 export type DeploymentInterfaces<Contract extends FeatureContract> = Readonly<
   Partial<{
-    [Name in InterfaceNamesIn<Contract>]: DeploymentInterface;
+    [Application in keyof ApplicationsOf<Contract>]: Readonly<
+      Partial<{
+        [Interface in keyof InterfacesOf<
+          ApplicationsOf<Contract>[Application]
+        >]: DeploymentInterface;
+      }>
+    >;
   }>
 >;
 
@@ -317,9 +304,7 @@ export function createDeployment<
       );
     }
   }
-  validateDeploymentInterfaces(
-    definition.interfaces as Readonly<Record<string, DeploymentInterface>> | undefined,
-  );
+  validateDeploymentInterfaces(definition.interfaces as DeploymentInterfaceTree | undefined);
   return Object.freeze({ system, ...definition });
 }
 
@@ -637,11 +622,10 @@ function deploymentInterfacePlan<
   const available = new Set(
     release.artifacts.filter(({ kind }) => kind === "interface").map(({ identity }) => identity),
   );
-  const configured = deployment.interfaces as
-    | Readonly<Record<string, DeploymentInterface>>
-    | undefined;
-  validateDeploymentInterfaces(configured);
-  for (const name of Object.keys(configured ?? {})) {
+  const configured = flattenDeploymentInterfaces(
+    deployment.interfaces as DeploymentInterfaceTree | undefined,
+  );
+  for (const name of Object.keys(configured)) {
     const identity = `interface/${name}`;
     if (!available.has(identity)) {
       throw new Error(`Deployment configures unknown interface ${JSON.stringify(name)}.`);
@@ -667,16 +651,44 @@ function deploymentInterfacePlan<
   return Object.freeze(result);
 }
 
-function validateDeploymentInterfaces(
-  interfaces: Readonly<Record<string, DeploymentInterface>> | undefined,
-): void {
-  for (const [name, interface_] of Object.entries(interfaces ?? {})) {
-    if (!name.trim()) throw new TypeError("Deployment interface name cannot be empty.");
-    if (!interface_ || typeof interface_ !== "object" || Array.isArray(interface_)) {
-      throw new TypeError(`Deployment interface ${JSON.stringify(name)} must be an object.`);
+type DeploymentInterfaceTree = Readonly<
+  Record<string, Readonly<Record<string, DeploymentInterface>>>
+>;
+
+function validateDeploymentInterfaces(applications: DeploymentInterfaceTree | undefined): void {
+  for (const [application, interfaces] of Object.entries(applications ?? {})) {
+    if (!application.trim()) throw new TypeError("Deployment Application name cannot be empty.");
+    if (!interfaces || typeof interfaces !== "object" || Array.isArray(interfaces)) {
+      throw new TypeError(
+        `Deployment Application ${JSON.stringify(application)} must be an object.`,
+      );
     }
-    for (const host of interface_.hosts ?? []) canonicalHost(host);
+    for (const [name, interface_] of Object.entries(interfaces)) {
+      if (!name.trim()) throw new TypeError("Deployment interface name cannot be empty.");
+      if (!interface_ || typeof interface_ !== "object" || Array.isArray(interface_)) {
+        throw new TypeError(
+          `Deployment interface ${JSON.stringify(`${application}.${name}`)} must be an object.`,
+        );
+      }
+      for (const host of interface_.hosts ?? []) canonicalHost(host);
+    }
   }
+}
+
+function flattenDeploymentInterfaces(
+  applications: DeploymentInterfaceTree | undefined,
+): Readonly<Record<string, DeploymentInterface>> {
+  validateDeploymentInterfaces(applications);
+  return Object.freeze(
+    Object.fromEntries(
+      Object.entries(applications ?? {}).flatMap(([application, interfaces]) =>
+        Object.entries(interfaces).map(([name, interface_]) => [
+          `${application}.${name}`,
+          interface_,
+        ]),
+      ),
+    ),
+  );
 }
 
 function canonicalHost(value: string): string {

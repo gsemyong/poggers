@@ -285,7 +285,6 @@ import {
   createSystem,
   type Actor,
   type Dependency,
-  type Program,
 } from "kit";
 import type { ServerProcess } from "kit/server";
 
@@ -316,15 +315,13 @@ type Recorder = Dependency<{
 }>;
 type Probe = {
   Programs: {
-    server: Program<
-      ServerProcess,
-      {
-        Requires: {
-          counter: Actor.Reference<typeof counter>;
-          recorder: Recorder;
-        };
-      }
-    >;
+    server: {
+      Environment: ServerProcess;
+      Requires: {
+        counter: Actor.Reference<typeof counter>;
+        recorder: Recorder;
+      };
+    };
   };
 };
 const probe = createFeature<Probe>({

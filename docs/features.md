@@ -6,16 +6,20 @@ UI, providers, and tests together.
 
 ## Foundation
 
-Kit has five authoring concepts:
+Kit's substrate has two concepts:
 
 1. A **Program** describes executable meaning for one Environment.
 2. A **Dependency** is the typed boundary through which a Program reaches
    authority outside its own implementation.
-3. A **Feature** collocates contributions to Programs and composes child
-   Features.
-4. A **System** is the one composition, compilation, and realization root.
-5. A **Platform** supplies the authoring and realization contract for the
-   Environments it owns.
+
+Three composition boundaries organize that meaning:
+
+1. A **Feature** collocates Program contributions and composes child Features.
+2. An **Application** selects concrete Features and exposes Platform interfaces.
+3. A **System** is the one company-level compilation and realization root.
+
+Platforms extend Program and Application authoring at typed adapter boundaries;
+they are not another composition tree.
 
 A reusable Feature factory is an ordinary TypeScript function built from these
 concepts. It may implement a complete programming model, such as durable
@@ -129,8 +133,8 @@ src/
   system.spec.ts       optional cross-System behavior
 ```
 
-One App occupies one file until its own semantic content justifies a directory.
-The App selects concrete Feature values once and declares adapter-owned
+One Application occupies one file until its own semantic content justifies a directory.
+The Application selects concrete Feature values once and declares adapter-owned
 interfaces over that composition. Presentations are grouped by Platform because
 their authoring languages are Platform-specific. Reusable parameters, recipes,
 and typed Feature fragments stay in that Platform file until they become a

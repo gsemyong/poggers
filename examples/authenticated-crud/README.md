@@ -7,7 +7,7 @@ server adapters without System-level transport or provider wiring.
 
 ```text
 src/
-  apps/           customer and operations Apps
+  apps/           customer and operations Applications
   features/       identity, tasks, and shell vertical slices
   presentations/  the web Presentation
   deployment.ts   local deployment definition

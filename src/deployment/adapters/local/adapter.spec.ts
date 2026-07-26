@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 
 import { afterEach, describe, expect, test } from "vitest";
 
-import type { System } from "@/core/system";
+import type { ApplicationFeatureContract, System } from "@/core/system";
 import {
   applyDeployment,
   createDeployment,
@@ -14,6 +14,7 @@ import {
   type Release,
 } from "@/deployment";
 import { createLocalDeploymentAdapter } from "@/deployment/adapters/local";
+import type { WebPlatform } from "@/platforms/web";
 
 const directories: string[] = [];
 const pids = new Set<number>();
@@ -296,21 +297,19 @@ describe("local Deployment adapter", { tags: ["production"] }, () => {
       artifacts: fixture.artifacts,
       state: fixture.state,
     });
+    type App = ApplicationFeatureContract<{ Features: {}; Interfaces: WebPlatform }>;
     const system = {} as System<{
       Features: {
-        app: {
-          App: true;
-          Features: {};
-          Interfaces: {
-            web: { Interface: { Platform: { Name: "web" } } };
-          };
-        };
+        app: App;
       };
+      Applications: { app: App };
     }>;
     const deployment = createDeployment(system, {
       adapter,
       interfaces: {
-        "app.web": { hosts: ["workspace.localhost", "workspace-alt.localhost"] },
+        app: {
+          web: { hosts: ["workspace.localhost", "workspace-alt.localhost"] },
+        },
       },
     });
     const release = {

@@ -1,8 +1,12 @@
 import { createSystem } from "kit";
 
-import { main } from "@/apps/main";
+import { main, type Main } from "@/apps/main";
 
-export default createSystem({
+type Basic = {
+  Applications: { main: Main };
+};
+
+export default createSystem<Basic>({
   metadata: { name: "Basic" },
-  features: { main },
+  applications: { main },
 });

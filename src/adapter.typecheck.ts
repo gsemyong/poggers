@@ -1,12 +1,15 @@
 import type {
+  ApplicationInterfaceKind,
   DevelopmentSession,
   PresentationAdapter,
   PlatformAdapter,
   PlatformAdapters,
+  ProgramDefinitionKind,
   ProductionArtifacts,
   UIAdapter,
 } from "@/adapter";
-import type { Program } from "@/core/program";
+import { createFeature } from "@/core/feature";
+import { createApplication } from "@/core/system";
 import type { UIElement } from "@/core/ui/language";
 
 type IOSView = { readonly kind: "ios-view" };
@@ -41,7 +44,12 @@ type OtherPresentation = {
 };
 
 type ServerPlatform = { readonly Name: "server" };
-type IOSPlatform = { readonly Name: "ios"; readonly UI: IOSUI };
+type IOSPlatform = {
+  readonly Name: "ios";
+  readonly UI: IOSUI;
+  readonly Program: IOSProgramDefinitionKind;
+  readonly Application: IOSApplicationInterfaceKind;
+};
 type Server = { readonly Name: "server"; readonly Platform: ServerPlatform };
 type IOSForeground = {
   readonly Name: "ios-foreground";
@@ -52,6 +60,10 @@ type IOSWidget = {
   readonly Name: "ios-widget";
   readonly Platform: IOSPlatform;
 };
+
+type Program<Environment, Contract extends object = object> = Readonly<
+  Contract & { Environment: Environment }
+>;
 
 type ServerProgram = Program<Server>;
 type IOSProgram = Program<IOSForeground, { Components: { Root: { Elements: { Root: "stack" } } } }>;
@@ -73,10 +85,79 @@ const iosWidgetProgram: IOSWidgetProgram = {
 };
 void [serverProgram, iosProgram, iosBackgroundProgram, iosWidgetProgram];
 
-type HeadlessUIProgram = Program<Server, { Components: {} }>;
-// @ts-expect-error A process-only Platform cannot receive UI declarations.
-const headlessUIProgram: HeadlessUIProgram = { Environment: {} as Server, Components: {} };
-void headlessUIProgram;
+type HeadlessUIFeature = {
+  Programs: {
+    server: {
+      Environment: Server;
+      Components: {};
+    };
+  };
+};
+
+createFeature<HeadlessUIFeature>({
+  // @ts-expect-error A process-only Platform cannot receive UI declarations.
+  programs: { server: {} },
+});
+
+type IOSProgramDefinition<Name> = Readonly<{ scene: Extract<Name, string> }>;
+
+interface IOSProgramDefinitionKind extends ProgramDefinitionKind {
+  readonly Definition: IOSProgramDefinition<this["ProgramName"]>;
+}
+
+interface IOSApplicationInterfaceKind extends ApplicationInterfaceKind {
+  readonly Definition: Readonly<{
+    title: string;
+  }>;
+}
+
+type IOSFeature = {
+  Programs: {
+    foreground: {
+      Environment: IOSForeground;
+    };
+  };
+};
+
+const iosFeature = createFeature<IOSFeature>({
+  programs: {
+    foreground: {
+      scene: "foreground",
+    },
+  },
+});
+
+createFeature<IOSFeature>({
+  programs: {
+    // @ts-expect-error The iOS adapter requires its Program-specific scene declaration.
+    foreground: {},
+  },
+});
+
+createApplication<{
+  Features: { root: IOSFeature };
+  Interfaces: IOSPlatform;
+}>({
+  features: { root: iosFeature },
+  interfaces: {
+    ios: {
+      title: "Application",
+    },
+  },
+});
+
+createApplication<{
+  Features: { root: IOSFeature };
+  Interfaces: IOSPlatform;
+}>({
+  features: { root: iosFeature },
+  interfaces: {
+    ios: {
+      // @ts-expect-error The iOS interface contract owns the title value type.
+      title: 42,
+    },
+  },
+});
 
 const session = {} as DevelopmentSession;
 const artifacts = {} as ProductionArtifacts;

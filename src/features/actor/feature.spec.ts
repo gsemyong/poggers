@@ -7,7 +7,6 @@ import { dependencyOperationIdentity } from "@/compiler/ir";
 import { collectProgramManifest, linkProgram } from "@/compiler/linker";
 import { compileSystem } from "@/compiler/source";
 import { dependencyInvocation, invokeDependency } from "@/core/dependency";
-import { placePrograms } from "@/core/feature";
 import {
   createMemoryProcessDirectory,
   processPartition,
@@ -73,23 +72,6 @@ describe("Actor", () => {
     expect(error).toBeInstanceOf(ActorError);
     expect(new Error("domain")).not.toBeInstanceOf(ActorError);
     expect(error.failure).toEqual({ type: "overloaded", retryAt: 1_000 });
-  });
-
-  it("uses ordinary Program placement", () => {
-    type Counter = Actor<{
-      Name: "counter";
-      Key: string;
-      State: { value: number };
-      Methods: Record<never, never>;
-    }>;
-    const counter = createActor<Counter>({
-      state: (_context) => ({ value: 0 }),
-      methods: {},
-    });
-
-    const placed = placePrograms(counter, { server: "workers" });
-
-    expect(Object.keys(placed.programs)).toEqual(["workers"]);
   });
 
   it("lowers the Feature factory to ordinary portable Programs and Dependencies", () => {

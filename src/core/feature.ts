@@ -8,6 +8,8 @@ import type {
   ProgramProvides as ProvidedByProgram,
   ProgramRequires as RequiredByProgram,
   ProgramState,
+  ProgramDefinitionKind,
+  ValidProgramContract,
 } from "@/core/program";
 import type { ComponentDefinitions, RootComponentName } from "@/core/ui/component";
 
@@ -194,32 +196,60 @@ type ProgramStartResult<Contract extends ProgramContract> = Contract extends {
   ? DependencyImplementations<Provides> | PromiseLike<DependencyImplementations<Provides>>
   : ProgramResourceResult;
 
+type ApplyProgramDefinitionKind<
+  Kind extends ProgramDefinitionKind,
+  Owner extends FeatureContract,
+  ProgramName extends keyof ProgramsOf<Owner>,
+  Root extends FeatureContract,
+  Contract extends ProgramContract,
+> = (Kind & {
+  readonly Owner: Owner;
+  readonly ProgramName: ProgramName;
+  readonly Root: Root;
+  readonly Contract: Contract;
+})["Definition"];
+
+type PlatformProgramDefinition<
+  Owner extends FeatureContract,
+  ProgramName extends keyof ProgramsOf<Owner>,
+  Root extends FeatureContract,
+  Contract extends ProgramContract,
+> = Contract["Environment"]["Platform"] extends {
+  Program: infer Kind extends ProgramDefinitionKind;
+}
+  ? ApplyProgramDefinitionKind<Kind, Owner, ProgramName, Root, Contract>
+  : Empty;
+
 export type ProgramDefinition<
   Owner extends FeatureContract,
   ProgramName extends keyof ProgramsOf<Owner>,
   Root extends FeatureContract,
   Contract extends ProgramContract = Extract<ProgramsOf<Owner>[ProgramName], ProgramContract>,
-> = Readonly<
-  (HasUI<Contract> extends true
-    ? ProgramUIFields<Owner, ProgramName, Contract, Root>
-    : {
-        state?: never;
-        actions?: never;
-        components?: never;
-        root?: never;
-      }) &
-    (Contract extends { Provides: object }
-      ? {
-          start: (
-            context: ProgramStartContext<Owner, ProgramName, Contract>,
-          ) => ProgramStartResult<Contract>;
-        }
-      : {
-          start?: (
-            context: ProgramStartContext<Owner, ProgramName, Contract>,
-          ) => ProgramStartResult<Contract>;
-        })
->;
+> =
+  ValidProgramContract<Contract> extends true
+    ? Readonly<
+        (HasUI<Contract> extends true
+          ? ProgramUIFields<Owner, ProgramName, Contract, Root>
+          : {
+              state?: never;
+              actions?: never;
+              components?: never;
+              root?: never;
+            }) &
+          (Contract extends { Provides: object }
+            ? {
+                start: (
+                  context: ProgramStartContext<Owner, ProgramName, Contract>,
+                ) => ProgramStartResult<Contract>;
+              }
+            : {
+                start?: (
+                  context: ProgramStartContext<Owner, ProgramName, Contract>,
+                ) => ProgramStartResult<Contract>;
+              }) &
+          PlatformProgramDefinition<Owner, ProgramName, Root, Contract>
+      >
+    : never;
 
 export type ProgramDefinitions<Owner extends FeatureContract, Root extends FeatureContract> = {
   readonly [Name in keyof ProgramsOf<Owner>]: ProgramDefinition<Owner, Name, Root>;
@@ -248,13 +278,15 @@ export type Feature<
 
 /** Validates one Feature implementation and retains its exact semantic contract. */
 export function createFeature<Contract extends FeatureContract>(
-  definition: Feature<Contract>,
+  definition: Feature<Contract> &
+    ([FeatureEnvironmentConflict<Contract>] extends [never] ? unknown : never),
 ): Feature<Contract> {
   return definition;
 }
 
 type RuntimeFeatureProviderOwner = Readonly<{
   features?: Readonly<Record<string, RuntimeFeatureProviderOwner>>;
+  applications?: Readonly<Record<string, RuntimeFeatureProviderOwner>>;
   providers?: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
 }>;
 
@@ -268,14 +300,22 @@ export function resolveFeatureProvider<Provider>(
   system: RuntimeFeatureProviderOwner,
   input: Readonly<{ feature: string; platform: string; dependency: string }>,
 ): Provider {
-  let owner: RuntimeFeatureProviderOwner | undefined = system;
-  for (const name of input.feature.split(".").filter(Boolean)) {
-    owner = owner.features?.[name];
+  const [root, ...path] = input.feature.split(".").filter(Boolean);
+  let owner = root
+    ? (system.applications?.[root] ?? system.features?.[root])
+    : (system as RuntimeFeatureProviderOwner | undefined);
+  for (const name of path) {
+    owner = owner?.features?.[name];
     if (!owner) {
       throw new Error(
         `Feature provider owner ${JSON.stringify(input.feature)} is unavailable at runtime.`,
       );
     }
+  }
+  if (!owner) {
+    throw new Error(
+      `Feature provider owner ${JSON.stringify(input.feature)} is unavailable at runtime.`,
+    );
   }
   const provider = owner.providers?.[input.platform]?.[input.dependency];
   if (provider === undefined) {
@@ -287,7 +327,14 @@ export function resolveFeatureProvider<Provider>(
   return provider as Provider;
 }
 
-export type ProgramNamesIn<
+export type FeatureContractOf<Value> =
+  Value extends Readonly<{
+    [featureContract]?: infer Contract extends FeatureContract;
+  }>
+    ? Contract
+    : never;
+
+type ProgramNamesIn<
   Owner extends FeatureContract,
   Depth extends readonly unknown[] = [],
 > = Depth["length"] extends 8
@@ -300,96 +347,6 @@ export type ProgramNamesIn<
             readonly [...Depth, unknown]
           >;
         }[keyof FeaturesOf<Owner>];
-
-type PlacedPrograms<Programs, Placement> = {
-  readonly [Name in keyof Programs as Name extends keyof Placement
-    ? Placement[Name] extends PropertyKey
-      ? Placement[Name]
-      : Name
-    : Name]: Programs[Name];
-};
-
-/** The Feature contract produced by assigning logical Program roles to concrete Program names. */
-export type PlacedFeature<Owner extends FeatureContract, Placement extends object> = Readonly<
-  Omit<Owner, "Programs" | "Features"> &
-    (Owner extends { Programs: infer Programs extends Record<string, ProgramContract> }
-      ? { Programs: PlacedPrograms<Programs, Placement> }
-      : Empty) &
-    (Owner extends { Features: infer Features extends Record<string, FeatureContract> }
-      ? {
-          Features: {
-            readonly [Name in keyof Features]: PlacedFeature<Features[Name], Placement>;
-          };
-        }
-      : Empty)
->;
-
-/** Assigns reusable logical Program roles throughout one Feature tree to concrete names. */
-export function placePrograms<
-  Value extends Readonly<{ [featureContract]?: FeatureContract }>,
-  const Placement extends Partial<Record<ProgramNamesIn<FeatureContractOf<Value>>, string>>,
->(
-  feature: Value,
-  placement: Placement,
-): Feature<PlacedFeature<FeatureContractOf<Value>, Placement>> &
-  Omit<Value, "programs" | "features" | typeof featureContract> {
-  return placeFeaturePrograms(
-    feature as Readonly<Record<string, unknown>>,
-    placement as Readonly<Record<string, string>>,
-    "",
-  ) as Feature<PlacedFeature<FeatureContractOf<Value>, Placement>> &
-    Omit<Value, "programs" | "features" | typeof featureContract>;
-}
-
-export type FeatureContractOf<Value> =
-  Value extends Readonly<{
-    [featureContract]?: infer Contract extends FeatureContract;
-  }>
-    ? Contract
-    : never;
-
-function placeFeaturePrograms(
-  feature: Readonly<Record<string, unknown>>,
-  placement: Readonly<Record<string, string>>,
-  path: string,
-): Readonly<Record<string, unknown>> {
-  const result: Record<string, unknown> = { ...feature };
-  const programs = record(feature.programs);
-  if (programs) {
-    const placed: Record<string, unknown> = Object.create(null);
-    for (const [name, program] of Object.entries(programs)) {
-      const target = placement[name] ?? name;
-      if (Object.hasOwn(placed, target)) {
-        throw new Error(
-          `Feature ${JSON.stringify(path || "<root>")} maps multiple Programs to ${JSON.stringify(target)}.`,
-        );
-      }
-      placed[target] = program;
-    }
-    result.programs = placed;
-  }
-  const features = record(feature.features);
-  if (features) {
-    result.features = Object.fromEntries(
-      Object.entries(features).map(([name, child]) => {
-        const childFeature = record(child);
-        if (!childFeature)
-          throw new TypeError(`Feature ${JSON.stringify(name)} must be an object.`);
-        return [
-          name,
-          placeFeaturePrograms(childFeature, placement, path ? `${path}.${name}` : name),
-        ];
-      }),
-    );
-  }
-  return result;
-}
-
-function record(value: unknown): Readonly<Record<string, unknown>> | undefined {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Readonly<Record<string, unknown>>)
-    : undefined;
-}
 
 type EnvironmentIdentity<Environment extends EnvironmentContract> = Environment extends {
   Name: infer EnvironmentName extends string;

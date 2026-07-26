@@ -6,7 +6,13 @@ import type {
 } from "@/core/dependency";
 import type { FeatureContract } from "@/core/feature";
 import type { UIDefinition, UIElement } from "@/core/ui/language";
-import type { WebNavigation, WebRouteContract, WebRoutes } from "@/platforms/web/routing";
+import type {
+  WebApplicationInterfaceKind,
+  WebNavigation,
+  WebProgramDefinitionKind,
+  WebRouteContract,
+  WebRoutes,
+} from "@/platforms/web/routing";
 import type { Child, IntrinsicElements } from "@/platforms/web/ui";
 
 type WebPrimitiveName = Extract<keyof IntrinsicElements, string>;
@@ -55,7 +61,12 @@ export type WebUI = Readonly<{
 }>;
 
 /** The web realization family. Its main thread may render the web UI language. */
-export type WebPlatform = { readonly Name: "web"; readonly UI: WebUI };
+export type WebPlatform = {
+  readonly Name: "web";
+  readonly UI: WebUI;
+  readonly Program: WebProgramDefinitionKind;
+  readonly Application: WebApplicationInterfaceKind;
+};
 export type BrowserMainThread = {
   readonly Name: "browser-main";
   readonly Platform: WebPlatform;
@@ -82,9 +93,7 @@ export type HttpClient = WebDependency<{
 
 /** Browser history exposed without coupling Features to global objects. */
 export type Navigation<
-  Routes extends Readonly<Record<string, WebRouteContract>> = Readonly<
-    Record<string, WebRouteContract>
-  >,
+  Routes extends Readonly<Record<string, unknown>> = Readonly<Record<string, WebRouteContract>>,
   Owner extends FeatureContract | undefined = undefined,
 > = Dependency<
   {
@@ -170,24 +179,19 @@ export type {
   ShortcutBinding,
   VirtualForOptions,
 } from "@/platforms/web/ui";
-export { createWebInterface, mountFeature } from "@/platforms/web/routing";
 export type {
   Deferred,
   DeferredValue,
-  MountedWebFeature,
   PathParameterName,
   Validate,
   ValidationInput,
   ValidationOutput,
   ValidationRules,
   WebDestination,
-  WebFeature,
   WebInstallation,
   WebInstallationIcon,
-  WebInterface,
   WebJSON,
   WebNavigation,
-  WebRoute,
   WebRouteCache,
   WebRouteContract,
   WebRouteMetadata,

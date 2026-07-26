@@ -5,10 +5,27 @@ type Empty = Record<never, never>;
 export type ActionRecord = Record<string, (...args: never[]) => unknown>;
 type UIKey = "State" | "Actions" | "Components";
 
+/** Adapter-owned projection from one Program contract to its authoring fields. */
+export interface ProgramDefinitionKind {
+  readonly Owner: unknown;
+  readonly ProgramName: PropertyKey;
+  readonly Root: unknown;
+  readonly Contract: unknown;
+  readonly Definition: object;
+}
+
+/** Adapter-owned projection from an Application contract to one interface definition. */
+export interface ApplicationInterfaceKind {
+  readonly Owner: unknown;
+  readonly Definition: object;
+}
+
 /** One technical realization family. Every Platform supports Processes; UI is optional. */
 export type PlatformContract = Readonly<{
   Name: string;
   UI?: UIContract;
+  Program?: ProgramDefinitionKind;
+  Application?: ApplicationInterfaceKind;
 }>;
 
 /**
@@ -74,12 +91,12 @@ type SupportsComponents<
     : false
   : false;
 
-/** Declares one Program and the Environment in which its Processes execute. */
-export type Program<Environment extends EnvironmentContract, Contract extends object = Empty> =
+/** @internal Validates that one Program uses only primitives owned by its Platform. */
+export type ValidProgramContract<Contract extends ProgramContract> =
   HasProgramUI<Contract> extends true
-    ? Environment["Platform"] extends { UI: UIContract }
-      ? SupportsComponents<Environment, Contract> extends true
-        ? Readonly<Contract & { Environment: Environment }>
-        : never
-      : never
-    : Readonly<Contract & { Environment: Environment }>;
+    ? Contract["Environment"]["Platform"] extends { UI: UIContract }
+      ? SupportsComponents<Contract["Environment"], Contract> extends true
+        ? true
+        : false
+      : false
+    : true;

@@ -1,17 +1,16 @@
 import type {
-  Feature,
   FeatureContract,
-  FeatureContractOf,
   FeatureUIAPIs,
-  ProgramDefinition,
   ProgramOwner,
   UIContributionAPI,
 } from "@/core/feature";
-import type { ProgramContract } from "@/core/program";
-import type { PlatformInterface } from "@/core/system";
+import type {
+  ApplicationInterfaceKind,
+  ProgramContract,
+  ProgramDefinitionKind,
+} from "@/core/program";
 import type { ComponentComposition, ComponentUI } from "@/core/ui/component";
 import type { ConfiguredPresentationFor } from "@/core/ui/presentation";
-import type { WebPlatform } from "@/platforms/web";
 import type { WebPresentationLanguage } from "@/platforms/web/presentation";
 
 declare const validation: unique symbol;
@@ -69,6 +68,16 @@ export type Validate<
 }>;
 
 export type WebRouteContract = Readonly<{ Params: object; SearchInput: object }>;
+type ResolvedWebRoute<Route> = Route extends WebRouteSpecification
+  ? WebRoute<Route>
+  : Route extends WebRouteContract
+    ? Route
+    : never;
+type ResolvedWebRoutes<Routes extends Readonly<Record<string, unknown>>> = {
+  readonly [Name in keyof Routes as ResolvedWebRoute<Routes[Name]> extends never
+    ? never
+    : Name]: ResolvedWebRoute<Routes[Name]>;
+};
 type DestinationField<Name extends string, Value extends object> = keyof Value extends never
   ? { readonly [Key in Name]?: never }
   : Empty extends Value
@@ -81,12 +90,13 @@ type RouteDestination<Name extends PropertyKey, Route extends WebRouteContract> 
 
 /** One typed address shape shared by links, navigation, redirects, and URL generation. */
 export type WebDestination<
-  Routes extends Readonly<Record<string, WebRouteContract>> = Readonly<
-    Record<string, WebRouteContract>
-  >,
+  Routes extends Readonly<Record<string, unknown>> = Readonly<Record<string, WebRouteContract>>,
 > = {
-  [Name in keyof Routes]: RouteDestination<Name, Routes[Name]>;
-}[keyof Routes];
+  [Name in keyof ResolvedWebRoutes<Routes>]: RouteDestination<
+    Name,
+    ResolvedWebRoutes<Routes>[Name]
+  >;
+}[keyof ResolvedWebRoutes<Routes>];
 
 export type WebInstallationIcon = Readonly<{
   src: string;
@@ -112,21 +122,26 @@ export type WebInstallation<Contract extends FeatureContract> = Readonly<{
 
 type WebInterfaceDefinition<Owner extends FeatureContract> = Readonly<{
   presentation: ConfiguredPresentationFor<Owner, WebPresentationLanguage>;
+  routes?: Partial<
+    Readonly<
+      Record<
+        Extract<
+          keyof (Owner extends {
+            Features: infer Features extends Record<string, FeatureContract>;
+          }
+            ? Features
+            : Empty),
+          string
+        >,
+        string
+      >
+    >
+  >;
   installation?: WebInstallation<Owner>;
 }>;
 
-/** Web-owned realization configuration for one exact App Feature contract. */
-export type WebInterface<Owner extends FeatureContract> = PlatformInterface<
-  Owner,
-  WebPlatform,
-  WebInterfaceDefinition<Owner>
->;
-
-/** Retains typed web configuration without owning or repeating App Features. */
-export function createWebInterface<Owner extends FeatureContract>(
-  definition: WebInterfaceDefinition<Owner>,
-): WebInterface<Owner> {
-  return definition as WebInterface<Owner>;
+export interface WebApplicationInterfaceKind extends ApplicationInterfaceKind {
+  readonly Definition: WebInterfaceDefinition<Extract<this["Owner"], FeatureContract>>;
 }
 
 type ProgramsOf<Owner> = Owner extends {
@@ -149,10 +164,9 @@ type WebProgramRoutes<Program> = Program extends {
   Routes: infer Routes extends Record<string, unknown>;
 }
   ? {
-      [Name in keyof Routes as Routes[Name] extends WebRouteContract ? Name : never]: Extract<
-        Routes[Name],
-        WebRouteContract
-      >;
+      [Name in keyof Routes as ResolvedWebRoute<Routes[Name]> extends never
+        ? never
+        : Name]: ResolvedWebRoute<Routes[Name]>;
     }
   : Empty;
 type LocalWebRoutes<Owner> = UnionToIntersection<
@@ -183,13 +197,12 @@ type WebRoutesIn<
       >;
 
 type ValidWebRoutes<Routes> = {
-  [Name in keyof Routes as Routes[Name] extends WebRouteContract ? Name : never]: Extract<
-    Routes[Name],
-    WebRouteContract
-  >;
+  [Name in keyof Routes as ResolvedWebRoute<Routes[Name]> extends never
+    ? never
+    : Name]: ResolvedWebRoute<Routes[Name]>;
 };
 
-/** Every qualified web Route contributed by one App Feature contract. */
+/** Every qualified web Route contributed by one Application's Feature contract. */
 export type WebRoutes<Owner extends FeatureContract> = Readonly<
   ValidWebRoutes<WebRoutesIn<Owner, "">>
 >;
@@ -446,10 +459,9 @@ type RoutesOf<Contract> = Contract extends {
   Routes: infer Routes extends Record<string, unknown>;
 }
   ? {
-      [Name in keyof Routes as Routes[Name] extends CompleteWebRoute ? Name : never]: Extract<
-        Routes[Name],
-        CompleteWebRoute
-      >;
+      [Name in keyof Routes as ResolvedWebRoute<Routes[Name]> extends CompleteWebRoute
+        ? Name
+        : never]: Extract<ResolvedWebRoute<Routes[Name]>, CompleteWebRoute>;
     }
   : Empty;
 type DefinitionField<Name extends PropertyKey, Value extends object> = keyof Value extends never
@@ -520,45 +532,23 @@ type WebRouteDefinitions<
     }
   >;
 };
-type WebProgramDefinitions<Owner extends FeatureContract, Root extends FeatureContract> = {
-  readonly [Name in keyof ProgramsOf<Owner>]: ProgramDefinition<Owner, Name, Root> &
-    DefinitionField<
-      "routes",
-      WebRouteDefinitions<Owner, Name, Extract<ProgramsOf<Owner>[Name], ProgramContract>, Root>
-    >;
-};
+type WebProgramDefinitionFields<
+  Owner extends FeatureContract,
+  ProgramName extends keyof ProgramsOf<Owner>,
+  Contract extends ProgramContract,
+  Root extends FeatureContract,
+> = DefinitionField<"routes", WebRouteDefinitions<Owner, ProgramName, Contract, Root>>;
 
-/** A vertical slice whose web-specific Route implementation is checked by the web adapter. */
-export type WebFeature<
-  Contract extends FeatureContract,
-  Root extends FeatureContract = Contract,
-> = Readonly<
-  Omit<Feature<Contract, Root>, "programs"> &
-    DefinitionField<"programs", WebProgramDefinitions<Contract, Root>> &
-    (Contract extends { RoutePath: infer Path extends string }
-      ? { readonly routePath: Path }
-      : { readonly routePath?: never })
->;
-
-export type MountedWebFeature<Owner extends FeatureContract, Path extends string> = Readonly<
-  Owner & { RoutePath: Path }
->;
-
-/** Assigns one relative web Route base without changing a reusable Feature implementation. */
-export function mountFeature<Value extends object, const Path extends string>(
-  feature: Value,
-  input: Readonly<{ path: Path }>,
-): WebFeature<MountedWebFeature<FeatureContractOf<Value>, Path>> & Omit<Value, "routePath"> {
-  if (input.path.startsWith("/")) {
-    throw new TypeError("A mounted Feature path must be relative.");
-  }
-  return { ...feature, routePath: input.path } as unknown as WebFeature<
-    MountedWebFeature<FeatureContractOf<Value>, Path>
-  > &
-    Omit<Value, "routePath">;
+export interface WebProgramDefinitionKind extends ProgramDefinitionKind {
+  readonly Definition: WebProgramDefinitionFields<
+    Extract<this["Owner"], FeatureContract>,
+    Extract<this["ProgramName"], keyof ProgramsOf<Extract<this["Owner"], FeatureContract>>>,
+    Extract<this["Contract"], ProgramContract>,
+    Extract<this["Root"], FeatureContract>
+  >;
 }
 
-export type WebNavigation<Routes extends Readonly<Record<string, WebRouteContract>>> = Readonly<{
+export type WebNavigation<Routes extends Readonly<Record<string, unknown>>> = Readonly<{
   current(): URL;
   href(destination: WebDestination<Routes>): string;
   navigate(destination: WebDestination<Routes> & Readonly<{ replace?: boolean }>): void;

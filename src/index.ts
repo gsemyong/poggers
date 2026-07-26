@@ -11,18 +11,18 @@ export type {
   DependencyReferenceDefinition,
 } from "@/core/dependency";
 export { DependencyFailureError } from "@/core/dependency";
-export type { Feature, FeatureContract, FeatureContractOf, PlacedFeature } from "@/core/feature";
-export { createFeature, placePrograms } from "@/core/feature";
+export type { Feature, FeatureContract, FeatureContractOf } from "@/core/feature";
+export { createFeature } from "@/core/feature";
 export type {
-  AppFeatureContract,
-  PlatformInterface,
-  PlatformInterfaceContract,
+  Application,
+  ApplicationContract,
+  ApplicationContractOf,
   System,
   SystemContractOf,
   SystemMetadata,
 } from "@/core/system";
-export { createApp, createSystem } from "@/core/system";
-export type { EnvironmentContract, PlatformContract, Program } from "@/core/program";
+export { createApplication, createSystem } from "@/core/system";
+export type { EnvironmentContract, PlatformContract } from "@/core/program";
 export { mapStream } from "@/core/stream";
 export { ActorError, createActor } from "@/features/actor";
 export type {

@@ -2,11 +2,13 @@ import { describe, expect, test } from "vitest";
 
 import type { ProgramIR } from "@/compiler/ir";
 import type { Feature } from "@/core/feature";
-import type { Program } from "@/core/program";
 import type { System } from "@/core/system";
 import { startServerPrograms } from "@/platforms/server/adapter/typescript/runtime";
 
 type Server = Readonly<{ Name: "server"; Platform: { Name: "server" } }>;
+type Program<Environment, Contract extends object = object> = Readonly<
+  Contract & { Environment: Environment }
+>;
 type Reader = Readonly<{ read(): string }>;
 type Clock = Readonly<{ now(): number }>;
 type Provider = Readonly<{

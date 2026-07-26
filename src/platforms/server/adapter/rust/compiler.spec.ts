@@ -919,7 +919,6 @@ import {
   type Actor,
   type Dependency,
   type Feature,
-  type Program,
 } from "@/index";
 import type {
   Clock,
@@ -1153,7 +1152,8 @@ async function normalizedJournal(
 }
 type Probe = {
   Programs: {
-    server: Program<ServerProcess, {
+    server: {
+      Environment: ServerProcess;
       Requires: {
         counter: Actor.Reference<typeof counter>;
         cycleA: Actor.Reference<typeof cycleA>;
@@ -1163,7 +1163,7 @@ type Probe = {
         clock: Clock;
         timer: Timer;
       };
-    }>;
+    };
   };
 };
 const probe = createFeature<Probe>({
@@ -1303,7 +1303,6 @@ import {
   createSystem,
   type Actor,
   type Dependency,
-  type Program,
 } from "@/index";
 import type { Alarm, Clock, ServerProcess, Timer } from "@/platforms/server";
 
@@ -1358,18 +1357,16 @@ type Driver = Dependency<{
 }>;
 type Probe = {
   Programs: {
-    server: Program<
-      ServerProcess,
-      {
-        Requires: {
-          alarm: Alarm;
-          clock: ActorClock;
-          counter: Actor.Reference<typeof counter>;
-          recorder: Recorder;
-        };
-        Provides: { driver: Driver };
-      }
-    >;
+    server: {
+      Environment: ServerProcess;
+      Requires: {
+        alarm: Alarm;
+        clock: ActorClock;
+        counter: Actor.Reference<typeof counter>;
+        recorder: Recorder;
+      };
+      Provides: { driver: Driver };
+    };
   };
 };
 const probe = createFeature<Probe>({

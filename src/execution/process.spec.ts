@@ -13,7 +13,6 @@ import {
   type DependencyProviderInvocation,
 } from "@/core/dependency";
 import type { Feature } from "@/core/feature";
-import type { Program } from "@/core/program";
 import type { System } from "@/core/system";
 import {
   bindDependenciesToScope,
@@ -30,6 +29,9 @@ import type { BrowserMainThread } from "@/platforms/web";
 
 type ServerPlatform = { readonly Name: "server" };
 type Server = { readonly Name: "server"; readonly Platform: ServerPlatform };
+type Program<Environment, Contract extends object = object> = Readonly<
+  Contract & { Environment: Environment }
+>;
 
 describe("Program runtime", () => {
   test("enforces one compiler-derived contract across synchronous, asynchronous, and stream calls", async () => {

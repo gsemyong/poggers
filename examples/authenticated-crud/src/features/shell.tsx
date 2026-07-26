@@ -1,5 +1,5 @@
-import type { Program } from "kit";
-import type { BrowserMainThread, Child, Navigation, WebFeature, WebRoute } from "kit/web";
+import { createFeature } from "kit";
+import type { BrowserMainThread, Child, Navigation } from "kit/web";
 
 import type { Workspace } from "@/apps/workspace";
 import type { IdentityClient, Session } from "@/features/identity";
@@ -7,78 +7,74 @@ import type { IdentityClient, Session } from "@/features/identity";
 type AuthMode = "sign-in" | "sign-up";
 type AuthPhase = "loading" | "signed-out" | "signed-in";
 type ShellRoutes = {
-  auth: WebRoute<{
+  auth: {
     Path: "auth";
     Metadata: { Title: "Sign in"; Robots: "noindex" };
-  }>;
+  };
 };
 
 export type ShellFeature = Readonly<{
   Programs: {
-    browser: Program<
-      BrowserMainThread,
-      {
-        Requires: {
-          identity: IdentityClient;
-          navigation: Navigation<ShellRoutes, Workspace>;
-        };
-        State: {
-          phase: AuthPhase;
-          mode: AuthMode;
-          session: Session | undefined;
-          name: string;
-          email: string;
-          password: string;
-          working: boolean;
-          error: string | undefined;
-        };
-        Actions: {
-          refresh(): Promise<void>;
-          changeName(input: { value: string }): void;
-          changeEmail(input: { value: string }): void;
-          changePassword(input: { value: string }): void;
-          switchMode(): void;
-          submit(): Promise<void>;
-          signOut(): Promise<void>;
-        };
-        Components: {
-          Layout: {
-            Slots: { Content: Child };
-            Elements: {
-              Root: "main";
-              Topbar: "header";
-              BrandGroup: "div";
-              Mark: "span";
-              Brand: "h1";
-              Account: "div";
-              User: "p";
-              SignOut: "button";
-              Content: "div";
-              AuthLayout: "section";
-              AuthIntro: "div";
-              AuthEyebrow: "p";
-              AuthTitle: "h1";
-              AuthCopy: "p";
-              AuthPanel: "div";
-              Form: "form";
-              Label: "label";
-              Input: "input";
-              Submit: "button";
-              Switch: "button";
-              Error: "p";
-            };
+    browser: {
+      Environment: BrowserMainThread;
+      Requires: {
+        identity: IdentityClient;
+        navigation: Navigation<ShellRoutes, Workspace>;
+      };
+      State: {
+        phase: AuthPhase;
+        mode: AuthMode;
+        session: Session | undefined;
+        name: string;
+        email: string;
+        password: string;
+        working: boolean;
+        error: string | undefined;
+      };
+      Actions: {
+        refresh(): Promise<void>;
+        changeName(input: { value: string }): void;
+        changeEmail(input: { value: string }): void;
+        changePassword(input: { value: string }): void;
+        switchMode(): void;
+        submit(): Promise<void>;
+        signOut(): Promise<void>;
+      };
+      Components: {
+        Layout: {
+          Slots: { Content: Child };
+          Elements: {
+            Root: "main";
+            Topbar: "header";
+            BrandGroup: "div";
+            Mark: "span";
+            Brand: "h1";
+            Account: "div";
+            User: "p";
+            SignOut: "button";
+            Content: "div";
+            AuthLayout: "section";
+            AuthIntro: "div";
+            AuthEyebrow: "p";
+            AuthTitle: "h1";
+            AuthCopy: "p";
+            AuthPanel: "div";
+            Form: "form";
+            Label: "label";
+            Input: "input";
+            Submit: "button";
+            Switch: "button";
+            Error: "p";
           };
         };
-        Routes: ShellRoutes;
-      }
-    >;
+      };
+      Routes: ShellRoutes;
+    };
   };
 }>;
 
-export function createShell(
-  input: Readonly<{ name: string }>,
-): WebFeature<ShellFeature, Workspace> {
-  return {
+export function createShell(input: Readonly<{ name: string }>) {
+  return createFeature<ShellFeature>({
     programs: {
       browser: {
         state: {
@@ -304,14 +300,14 @@ export function createShell(
         },
         routes: {
           auth: {
-            view({ components: { Shell } }) {
-              return <Shell.Layout Content={null} />;
+            view({ components: { Layout } }) {
+              return <Layout Content={null} />;
             },
           },
         },
       },
     },
-  };
+  });
 }
 
 function redirectForSession(

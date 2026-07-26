@@ -6,6 +6,8 @@ import system from "@/system";
 export default createDeployment(system, {
   adapter: createLocalDeploymentAdapter(),
   interfaces: {
-    "main.web": { hosts: ["basic.localhost"] },
+    main: {
+      web: { hosts: ["basic.localhost"] },
+    },
   },
 });

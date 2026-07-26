@@ -6,6 +6,7 @@ const referenceDocuments = new Map<string, string>();
 testSystem({
   name: "request-rendered web System",
   directory: new URL("..", import.meta.url).pathname,
+  tags: ["package"],
   async verify({ location, locations, realization, metrics }) {
     const productLocation = locations["interface/product.web"]?.[0] ?? location;
     const adminLocation = locations["interface/administration.web"]?.[0];

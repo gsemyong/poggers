@@ -1,7 +1,6 @@
 import {
   createIdentity,
   type FeatureContractOf,
-  placePrograms,
   type AuthenticatedUser,
   type IdentityClient as FeatureIdentityClient,
   type IdentityModel,
@@ -18,11 +17,8 @@ export type Identity = IdentityModel<{
 export type Session = IdentitySession<Identity>;
 export type IdentityClient = FeatureIdentityClient<Identity>;
 
-export const identity = placePrograms(
-  createIdentity<Identity>({
-    principal: (user: AuthenticatedUser): User => user,
-  }),
-  { server: "api", browser: "browser" },
-);
+export const identity = createIdentity<Identity>({
+  principal: (user: AuthenticatedUser): User => user,
+});
 
 export type IdentityBrowserFeature = FeatureContractOf<typeof identity>;

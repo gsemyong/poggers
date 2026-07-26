@@ -5,7 +5,6 @@ import {
   type DependencyImplementations,
 } from "@/core/dependency";
 import { createFeature, type Feature } from "@/core/feature";
-import type { Program } from "@/core/program";
 import { startFeatureFixture } from "@/execution/process";
 import type {
   HttpField,
@@ -75,17 +74,16 @@ type BrowserProvision<Model extends IdentityModelDefinition> = Readonly<{
 
 export type IdentityFeature<Model extends IdentityModelDefinition> = Readonly<{
   Programs: {
-    server: Program<
-      ServerProcess,
-      {
-        Requires: { authentication: AuthenticationBackend; http: HttpServer };
-        Provides: ServerProvision<Model>;
-      }
-    >;
-    browser: Program<
-      BrowserMainThread,
-      { Requires: { http: HttpClient }; Provides: BrowserProvision<Model> }
-    >;
+    server: {
+      Environment: ServerProcess;
+      Requires: { authentication: AuthenticationBackend; http: HttpServer };
+      Provides: ServerProvision<Model>;
+    };
+    browser: {
+      Environment: BrowserMainThread;
+      Requires: { http: HttpClient };
+      Provides: BrowserProvision<Model>;
+    };
   };
   Providers: {
     server: { authentication: ServerDependencyProvider<AuthenticationBackend> };

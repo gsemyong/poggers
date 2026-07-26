@@ -19,7 +19,7 @@ TypeScript product source
 
 1. **System is the only root.** It is the complete compilation and development
    boundary for one Workspace.
-2. **Feature is the only recursive composition unit.** An App owns one Feature
+2. **Feature is the only recursive composition unit.** An Application owns one Feature
    composition; its platform interfaces configure realization and never repeat
    that composition.
 3. **Program is the authored deployment unit.** Same-named compatible
@@ -49,18 +49,25 @@ TypeScript product source
 ### Workspace
 
 The source repository and development boundary. It contains one `src/system.ts`,
-shared Features, App Features, Presentations, tests, and configuration. It is a
+shared Features, Applications, Presentations, tests, and configuration. It is a
 tooling convention, not an IR primitive.
 
 ### System
 
-The company-level composition root. It contains metadata and named Features.
-It contains no adapter instances, host wiring, or global Presentation registry.
+The company-level composition root. It contains metadata, standalone Features,
+and Applications. It contains no adapter instances, host wiring, Program
+placement, or global Presentation registry.
 
 ```ts
-export default createSystem({
+type Company = {
+  Features: { shared: SharedFeature };
+  Applications: { customer: Customer; operations: Operations };
+};
+
+export default createSystem<Company>({
   metadata: { name: "Company" },
-  features: { customer, operations },
+  features: { shared },
+  applications: { customer, operations },
 });
 ```
 
@@ -74,8 +81,8 @@ Dependency contracts.
 ```ts
 export const tasks = createFeature<Tasks>({
   programs: {
-    api: { start({ dependencies }) {} },
-    browser: { state, actions, components },
+    server: { start({ dependencies }) {} },
+    browser: { state, actions, components, routes },
   },
 });
 ```
@@ -83,9 +90,14 @@ export const tasks = createFeature<Tasks>({
 A Feature sees only its declared children and Dependencies. It has no ambient
 access to the consuming System.
 
-### App
+The generic contract declares Program Environments, Dependencies, UI state,
+actions, Components, Routes, and child Feature contracts directly. There is no
+`Program<...>` authoring wrapper: the implementation object fills the behavior
+required by that contract.
 
-An App is one named product experience. It owns its domain Feature values once
+### Application
+
+An Application is one named product experience. It selects its Feature values once
 and may expose that same behavior through one interface per Platform.
 
 ```ts
@@ -95,50 +107,50 @@ type Customer = {
     shell: ShellFeature;
     tasks: FeatureContractOf<typeof tasks>;
   };
+  Interfaces: WebPlatform;
 };
 
-const features = {
-  identity,
-  shell: createShell({ name: "Customer" }),
-  tasks,
-};
-
-export const customer = createApp({
-  features,
+export const customer = createApplication<Customer>({
+  features: {
+    identity,
+    shell: createShell({ name: "Customer" }),
+    tasks,
+  },
   interfaces: {
-    web: createWebInterface<Customer>({
+    web: {
       presentation: customerWeb,
+      routes: { shell: "", tasks: "tasks" },
       installation: customerInstallation,
-    }),
+    },
   },
 });
 ```
 
 The factory call creates a Feature instance. Reusing that exact value in
-several Apps references the same semantic instance; it does not instantiate or
+several Applications references the same semantic instance; it does not instantiate or
 copy it. Calling the factory again creates another instance. This concrete
 value rule is both simpler and more precise than a type-only `uses` relation:
 types describe compatibility, while values select implementations.
 
 An interface is not another Feature tree. It contains only Platform-owned
-configuration such as a web Presentation and installation policy. A web and
-iOS interface of the same App therefore receive the same domain composition,
+configuration such as a web Presentation, route mounts, and installation policy. A web and
+iOS interface of the same Application therefore receive the same domain composition,
 while each Platform retains its own structure, navigation, accessibility, and
-Presentation language. An App has at most one interface for a given Platform;
+Presentation language. An Application has at most one interface for a given Platform;
 independently addressable experiences with different route, loading, security,
-or installation lifecycles are separate Apps that may reuse the same Feature
+or installation lifecycles are separate Applications that may reuse the same Feature
 values.
 
 ### Program And Process
 
 A Program is the linked result of every compatible contribution with the same
-concrete name. Different names produce independently realizable artifacts.
-`placePrograms` maps logical roles used by a reusable factory to concrete names
-at composition.
+semantic name and Environment. Different names produce independently realizable
+artifacts. Feature and Application composition never rewrites Program names.
 
 A Process is one running Program instance. Replication creates more Processes
-from the same artifact. Coordination, sharding, persistence, and communication
-are expressed through Dependencies rather than a second execution model.
+from the same artifact. Deployment selects replica policy; coordination,
+sharding, persistence, and communication are expressed through Dependencies
+rather than a second execution model.
 
 ### Environment And Platform
 
@@ -163,7 +175,7 @@ HTML and CSS without a client script or hydration markers.
 
 Installation and background warming belong to one web Interface. A public
 static surface and an authenticated offline application should therefore be
-separate Apps when they have different loading and security lifecycles. Their
+separate Applications when they have different loading and security lifecycles. Their
 web interfaces may remain in the same System, reuse the exact same Feature
 values and Presentation, and receive separate hostnames from Deployment. This
 avoids auth-specific rendering switches and prevents an installable
@@ -224,23 +236,23 @@ consume the same linked IR and may use different implementation languages.
 The compiler walks the Feature tree once, links Program contributions, resolves
 Dependencies, and records exact output ownership. This supports:
 
-- several Apps in one System;
-- several platform interfaces per App;
-- shared and App-private backend Programs;
-- focused App development without duplicating shared Programs;
+- several Applications in one System;
+- several platform interfaces per Application;
+- shared and Application-private backend Programs;
+- focused Application development without duplicating shared Programs;
 - independent Program replicas in production.
 
 Feature composition and cross-Feature communication are intentionally
 different operations:
 
-- an App or Feature composes concrete child Feature values;
+- an Application or Feature composes concrete child Feature values;
 - JSX composes Components from the visible Feature tree;
 - separately realized Programs communicate through typed Dependencies;
 - Presentations enrich the exact Component contract for one Platform.
 
 The compiler assigns every concrete Feature value a stable source identity.
-When the same value contributes the same headless Program through several Apps,
-linking retains one contribution and records all owning Apps. UI contributions
+When the same value contributes the same headless Program through several Applications,
+linking retains one contribution and records all owning Applications. UI contributions
 are assigned to the interface whose Platform matches their Environment. This
 is semantic sharing, not heuristic deduplication by compatible type or name.
 

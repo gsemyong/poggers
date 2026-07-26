@@ -118,6 +118,7 @@ type RuntimeFeature = Readonly<{
 type RuntimeSystem = Readonly<{
   metadata?: Readonly<{ name?: string }>;
   features?: Readonly<Record<string, RuntimeFeature>>;
+  applications?: Readonly<Record<string, RuntimeFeature>>;
 }>;
 
 export type RuntimeConfiguredPresentation = Readonly<{
@@ -320,7 +321,7 @@ export async function createInterfaceUI<Contract extends SystemContract>({
         dependencies,
         apis: programUI.apis,
         featureDependencies: programUI.dependencies,
-        components: componentNamespaces[""]!,
+        composition,
         loadRoute,
         routeLoaders,
         boundary,
@@ -393,7 +394,7 @@ async function createRouteRuntime(options: {
   dependencies: Readonly<Record<string, unknown>>;
   apis: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
   featureDependencies: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
-  components: Record<string, unknown>;
+  composition: RuntimeComponentComposition;
   loadRoute?(route: WebRouteIR): Promise<RuntimeRouteDefinition>;
   routeLoaders?: readonly string[];
   boundary: Element;
@@ -584,7 +585,7 @@ async function createRouteRuntime(options: {
       search: current.match.search,
       feature: options.apis[feature] ?? {},
       features: childFeatureAPIs(feature, options.apis),
-      components: options.components,
+      components: componentsForOwner(feature, options.composition),
     });
   };
   return {
@@ -718,12 +719,7 @@ function routeDefinition(
   program: string,
   route: WebRouteIR,
 ): RuntimeRouteDefinition {
-  let feature: RuntimeFeature | undefined;
-  let features = system.features;
-  for (const name of route.feature.split(".")) {
-    feature = features?.[name];
-    features = feature?.features;
-  }
+  const feature = resolveRuntimeFeature(system, route.feature);
   const definition = feature?.programs?.[program]?.routes?.[route.name];
   if (!definition)
     throw new Error(`Missing implementation for web Route ${route.feature}.${route.name}.`);
@@ -1130,12 +1126,12 @@ function componentLocalName(component: string): string {
 }
 
 function resolveRuntimeFeature(system: RuntimeSystem, path: string): RuntimeFeature | undefined {
-  let feature: RuntimeFeature | undefined;
-  let features = system.features;
-  for (const name of path.split(".").filter(Boolean)) {
-    feature = features?.[name];
+  const [root, ...segments] = path.split(".").filter(Boolean);
+  if (!root) return undefined;
+  let feature = system.applications?.[root] ?? system.features?.[root];
+  for (const name of segments) {
+    feature = feature?.features?.[name];
     if (!feature) return undefined;
-    features = feature.features;
   }
   return feature;
 }
@@ -1208,7 +1204,13 @@ function componentsForComponent(
   component: string,
   composition: RuntimeComponentComposition,
 ): Record<string, unknown> {
-  const owner = componentOwner(component) ?? "";
+  return componentsForOwner(componentOwner(component) ?? "", composition);
+}
+
+function componentsForOwner(
+  owner: string,
+  composition: RuntimeComponentComposition,
+): Record<string, unknown> {
   return Object.assign(
     Object.create(null),
     composition.componentNamespaces[""] ?? {},

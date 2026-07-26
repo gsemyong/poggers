@@ -1679,9 +1679,10 @@ function routeModuleSource(input: {
   );
   return `import system from ${JSON.stringify(system)};
 
-let feature = system;
-for (const name of ${JSON.stringify(input.route.feature.split(".").filter(Boolean))}) {
-  feature = feature.features?.[name];
+const [root, ...path] = ${JSON.stringify(input.route.feature.split(".").filter(Boolean))};
+let feature = system.applications?.[root] ?? system.features?.[root];
+for (const name of path) {
+  feature = feature?.features?.[name];
 }
 const definition = feature?.programs?.[${JSON.stringify(input.program)}]?.routes?.[${JSON.stringify(input.route.name)}];
 if (!definition || typeof definition.view !== "function") {
@@ -2502,9 +2503,10 @@ async function prepareProductionDocuments(
       `import system from ${JSON.stringify(paths.system)};
 import { prepareClientWebDocument, prepareInitialWebPresentation, prepareWebDocument } from ${JSON.stringify(resolve(import.meta.dirname, `document${moduleExtension()}`))};
 
-let appFeature = system;
-for (const name of ${JSON.stringify(contract.interface.app.split(".").filter(Boolean))}) {
-  appFeature = appFeature.features?.[name];
+const [appRoot, ...appPath] = ${JSON.stringify(contract.interface.app.split(".").filter(Boolean))};
+let appFeature = system.applications?.[appRoot] ?? system.features?.[appRoot];
+for (const name of appPath) {
+  appFeature = appFeature?.features?.[name];
 }
 const interfaceFeature =
   appFeature?.interfaces?.[${JSON.stringify(contract.interface.path.slice(contract.interface.app.length + 1))}];
@@ -2959,9 +2961,10 @@ import { createWebUIAdapter, render } from ${JSON.stringify(input.runtime)};
 import { startProcess } from ${JSON.stringify(input.processRuntime)};
 
 export const manifest = ${JSON.stringify(input.hotManifest)};
-let appFeature = system;
-for (const name of ${JSON.stringify(input.interface.split(".").slice(0, -1).filter(Boolean))}) {
-  appFeature = appFeature.features?.[name];
+const [appRoot, ...appPath] = ${JSON.stringify(input.interface.split(".").slice(0, -1).filter(Boolean))};
+let appFeature = system.applications?.[appRoot] ?? system.features?.[appRoot];
+for (const name of appPath) {
+  appFeature = appFeature?.features?.[name];
 }
 const interfaceFeature =
   appFeature?.interfaces?.[${JSON.stringify(input.interface.split(".").at(-1))}];
@@ -3234,9 +3237,10 @@ function developmentDocumentEvaluatorSource(input: {
   return `import system from ${JSON.stringify(system)};
 import { prepareWebDocument } from ${JSON.stringify(input.document)};
 
-let appFeature = system;
-for (const name of ${JSON.stringify(input.interface.split(".").slice(0, -1).filter(Boolean))}) {
-  appFeature = appFeature.features?.[name];
+const [appRoot, ...appPath] = ${JSON.stringify(input.interface.split(".").slice(0, -1).filter(Boolean))};
+let appFeature = system.applications?.[appRoot] ?? system.features?.[appRoot];
+for (const name of appPath) {
+  appFeature = appFeature?.features?.[name];
 }
 const interfaceFeature =
   appFeature?.interfaces?.[${JSON.stringify(input.interface.split(".").at(-1))}];
@@ -3487,6 +3491,7 @@ export function validateUIProgramRoot(system: Record<string, unknown>, program: 
     }
   };
   visit(system.features, "");
+  visit(system.applications, "");
   if ((routes === 0 && roots.length !== 1) || (routes > 0 && roots.length !== 0)) {
     throw new Error(
       routes > 0

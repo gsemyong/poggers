@@ -24,11 +24,15 @@ import system from "@/system";
 export default createDeployment(system, {
   adapter: createLocalDeploymentAdapter(),
   interfaces: {
-    "customer.web": {
-      hosts: ["app.localhost"],
+    customer: {
+      web: {
+        hosts: ["app.localhost"],
+      },
     },
-    "operations.web": {
-      hosts: ["operations.localhost"],
+    operations: {
+      web: {
+        hosts: ["operations.localhost"],
+      },
     },
   },
   programs: {
@@ -45,7 +49,7 @@ Interface names are inferred too. A Deployment assigns hostnames; its adapter
 owns DNS records, certificates, gateways, and any CDN realization required to
 make those hostnames converge. These concerns do not enter Feature or Route
 definitions. The local adapter realizes the same contract with `.localhost`
-hostnames, allowing multi-App host routing to be tested without provider
+hostnames, allowing multi-Application host routing to be tested without provider
 credentials.
 
 Use `secret("name")` when an adapter configuration or Dependency binding needs

@@ -230,6 +230,7 @@ type RuntimeFeature = Readonly<{
 type RuntimeSystem = Readonly<{
   metadata?: Readonly<{ name?: string }>;
   features?: Readonly<Record<string, RuntimeFeature>>;
+  applications?: Readonly<Record<string, RuntimeFeature>>;
 }>;
 
 type RuntimeConfiguredPresentation = Readonly<{
@@ -2210,12 +2211,12 @@ function createPreparedPresentation(
 }
 
 function resolveRuntimeFeature(system: RuntimeSystem, path: string): RuntimeFeature | undefined {
-  let feature: RuntimeFeature | undefined;
-  let features = system.features;
-  for (const name of path.split(".").filter(Boolean)) {
-    feature = features?.[name];
+  const [root, ...segments] = path.split(".").filter(Boolean);
+  if (!root) return undefined;
+  let feature = system.applications?.[root] ?? system.features?.[root];
+  for (const name of segments) {
+    feature = feature?.features?.[name];
     if (!feature) return undefined;
-    features = feature.features;
   }
   return feature;
 }

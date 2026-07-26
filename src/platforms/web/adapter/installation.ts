@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import type { SystemIR } from "@/compiler/ir";
 import {
   resolveWebDestination,
-  webFeatureCompilerIR,
+  webInterfaceCompilerIR,
   type WebInstallationIconIR,
   type WebRouteIR,
 } from "@/platforms/web/adapter/lowering";
@@ -35,7 +35,7 @@ export function planWebInstallation(
   if (!interface_) throw new Error(`Unknown web interface ${JSON.stringify(interfaceId)}.`);
   const extension = interface_.extensions?.web;
   if (!extension) return undefined;
-  const installation = webFeatureCompilerIR(extension).installation;
+  const installation = webInterfaceCompilerIR(extension).installation;
   if (!installation) return undefined;
   const start = resolveWebDestination(routes, installation.start);
   const fallback = resolveWebDestination(routes, installation.offline.fallback);
