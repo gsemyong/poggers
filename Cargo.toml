@@ -1,0 +1,19 @@
+[workspace]
+resolver = "3"
+members = [
+  "src/features/data/providers/server/rust",
+  "src/features/identity/providers/server/rust",
+  "src/compiler/rust/runtime",
+  "src/platforms/server/adapter/rust/distribution",
+  "src/platforms/server/adapter/rust/providers/alarm",
+  "src/platforms/server/adapter/rust/providers/clock",
+  "src/platforms/server/adapter/rust/providers/events/sqlite",
+  "src/platforms/server/adapter/rust/providers/events/jetstream",
+  "src/platforms/server/adapter/rust/providers/execution-context",
+  "src/platforms/server/adapter/rust/providers/synchronization",
+  "src/platforms/server/adapter/rust/providers/telemetry",
+  "src/platforms/server/adapter/rust/providers/http",
+  "src/platforms/server/adapter/rust/providers/identifiers",
+  "src/platforms/server/adapter/rust/providers/timer",
+  "src/platforms/server/adapter/rust/fixtures/recorder",
+]

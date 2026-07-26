@@ -1,5 +1,3 @@
-export { typeLiteral, typeSchema } from "@/core/intrinsic";
-export type { PortableLiteral, TypeSchema } from "@/core/intrinsic";
 export type {
   Dependency,
   DependencyContract,
@@ -25,15 +23,6 @@ export type {
 export { createApp, createSystem } from "@/core/system";
 export type { EnvironmentContract, PlatformContract, Program } from "@/core/program";
 export { mapStream } from "@/core/stream";
-export type {
-  Deployment,
-  DeploymentDefinition,
-  DeploymentDependencies,
-  DeploymentProgram,
-  DeploymentPrograms,
-  SecretReference,
-} from "@/contracts/deployment";
-export { createDeployment, secret } from "@/contracts/deployment";
 export { ActorError, createActor } from "@/features/actor";
 export type {
   Actor,
@@ -49,7 +38,6 @@ export type {
   EntityApi,
   EntityActions,
   EntityAuthorization,
-  EntityBrowserFeature,
   EntityEvent,
   EntityFailureCode,
   EntityImplementation,
@@ -59,7 +47,6 @@ export type {
   EntityService,
   EntitySnapshot,
   EntityState,
-  EntityServerFeature,
   EntityMutation,
   EntitySynchronization,
   EntityValue,
@@ -68,7 +55,6 @@ export { bindDataPrincipal, createData } from "@/features/data";
 export type {
   DataApi,
   DataAuthorization,
-  DataBrowserFeature,
   DataCondition,
   DataImplementation,
   DataMatch,
@@ -77,7 +63,6 @@ export type {
   DataQuery,
   DataSearch,
   DataSearchSnapshot,
-  DataServerFeature,
   DataService,
   DataSnapshot,
   DefinedData,
@@ -86,12 +71,10 @@ export { createIdentity } from "@/features/identity";
 export type {
   AuthenticatedUser,
   DefinedIdentity,
-  IdentityBrowserFeature,
   IdentityClient,
   IdentityImplementation,
   IdentityModel,
   IdentityModelDefinition,
   IdentitySession,
-  IdentityServerFeature,
   IdentityService,
 } from "@/features/identity";

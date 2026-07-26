@@ -13,7 +13,7 @@ import {
   createPresentationFrame,
   eventCursor,
   readEventOccurrences,
-} from "@/runtime/presentation";
+} from "@/execution/presentation";
 
 describe("Presentation kernel", () => {
   it("normalizes one logical frame into deterministic immutable data", () => {

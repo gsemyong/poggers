@@ -42,8 +42,17 @@ builds the System graph once and adapters realize only the requested outputs.
 
 ## Develop The Kit
 
-This repository contains the framework, its canonical starter, and focused
-examples:
+This repository keeps three workspace roles distinct:
+
+- `template/` is the single source copied by `kit create`;
+- `playground/` is the interactive lab for developing Features and
+  Presentations;
+- `examples/authenticated-crud/` is the one representative end-to-end System.
+
+They are not alternate project shapes. All three use the same public API and
+source convention.
+
+Develop the framework with:
 
 ```sh
 mise install
@@ -59,13 +68,12 @@ nub run release -- 0.1.0 --dry-run
 nub run release -- 0.1.0
 ```
 
-Run the presentation lab or the multi-App authenticated example:
+Run the playground or the authenticated example:
 
 ```sh
+nub run dev
 nub run dev:example
-nub run dev:crud
 ```
 
 See the [architecture](docs/architecture.md), [Feature convention](docs/features.md),
-[compatibility policy](docs/compatibility.md), and
-[Portable TypeScript profile](docs/portable-typescript.md).
+and [Portable TypeScript profile](docs/portable-typescript.md).

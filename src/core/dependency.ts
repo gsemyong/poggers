@@ -12,6 +12,7 @@ type UnionToIntersection<Union> = (Union extends unknown ? (value: Union) => voi
   : never;
 declare const dependencyDefinition: unique symbol;
 declare const dependencyReferenceDefinition: unique symbol;
+declare const dependencyProviderDefinition: unique symbol;
 export const dependencyInvocation: unique symbol = Symbol("kit.dependency.invocation");
 export const dependencyInvocationControl: unique symbol = Symbol(
   "kit.dependency.invocation.control",
@@ -52,15 +53,35 @@ export type Dependency<
   API extends Procedures = Definition["Operations"],
 > = Readonly<
   API & {
-    readonly [dependencyDefinition]: Definition;
+    readonly [dependencyDefinition]?: Definition;
   }
 >;
 
 export type DependencyContract = Dependency<DependencyDefinition>;
 
+/**
+ * One owner-collocated realization of a Dependency.
+ *
+ * Feature composition does not call this object. Platform adapters select its
+ * development and production halves while Programs see only `Api`.
+ */
+export type DependencyProvider<
+  Api extends DependencyContract,
+  Development,
+  Production = never,
+  Requirements = never,
+> = Readonly<
+  {
+    development: Development;
+  } & ([Production] extends [never] ? object : { production: Production }) &
+    ([Requirements] extends [never] ? object : { requirements: Requirements }) & {
+      readonly [dependencyProviderDefinition]?: Api;
+    }
+>;
+
 export type DependencyDefinitionOf<Api extends DependencyContract> =
   Api extends Readonly<{
-    [dependencyDefinition]: infer Definition extends DependencyDefinition;
+    [dependencyDefinition]?: infer Definition extends DependencyDefinition;
   }>
     ? Definition
     : never;
@@ -173,13 +194,8 @@ export class DependencyFailureError extends Error {
   }
 }
 
-type OperationOutput<Operation> = Operation extends (...arguments_: never[]) => infer Output
-  ? Awaited<Output>
-  : never;
 type ProviderOperationResult<Operation> = Operation extends (...arguments_: never[]) => infer Output
-  ? Output extends PromiseLike<unknown>
-    ? PromiseLike<OperationOutput<Operation>>
-    : Output
+  ? Output
   : never;
 
 /** The one implementation projection used by portable and host providers. */
@@ -195,10 +211,29 @@ export type DependencyImplementation<Api extends DependencyContract> = {
   ) => ProviderOperationResult<DependencyDefinitionOf<Api>["Operations"][Operation]>;
 };
 
+/**
+ * Internal runtime form used when a generated Feature dispatches operations
+ * from materialized semantic metadata rather than repeating them as object
+ * properties.
+ */
+type DependencyDispatcher<Api extends DependencyContract> = Readonly<{
+  [dependencyInvocation](
+    operation: Extract<keyof DependencyDefinitionOf<Api>["Operations"], string>,
+    input: InputOf<
+      DependencyDefinitionOf<Api>["Operations"][keyof DependencyDefinitionOf<Api>["Operations"]]
+    >,
+    invocation: DependencyInvocation,
+  ): unknown;
+}>;
+
+type ProvidedDependencyImplementation<Api extends DependencyContract> =
+  | DependencyImplementation<Api>
+  | DependencyDispatcher<Api>;
+
 /** Projects a named consumer Dependency map to the providers a host must mount. */
 export type DependencyImplementations<Dependencies extends object> = {
   readonly [Name in keyof Dependencies]: Dependencies[Name] extends DependencyContract
-    ? DependencyImplementation<Dependencies[Name]>
+    ? ProvidedDependencyImplementation<Dependencies[Name]>
     : Dependencies[Name];
 };
 
@@ -226,6 +261,58 @@ export function invokeDependency(
     throw new Error(`Dependency operation ${JSON.stringify(operation)} is not implemented.`);
   }
   return Reflect.apply(method, dependency, [input]);
+}
+
+/**
+ * @internal Projects a provider envelope to its consumer API without compiler
+ * conformance. Focused Feature fixtures use this only after provider typing has
+ * already been checked; realized Programs use compiler-derived contracts.
+ */
+export function createUncheckedDependencyClient<Api extends DependencyContract>(
+  implementation: DependencyImplementation<Api>,
+): Api {
+  let sequence = 0;
+  return new Proxy(Object.create(null) as object, {
+    get(_target, property) {
+      if (typeof property !== "string") return Reflect.get(implementation, property);
+      const operation = Reflect.get(implementation, property);
+      if (typeof operation !== "function") return operation;
+      return (input: unknown) => {
+        const now = Date.now();
+        return Reflect.apply(operation, implementation, [
+          {
+            input,
+            invocation: {
+              id: `fixture:${property}:${++sequence}`,
+              attempt: 1,
+              scheduledAt: now,
+              startedAt: now,
+              heartbeat() {},
+              cancellation: {
+                requested: () => false,
+                wait: () => new Promise<void>(() => undefined),
+              },
+              fail(failure: {
+                type: string;
+                data: unknown;
+                message?: string;
+                retry?: Readonly<{ delay: number }>;
+              }): never {
+                throw new DependencyFailureError(failure);
+              },
+            },
+          },
+        ]);
+      };
+    },
+    getOwnPropertyDescriptor(_target, property) {
+      const descriptor = Reflect.getOwnPropertyDescriptor(implementation, property);
+      return descriptor ? { ...descriptor, configurable: true } : undefined;
+    },
+    getPrototypeOf: () => Reflect.getPrototypeOf(implementation),
+    has: (_target, property) => Reflect.has(implementation, property),
+    ownKeys: () => Reflect.ownKeys(implementation),
+  }) as Api;
 }
 
 type ProgramsOf<Owner> = Owner extends {

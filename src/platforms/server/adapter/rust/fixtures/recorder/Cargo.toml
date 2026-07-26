@@ -1,0 +1,8 @@
+[package]
+name = "kit-server-recorder"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+kit-server-runtime = { path = "../../../../../../compiler/rust/runtime" }
+serde_json = "1.0.145"

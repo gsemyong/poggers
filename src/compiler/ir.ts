@@ -1,6 +1,9 @@
 import type { PresentationSourceIR } from "@/compiler/presentation";
 
-export const SYSTEM_IR_VERSION = 26 as const;
+export const SYSTEM_IR_VERSION = 28 as const;
+
+/** Maps semantic source files to the generated outputs affected by each source. */
+export type SystemOutputSources = Readonly<Record<string, readonly string[]>>;
 
 /**
  * Orders providers before consumers while retaining mutually dependent
@@ -361,6 +364,8 @@ export type ComponentIR = Readonly<{
 export type ProgramContributionIR = Readonly<{
   id: string;
   feature: string;
+  /** Present when one exact contribution instance is shared by several Apps. */
+  apps?: readonly string[];
   requires: readonly DependencyIR[];
   provides: readonly DependencyIR[];
   ui?: Readonly<{
@@ -547,8 +552,23 @@ export type FeatureIR = Readonly<{
   platform?: string;
   children: readonly string[];
   programs: readonly string[];
+  providers?: readonly DependencyProviderIR[];
   extensions?: CompilerExtensionsIR;
 }>;
+
+/** Adapter-neutral ownership and static realization meaning for one provider. */
+export type DependencyProviderIR = Readonly<{
+  dependency: string;
+  platform: string;
+  development: boolean;
+  /** Development implementation sources retained for exact hot replacement. */
+  sources?: readonly string[];
+  requirements?: ExtensionIR;
+  production?: ExtensionIR;
+  span: SourceSpan;
+}>;
+
+export type SelectedDependencyProviderIR = DependencyProviderIR & Readonly<{ feature: string }>;
 
 export type AppIR = Readonly<{
   id: string;
@@ -585,6 +605,70 @@ export type SystemIR = Readonly<{
   presentations: readonly InterfacePresentationIR[];
 }>;
 
+/**
+ * Selects owner-collocated providers visible to one Program.
+ *
+ * A provider is visible to contributions owned by the same Feature subtree.
+ * Reusing the exact same provider declaration is deduplicated; distinct
+ * declarations for one Dependency are rejected before realization.
+ */
+export function selectDependencyProviders(
+  ir: SystemIR,
+  program: ProgramIR,
+  dependencies: readonly string[],
+): readonly SelectedDependencyProviderIR[] {
+  const required = new Set(dependencies);
+  const candidates: SelectedDependencyProviderIR[] = [];
+  for (const feature of ir.features) {
+    if (
+      !program.contributions.some(
+        ({ feature: owner }) => owner === feature.path || owner.startsWith(`${feature.path}.`),
+      )
+    ) {
+      continue;
+    }
+    for (const provider of feature.providers ?? []) {
+      if (
+        provider.platform !== program.environment.platform ||
+        !required.has(provider.dependency)
+      ) {
+        continue;
+      }
+      candidates.push({ ...provider, feature: feature.path });
+    }
+  }
+  const selected = new Map<string, SelectedDependencyProviderIR>();
+  for (const provider of candidates) {
+    const current = selected.get(provider.dependency);
+    if (!current) {
+      selected.set(provider.dependency, provider);
+      continue;
+    }
+    if (sameProvider(current, provider)) continue;
+    throw new Error(
+      `Dependency ${JSON.stringify(provider.dependency)} has conflicting providers from ` +
+        `${JSON.stringify(current.feature)} and ${JSON.stringify(provider.feature)}.`,
+    );
+  }
+  return [...selected.values()].sort((left, right) =>
+    left.dependency.localeCompare(right.dependency),
+  );
+}
+
+function sameProvider(
+  left: SelectedDependencyProviderIR,
+  right: SelectedDependencyProviderIR,
+): boolean {
+  return (
+    left.span.file === right.span.file &&
+    left.span.line === right.span.line &&
+    left.span.column === right.span.column &&
+    JSON.stringify(left.sources ?? []) === JSON.stringify(right.sources ?? []) &&
+    JSON.stringify(left.requirements) === JSON.stringify(right.requirements) &&
+    JSON.stringify(left.production) === JSON.stringify(right.production)
+  );
+}
+
 export type SystemOutputSelection = Readonly<{
   app?: string;
   platforms: readonly string[];
@@ -611,6 +695,7 @@ export function selectSystemOutputs(ir: SystemIR, app?: string): SystemOutputSel
   const programs = ir.programs.flatMap((program): ProgramIR[] => {
     if (program.interface && !interfaceFeatures.has(program.interface)) return [];
     const contributions = program.contributions.filter((contribution) => {
+      if (contribution.apps) return contribution.apps.includes(selectedApp.feature);
       const feature = features.get(contribution.feature);
       if (!feature) {
         throw new Error(

@@ -13,14 +13,15 @@
   "files": [
     "dist",
     "CHANGELOG.md",
+    "docs/architecture.md",
     "docs/actors.md",
-    "docs/compatibility.md",
     "docs/data.md",
     "docs/deployment.md",
     "docs/features.md",
-    "docs/migrations",
-    "examples/basic",
-    "examples/basic/.gitignore",
+    "docs/portable-typescript.md",
+    "docs/presentation.md",
+    "template",
+    "template/.gitignore",
     "tsconfig.json"
   ],
   "type": "module",
@@ -47,24 +48,24 @@
       "default": "./dist/src/jsx/runtime.js"
     },
     "./web": {
-      "source": "./dist/source/platforms/web/platform.ts",
-      "types": "./dist/src/platforms/web/platform.d.ts",
-      "default": "./dist/src/platforms/web/platform.js"
+      "source": "./dist/source/platforms/web/index.ts",
+      "types": "./dist/src/platforms/web/index.d.ts",
+      "default": "./dist/src/platforms/web/index.js"
     },
     "./adapters/web": {
-      "source": "./dist/source/adapters/web/adapter.ts",
-      "types": "./dist/src/adapters/web/adapter.d.ts",
-      "default": "./dist/src/adapters/web/adapter.js"
+      "source": "./dist/source/platforms/web/adapter/index.ts",
+      "types": "./dist/src/platforms/web/adapter/index.d.ts",
+      "default": "./dist/src/platforms/web/adapter/index.js"
     },
     "./server": {
-      "source": "./dist/source/platforms/server/platform.ts",
-      "types": "./dist/src/platforms/server/platform.d.ts",
-      "default": "./dist/src/platforms/server/platform.js"
+      "source": "./dist/source/platforms/server/index.ts",
+      "types": "./dist/src/platforms/server/index.d.ts",
+      "default": "./dist/src/platforms/server/index.js"
     },
     "./testing": {
-      "source": "./dist/source/testing.ts",
-      "types": "./dist/src/testing.d.ts",
-      "default": "./dist/src/testing.js"
+      "source": "./dist/source/testing/index.ts",
+      "types": "./dist/src/testing/index.d.ts",
+      "default": "./dist/src/testing/index.js"
     },
     "./adapter": {
       "source": "./dist/source/adapter.ts",
@@ -72,49 +73,59 @@
       "default": "./dist/src/adapter.js"
     },
     "./adapters/server": {
-      "source": "./dist/source/adapters/server/adapter.ts",
-      "types": "./dist/src/adapters/server/adapter.d.ts",
-      "default": "./dist/src/adapters/server/adapter.js"
+      "source": "./dist/source/platforms/server/adapter/index.ts",
+      "types": "./dist/src/platforms/server/adapter/index.d.ts",
+      "default": "./dist/src/platforms/server/adapter/index.js"
     },
     "./adapters/deployment/local": {
-      "source": "./dist/source/adapters/deployment/local.ts",
-      "types": "./dist/src/adapters/deployment/local.d.ts",
-      "default": "./dist/src/adapters/deployment/local.js"
+      "source": "./dist/source/deployment/adapters/local/index.ts",
+      "types": "./dist/src/deployment/adapters/local/index.d.ts",
+      "default": "./dist/src/deployment/adapters/local/index.js"
     },
-    "./adapters/deployment/oci": {
-      "source": "./dist/source/adapters/deployment/oci.ts",
-      "types": "./dist/src/adapters/deployment/oci.d.ts",
-      "default": "./dist/src/adapters/deployment/oci.js"
+    "./deployment/oci": {
+      "source": "./dist/source/deployment/artifacts/oci/index.ts",
+      "types": "./dist/src/deployment/artifacts/oci/index.d.ts",
+      "default": "./dist/src/deployment/artifacts/oci/index.js"
     },
     "./cli": {
       "source": "./dist/source/cli.ts",
       "types": "./dist/src/cli.d.ts",
       "default": "./dist/src/cli.js"
     },
+    "./deployment": {
+      "source": "./dist/source/deployment/index.ts",
+      "types": "./dist/src/deployment/index.d.ts",
+      "default": "./dist/src/deployment/index.js"
+    },
+    "./factory": {
+      "source": "./dist/source/factory.ts",
+      "types": "./dist/src/factory.d.ts",
+      "default": "./dist/src/factory.js"
+    },
     "./tsconfig": "./tsconfig.json"
   },
   "scripts": {
     "api:check": "nub scripts/api.ts",
     "api:update": "nub run build && nub scripts/api.ts --write",
-    "actor:benchmark": "nub scripts/actor.ts",
     "build": "nub scripts/build.ts",
-    "check:distribution": "tsc -p src/adapters/web/fixtures/request-render/tsconfig.json",
-    "check:examples": "tsc -p examples/basic/tsconfig.json && tsc -p examples/authenticated-crud/tsconfig.json && tsc -p playground/tsconfig.json",
-    "check:native": "vitest run --tagsFilter=native && cargo test --manifest-path src/adapters/server/production/Cargo.toml --workspace",
-    "check:presentation": "nub run presentation:check && vitest run src/core/ui/presentation.spec.ts src/compiler/presentation.spec.ts src/platforms/web/presentation.spec.ts src/platforms/web/presentation/dynamics.spec.ts src/adapters/web/ui/presentation",
-    "check:production": "vitest run --tagsFilter=production && KIT_NATIVE_PROFILE=release vitest run src/features/data.spec.ts -t \"builds the composed data Feature as a native executable\"",
-    "dev:crud": "nub src/cli.ts dev --dir examples/authenticated-crud",
-    "dev:example": "nub src/cli.ts dev --dir playground",
+    "check:distribution": "tsc -p src/platforms/web/adapter/fixtures/request-render/tsconfig.json",
+    "check:workspaces": "tsc -p template/tsconfig.json && tsc -p examples/authenticated-crud/tsconfig.json && tsc -p playground/tsconfig.json",
+    "check:compiler": "vitest run --tagsFilter=compiler src/compiler src/platforms/server/adapter/rust",
+    "check:providers": "vitest run --tagsFilter=provider src/features src/platforms/server && cargo test --workspace",
+    "check:presentation": "nub run presentation:check && vitest run src/core/ui/presentation.spec.ts src/compiler/presentation.spec.ts src/platforms/web/presentation src/platforms/web/adapter/presentation",
+    "check:production": "KIT_NATIVE_PROFILE=release vitest run --tagsFilter=production",
+    "dev": "nub src/cli.ts dev --dir playground",
+    "dev:example": "nub src/cli.ts dev --dir examples/authenticated-crud",
     "fmt": "oxfmt",
     "fmt:check": "oxfmt --check",
-    "lint": "oxlint --disable-nested-config src scripts examples playground vitest.config.ts",
+    "lint": "oxlint --disable-nested-config src scripts template examples playground vitest.config.ts",
     "presentation:check": "nub scripts/presentation.ts",
     "presentation:update": "nub scripts/presentation.ts --write",
     "release": "nub scripts/release.ts",
     "release:check": "nub scripts/release.ts --check",
-    "test": "vitest run --tagsFilter='!native && !production'",
+    "test": "vitest run --tagsFilter='!compiler && !provider && !production'",
     "typecheck": "tsc --noEmit",
-    "check": "nub run typecheck && nub run lint && nub run fmt:check && vitest run && cargo test --manifest-path src/adapters/server/production/Cargo.toml --workspace && nub run build && nub run check:examples && nub run api:check && nub run presentation:check && nub run check:distribution && KIT_NATIVE_PROFILE=release vitest run src/features/data.spec.ts -t \"builds the composed data Feature as a native executable\""
+    "check": "nub run typecheck && nub run lint && nub run fmt:check && nub run test && nub run check:compiler && nub run check:providers && nub run check:presentation && nub run build && nub run check:workspaces && nub run api:check && nub run check:distribution && nub run check:production"
   },
   "dependencies": {
     "@nats-io/jetstream": "3.4.0",

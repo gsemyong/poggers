@@ -5,6 +5,7 @@ import {
   SYSTEM_IR_VERSION,
   assertSystemIRVersion,
   dependencyOperationIdentity,
+  selectDependencyProviders,
   serializeSystemIR,
   typeIdentity,
   type SystemIR,
@@ -58,6 +59,77 @@ test("rejects System IR from every other schema version", () => {
   expect(() => assertSystemIRVersion({ version: SYSTEM_IR_VERSION + 1 })).toThrow(
     `Unsupported System IR version ${SYSTEM_IR_VERSION + 1}.`,
   );
+});
+
+test("selects visible Feature providers once and rejects conflicting ownership", () => {
+  const program = fixtureProgram([contribution("owner.consumer", [repository])]);
+  const provider = {
+    dependency: "repository",
+    platform: "server",
+    development: true,
+    span: { file: "provider.ts", line: 1, column: 1 },
+  } as const;
+  const ir: SystemIR = {
+    version: SYSTEM_IR_VERSION,
+    system: { id: "system", name: "providers" },
+    platforms: ["server"],
+    apps: [],
+    interfaces: [],
+    features: [
+      {
+        id: "feature/owner",
+        path: "owner",
+        kind: "feature",
+        children: ["feature/owner.consumer"],
+        programs: [],
+        providers: [provider],
+      },
+      {
+        id: "feature/owner.consumer",
+        path: "owner.consumer",
+        kind: "feature",
+        children: [],
+        programs: ["program/api"],
+        providers: [provider, { ...provider, platform: "web" }],
+      },
+      {
+        id: "feature/unrelated",
+        path: "unrelated",
+        kind: "feature",
+        children: [],
+        programs: [],
+        providers: [{ ...provider, span: { file: "unrelated.ts", line: 1, column: 1 } }],
+      },
+    ],
+    programs: [program],
+    presentations: [],
+  };
+
+  expect(selectDependencyProviders(ir, program, ["repository"])).toEqual([
+    { ...provider, feature: "owner" },
+  ]);
+  expect(() =>
+    selectDependencyProviders(
+      {
+        ...ir,
+        features: ir.features.map((feature) =>
+          feature.path === "owner.consumer"
+            ? {
+                ...feature,
+                providers: [
+                  {
+                    ...provider,
+                    span: { file: "conflict.ts", line: 1, column: 1 },
+                  },
+                ],
+              }
+            : feature,
+        ),
+      },
+      program,
+      ["repository"],
+    ),
+  ).toThrow(/conflicting providers/);
 });
 
 const textType: TypeIR = { kind: "primitive", name: "string" };

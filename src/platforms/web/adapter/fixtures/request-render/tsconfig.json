@@ -1,0 +1,16 @@
+{
+  "extends": "../../../../../../tsconfig.json",
+  "compilerOptions": {
+    "paths": {
+      "@/*": ["./src/*"],
+      "kit": ["../../../../../../dist/source/index.ts"],
+      "kit/jsx-dev-runtime": ["../../../../../../dist/source/jsx/development.ts"],
+      "kit/jsx-runtime": ["../../../../../../dist/source/jsx/runtime.ts"],
+      "kit/server": ["../../../../../../dist/source/platforms/server/index.ts"],
+      "kit/testing": ["../../../../../../dist/source/testing/index.ts"],
+      "kit/web": ["../../../../../../dist/source/platforms/web/index.ts"]
+    },
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx"]
+}

@@ -19,6 +19,7 @@ declare const featureContract: unique symbol;
 export type FeatureContract = {
   Programs?: Record<string, ProgramContract>;
   Features?: Record<string, FeatureContract>;
+  Providers?: Record<string, Record<string, object>>;
 };
 
 type StateOf<Contract> = ProgramState<Contract>;
@@ -42,6 +43,11 @@ type EnvironmentOf<
   : never;
 type FeaturesOf<Contract> = Contract extends {
   Features: infer Value extends Record<string, FeatureContract>;
+}
+  ? Value
+  : Empty;
+type ProvidersOf<Contract> = Contract extends {
+  Providers: infer Value extends Record<string, Record<string, object>>;
 }
   ? Value
   : Empty;
@@ -171,19 +177,22 @@ export type ProgramStartContext<
 > = Readonly<
   {
     dependencies: RequiredByProgram<Contract>;
-  } & (HasUI<Contract> extends true
-    ? {
-        actions: ActionAPI<Contract>;
-        features: FeatureUIAPIs<Owner, ProgramName>;
-      }
-    : Empty)
+  } & (Contract extends { Provides: infer Provides extends object }
+    ? { provides: readonly Extract<keyof Provides, string>[] }
+    : Empty) &
+    (HasUI<Contract> extends true
+      ? {
+          actions: ActionAPI<Contract>;
+          features: FeatureUIAPIs<Owner, ProgramName>;
+        }
+      : Empty)
 >;
 
-type ProgramStartResult<Contract extends ProgramContract> = keyof ProvidesOf<Contract> extends never
-  ? ProgramResourceResult
-  :
-      | DependencyImplementations<ProvidesOf<Contract>>
-      | PromiseLike<DependencyImplementations<ProvidesOf<Contract>>>;
+type ProgramStartResult<Contract extends ProgramContract> = Contract extends {
+  Provides: infer Provides extends object;
+}
+  ? DependencyImplementations<Provides> | PromiseLike<DependencyImplementations<Provides>>
+  : ProgramResourceResult;
 
 export type ProgramDefinition<
   Owner extends FeatureContract,
@@ -199,14 +208,14 @@ export type ProgramDefinition<
         components?: never;
         root?: never;
       }) &
-    (keyof ProvidesOf<Contract> extends never
+    (Contract extends { Provides: object }
       ? {
-          start?: (
+          start: (
             context: ProgramStartContext<Owner, ProgramName, Contract>,
           ) => ProgramStartResult<Contract>;
         }
       : {
-          start: (
+          start?: (
             context: ProgramStartContext<Owner, ProgramName, Contract>,
           ) => ProgramStartResult<Contract>;
         })
@@ -232,6 +241,7 @@ export type Feature<
 > = Readonly<
   DefinitionField<"programs", ProgramDefinitions<Contract, Root>> &
     DefinitionField<"features", FeatureDefinitions<FeaturesOf<Contract>, Root>> & {
+      readonly providers?: ProvidersOf<Contract>;
       readonly [featureContract]?: Contract;
     }
 >;
@@ -241,6 +251,40 @@ export function createFeature<Contract extends FeatureContract>(
   definition: Feature<Contract>,
 ): Feature<Contract> {
   return definition;
+}
+
+type RuntimeFeatureProviderOwner = Readonly<{
+  features?: Readonly<Record<string, RuntimeFeatureProviderOwner>>;
+  providers?: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
+}>;
+
+/**
+ * Resolves one compiler-selected provider from its retained Feature owner.
+ *
+ * Selection and conflict handling use compiler meaning; this function only
+ * recovers the corresponding runtime implementation after loading a System.
+ */
+export function resolveFeatureProvider<Provider>(
+  system: RuntimeFeatureProviderOwner,
+  input: Readonly<{ feature: string; platform: string; dependency: string }>,
+): Provider {
+  let owner: RuntimeFeatureProviderOwner | undefined = system;
+  for (const name of input.feature.split(".").filter(Boolean)) {
+    owner = owner.features?.[name];
+    if (!owner) {
+      throw new Error(
+        `Feature provider owner ${JSON.stringify(input.feature)} is unavailable at runtime.`,
+      );
+    }
+  }
+  const provider = owner.providers?.[input.platform]?.[input.dependency];
+  if (provider === undefined) {
+    throw new Error(
+      `Feature ${JSON.stringify(input.feature)} has no ${JSON.stringify(input.platform)} ` +
+        `provider for Dependency ${JSON.stringify(input.dependency)}.`,
+    );
+  }
+  return provider as Provider;
 }
 
 export type ProgramNamesIn<

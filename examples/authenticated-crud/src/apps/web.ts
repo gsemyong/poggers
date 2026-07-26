@@ -1,7 +1,7 @@
 import type { PlatformInterfaceContract } from "kit";
 import { createWebInterface, type WebPlatform } from "kit/web";
 
-import { identityBrowser, type IdentityBrowserFeature } from "../features/identity";
+import { identity, type IdentityBrowserFeature } from "../features/identity";
 import { createShell, type ShellFeature } from "../features/shell";
 import { tasks, type TasksFeature } from "../features/tasks";
 import { clean } from "../presentations/clean";
@@ -23,7 +23,7 @@ const icon =
 export function createWorkspaceWeb(input: Readonly<{ shortName: string }>) {
   return createWebInterface<WebContract>({
     features: {
-      identity: identityBrowser,
+      identity,
       shell: createShell({ name: input.shortName }),
       tasks,
     },

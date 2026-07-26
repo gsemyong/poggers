@@ -4,15 +4,15 @@ import { resolve } from "node:path";
 
 import { afterEach, describe, expect, test } from "vitest";
 
-import { webCompilerExtension } from "@/adapters/web/compiler";
-import type { SourceCompilerExtension } from "@/compiler/extension";
-import { serializeSystemIR } from "@/compiler/ir";
-import { linkProgram } from "@/compiler/linker";
 import type {
   PlatformDevelopmentInput,
   PlatformProductionInput,
   PlatformAdapterImplementation,
-} from "@/contracts/platform";
+} from "@/adapter";
+import type { SourceCompilerExtension } from "@/compiler/extension";
+import { serializeSystemIR } from "@/compiler/ir";
+import { linkProgram } from "@/compiler/linker";
+import { webCompilerExtension } from "@/platforms/web/adapter/compiler";
 import {
   buildSystem,
   createSystemRevisionSource,

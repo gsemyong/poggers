@@ -75,7 +75,7 @@ The UI adapter contract checks that:
 - a Platform cannot accidentally mount another Platform's UI adapter;
 - a process-only Platform cannot receive UI declarations.
 
-`src/contracts/platform.typecheck.ts` proves these properties with an iOS-like
+`src/adapter.typecheck.ts` proves these properties with an iOS-like
 language that shares no web declarations.
 
 ## Web Language Today
@@ -304,22 +304,6 @@ No broad public-language, core, or IR rewrite is justified. The existing
 contract already separates behavior, Presentation meaning, Platform language,
 and adapter realization, and a non-web language proves that separation.
 
-Completion proceeds from the working system:
-
-1. freeze and inventory the current API, examples, lowering, runtime, and
-   evidence;
-2. use standards data to find relevant outcome gaps and redundant spellings;
-3. add only the smallest semantic primitive or targeted internal hardening
-   required by a failing fixture;
-4. preserve existing examples and prove compatibility;
-5. publish browser, visual, compatibility, and performance conformance
-   evidence;
-6. remove only superseded experiments after their replacements pass.
-
-The staged execution contract is recorded in
-[Presentation Language Implementation Plan](./presentation-plan.md).
-
-Adding isolated CSS fields without an outcome gap and fixture would increase
-surface area without establishing usefulness. The living programme therefore
-preserves the current implementation and changes it only from demonstrated
-evidence.
+Future additions require a failing outcome fixture and the smallest semantic
+primitive or targeted internal change that closes it. Adding isolated CSS
+fields without demonstrated product meaning would only increase the surface.

@@ -16,30 +16,29 @@
       "kit/ui": ["./src/ui.ts", "./dist/source/ui.ts"],
       "kit/jsx-dev-runtime": ["./src/jsx/development.ts", "./dist/source/jsx/development.ts"],
       "kit/jsx-runtime": ["./src/jsx/runtime.ts", "./dist/source/jsx/runtime.ts"],
-      "kit/web": ["./src/platforms/web/platform.ts", "./dist/source/platforms/web/platform.ts"],
+      "kit/web": ["./src/platforms/web/index.ts", "./dist/source/platforms/web/index.ts"],
       "kit/adapters/web": [
-        "./src/adapters/web/adapter.ts",
-        "./dist/source/adapters/web/adapter.ts"
+        "./src/platforms/web/adapter/index.ts",
+        "./dist/source/platforms/web/adapter/index.ts"
       ],
-      "kit/server": [
-        "./src/platforms/server/platform.ts",
-        "./dist/source/platforms/server/platform.ts"
-      ],
-      "kit/testing": ["./src/testing.ts", "./dist/src/testing.d.ts"],
+      "kit/server": ["./src/platforms/server/index.ts", "./dist/source/platforms/server/index.ts"],
+      "kit/testing": ["./src/testing/index.ts", "./dist/src/testing/index.d.ts"],
       "kit/adapter": ["./src/adapter.ts", "./dist/source/adapter.ts"],
       "kit/adapters/deployment/local": [
-        "./src/adapters/deployment/local.ts",
-        "./dist/source/adapters/deployment/local.ts"
+        "./src/deployment/adapters/local/index.ts",
+        "./dist/source/deployment/adapters/local/index.ts"
       ],
-      "kit/adapters/deployment/oci": [
-        "./src/adapters/deployment/oci.ts",
-        "./dist/source/adapters/deployment/oci.ts"
+      "kit/deployment/oci": [
+        "./src/deployment/artifacts/oci/index.ts",
+        "./dist/source/deployment/artifacts/oci/index.ts"
       ],
       "kit/adapters/server": [
-        "./src/adapters/server/adapter.ts",
-        "./dist/source/adapters/server/adapter.ts"
+        "./src/platforms/server/adapter/index.ts",
+        "./dist/source/platforms/server/adapter/index.ts"
       ],
-      "kit/cli": ["./src/cli.ts", "./dist/source/cli.ts"]
+      "kit/cli": ["./src/cli.ts", "./dist/source/cli.ts"],
+      "kit/deployment": ["./src/deployment/index.ts", "./dist/source/deployment/index.ts"],
+      "kit/factory": ["./src/factory.ts", "./dist/source/factory.ts"]
     },
     "verbatimModuleSyntax": true,
     "noEmit": true,
@@ -55,5 +54,5 @@
     "${configDir}/src/**/*.d.ts",
     "${configDir}/scripts/**/*.ts"
   ],
-  "exclude": ["${configDir}/src/adapters/**/fixtures/**"]
+  "exclude": ["${configDir}/src/platforms/**/fixtures/**"]
 }

@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 
 import { describe, expect, test } from "vitest";
 
-import { packageSources } from "@/adapters/source";
+import { packageSources } from "@/package";
 
 type Boundary = Readonly<{
   directory: string;
@@ -18,46 +18,34 @@ type ModuleBoundary = Readonly<{
 const boundaries: readonly Boundary[] = [
   { directory: "core", imports: ["core"] },
   { directory: "compiler", imports: ["compiler", "core"] },
-  { directory: "runtime", imports: ["runtime", "compiler", "core"] },
-  { directory: "jsx", imports: ["jsx", "runtime", "core"] },
-  { directory: "contracts", imports: ["contracts", "compiler", "core"] },
-  { directory: "platforms", imports: ["platforms", "core", "jsx"] },
-  { directory: "features", imports: ["features", "platforms", "core"] },
+  { directory: "execution", imports: ["execution", "compiler", "core"] },
+  { directory: "jsx", imports: ["jsx", "execution", "core"] },
+  { directory: "features", imports: ["features", "platforms", "execution", "core"] },
+  { directory: "deployment", imports: ["adapter", "core", "deployment"] },
   {
-    directory: "adapters/data",
-    imports: ["adapters/data", "features"],
-  },
-  {
-    directory: "adapters/deployment",
-    imports: ["adapters/deployment", "contracts"],
-  },
-  {
-    directory: "adapters/server",
+    directory: "platforms/server",
     imports: [
-      "adapters/data",
-      "adapters/server",
-      "adapters/source",
-      "adapters/web-server",
-      "contracts",
+      "adapter",
+      "package",
+      "deployment",
       "compiler",
-      "runtime",
       "core",
+      "execution",
       "features",
       "jsx",
       "platforms",
+      "platforms/web/adapter/server",
     ],
   },
   {
-    directory: "adapters/web",
+    directory: "platforms/web",
     imports: [
-      "adapters/data",
-      "adapters/web",
-      "adapters/source",
-      "adapters/web-server",
-      "contracts",
+      "adapter",
+      "package",
+      "deployment",
       "compiler",
-      "runtime",
       "core",
+      "execution",
       "jsx",
       "platforms",
     ],
@@ -65,27 +53,44 @@ const boundaries: readonly Boundary[] = [
 ] as const;
 
 const modules: readonly ModuleBoundary[] = [
-  { file: "index.ts", imports: ["contracts", "core", "features"] },
+  { file: "index.ts", imports: ["core", "features"] },
   { file: "ui.ts", imports: ["core"] },
-  { file: "deployment.ts", imports: ["contracts", "core"] },
-  { file: "realization.ts", imports: ["compiler", "contracts", "deployment"] },
+  { file: "factory.ts", imports: ["core"] },
+  { file: "platforms/server/index.ts", imports: ["core"] },
+  { file: "platforms/web/index.ts", imports: ["core", "jsx", "platforms/web"] },
+  { file: "adapter.ts", imports: ["adapter", "compiler", "core", "deployment"] },
+  { file: "deployment/index.ts", imports: ["adapter", "core", "deployment"] },
+  { file: "realization.ts", imports: ["adapter", "compiler", "deployment"] },
   {
-    file: "testing.ts",
-    imports: ["adapters", "compiler", "contracts", "features", "realization", "runtime"],
+    file: "testing/index.ts",
+    imports: [
+      "adapter",
+      "compiler",
+      "execution",
+      "features",
+      "platforms",
+      "realization",
+      "testing",
+    ],
   },
-  { file: "cli.ts", imports: ["adapters", "contracts", "core", "deployment", "realization"] },
-  { file: "adapter.ts", imports: ["compiler", "contracts", "deployment"] },
   {
-    file: "adapters/registry.ts",
-    imports: ["adapters/server", "adapters/web", "adapters/web-server", "contracts", "platforms"],
+    file: "cli.ts",
+    imports: ["adapter", "core", "deployment", "package", "platforms", "realization"],
   },
-  { file: "adapters/source.ts", imports: [] },
-  { file: "adapters/web-server.ts", imports: ["adapters/web", "compiler", "runtime"] },
   {
-    file: "adapters/server/production/compiler.ts",
-    imports: ["adapters/server/production", "adapters/web-server", "compiler"],
+    file: "platforms.ts",
+    imports: ["adapter", "platforms"],
   },
-  { file: "adapters/server/production/program.ts", imports: ["compiler"] },
+  { file: "package.ts", imports: [] },
+  {
+    file: "platforms/web/adapter/server.ts",
+    imports: ["compiler", "execution", "platforms/web"],
+  },
+  {
+    file: "platforms/server/adapter/rust/compiler.ts",
+    imports: ["compiler", "platforms/server/adapter/rust", "platforms/web/adapter/server"],
+  },
+  { file: "compiler/rust/lowering.ts", imports: ["compiler"] },
 ] as const;
 
 describe("architecture import graph", () => {
@@ -99,15 +104,20 @@ describe("architecture import graph", () => {
         if (/\.(?:spec|typecheck)\.tsx?$/.test(file)) continue;
         const contents = await readFile(file, "utf8");
         for (const imported of aliasImports(contents)) {
-          if (file.endsWith(".testing.ts") && owns("runtime", imported)) continue;
           if (
-            boundary.directory === "runtime" &&
+            file.endsWith("/testing.ts") &&
+            (owns("execution", imported) || owns("testing", imported))
+          ) {
+            continue;
+          }
+          if (
+            boundary.directory === "execution" &&
             owns("compiler", imported) &&
             imported !== "compiler/ir"
           ) {
             violations.push(
               `${file.slice(source.length + 1)} imports @/${imported}; ` +
-                "runtime may consume only canonical @/compiler/ir meaning",
+                "execution may consume only canonical @/compiler/ir meaning",
             );
             continue;
           }
@@ -145,13 +155,13 @@ describe("architecture import graph", () => {
       ...(await sourceFiles(resolve(source, "compiler"))).filter(
         (file) => !/\.(?:spec|typecheck)\.tsx?$/.test(file),
       ),
-      resolve(source, "runtime/interpreter.ts"),
-      resolve(source, "adapters/server/production/compiler.ts"),
-      resolve(source, "adapters/server/production/program.ts"),
+      resolve(source, "execution/interpreter.ts"),
+      resolve(source, "platforms/server/adapter/rust/compiler.ts"),
+      resolve(source, "compiler/rust/lowering.ts"),
     ];
     const rust = [
-      resolve(source, "adapters/server/production/runtime/src/lib.rs"),
-      resolve(source, "adapters/server/production/distribution/src/lib.rs"),
+      resolve(source, "compiler/rust/runtime/src/lib.rs"),
+      resolve(source, "platforms/server/adapter/rust/distribution/src/lib.rs"),
     ];
     const violations: string[] = [];
     for (const file of typescript) {
@@ -169,7 +179,7 @@ describe("architecture import graph", () => {
   });
 
   test("uses only explicit architectural directory names", async () => {
-    const forbidden = new Set(["compatibility", "helpers", "internal", "native", "types", "utils"]);
+    const forbidden = new Set(["compatibility", "helpers", "internal", "types", "utils"]);
     const directories = await sourceDirectories(import.meta.dirname);
     expect(
       directories

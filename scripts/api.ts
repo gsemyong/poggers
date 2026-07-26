@@ -59,7 +59,7 @@ if (write) {
   await validateIntent(recorded.intent);
   if (JSON.stringify(current) !== JSON.stringify(recorded)) {
     throw new Error(
-      "The public API differs from docs/api.json. Review the change, add a change file, then run `nub run api:update -- --intent <change-file>`.",
+      'The public API differs from docs/api.json. Review the change, update CHANGELOG.md, then run `nub run api:update -- --intent "<kind>: <summary>"`.',
     );
   }
 }
@@ -172,13 +172,9 @@ async function readExistingIntent(): Promise<string> {
   }
 }
 
-async function validateIntent(path: string): Promise<void> {
-  if (!path.startsWith("changes/") || path.includes("..")) {
-    throw new Error(`API intent must be a file under changes/: ${path}`);
-  }
-  const contents = await readFile(resolve(root, path), "utf8");
-  if (!/^kind: (breaking|feature|fix)$/m.test(contents) || !/^summary: .+$/m.test(contents)) {
-    throw new Error(`${path} must declare kind and summary.`);
+async function validateIntent(intent: string): Promise<void> {
+  if (!/^(breaking|feature|fix): \S.+$/.test(intent)) {
+    throw new Error('API intent must use "<breaking|feature|fix>: <summary>".');
   }
 }
 

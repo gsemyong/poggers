@@ -8,7 +8,7 @@ import type {
 } from "@/core/dependency";
 import type { Feature } from "@/core/feature";
 import type { Program } from "@/core/program";
-import type { BrowserMainThread } from "@/platforms/web/platform";
+import type { BrowserMainThread } from "@/platforms/web";
 
 type Reader = Readonly<{ read(): string }>;
 type Clock = Readonly<{ now(): number }>;

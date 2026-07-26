@@ -21,7 +21,7 @@ export type ComponentContract = {
 
 /** A Feature or Program shape from which Component meaning can be projected. */
 export type ComponentOwner = {
-  Environment?: { Name: string; Platform?: { UI?: UIContract } };
+  Environment?: { Name: string; Platform?: { Name?: string; UI?: UIContract } };
   State?: object;
   Actions?: ActionRecord;
   Requires?: object;
@@ -30,7 +30,7 @@ export type ComponentOwner = {
   Programs?: Record<
     string,
     {
-      Environment?: { Name: string; Platform?: { UI?: UIContract } };
+      Environment?: { Name: string; Platform?: { Name?: string; UI?: UIContract } };
       State?: object;
       Actions?: ActionRecord;
       Requires?: object;

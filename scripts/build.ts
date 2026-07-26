@@ -22,11 +22,11 @@ const targets = [
 const isBuildTarget = (target: unknown): target is string =>
   typeof target === "string" && target.startsWith("./dist/") && target.endsWith(".js");
 const generatedRuntimeEntrypoints = [
-  resolve(packageDir, "src/adapters/web/document.ts"),
-  resolve(packageDir, "src/adapters/web/host.ts"),
-  resolve(packageDir, "src/adapters/web/ui/adapter.ts"),
-  resolve(packageDir, "src/adapters/web/ui/stream.ts"),
-  resolve(packageDir, "src/runtime/process.ts"),
+  resolve(packageDir, "src/platforms/web/adapter/document.ts"),
+  resolve(packageDir, "src/platforms/web/adapter/host.ts"),
+  resolve(packageDir, "src/platforms/web/adapter/ui/adapter.ts"),
+  resolve(packageDir, "src/platforms/web/adapter/ui/stream.ts"),
+  resolve(packageDir, "src/execution/process.ts"),
 ];
 const entrypoints = [
   ...new Set(
@@ -55,9 +55,9 @@ for (const pattern of ["**/*.spec.d.ts", "**/*.typecheck.d.ts"]) {
   }
 }
 await rm(resolve(distDir, "scripts"), { force: true, recursive: true });
-await rm(resolve(distDir, "examples"), { force: true, recursive: true });
 await rewriteDeclarationAliases();
 await copySemanticSources();
+await copyFeatureProviderSources();
 
 await build({
   configFile: false,
@@ -90,18 +90,27 @@ await build({
     target: "node26",
   },
 });
-const productionSource = resolve(sourceDir, "adapters/server/production");
-const productionOutput = resolve(distDir, "src/adapters/server/production");
-for (const pattern of [
-  "runtime/Cargo.toml",
-  "runtime/src/**/*.rs",
-  "dependencies/**/Cargo.toml",
-  "dependencies/**/src/**/*.rs",
-]) {
-  for await (const file of glob(pattern, { cwd: productionSource })) {
-    const output = resolve(productionOutput, file);
+const rustCompilerSource = resolve(sourceDir, "compiler/rust");
+const rustCompilerOutput = resolve(distDir, "src/compiler/rust");
+for (const pattern of ["runtime/Cargo.toml", "runtime/src/**/*.rs"]) {
+  for await (const file of glob(pattern, { cwd: rustCompilerSource })) {
+    const output = resolve(rustCompilerOutput, file);
     await mkdir(dirname(output), { recursive: true });
-    await copyFile(resolve(productionSource, file), output);
+    await copyFile(resolve(rustCompilerSource, file), output);
+  }
+}
+const serverRustSource = resolve(sourceDir, "platforms/server/adapter/rust");
+const serverRustOutput = resolve(distDir, "src/platforms/server/adapter/rust");
+for (const pattern of [
+  "providers/**/Cargo.toml",
+  "providers/**/src/**/*.rs",
+  "distribution/Cargo.toml",
+  "distribution/src/**/*.rs",
+]) {
+  for await (const file of glob(pattern, { cwd: serverRustSource })) {
+    const output = resolve(serverRustOutput, file);
+    await mkdir(dirname(output), { recursive: true });
+    await copyFile(resolve(serverRustSource, file), output);
   }
 }
 await assertDistribution();
@@ -139,16 +148,21 @@ async function assertGeneratedRuntimeEntrypoints(): Promise<void> {
 }
 
 async function rewriteDeclarationAliases(): Promise<void> {
-  for await (const file of glob("src/**/*.d.ts", { cwd: distDir })) {
+  const files: string[] = [];
+  for await (const file of glob("src/**/*.d.ts", { cwd: distDir })) files.push(file);
+  const targets = sourceTargets(files, (file) => file.slice("src/".length).replace(/\.d\.ts$/, ""));
+
+  for (const file of files) {
     const path = resolve(distDir, file);
     const contents = await readFile(path, "utf8");
     const rewritten = contents.replaceAll(
       /(["'])@\/([^"']+)\1/g,
       (_match, quote: string, target: string) => {
-        let specifier = relative(dirname(path), resolve(distDir, "src", target)).replaceAll(
-          "\\\\",
-          "/",
-        );
+        const targetFile = targets.get(target);
+        if (!targetFile) throw new Error(`Declaration import @/${target} has no emitted target.`);
+        let specifier = relative(dirname(path), resolve(distDir, targetFile))
+          .replaceAll("\\", "/")
+          .replace(/\.d\.ts$/, "");
         if (!specifier.startsWith(".")) specifier = `./${specifier}`;
         return `${quote}${specifier}${quote}`;
       },
@@ -158,19 +172,28 @@ async function rewriteDeclarationAliases(): Promise<void> {
 }
 
 async function copySemanticSources(): Promise<void> {
+  const files: string[] = [];
   for await (const file of glob("**/*.{ts,tsx}", { cwd: sourceDir })) {
-    if (file.split("/").includes("fixtures") || /(?:^|\/)[^/]+\.(?:spec|typecheck)\./.test(file)) {
-      continue;
+    if (
+      !file.split("/").includes("fixtures") &&
+      !/(?:^|\/)[^/]+\.(?:spec|typecheck)\./.test(file)
+    ) {
+      files.push(file);
     }
+  }
+  const targets = sourceTargets(files, (file) => file.replace(/\.(?:ts|tsx)$/, ""));
+
+  for (const file of files) {
     const output = resolve(distDir, "source", file);
     const contents = await readFile(resolve(sourceDir, file), "utf8");
     const rewritten = contents.replaceAll(
       /(["'])@\/([^"']+)\1/g,
       (_match, quote: string, target: string) => {
-        let specifier = relative(dirname(output), resolve(distDir, "source", target)).replaceAll(
-          "\\",
-          "/",
-        );
+        const targetFile = targets.get(target);
+        if (!targetFile) return _match;
+        let specifier = relative(dirname(output), resolve(distDir, "source", targetFile))
+          .replaceAll("\\", "/")
+          .replace(/\.(?:ts|tsx)$/, "");
         if (!specifier.startsWith(".")) specifier = `./${specifier}`;
         return `${quote}${specifier}${quote}`;
       },
@@ -178,6 +201,32 @@ async function copySemanticSources(): Promise<void> {
     await mkdir(dirname(output), { recursive: true });
     await writeFile(output, rewritten);
   }
+}
+
+async function copyFeatureProviderSources(): Promise<void> {
+  for (const pattern of [
+    "features/*/providers/**/Cargo.toml",
+    "features/*/providers/**/src/**/*.rs",
+  ]) {
+    for await (const file of glob(pattern, { cwd: sourceDir })) {
+      const output = resolve(distDir, "source", file);
+      await mkdir(dirname(output), { recursive: true });
+      await copyFile(resolve(sourceDir, file), output);
+    }
+  }
+}
+
+function sourceTargets(
+  files: readonly string[],
+  name: (file: string) => string,
+): Map<string, string> {
+  const targets = new Map<string, string>();
+  for (const file of files) {
+    const target = name(file);
+    targets.set(target, file);
+    if (target.endsWith("/index")) targets.set(target.slice(0, -"/index".length), file);
+  }
+  return targets;
 }
 
 async function assertNoPrivateAliases(): Promise<void> {
@@ -200,7 +249,7 @@ async function assertVocabulary(): Promise<void> {
 
 async function assertServerEnvironment(): Promise<void> {
   const production = await readFile(
-    resolve(distDir, "src/adapters/server/production/compiler.js"),
+    resolve(distDir, "src/platforms/server/adapter/rust/compiler.js"),
     "utf8",
   );
   if (!production.includes("process.env.KIT_PRODUCTION_CACHE")) {

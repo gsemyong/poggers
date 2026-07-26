@@ -6,10 +6,7 @@ import process from "node:process";
 
 import { createServer, defaultServerConditions, type Plugin } from "vite";
 
-import { platformAdapters } from "@/adapters/registry";
-import { packageSourceAliases } from "@/adapters/source";
-import type { DeploymentAdapter } from "@/contracts/deployment";
-import type { PlatformAdapterImplementation } from "@/contracts/platform";
+import type { PlatformAdapterImplementation } from "@/adapter";
 import type { System, SystemContract } from "@/core/system";
 import {
   applyDeployment,
@@ -17,11 +14,14 @@ import {
   planDeployment,
   removeDeployment,
   type Deployment,
+  type DeploymentAdapter,
 } from "@/deployment";
+import { packageSourceAliases } from "@/package";
+import { platformAdapters } from "@/platforms";
 import { buildSystem, developSystem, resolveSystemRealization } from "@/realization";
 
 const valueFlags = new Set(["deployment", "dir", "name", "outdir", "outfile", "package"]);
-const ignoredStarterEntries = new Set([
+const ignoredTemplateEntries = new Set([
   ".data",
   ".kit",
   "coverage",
@@ -227,10 +227,10 @@ export async function createProject(arguments_: readonly string[]): Promise<void
     }
   }
 
-  const source = await findStarter(import.meta.dirname);
+  const source = await findTemplate(import.meta.dirname);
   for (const path of await listFiles(source)) {
     const file = resolve(target, path);
-    const contents = renderStarter(path, await readFile(resolve(source, path), "utf8"), {
+    const contents = renderTemplate(path, await readFile(resolve(source, path), "utf8"), {
       name,
       packageLocation,
     });
@@ -245,9 +245,9 @@ export async function createProject(arguments_: readonly string[]): Promise<void
   console.log(`created ${name} in ${target}`);
 }
 
-async function findStarter(start: string): Promise<string> {
+async function findTemplate(start: string): Promise<string> {
   for (let directory = start; ; directory = dirname(directory)) {
-    const candidate = resolve(directory, "examples/basic");
+    const candidate = resolve(directory, "template");
     try {
       await readdir(candidate);
       return candidate;
@@ -255,14 +255,14 @@ async function findStarter(start: string): Promise<string> {
       if (!hasCode(error, "ENOENT")) throw error;
     }
     const parent = dirname(directory);
-    if (parent === directory) throw new Error("Cannot locate the basic System example.");
+    if (parent === directory) throw new Error("Cannot locate the System template.");
   }
 }
 
 async function listFiles(directory: string, prefix = ""): Promise<string[]> {
   const files = await Promise.all(
     (await readdir(resolve(directory, prefix), { withFileTypes: true }))
-      .filter((entry) => !ignoredStarterEntries.has(entry.name))
+      .filter((entry) => !ignoredTemplateEntries.has(entry.name))
       .map(async (entry) => {
         const path = prefix ? `${prefix}/${entry.name}` : entry.name;
         return entry.isDirectory() ? listFiles(directory, path) : [path];
@@ -271,7 +271,7 @@ async function listFiles(directory: string, prefix = ""): Promise<string[]> {
   return files.flat().sort();
 }
 
-function renderStarter(
+function renderTemplate(
   path: string,
   contents: string,
   values: { readonly name: string; readonly packageLocation: string },

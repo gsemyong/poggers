@@ -297,32 +297,14 @@ skew; ordinary deployments leave it at zero.
 The focused source gate runs without Rust:
 
 ```sh
-nub exec vitest run src/features/actor.spec.ts --tagsFilter='!native && !production'
+nub exec vitest run src/features/actor/feature.spec.ts
 ```
 
-The native differential gate compiles the same Feature Programs through the
+The production differential gate compiles the same Feature Programs through the
 generic Rust backend and compares normalized journals, outcomes, failures,
 nested calls, reminders, invocation identities, and restart behavior:
 
 ```sh
-nub exec vitest run src/adapters/server/production/compiler.spec.ts \
+nub exec vitest run src/platforms/server/adapter/rust/compiler.spec.ts \
   -t 'compiles Actor Features'
 ```
-
-The reproducible reference benchmark uses the same in-memory
-compare-and-append EventStore for every case. Remote cases add the canonical
-Dependency wire protocol over an in-memory transport. It reports raw samples,
-p50/p95/p99 latency, throughput, approximate retained-heap delta, cache hit
-rate, network bytes, retained storage bytes, and relocation time for cold and
-warm calls, persistence, many keys, one hot key, overload, reminders, restart,
-snapshot recovery, scale-out, and failover:
-
-```sh
-nub run actor:benchmark
-```
-
-The hot-key case is a target-complexity check, not a claim that one Actor key
-scales internally. Its concurrent throughput should remain near the sequential
-durable-write ceiling; a large degradation indicates admission or persistence
-contention. Approximate retained heap is a lower-bound process measurement,
-not an allocator trace.

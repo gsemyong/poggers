@@ -76,7 +76,7 @@ const currentCapabilities: readonly ExistingCapability[] = [
     id: "typed-targeting",
     status: "complete",
     semanticPaths: ["PresentationComponentTree", "PresentationElement.name"],
-    evidence: ["src/core/ui/presentation.typecheck.ts", "src/contracts/platform.typecheck.ts"],
+    evidence: ["src/core/ui/presentation.typecheck.ts", "src/adapter.typecheck.ts"],
   },
   {
     id: "typed-inputs",
@@ -88,35 +88,35 @@ const currentCapabilities: readonly ExistingCapability[] = [
     id: "platform-independence",
     status: "complete",
     semanticPaths: ["PresentationLanguage", "PresentationAdapter", "UIAdapter"],
-    evidence: ["src/contracts/platform.typecheck.ts"],
+    evidence: ["src/adapter.typecheck.ts"],
   },
   {
     id: "static-artifacts",
     status: "complete",
     semanticPaths: ["WebStyle"],
-    evidence: ["src/adapters/web/ui/presentation/compiler.spec.ts"],
+    evidence: ["src/platforms/web/adapter/presentation/compiler.spec.ts"],
   },
   {
     id: "element-observations",
     status: "complete",
     semanticPaths: ["PresentationElement.observations"],
-    evidence: ["src/adapters/web/ui/presentation/runtime/observations.spec.ts"],
+    evidence: ["src/platforms/web/adapter/presentation/runtime/observations.spec.ts"],
   },
   {
     id: "assets-feedback",
     status: "complete",
     semanticPaths: ["WebElementPresentation.image", "WebElementPresentation.feedback"],
     evidence: [
-      "src/platforms/web/presentation.spec.ts",
-      "src/adapters/web/ui/presentation/adapter.spec.ts",
-      "src/adapters/web/pipeline.spec.ts",
+      "src/platforms/web/presentation/presentation.spec.ts",
+      "src/platforms/web/adapter/presentation/adapter.spec.ts",
+      "src/platforms/web/adapter/pipeline.spec.ts",
     ],
   },
   {
     id: "layout",
     status: "partial",
     semanticPaths: ["WebStyle.layout"],
-    evidence: ["src/adapters/web/ui/presentation/compiler.spec.ts"],
+    evidence: ["src/platforms/web/adapter/presentation/compiler.spec.ts"],
     gap: "Reusable named areas, fragmentation, and advanced positioning are not covered.",
   },
   {
@@ -124,8 +124,8 @@ const currentCapabilities: readonly ExistingCapability[] = [
     status: "partial",
     semanticPaths: ["WebStyle.rules[].when.container"],
     evidence: [
-      "src/adapters/web/ui/presentation/compiler.spec.ts",
-      "src/platforms/web/presentation.spec.ts",
+      "src/platforms/web/adapter/presentation/compiler.spec.ts",
+      "src/platforms/web/presentation/presentation.spec.ts",
       "src/core/ui/presentation.typecheck.ts",
       "examples/authenticated-crud/src/presentations/clean.ts",
       "playground/src/presentations/editorial.ts",
@@ -143,8 +143,8 @@ const currentCapabilities: readonly ExistingCapability[] = [
       "WebStyle.affordance",
     ],
     evidence: [
-      "src/platforms/web/presentation.ts",
-      "src/adapters/web/ui/presentation/compiler.spec.ts",
+      "src/platforms/web/presentation/index.ts",
+      "src/platforms/web/adapter/presentation/compiler.spec.ts",
     ],
     gap: "Advanced typography, masks, compositing, motion paths, and 3D are not covered.",
   },
@@ -163,29 +163,29 @@ const currentCapabilities: readonly ExistingCapability[] = [
     semanticPaths: ["animate", "velocity", "settled"],
     evidence: [
       "src/compiler/presentation.spec.ts",
-      "src/adapters/web/ui/presentation/runtime/animation.spec.ts",
-      "src/adapters/web/ui/presentation/runtime/execution.spec.ts",
+      "src/platforms/web/adapter/presentation/runtime/animation.spec.ts",
+      "src/platforms/web/adapter/presentation/runtime/execution.spec.ts",
     ],
   },
   {
     id: "layout-continuity",
     status: "partial",
     semanticPaths: ["WebElementPresentation.continuity"],
-    evidence: ["src/adapters/web/ui/presentation/runtime/layout.spec.ts"],
+    evidence: ["src/platforms/web/adapter/presentation/runtime/layout.spec.ts"],
     gap: "Rotated ancestry and the broader text/layout continuity corpus remain open.",
   },
   {
     id: "frame-inspection",
     status: "partial",
     semanticPaths: ["WebPresentationAdapterSession.inspect"],
-    evidence: ["src/adapters/web/ui/presentation/adapter.spec.ts"],
+    evidence: ["src/platforms/web/adapter/presentation/adapter.spec.ts"],
     gap: "Difficult browser fixtures and calibrated performance budgets remain open.",
   },
   {
     id: "hot-replacement",
     status: "complete",
     semanticPaths: ["PresentationAdapterInstance.snapshot", "PresentationAdapter.mount.snapshot"],
-    evidence: ["src/adapters/web/ui/presentation/adapter.spec.ts"],
+    evidence: ["src/platforms/web/adapter/presentation/adapter.spec.ts"],
   },
   {
     id: "accessibility-behavior",
@@ -202,7 +202,7 @@ const currentCapabilities: readonly ExistingCapability[] = [
   {
     id: "retained-gpu-native-ui",
     status: "delegated",
-    evidence: ["src/contracts/platform.typecheck.ts"],
+    evidence: ["src/adapter.typecheck.ts"],
     gap: "Retained GPU scenes and native controls require another UI-capable Platform and adapter.",
   },
   {
@@ -214,7 +214,7 @@ const currentCapabilities: readonly ExistingCapability[] = [
   {
     id: "generated-content",
     status: "delegated",
-    evidence: ["src/platforms/web/ui.ts"],
+    evidence: ["src/platforms/web/ui/index.ts"],
     gap: "Meaningful text and accessibility content belong to structure; adapter-owned decoration does not justify a second content path.",
   },
   {
@@ -228,8 +228,8 @@ const currentCapabilities: readonly ExistingCapability[] = [
     status: "partial",
     semanticPaths: ["PresentationElement.scroll"],
     evidence: [
-      "src/adapters/web/ui/presentation/runtime/observations.spec.ts",
-      "src/adapters/web/ui/presentation/runtime/animation.spec.ts",
+      "src/platforms/web/adapter/presentation/runtime/observations.spec.ts",
+      "src/platforms/web/adapter/presentation/runtime/animation.spec.ts",
     ],
     gap: "Existing observations and temporal values express the outcome, but native timeline optimization and compatibility evidence remain open.",
   },
@@ -426,7 +426,7 @@ function inspectWebStylePaths(): readonly string[] {
     throw new Error(ts.flattenDiagnosticMessageText(configFile.error.messageText, "\n"));
   }
   const config = ts.parseJsonConfigFileContent(configFile.config, ts.sys, root);
-  const file = resolve(root, "src/platforms/web/presentation.ts");
+  const file = resolve(root, "src/platforms/web/presentation/index.ts");
   const program = ts.createProgram({ rootNames: [file], options: config.options });
   const diagnostics = ts.getPreEmitDiagnostics(program);
   if (diagnostics.length) {

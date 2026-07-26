@@ -17,46 +17,6 @@
       "rules": {
         "no-restricted-imports": ["error", { "patterns": ["./**", "../**"] }]
       }
-    },
-    {
-      "files": ["src/core/**/*.ts", "src/contracts/**/*.ts"],
-      "rules": {
-        "no-restricted-imports": ["error", { "patterns": ["./**", "../**", "**/adapters/**"] }]
-      }
-    },
-    {
-      "files": ["src/platforms/**/*.ts", "src/platforms/**/*.tsx"],
-      "rules": {
-        "no-restricted-imports": [
-          "error",
-          {
-            "patterns": [
-              "./**",
-              "../**",
-              "@/adapters/**",
-              "@/compiler/**",
-              "@/contracts/**",
-              "@/features/**",
-              "@/runtime/**"
-            ]
-          }
-        ]
-      }
-    },
-    {
-      "files": ["src/adapters/server/**/*.ts"],
-      "rules": {
-        "no-restricted-imports": ["error", { "patterns": ["./**", "../**", "@/adapters/web/**"] }]
-      }
-    },
-    {
-      "files": ["src/adapters/web/**/*.ts"],
-      "rules": {
-        "no-restricted-imports": [
-          "error",
-          { "patterns": ["./**", "../**", "@/adapters/server/**"] }
-        ]
-      }
     }
   ],
   "options": {

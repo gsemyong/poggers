@@ -6,7 +6,7 @@ import {
   type BrowserServiceWorker,
   type Navigation,
   type WebServiceWorkerRuntime,
-} from "@/platforms/web/platform";
+} from "@/platforms/web";
 import type {
   Deferred,
   Validate,

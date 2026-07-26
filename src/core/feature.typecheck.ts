@@ -7,7 +7,7 @@ import {
 } from "@/core/feature";
 import type { Program } from "@/core/program";
 import { createSystem } from "@/core/system";
-import type { BrowserMainThread, BrowserServiceWorker } from "@/platforms/web/platform";
+import type { BrowserMainThread, BrowserServiceWorker } from "@/platforms/web";
 
 type Message = Readonly<{ id: string; text: string }>;
 type ServerPlatform = { readonly Name: "server" };

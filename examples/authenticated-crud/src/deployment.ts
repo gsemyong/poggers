@@ -1,5 +1,5 @@
-import { createDeployment } from "kit";
 import { createLocalDeploymentAdapter } from "kit/adapters/deployment/local";
+import { createDeployment } from "kit/deployment";
 
 import system from "./system";
 

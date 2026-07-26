@@ -11,7 +11,7 @@ import type { ProgramContract } from "@/core/program";
 import type { PlatformInterfaceContract, PlatformInterfaceFeature } from "@/core/system";
 import type { ComponentComposition, ComponentUI } from "@/core/ui/component";
 import type { ConfiguredPresentationFor } from "@/core/ui/presentation";
-import type { WebPlatform } from "@/platforms/web/platform";
+import type { WebPlatform } from "@/platforms/web";
 import type { WebPresentationLanguage } from "@/platforms/web/presentation";
 
 declare const validation: unique symbol;

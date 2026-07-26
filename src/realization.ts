@@ -3,22 +3,21 @@ import { readFileSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 
 import {
-  selectSystemOutputs,
-  type PlatformInterfaceIR,
-  type ProgramIR,
-  type SystemIR,
-} from "@/compiler/ir";
-import { createSystemCompiler, resolveSystem } from "@/compiler/source";
-import type { Release } from "@/contracts/deployment";
-import {
   selectPlatformAdapters,
   type DevelopmentSession,
   type PlatformAdapterImplementation,
   type ProductionArtifacts,
   type SystemCompilationRevision,
   type SystemRevisionSource,
-} from "@/contracts/platform";
-import { createRelease } from "@/deployment";
+} from "@/adapter";
+import {
+  selectSystemOutputs,
+  type PlatformInterfaceIR,
+  type ProgramIR,
+  type SystemIR,
+} from "@/compiler/ir";
+import { createSystemCompiler, resolveSystem } from "@/compiler/source";
+import { createRelease, type Release } from "@/deployment";
 
 export type SystemRealization<Adapter extends PlatformAdapterImplementation> = Readonly<{
   directory: string;

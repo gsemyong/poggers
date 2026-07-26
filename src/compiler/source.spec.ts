@@ -1,16 +1,10 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
 import fc from "fast-check";
 import { afterEach, describe, expect, test } from "vitest";
 
-import {
-  buildRustProgram,
-  createRustProgramSession,
-  runRustProgram,
-} from "@/adapters/server/production/fixtures/conformance";
-import { generateRustProgram } from "@/adapters/server/production/program";
 import type { SourceCompilerExtension } from "@/compiler/extension";
 import {
   selectSystemOutputs,
@@ -22,12 +16,18 @@ import {
   type TypeIR,
 } from "@/compiler/ir";
 import { collectProgramManifest, linkProgram } from "@/compiler/linker";
+import { generateRustProgram } from "@/compiler/rust/lowering";
 import { SystemDiagnostic, compileSystem, createSystemCompiler } from "@/compiler/source";
 import {
   executeLinkedProgramIR,
   executeProgramFixtureIR,
   executeProgramIR,
-} from "@/runtime/interpreter";
+} from "@/execution/interpreter";
+import {
+  buildRustProgram,
+  createRustProgramSession,
+  runRustProgram,
+} from "@/platforms/server/adapter/rust/fixtures/conformance";
 
 const temporaryDirectories: string[] = [];
 
@@ -1555,7 +1555,7 @@ const child = createFeature<Child>`,
 
   test(
     "generates and runs a standalone Rust artifact from the same portable IR",
-    { tags: ["native"], timeout: 120_000 },
+    { tags: ["compiler"], timeout: 120_000 },
     async () => {
       const ir = compileSystem(await fixture(systemSource()));
       const program = programContribution(ir, "feature/worker/program/cloud")!;
@@ -1642,7 +1642,7 @@ const child = createFeature<Child>`,
 
   test(
     "preserves portable failure identity and source context in JavaScript and Rust",
-    { tags: ["native"], timeout: 120_000 },
+    { tags: ["compiler"], timeout: 120_000 },
     async () => {
       const ir = compileSystem(await projectFixture(throwingSystemSource()));
       const contribution = programContribution(ir, "feature/worker/program/server")!;
@@ -1677,6 +1677,7 @@ async function fixture(source: string): Promise<string> {
 
 async function projectFixture(source: string): Promise<string> {
   const parent = resolve(process.cwd(), ".data");
+  await mkdir(parent, { recursive: true });
   const directory = await mkdtemp(resolve(parent, "compiler-fixture-"));
   temporaryDirectories.push(directory);
   const entry = resolve(directory, "system.ts");
@@ -1705,7 +1706,8 @@ function createSystem(definition: object): object {
 
 function typeLiteralFactorySystemSource(): string {
   return `
-import { createSystem, type Feature, type Program, typeLiteral } from "@/index";
+import { createSystem, type Feature, type Program } from "@/index";
+import { typeLiteral } from "@/factory";
 
 type Server = { Name: "server"; Platform: { Name: "server" } };
 type Reader = { read(input: {}): Promise<string> };
@@ -1757,9 +1759,8 @@ import {
   createSystem,
   type Feature,
   type Program,
-  typeLiteral,
-  typeSchema,
 } from "@/index";
+import { typeLiteral, typeSchema } from "@/factory";
 
 type Server = { Name: "server"; Platform: { Name: "server" } };
 type Reader = { describe(input: {}): Promise<object> };

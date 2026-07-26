@@ -1,6 +1,13 @@
 import type * as ts from "@typescript/typescript6";
 
-import type { ExtensionIR, FunctionIR, SourceSpan, SystemIR, TypeIR } from "@/compiler/ir";
+import type {
+  DependencyIR,
+  ExtensionIR,
+  FunctionIR,
+  SourceSpan,
+  SystemIR,
+  TypeIR,
+} from "@/compiler/ir";
 
 export type SourceCompilerAPI = Readonly<{
   properties(type: ts.Type | undefined): readonly ts.Symbol[];
@@ -16,6 +23,7 @@ export type SourceCompilerAPI = Readonly<{
   literal(type: ts.Type, name: string, at: ts.Node): string;
   optionalLiteral(type: ts.Type, name: string, at: ts.Node): string | undefined;
   lower(type: ts.Type, at: ts.Node): TypeIR;
+  dependencies(type: ts.Type, at: ts.Node): readonly DependencyIR[];
   portable(
     declaration: ts.ObjectLiteralElementLike | ts.FunctionLikeDeclaration,
     options: Readonly<{

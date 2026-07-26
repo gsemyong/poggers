@@ -18,12 +18,11 @@ export type Identity = IdentityModel<{
 export type Session = IdentitySession<Identity>;
 export type IdentityClient = FeatureIdentityClient<Identity>;
 
-export const identity = createIdentity<Identity>({
-  name: "identity",
-  principal: (user: AuthenticatedUser): User => user,
-});
+export const identity = placePrograms(
+  createIdentity<Identity>({
+    principal: (user: AuthenticatedUser): User => user,
+  }),
+  { server: "api", browser: "browser" },
+);
 
-export const identityServer = placePrograms(identity.server, { server: "api" });
-export const identityBrowser = placePrograms(identity.browser, { browser: "browser" });
-
-export type IdentityBrowserFeature = FeatureContractOf<typeof identityBrowser>;
+export type IdentityBrowserFeature = FeatureContractOf<typeof identity>;

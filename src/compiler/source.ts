@@ -13,6 +13,7 @@ import type {
 import {
   SYSTEM_IR_VERSION,
   type DependencyIR,
+  type DependencyProviderIR,
   type ComponentIR,
   type CompilerExtensionsIR,
   type ExtensionIR,
@@ -28,6 +29,7 @@ import {
   type ProgramIR,
   type SourceSpan,
   type StatementIR,
+  type SystemOutputSources,
   type TypeIR,
 } from "@/compiler/ir";
 import { compilePresentationSource } from "@/compiler/presentation";
@@ -48,7 +50,7 @@ export type SystemPaths = Readonly<{
   system: string;
 }>;
 
-export type SystemOutputSources = Readonly<Record<string, readonly string[]>>;
+export type { SystemOutputSources } from "@/compiler/ir";
 
 export type SystemCompilation = Readonly<{
   ir: SystemIR;
@@ -144,6 +146,7 @@ function sourceCompilerAPI(checker: ts.TypeChecker, scope?: StaticValue): Source
     literal: (type, name, at) => literalProperty(checker, type, name, at),
     optionalLiteral: (type, name, at) => literalPropertyOptional(checker, type, name, at),
     lower: (type, at) => lowerType(checker, type, at),
+    dependencies: (type, at) => dependencyList(checker, type, at),
     portable(declaration, options) {
       const functionLike = isFunctionImplementation(declaration)
         ? declaration
@@ -302,6 +305,7 @@ function compileSystemProgram(
   const contributions: UnassembledProgramIR[] = [];
   const interfaceSources: InterfaceSource[] = [];
   extractFeatures(
+    program,
     checker,
     featuresContract,
     featureValues,
@@ -403,10 +407,13 @@ function compileSystemProgram(
 
 type UnassembledProgramIR = ProgramContributionIR &
   Readonly<{
+    instance: string;
+    app?: string;
     name: string;
     logicalName: string;
     environment: ProgramIR["environment"];
     interface?: string;
+    placementInterface?: string;
   }>;
 
 type InterfaceSource = Readonly<{
@@ -438,9 +445,34 @@ function validateProgramEnvironments(programs: readonly UnassembledProgramIR[]):
 function assemblePrograms(contributions: readonly UnassembledProgramIR[]): ProgramIR[] {
   const names = [...new Set(contributions.map(({ name }) => name))].sort();
   return names.map((name) => {
-    const members = contributions
+    const candidates = contributions
       .filter((contribution) => contribution.name === name)
       .sort((left, right) => left.feature.localeCompare(right.feature));
+    const repeated = new Map<string, number>();
+    const members: UnassembledProgramIR[] = [];
+    for (const contribution of candidates) {
+      if (contribution.interface || !contribution.placementInterface) {
+        members.push(contribution);
+        continue;
+      }
+      const key = `${contribution.logicalName}\0${contribution.instance}`;
+      const previousIndex = repeated.get(key);
+      if (previousIndex === undefined) {
+        repeated.set(key, members.length);
+        members.push(contribution);
+        continue;
+      }
+      const previous = members[previousIndex]!;
+      const apps = [
+        ...new Set(
+          [previous.app, contribution.app].filter((value): value is string => value !== undefined),
+        ),
+      ].sort();
+      members[previousIndex] = {
+        ...previous,
+        ...(apps.length > 1 ? { apps } : {}),
+      };
+    }
     const environment = members[0]!.environment;
     const roots = members.flatMap(({ feature, ui }) =>
       ui?.root ? [{ feature, component: ui.root }] : [],
@@ -465,6 +497,9 @@ function assemblePrograms(contributions: readonly UnassembledProgramIR[]): Progr
           logicalName: _logicalName,
           environment: _environment,
           interface: _interface,
+          placementInterface: _placementInterface,
+          instance: _instance,
+          app: _app,
           ...member
         }) => member,
       ),
@@ -633,6 +668,7 @@ function inside(root: string, file: string): boolean {
 }
 
 function extractFeatures(
+  program: ts.Program,
   checker: ts.TypeChecker,
   contracts: ts.Type,
   values: ts.ObjectLiteralExpression | undefined,
@@ -699,7 +735,6 @@ function extractFeatures(
         sourceFiles.add(canonicalSourceFile(source.fileName));
       }
     }
-    featureSourceFiles.set(path, sourceFiles);
     const featureLocation = value ?? location;
     const isApp = booleanLiteralProperty(checker, contract, "App", location) === true;
     const interfaceMarker = propertyType(checker, contract, "Interface", location);
@@ -757,6 +792,20 @@ function extractFeatures(
     );
     const childContracts = propertyType(checker, contract, "Features", location);
     const childValues = objectExpression(checker, objectMember(checker, featureValue, "features"));
+    const providers = extractDependencyProviders(
+      program,
+      checker,
+      contract,
+      featureValue,
+      (staticFeature ? resolveStaticMember(checker, staticFeature, "providers") : undefined) ??
+        (value ? resolveFeatureMember(checker, value, "providers") : undefined),
+      featureLocation,
+      root,
+    );
+    for (const provider of providers) {
+      for (const source of provider.sources ?? []) sourceFiles.add(canonicalSourceFile(source));
+    }
+    featureSourceFiles.set(path, sourceFiles);
     const programIds: string[] = [];
     const childIds: string[] = [];
 
@@ -801,6 +850,14 @@ function extractFeatures(
           extensions,
           root,
           ownedInterface,
+          staticValueIdentity(
+            staticFeature ?? {
+              node: value ?? featureLocation,
+              bindings: new Map(),
+              types: new Map(),
+            },
+          ),
+          ownedApp,
         );
         programs.push(extracted);
         programIds.push(`program/${extracted.name}`);
@@ -814,6 +871,7 @@ function extractFeatures(
         childIds.push(`feature/${path}.${child.getName()}`);
       }
       extractFeatures(
+        program,
         checker,
         childContracts,
         childValues,
@@ -843,6 +901,7 @@ function extractFeatures(
       ...(interfacePlatform ? { platform: interfacePlatform } : {}),
       children: childIds.sort(),
       programs: [...new Set(programIds)].sort(),
+      ...(providers.length ? { providers } : {}),
       ...extensionField(extensions, "feature", {
         checker,
         source: sourceCompilerAPI(checker, staticFeature),
@@ -854,6 +913,137 @@ function extractFeatures(
       }),
     });
   }
+}
+
+function extractDependencyProviders(
+  program: ts.Program,
+  checker: ts.TypeChecker,
+  contract: ts.Type,
+  feature: ts.ObjectLiteralExpression | undefined,
+  staticProviders: StaticValue | undefined,
+  location: ts.Node,
+  root: string,
+): readonly DependencyProviderIR[] {
+  const providerContracts = propertyType(checker, contract, "Providers", location);
+  if (!providerContracts) return [];
+  const providerValues =
+    staticObjectValue(checker, staticProviders) ??
+    objectExpression(checker, objectMember(checker, feature, "providers"));
+  if (feature && !providerValues) {
+    throw diagnostic(feature, "Feature provider contracts require provider implementations.");
+  }
+  const providers: DependencyProviderIR[] = [];
+  for (const platformSymbol of sortedSymbols(providerContracts.getProperties())) {
+    const platform = platformSymbol.getName();
+    const platformLocation = platformSymbol.valueDeclaration ?? location;
+    const platformContract = checker.getTypeOfSymbolAtLocation(platformSymbol, platformLocation);
+    const platformValue = providerValues
+      ? staticObjectExpression(checker, resolveObjectMember(checker, providerValues, platform))
+      : undefined;
+    if (providerValues && !platformValue) {
+      throw diagnostic(
+        providerValues,
+        `Feature provider Platform ${JSON.stringify(platform)} has no implementation.`,
+      );
+    }
+    for (const dependencySymbol of sortedSymbols(platformContract.getProperties())) {
+      const dependency = dependencySymbol.getName();
+      const providerValue = platformValue
+        ? staticObjectExpression(checker, resolveObjectMember(checker, platformValue, dependency))
+        : undefined;
+      if (platformValue && !providerValue) {
+        throw diagnostic(
+          platformValue,
+          `Feature Dependency provider ${JSON.stringify(dependency)} has no implementation.`,
+        );
+      }
+      const development = providerValue
+        ? objectMemberDeclaration(providerValue, "development")
+        : undefined;
+      if (!development) {
+        throw diagnostic(
+          providerValue ?? platformValue ?? feature ?? location,
+          `Feature Dependency provider ${JSON.stringify(dependency)} has no development implementation.`,
+        );
+      }
+      const requirementsValue = objectMember(checker, providerValue, "requirements");
+      const requirements = requirementsValue
+        ? staticConstant(
+            checker,
+            { node: requirementsValue, bindings: new Map(), types: new Map() },
+            new Set(),
+          )
+        : undefined;
+      if (requirementsValue && requirements === undefined) {
+        throw diagnostic(
+          requirementsValue,
+          `Feature Dependency provider ${JSON.stringify(dependency)} requirements must be static data.`,
+        );
+      }
+      const productionValue = objectMember(checker, providerValue, "production");
+      const production = productionValue
+        ? staticConstant(
+            checker,
+            { node: productionValue, bindings: new Map(), types: new Map() },
+            new Set(),
+          )
+        : undefined;
+      if (productionValue && production === undefined) {
+        throw diagnostic(
+          productionValue,
+          `Feature Dependency provider ${JSON.stringify(dependency)} production meaning must be static data.`,
+        );
+      }
+      providers.push({
+        dependency,
+        platform,
+        development: true,
+        sources: Object.freeze(
+          [
+            ...transitiveLocalSources(program, checker, root, [
+              development.getSourceFile(),
+              ...(providerValue ? [providerValue.getSourceFile()] : []),
+            ]),
+          ].sort(),
+        ),
+        ...(requirements === undefined ? {} : { requirements }),
+        ...(production === undefined ? {} : { production }),
+        span: spanOf(providerValue ?? development),
+      });
+    }
+  }
+  return providers.sort((left, right) =>
+    `${left.platform}/${left.dependency}`.localeCompare(`${right.platform}/${right.dependency}`),
+  );
+}
+
+function staticObjectExpression(
+  checker: ts.TypeChecker,
+  value: ts.Expression | undefined,
+): ts.ObjectLiteralExpression | undefined {
+  const direct = objectExpression(checker, value);
+  if (direct || !value) return direct;
+  const resolved = resolveStaticValue(
+    checker,
+    { node: value, bindings: new Map(), types: new Map() },
+    new Set(),
+  );
+  return resolved?.node && ts.isExpression(resolved.node)
+    ? objectExpression(checker, resolved.node)
+    : undefined;
+}
+
+function staticObjectValue(
+  checker: ts.TypeChecker,
+  value: StaticValue | undefined,
+): ts.ObjectLiteralExpression | undefined {
+  if (!value) return undefined;
+  const direct = ts.isExpression(value.node) ? objectExpression(checker, value.node) : undefined;
+  if (direct) return direct;
+  const resolved = resolveStaticValue(checker, value, new Set());
+  return resolved?.node && ts.isExpression(resolved.node)
+    ? objectExpression(checker, resolved.node)
+    : undefined;
 }
 
 function extractProgram(
@@ -869,6 +1059,8 @@ function extractProgram(
   extensions: readonly SourceCompilerExtension[] = [],
   sourceRoot = dirname(at.getSourceFile().fileName),
   interfaceOwner?: InterfaceOwner,
+  instance = sourceIdentity(at),
+  app?: string,
 ): UnassembledProgramIR {
   const location = value ?? at;
   const environment = propertyType(checker, contract, "Environment", location);
@@ -933,10 +1125,13 @@ function extractProgram(
   return {
     id: `feature/${feature}/program/${name}`,
     feature,
+    instance,
+    ...(app ? { app } : {}),
     name: concreteName,
     logicalName: name,
     environment: { name: environmentName, platform, ...(ui ? { ui } : {}) },
     ...(interfaceOwner?.platform === platform ? { interface: interfaceOwner.path } : {}),
+    ...(interfaceOwner ? { placementInterface: interfaceOwner.path } : {}),
     requires,
     provides,
     ...(state || actions || components
@@ -1202,9 +1397,11 @@ function dependencyList(
       .getProperties()
       .find((property) => property.getName().startsWith("__@dependencyDefinition"));
     const definition = definitionMarker
-      ? checker.getTypeOfSymbolAtLocation(
-          definitionMarker,
-          definitionMarker.valueDeclaration ?? symbol.valueDeclaration ?? at,
+      ? checker.getNonNullableType(
+          checker.getTypeOfSymbolAtLocation(
+            definitionMarker,
+            definitionMarker.valueDeclaration ?? symbol.valueDeclaration ?? at,
+          ),
         )
       : undefined;
     const operations = definition
@@ -1635,6 +1832,7 @@ type PortableLowering = Readonly<{
   typeSubstitutions: Map<ts.Type, ts.Type>;
   staticBindings: Map<ts.Symbol, StaticValue>;
   providedNames: readonly string[];
+  providedBinding?: ts.Symbol;
 }>;
 
 function lowerPortableType(lowering: PortableLowering, type: ts.Type, at: ts.Node): TypeIR {
@@ -1667,12 +1865,24 @@ function lowerStartFunction(
   const functionLike = isFunctionImplementation(node) ? node : functionFromMember(node);
   if (!functionLike?.body)
     throw diagnostic(node, "Program start must have a statically known body.");
-  return lowerFunction(lowering, functionLike, {
-    id: "start",
-    name: "start",
-    dependenciesName: dependencyBinding(functionLike.parameters[0]) ?? "@dependencies",
-    omitFirstParameter: true,
-  });
+  const providedBinding = contextBindingSymbol(
+    lowering.checker,
+    functionLike.parameters[0],
+    "provides",
+  );
+  return lowerFunction(
+    {
+      ...lowering,
+      ...(providedBinding ? { providedBinding } : {}),
+    },
+    functionLike,
+    {
+      id: "start",
+      name: "start",
+      dependenciesName: dependencyBinding(functionLike.parameters[0]) ?? "@dependencies",
+      omitFirstParameter: true,
+    },
+  );
 }
 
 function lowerFunction(
@@ -2326,6 +2536,22 @@ function lowerExpression(
       return typedExpression(lowering, expression, { kind: "none" });
     }
     const symbol = valueSymbol(checker, expression);
+    if (symbol && symbol === lowering.providedBinding) {
+      const span = spanOf(expression);
+      return {
+        kind: "array",
+        values: lowering.providedNames.map(
+          (name): ExpressionIR => ({
+            kind: "literal",
+            value: name,
+            type: { kind: "literal", value: name },
+            span,
+          }),
+        ),
+        type: lowerPortableType(lowering, checker.getTypeAtLocation(expression), expression),
+        span,
+      };
+    }
     const binding = symbol ? staticBinding(lowering, symbol) : undefined;
     if (binding?.node && ts.isExpression(binding.node)) {
       return lowerStaticValue(lowering, symbol, binding, dependenciesName, expression);
@@ -3719,6 +3945,22 @@ function dependencyBinding(parameter: ts.ParameterDeclaration | undefined): stri
   return undefined;
 }
 
+function contextBindingSymbol(
+  checker: ts.TypeChecker,
+  parameter: ts.ParameterDeclaration | undefined,
+  name: string,
+): ts.Symbol | undefined {
+  if (!parameter || !ts.isObjectBindingPattern(parameter.name)) return undefined;
+  const binding = parameter.name.elements.find(
+    (element) =>
+      (element.propertyName ? memberName(element) : memberName(element)) === name &&
+      ts.isIdentifier(element.name),
+  );
+  return binding && ts.isIdentifier(binding.name)
+    ? checker.getSymbolAtLocation(binding.name)
+    : undefined;
+}
+
 function dependencyContractBinding(
   checker: ts.TypeChecker,
   parameter: ts.ParameterDeclaration | undefined,
@@ -3976,6 +4218,25 @@ type StaticValue = Readonly<{
   types?: ReadonlyMap<ts.Type, ts.Type>;
 }>;
 
+function sourceIdentity(node: ts.Node): string {
+  const source = node.getSourceFile();
+  return `${canonicalSourceFile(source.fileName)}:${node.getStart(source)}:${node.getEnd()}`;
+}
+
+function staticValueIdentity(value: StaticValue): string {
+  const seen = new Set<ts.Node>();
+  const visit = (current: StaticValue): string => {
+    if (seen.has(current.node)) return sourceIdentity(current.node);
+    seen.add(current.node);
+    const bindings = [...current.bindings.entries()]
+      .sort(([left], [right]) => left.getName().localeCompare(right.getName()))
+      .map(([symbol, bound]) => `${symbol.getName()}=${visit(bound)}`)
+      .join(",");
+    return `${sourceIdentity(current.node)}${bindings ? `{${bindings}}` : ""}`;
+  };
+  return visit(value);
+}
+
 function resolveStaticPath(
   checker: ts.TypeChecker,
   expression: ts.Expression,
@@ -4038,6 +4299,38 @@ function resolveFeatureProgram(
       if (unwrapped) return unwrapped;
     }
     return resolveStaticPath(checker, node, ["programs", program]);
+  } finally {
+    active.delete(node);
+  }
+}
+
+function resolveFeatureMember(
+  checker: ts.TypeChecker,
+  expression: ts.Expression,
+  member: string,
+  active: Set<ts.Node> = new Set(),
+): StaticValue | undefined {
+  const node = unwrapExpression(expression);
+  if (active.has(node)) return undefined;
+  active.add(node);
+  try {
+    if (ts.isIdentifier(node)) {
+      let symbol = ts.isShorthandPropertyAssignment(node.parent)
+        ? checker.getShorthandAssignmentValueSymbol(node.parent)
+        : checker.getSymbolAtLocation(node);
+      if (symbol?.flags && symbol.flags & ts.SymbolFlags.Alias) {
+        symbol = checker.getAliasedSymbol(symbol);
+      }
+      const declaration = symbol?.declarations?.find(ts.isVariableDeclaration);
+      return declaration?.initializer
+        ? resolveFeatureMember(checker, declaration.initializer, member, active)
+        : undefined;
+    }
+    if (ts.isCallExpression(node) && resolvedCallName(checker, node) === "placePrograms") {
+      const feature = node.arguments[0];
+      return feature ? resolveFeatureMember(checker, feature, member, active) : undefined;
+    }
+    return resolveStaticPath(checker, node, [member]);
   } finally {
     active.delete(node);
   }
@@ -4859,6 +5152,24 @@ function normalizeSourceFiles(ir: SystemIR, root: string): SystemIR {
   };
   return {
     ...ir,
+    features: ir.features.map((feature) => ({
+      ...feature,
+      ...(feature.providers
+        ? {
+            providers: feature.providers.map((provider) => ({
+              ...provider,
+              ...(provider.sources
+                ? {
+                    sources: provider.sources.map((source) =>
+                      relative(root, source).replaceAll("\\", "/"),
+                    ),
+                  }
+                : {}),
+              span: normalizeSpan(provider.span),
+            })),
+          }
+        : {}),
+    })),
     programs: ir.programs.map((program) => ({
       ...program,
       contributions: program.contributions.map((contribution) => ({

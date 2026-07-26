@@ -1,8 +1,6 @@
 node_modules/
 dist/
 target/
-Cargo.lock
-!src/adapters/server/production/Cargo.lock
 .kit/
 .data/
 .DS_Store

@@ -115,14 +115,13 @@ type TasksBrowser = Program<
 >;
 
 type TasksFeatureDefinition = Readonly<{
-  Features: { tasks: FeatureContractOf<typeof taskBrowser> };
+  Features: { tasks: FeatureContractOf<typeof placedTaskEntity> };
   Programs: { browser: TasksBrowser };
 }>;
 
 export type TasksFeature = MountedWebFeature<TasksFeatureDefinition, "tasks">;
 
 export const taskEntity = createEntity<Tasks>({
-  name: "tasks",
   create: (value) => ({
     id: value.id,
     ownerId: value.principal.id,
@@ -138,11 +137,10 @@ export const taskEntity = createEntity<Tasks>({
   authorize: (value) => value.principal.id === value.entity.ownerId,
 });
 
-export const taskServer = placePrograms(taskEntity.server, { server: "api" });
-const taskBrowser = placePrograms(taskEntity.browser, { browser: "browser" });
+const placedTaskEntity = placePrograms(taskEntity, { server: "api", browser: "browser" });
 
 const taskFeature: WebFeature<TasksFeatureDefinition, WorkspaceWeb> = {
-  features: { tasks: taskBrowser },
+  features: { tasks: placedTaskEntity },
   programs: {
     browser: {
       state: { error: undefined },

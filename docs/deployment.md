@@ -16,7 +16,7 @@ and where declared interfaces are reachable.
 A workspace has one `src/deployment.ts`:
 
 ```ts
-import { createDeployment } from "kit";
+import { createDeployment } from "kit/deployment";
 import { createLocalDeploymentAdapter } from "kit/adapters/deployment/local";
 
 import system from "@/system";
@@ -70,7 +70,7 @@ independent detached operating-system Processes, persists non-secret observed
 state, allocates ports and storage, exposes interface gateways, and verifies
 failure recovery and replica changes without a cloud account.
 
-`kit/adapters/deployment/oci` packages the same Release into a deterministic
+`kit/deployment/oci` packages the same Release into a deterministic
 OCI image layout. It is a building block for container, bare-metal, and cloud
 Deployment adapters, not a second deployment language.
 
@@ -82,7 +82,7 @@ is opt-in and requires a compatible Linux Rust target plus a Docker-compatible
 
 ```sh
 KIT_OCI_RUNTIME=/path/to/container \
-  nub exec vitest run src/adapters/deployment/oci.spec.ts
+  nub exec vitest run src/deployment/artifacts/oci/artifact.spec.ts
 ```
 
 The runtime smoke compiles a minimal static Linux fixture, packages it through

@@ -179,60 +179,141 @@ dependency bag, hidden event bus, or adapter import in product code.
 
 ## Source Layout
 
-The current physical tree is transitional. The target ownership convention,
-provider placement, Feature-factory surface, testing contract, and migration
-gates are recorded in [`features.md`](./features.md). In particular, the target
-does not retain global `contracts/`, `runtime/`, and `adapters/` buckets merely
-because several semantic owners happen to use those implementation roles.
+The physical tree follows semantic ownership. One architectural unit owns one
+directory. Its `index.ts` is the semantic boundary; implementations and tests
+are nested beneath the same owner. A peer file and same-named directory never
+represent one unit.
 
 ```text
+Cargo.toml                    shared Rust verification workspace
+Cargo.lock
+
 src/
-  core/         product-language contracts
-  compiler/     TypeScript meaning, IR, and linking
-  runtime/      platform-neutral interpretation and Process scopes
-  jsx/          shared JSX dispatch
-  contracts/    adapter contracts
-  platforms/    platform authoring languages
-  features/     shipped reusable Feature factories
-  adapters/     development and production realizations
+  core/          universal product-language meaning
+  compiler/      TypeScript frontend, canonical IR, linking, and backends
+  execution/     platform-neutral Process and Dependency semantics
+  jsx/           shared JSX dispatch
+  features/      shipped reusable Feature factories
+  platforms/     Platform contracts and adapters
+  deployment/    deployment contract, adapters, and artifact formats
+  adapter.ts     Platform Adapter authoring contract
+  factory.ts     Feature-factory compiler intrinsics
+  index.ts       ordinary product facade
 ```
 
-Top-level source files are public facades or whole-System orchestration:
+`execution/` is a genuine universal stage, not a technical catch-all: it owns
+live interpretation of linked Program meaning, Process scopes, state, and
+Dependency transport. Contracts are not collected in a global `contracts/`
+directory: each contract stays beside the concept that owns it. Rust workspace
+files live at the repository root because they coordinate repository tooling,
+not TypeScript product source.
 
-- `index.ts`, `ui.ts`, and platform modules define package entry points;
+Top-level source entries are public facades or whole-System coordination:
+
+- `index.ts`, `ui.ts`, `factory.ts`, `deployment/index.ts`, and Platform modules
+  define package entry points;
 - `realization.ts` coordinates one compiled System with selected adapters;
-- `testing.ts` verifies complete development and production realizations;
+- `testing/index.ts` verifies complete development and production realizations;
 - `cli.ts` exposes the command boundary.
 
-Adapter implementations organize by Platform, then by lifecycle:
+A Platform directory contains its contract and each complete adapter. An
+adapter may use several implementation languages, but development and
+production are adapter operations rather than source-ownership categories:
 
 ```text
-adapters/
-  deployment/
-    local.ts
-    oci.ts
-  data/
+platforms/
   server/
-    development/
-    production/
+    index.ts
+    adapter/
+      index.ts
+      adapter.spec.ts
+      typescript/
+      rust/
   web/
-    development/
-    production/
-    ui/
+    index.ts
+    adapter/
+      index.ts
+      adapter.spec.ts
+      development.ts
+      production.ts
+      presentation/
+      ui/
 ```
 
-`adapters/data/` is the one shared Dependency-adapter boundary: its Turso
-implementation is mounted by both the web and server Platform adapters. Shared
-Dependency adapters are introduced only when the same implementation truly runs
-on several Platforms; otherwise code remains under its owning Platform.
+Generic TypeScript-to-Rust lowering is a compiler backend. It never recognizes
+a Feature factory or platform-specific Dependency:
 
-Adapter-root modules contain only coordination shared by concrete adapters:
-registry wiring, public-package source resolution, and the explicit web/server
-route-loader bridge.
+```text
+compiler/
+  rust/
+    lowering.ts
+    runtime/
+```
 
-Native-language code lives under the production profile that owns it.
-Dependency implementations group by semantic Dependency, adding a technology
-subdirectory only when several real implementations exist.
+A shipped Feature factory owns one directory. Its public model, factory,
+portable Programs, UI, and TypeScript provider implementations remain
+co-located in `index.ts`. Reusable test projections use `testing.ts`. Source in
+another implementation language is organized first by Platform and then by
+language:
+
+```text
+features/
+  data/
+    index.ts
+    feature.spec.ts
+    feature.typecheck.ts
+    testing.ts
+    providers/
+      server/
+        rust/
+          Cargo.toml
+          src/lib.rs
+  identity/
+    index.ts
+    feature.spec.ts
+    testing.ts
+    providers/
+      server/
+        rust/
+```
+
+General host Dependency implementations live under their Platform. A provider
+created specifically for a Feature lives with that Feature. A provider that
+becomes independently reusable becomes its own Feature rather than entering a
+global registry. `native` is not an ownership category: foreign source always
+names both its Platform and implementation language.
+
+Deployment follows the same ownership rule:
+
+```text
+deployment/
+  index.ts
+  adapters/
+    local/
+      index.ts
+      adapter.spec.ts
+  artifacts/
+    oci/
+      index.ts
+      artifact.spec.ts
+```
+
+An OCI packager is an artifact implementation, not a Deployment adapter.
+Cross-system verification has an explicitly named `integration.spec.ts`; test
+names never encode incidental technologies through suffixes such as
+`.native.spec.ts`, `.full.spec.ts`, or `.extra.spec.ts`.
+
+The repository has one workspace for each external-development purpose:
+
+```text
+template/                         source copied by kit create
+playground/                       interactive Feature and Presentation lab
+examples/authenticated-crud/      representative end-to-end System
+```
+
+These are not alternate architectures. They use the same source convention and
+public API. Keeping the template in this repository lets one framework release
+atomically version and verify the exact workspace it creates.
 
 Platform adapters turn Program meaning into development sessions or immutable
 production artifacts. Deployment adapters consume those artifacts and realize
@@ -248,49 +329,83 @@ kit
 kit/ui
 kit/web
 kit/server
-kit/testing
 ```
 
-Adapter authors use the explicit advanced entries:
+Feature-factory authors, tests, and deployment definitions use explicit
+semantic entries:
+
+```text
+kit/factory
+kit/testing
+kit/deployment
+```
+
+Adapter authors use the explicit implementation entries:
 
 ```text
 kit/adapter
 kit/adapters/web
 kit/adapters/server
 kit/adapters/deployment/local
-kit/adapters/deployment/oci
+kit/deployment/oci
 ```
 
 Compiler and runtime implementation modules remain private. Public declarations
-are recorded in `docs/api.json`; an intentional change requires a file under
-`changes/`.
+are recorded in `docs/api.json`; an intentional change requires one
+`CHANGELOG.md` entry and a matching API intent.
 
 ## Verification
 
-`nub run check` is the repository acceptance gate. It verifies declarations,
-portable source, architecture boundaries, deterministic compiler behavior,
-runtime and adapter contracts, web artifacts, Rust production crates, package
-API drift, formatting, and linting.
+Semantic verification is authored once in TypeScript. A Dependency owns a
+reusable TypeScript conformance suite beside its contract. Asynchronous JSON
+providers run that suite directly against TypeScript and Rust. Synchronous,
+callback, and streaming contracts instead run a TypeScript-authored portable
+Program or complete System specification through both realizations; converting
+those calls into asynchronous subprocess IPC would change their semantics.
+Rust-local tests are reserved for implementation-internal safety such as
+persistence, fencing, parser behavior, and cache bounds.
+
+Feature factories expose typed fixtures for concrete Features produced from
+them. Those fixtures use deterministic in-memory Dependencies by default and
+support controlled time, identity, faults, persistence, restart, and
+synchronization only when the Feature owns those concepts. Application
+developers never need Cargo or native source to test product behavior.
+
+The verification ladder follows ownership:
+
+| Change                 | Required verification                                            |
+| ---------------------- | ---------------------------------------------------------------- |
+| Feature behavior       | adjacent TypeScript `feature.spec.ts`                            |
+| Feature public types   | adjacent `feature.typecheck.ts` and root typecheck               |
+| Dependency contract    | its TypeScript conformance suite against the reference provider  |
+| TypeScript provider    | the owning Dependency conformance suite                          |
+| Rust provider          | direct conformance or generated-Program conformance, as required |
+| Portable subset or IR  | compiler tests and combined TypeScript/Rust differential corpus  |
+| Rust compiler backend  | lowering tests, targeted Cargo check, differential corpus        |
+| Platform adapter       | adjacent adapter contract suite                                  |
+| Web UI or Presentation | focused web tests and browser verification                       |
+| Deployment adapter     | deployment contract suite against that adapter                   |
+| Public package meaning | API record and affected workspaces                               |
+| Release                | complete repository gate and focused release-mode smoke          |
 
 Use the validation ladder while editing:
 
 ```sh
-nub exec vitest run path/to/file.spec.ts -t "changed behavior" --tagsFilter="!native && !production"
+nub exec vitest run path/to/feature.spec.ts -t "changed behavior"
 nub run typecheck
 nub run test
-nub run check:native
+nub run check:compiler
+nub run check:providers
 nub run check:presentation
 nub run check:production
 ```
 
-The first two commands are the general inner loop. `test` is the complete
-source/development milestone and does not compile or execute generated native Programs. Run
-cross-backend differential tests when portable compiler or IR meaning changes;
-run focused Cargo checks when a native Dependency changes. Native and
-production checks are explicit milestones; `check` runs every milestone once
-and builds the package once. API, example, Presentation, and browser checks are
-run while changing their owned surfaces and are always retained by the complete
-or release gate.
+The first two commands are the application and Feature-factory inner loop.
+They never invoke Cargo. `test` is the complete TypeScript development
+milestone and does not compile generated Programs. Compiler, provider, adapter,
+browser, and production gates run only for changes to their owned surfaces.
+`check` remains the complete repository acceptance gate and builds the package
+at most once.
 
 In a consuming Workspace, `kit typecheck` and `kit check` also compile
 `src/system.ts` semantically after TypeScript succeeds. The selected compiler
@@ -303,5 +418,50 @@ and production realizations. Browser inspection is used for end-to-end product
 behavior; committed tests verify framework semantics rather than browser
 implementations.
 
-Generated databases, caches, native targets, build output, and temporary source
+Generated databases, caches, Rust targets, build output, and temporary source
 are ignored and never part of the architecture.
+
+### Organization Migration Ledger
+
+The following checklist records migration evidence:
+
+- [x] move the shared Cargo workspace and lockfile from `src/` to the repository root;
+- [x] separate generic Rust lowering and the generated-code runtime from
+      server artifact assembly and its content-addressed cache;
+- [x] replace `development`, `production`, and `native` source ownership with
+      explicit Platform, adapter, and implementation-language ownership;
+- [x] turn every shipped Feature factory into one self-contained directory;
+- [x] place every Feature-owned Dependency provider under its Feature,
+      Platform, and implementation language;
+- [x] separate the local Deployment adapter from OCI artifact packaging;
+- [x] define reusable TypeScript conformance projections and run them against
+      development and production DataStore, AuthenticationBackend, and Timer providers;
+- [x] remove duplicated semantics from migrated Rust tests while retaining required
+      compile, safety, and implementation-internal checks;
+- [x] remove Feature tests that directly compile generated Rust Programs;
+- [x] replace technology-suffixed cross-system tests with one deliberately
+      owned integration/conformance fixture where the guarantee is unique;
+- [x] make validation commands follow affected ownership and keep Cargo out of
+      the ordinary TypeScript loop;
+- [x] update package exports, build packaging, documentation, examples, and
+      architecture checks to the final hierarchy;
+- [x] run focused gates after each ownership move, then one complete repository
+      and production release gate;
+- [x] review the final tree for obsolete aliases, compatibility shims,
+      duplicate fixtures, and superseded documentation.
+
+## Compatibility
+
+Kit has three compatibility boundaries:
+
+1. portable TypeScript accepted by the compiler;
+2. product-facing APIs exposed by Feature factories;
+3. adapter contracts connecting semantic meaning to realizations.
+
+An adapter must accept the current semantic IR version and implement every
+Platform contract it declares. Development and production realizations pass
+the same contract suites. Unsupported portable syntax is a compilation error,
+never a silent runtime fallback.
+
+The package is private and pre-1.0. Public declaration changes still require a
+`CHANGELOG.md` entry and an updated `docs/api.json`.

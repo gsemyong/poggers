@@ -1,0 +1,10 @@
+[package]
+name = "kit-server-telemetry"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+kit-server-runtime = { path = "../../../../../../compiler/rust/runtime" }
+
+[dev-dependencies]
+tokio = { version = "1.48.0", features = ["macros", "rt"] }

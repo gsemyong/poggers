@@ -20,7 +20,7 @@ import {
   type WebPresentationLanguage,
   type WebRoute,
   type WebPlatform,
-} from "@/platforms/web/platform";
+} from "@/platforms/web";
 
 type ServerPlatform = Readonly<{ Name: "server" }>;
 type Server = Readonly<{ Name: "server"; Platform: ServerPlatform }>;

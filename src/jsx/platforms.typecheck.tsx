@@ -3,7 +3,7 @@ import type { JSXElement, JSXPlatformRegistration } from "kit/jsx-runtime";
 import { createFeature } from "@/core/feature";
 import type { Program } from "@/core/program";
 import type { UIElement } from "@/core/ui/language";
-import type { BrowserMainThread } from "@/platforms/web/platform";
+import type { BrowserMainThread } from "@/platforms/web";
 
 type NativeNode = Readonly<{ id: number }>;
 type NativeStackProps = Readonly<{

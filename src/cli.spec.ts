@@ -16,10 +16,10 @@ import { resolve } from "node:path";
 
 import { afterEach, describe, expect, test } from "vitest";
 
-import { validateUIProgramRoot } from "@/adapters/web/pipeline";
 import { createProject, runCli } from "@/cli";
 import { SYSTEM_IR_VERSION } from "@/compiler/ir";
 import { compileSystem } from "@/compiler/source";
+import { validateUIProgramRoot } from "@/platforms/web/adapter/pipeline";
 
 const directories: string[] = [];
 afterEach(async () => {
@@ -263,7 +263,7 @@ describe("project template", () => {
     await writeFile(
       resolve(source, "deployment.ts"),
       `
-import { createDeployment } from "kit";
+import { createDeployment } from "kit/deployment";
 import { createLocalDeploymentAdapter } from "kit/adapters/deployment/local";
 import system from "@/system";
 
@@ -387,7 +387,7 @@ while true; do sleep 1; done
 
   test(
     "builds a portable server Program through the normal production path",
-    { tags: ["native"], timeout: 120_000 },
+    { tags: ["production"], timeout: 120_000 },
     async () => {
       const directory = await mkdtemp(resolve(tmpdir(), "kit-production-cli-"));
       directories.push(directory);

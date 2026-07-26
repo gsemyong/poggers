@@ -2,8 +2,8 @@ import { resolve } from "node:path";
 
 import { defineConfig } from "vitest/config";
 
-import { packageSourceAliases } from "./src/adapters/source";
 import { transformPresentationSource } from "./src/compiler/presentation";
+import { packageSourceAliases } from "./src/package";
 
 export default defineConfig({
   plugins: [
@@ -40,8 +40,12 @@ export default defineConfig({
     restoreMocks: true,
     tags: [
       {
-        name: "native",
-        description: "Compiles or executes generated native Programs.",
+        name: "compiler",
+        description: "Compiles or executes generated Programs through a production backend.",
+      },
+      {
+        name: "provider",
+        description: "Runs TypeScript conformance against production Dependency providers.",
       },
       {
         name: "production",
