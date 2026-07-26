@@ -316,9 +316,9 @@ examples/presentation/             difficult web Presentation fixture
 Every example is a canonical runnable composition used for development,
 verification, and `kit create --example`. Creation overlays one selected
 example onto the scaffold, so there is no separate demo implementation to
-drift. The repository `tsconfig.json` and `vitest.config.ts` add only
-framework-source concerns to the shared policy; generated workspaces inherit
-the package-owned configuration.
+drift. The repository and its examples extend `config/tsconfig.json` directly.
+Generated workspaces consume the same package-owned policy through
+`kit/tsconfig`.
 
 `.kit/` is the sole framework-owned local state root. Persistent development
 data lives under `.kit/data/`; deployment state and generated caches use their
@@ -416,6 +416,20 @@ milestone and does not compile generated Programs. Compiler, provider, adapter,
 browser, and production gates run only for changes to their owned surfaces.
 `check` remains the complete repository acceptance gate and builds the package
 at most once.
+
+`kit dev` does not run `tsc`, package builds, or native compilation. It retains
+one TypeScript semantic graph, ignores duplicate file notifications, computes
+the affected outputs, and asks only their Platform Adapters to update. Adapters
+report semantic updates and diagnostics through one framework event stream;
+the CLI owns how those facts are rendered. Web generated sources and Vite
+artifacts remain under `.kit/cache/web`, while repeated `kit typecheck` and
+`nub run typecheck` calls reuse `.kit/cache/typescript.tsbuildinfo`.
+
+Generated native verification is similarly staged. Exact semantic matches use
+the bounded content-addressed cache without invoking Cargo. IR and lowering
+tests emit no executable, behavioral conformance defaults to debug artifacts,
+and release compilation is reserved for production smoke, performance, and
+release gates.
 
 In a consuming Workspace, `kit typecheck` and `kit check` also compile
 `src/system.ts` semantically after TypeScript succeeds. The selected compiler

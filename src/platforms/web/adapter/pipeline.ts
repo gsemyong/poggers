@@ -20,6 +20,7 @@ import {
 } from "vite";
 
 import type {
+  DevelopmentReporter,
   ProductionArtifact,
   SystemCompilationRevision,
   SystemRevisionSource,
@@ -586,6 +587,7 @@ export async function runWebInterface(options: {
   serverOrigin?: string;
   webLoaders?: DevelopmentWebLoaderRegistry;
   strictPort?: boolean;
+  report?: DevelopmentReporter;
 }): Promise<DevelopmentServer> {
   const paths = resolveSystem(options.directory);
   const workspace = webDevelopmentWorkspace(paths.directory, options.interface);
@@ -617,6 +619,7 @@ export async function runWebInterface(options: {
         interfaceState,
         options.serverOrigin,
         options.webLoaders,
+        options.report,
       ),
       ...vitePlugins(paths, () => interfaceState.current.ir),
     ],
@@ -894,6 +897,7 @@ function viteConfiguration(
   return {
     configFile: false as const,
     mode: development ? "development" : "production",
+    ...(development ? { logLevel: "warn" as const } : {}),
     oxc: { jsx: { development } },
     ...(development ? { optimizeDeps: { include: [], noDiscovery: true } } : {}),
     plugins: vitePlugins(paths, ir, presentationAssets),
@@ -1486,6 +1490,7 @@ function presentationContractPlugin(
   state: PreparedInterfaceState,
   serverOrigin?: string,
   webLoaders?: DevelopmentWebLoaderRegistry,
+  report?: DevelopmentReporter,
 ): Plugin {
   let prepared = state.current;
   let observedRevision = revisions.current.revision;
@@ -1531,10 +1536,13 @@ function presentationContractPlugin(
         );
         state.current = prepared;
         responseCache.clear();
-        context.server.config.logger.info(
-          `[kit] ${updateKind} semantic update ${Math.round((performance.now() - started) * 10) / 10}ms`,
-          { timestamp: true },
-        );
+        report?.({
+          kind: "update",
+          platform: "web",
+          scope: updateKind === "presentation" ? "presentation" : "interface",
+          outputs: Object.freeze([prepared.interface]),
+          durationMs: performance.now() - started,
+        });
         const candidateModules = [
           ...(context.server.moduleGraph.getModulesByFile(prepared.candidate) ?? []),
         ];
@@ -1555,7 +1563,14 @@ function presentationContractPlugin(
         // Returning that boundary lets Vite replace Presentation modules without reloading.
         modules = candidateModules;
       } catch (error) {
-        context.server.config.logger.error(error instanceof Error ? error.message : String(error));
+        const diagnostic = {
+          kind: "diagnostic",
+          platform: "web",
+          severity: "error",
+          message: error instanceof Error ? error.message : String(error),
+        } as const;
+        if (report) report(diagnostic);
+        else context.server.config.logger.error(diagnostic.message);
         modules = [];
       }
     });

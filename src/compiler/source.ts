@@ -79,7 +79,12 @@ export function compileSystem(
   entry: string,
   extensions: readonly SourceCompilerExtension[] = [],
 ): SystemIR {
-  return compileSystemProgram(entry, undefined, undefined, extensions).compilation.ir;
+  const file = resolve(entry);
+  const program = ts.createProgram({
+    rootNames: [file],
+    options: compilerOptions(file),
+  });
+  return compileSystemProgram(file, program, undefined, extensions).ir;
 }
 
 /** Retains TypeScript's semantic graph across development compilations. */
@@ -87,12 +92,43 @@ export function createSystemCompiler(
   entry: string,
   extensions: readonly SourceCompilerExtension[] = [],
 ): SystemCompiler {
-  let previous: ts.Program | undefined;
+  const file = resolve(entry);
+  const options = compilerOptions(file);
+  const versions = new Map<string, number>();
+  let projectVersion = 0;
+  const service = ts.createLanguageService(
+    {
+      getCompilationSettings: () => options,
+      getCurrentDirectory: () => dirname(file),
+      getDefaultLibFileName: ts.getDefaultLibFilePath,
+      getDirectories: ts.sys.getDirectories,
+      getNewLine: () => ts.sys.newLine,
+      getProjectVersion: () => String(projectVersion),
+      getScriptFileNames: () => [file],
+      getScriptSnapshot(path) {
+        const source = ts.sys.readFile(path);
+        return source === undefined ? undefined : ts.ScriptSnapshot.fromString(source);
+      },
+      getScriptVersion: (path) => String(versions.get(resolve(path)) ?? 0),
+      readDirectory: ts.sys.readDirectory,
+      readFile: ts.sys.readFile,
+      fileExists: ts.sys.fileExists,
+      directoryExists: ts.sys.directoryExists,
+      realpath: ts.sys.realpath,
+      useCaseSensitiveFileNames: () => ts.sys.useCaseSensitiveFileNames,
+    },
+    ts.createDocumentRegistry(),
+  );
   return {
     compile(changedFile) {
-      const result = compileSystemProgram(entry, previous, changedFile, extensions);
-      previous = result.program;
-      return result.compilation;
+      if (changedFile) {
+        const changed = resolve(changedFile);
+        versions.set(changed, (versions.get(changed) ?? 0) + 1);
+        projectVersion++;
+      }
+      const program = service.getProgram();
+      if (!program) throw new Error(`Cannot create the semantic Program for ${file}.`);
+      return compileSystemProgram(file, program, changedFile, extensions);
     },
   };
 }
@@ -237,30 +273,13 @@ function assertExtensionIR(
 
 function compileSystemProgram(
   entry: string,
-  previous?: ts.Program,
+  program: ts.Program,
   changedFile?: string,
   extensions: readonly SourceCompilerExtension[] = [],
-): Readonly<{ compilation: SystemCompilation; program: ts.Program }> {
+): SystemCompilation {
   validateCompilerExtensions(extensions);
   const file = resolve(entry);
   const configuration = ts.findConfigFile(dirname(file), ts.sys.fileExists, "tsconfig.json");
-  const configured = configuration ? readCompilerOptions(configuration) : undefined;
-  const program = ts.createProgram({
-    rootNames: [file],
-    options: {
-      ...configured,
-      allowImportingTsExtensions: true,
-      jsx: ts.JsxEmit.Preserve,
-      module: ts.ModuleKind.Preserve,
-      moduleResolution: ts.ModuleResolutionKind.Bundler,
-      noEmit: true,
-      skipLibCheck: true,
-      strict: true,
-      target: ts.ScriptTarget.ESNext,
-      types: [],
-    },
-    oldProgram: previous,
-  });
   const changedSource = changedFile ? program.getSourceFile(resolve(changedFile)) : undefined;
   const diagnostics = changedSource
     ? [
@@ -388,21 +407,35 @@ function compileSystemProgram(
   );
   for (const extension of extensions) extension.validate?.(ir);
   return {
-    compilation: {
-      ir,
-      presentationSources,
-      outputSources: collectSystemOutputSources({
-        checker,
-        entry: file,
-        featureSourceFiles,
-        interfaceSourceFiles,
-        interfaces,
-        program,
-        programs,
-        root,
-      }),
-    },
-    program,
+    ir,
+    presentationSources,
+    outputSources: collectSystemOutputSources({
+      checker,
+      entry: file,
+      featureSourceFiles,
+      interfaceSourceFiles,
+      interfaces,
+      program,
+      programs,
+      root,
+    }),
+  };
+}
+
+function compilerOptions(file: string): ts.CompilerOptions {
+  const configuration = ts.findConfigFile(dirname(file), ts.sys.fileExists, "tsconfig.json");
+  const configured = configuration ? readCompilerOptions(configuration) : undefined;
+  return {
+    ...configured,
+    allowImportingTsExtensions: true,
+    jsx: ts.JsxEmit.Preserve,
+    module: ts.ModuleKind.Preserve,
+    moduleResolution: ts.ModuleResolutionKind.Bundler,
+    noEmit: true,
+    skipLibCheck: true,
+    strict: true,
+    target: ts.ScriptTarget.ESNext,
+    types: [],
   };
 }
 

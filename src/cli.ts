@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 
 import { createServer, defaultServerConditions, type Plugin } from "vite";
 
-import type { PlatformAdapterImplementation } from "@/adapter";
+import type { DevelopmentEvent, PlatformAdapterImplementation } from "@/adapter";
 import type { System, SystemContract } from "@/core/system";
 import {
   applyDeployment,
@@ -55,7 +55,10 @@ export async function runCli(
   if (command === "create") {
     await createProject(commandArguments);
   } else if (command === "dev") {
-    const system = await developSystem(directory, adapters, app ? { app } : {});
+    const system = await developSystem(directory, adapters, {
+      ...(app ? { app } : {}),
+      report: reportDevelopmentEvent,
+    });
     for (const location of Object.values(system.locations).flat()) {
       console.log(`kit dev running on ${location}`);
     }
@@ -146,6 +149,17 @@ export async function runCli(
     );
     process.exitCode = 1;
   }
+}
+
+function reportDevelopmentEvent(event: DevelopmentEvent): void {
+  if (event.kind === "diagnostic") {
+    const output = event.severity === "error" ? console.error : console.warn;
+    output(`kit ${event.platform}: ${event.message}`);
+    return;
+  }
+  const duration = Math.round(event.durationMs * 10) / 10;
+  const outputs = event.outputs.length ? ` (${event.outputs.join(", ")})` : "";
+  console.log(`kit ${event.platform}: updated ${event.scope}${outputs} in ${duration}ms`);
 }
 
 async function runDeploymentCli(

@@ -1,6 +1,6 @@
 {
   "compilerOptions": {
-    "lib": ["ES2025", "ESNext.Disposable", "DOM", "DOM.Iterable"],
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
     "target": "ESNext",
     "module": "Preserve",
     "moduleDetection": "force",
@@ -10,6 +10,8 @@
     "types": ["node"],
     "moduleResolution": "bundler",
     "customConditions": ["source"],
+    "incremental": true,
+    "tsBuildInfoFile": "${configDir}/.kit/cache/typescript.tsbuildinfo",
     "paths": {
       "@/*": ["${configDir}/src/*"]
     },

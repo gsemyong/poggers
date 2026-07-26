@@ -61,6 +61,7 @@ export async function developServerPrograms(
   const vite = await createServer({
     appType: "custom",
     configFile: false,
+    logLevel: "warn",
     plugins: [systemAliasPlugin(source)],
     root: input.directory,
     resolve: {
@@ -105,6 +106,7 @@ export async function developServerPrograms(
     reload = reload.then(async () => {
       let nextPrograms: readonly ProgramIR[];
       let candidate: System<SystemContract>;
+      const started = performance.now();
       try {
         const compilation = input.revisions.compile(file);
         const nextIR = compilation.ir;
@@ -120,10 +122,6 @@ export async function developServerPrograms(
           compilation.change?.source,
         );
         if (!affected.names.size) return;
-        vite.config.logger.info(
-          `[kit] reloading server Programs: ${[...affected.names].sort().join(", ")}`,
-          { timestamp: true },
-        );
         candidate = moduleDefault(
           await vite.ssrLoadModule(`${input.system}?kit-revision=${++revision}`),
         );
@@ -138,8 +136,22 @@ export async function developServerPrograms(
           ir: nextIR,
           options: developmentOptions,
         });
+        input.report?.({
+          kind: "update",
+          platform: "server",
+          scope: "program",
+          outputs: Object.freeze([...affected.names].sort()),
+          durationMs: performance.now() - started,
+        });
       } catch (error) {
-        vite.config.logger.error(message(error));
+        const diagnostic = {
+          kind: "diagnostic",
+          platform: "server",
+          severity: "error",
+          message: message(error),
+        } as const;
+        if (input.report) input.report(diagnostic);
+        else vite.config.logger.error(diagnostic.message);
       }
     });
   });

@@ -6,6 +6,7 @@ import { resolve } from "node:path";
 
 import { afterEach, describe, expect, test } from "vitest";
 
+import type { DevelopmentEvent } from "@/adapter";
 import { compileSystem } from "@/compiler/source";
 import { createServerPlatformAdapter } from "@/platforms/server/adapter";
 import { createSystemRevisionSource } from "@/realization";
@@ -89,6 +90,7 @@ describe("server Platform adapter", () => {
     const port = await availablePort();
     const revisions = revisionSource(fixture.system);
     const ir = revisions.current.ir;
+    const events: DevelopmentEvent[] = [];
     const session = await createServerPlatformAdapter({ developmentPort: port }).develop({
       directory: fixture.directory,
       system: fixture.system,
@@ -97,6 +99,7 @@ describe("server Platform adapter", () => {
       programs: ir.programs,
       interfaces: [],
       platform: "server",
+      report: (event) => events.push(event),
     });
 
     try {
@@ -116,6 +119,14 @@ describe("server Platform adapter", () => {
       await expect
         .poll(() => fetchText(`http://localhost:${port}/probe`), { timeout: 5_000 })
         .toBe("second");
+      expect(events).toEqual([
+        expect.objectContaining({
+          kind: "update",
+          platform: "server",
+          scope: "program",
+          outputs: ["api"],
+        }),
+      ]);
       sampling = false;
       await requests;
       expect(observed.length).toBeGreaterThan(0);

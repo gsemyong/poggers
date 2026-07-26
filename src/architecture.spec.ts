@@ -226,14 +226,16 @@ describe("architecture import graph", () => {
     }
   });
 
-  test("keeps every example on the same minimal workspace configuration", async () => {
+  test("keeps repository examples on the shared source configuration", async () => {
     const root = resolve(import.meta.dirname, "..");
-    const expected = await readFile(resolve(root, "template/tsconfig.json"), "utf8");
+    const expected = {
+      extends: "../../config/tsconfig.json",
+    };
     for (const entry of await readdir(resolve(root, "examples"), { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
-      expect(await readFile(resolve(root, "examples", entry.name, "tsconfig.json"), "utf8")).toBe(
-        expected,
-      );
+      expect(
+        JSON.parse(await readFile(resolve(root, "examples", entry.name, "tsconfig.json"), "utf8")),
+      ).toEqual(expected);
     }
   });
 });

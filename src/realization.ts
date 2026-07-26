@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import {
   selectPlatformAdapters,
   type DevelopmentSession,
+  type DevelopmentReporter,
   type PlatformAdapterImplementation,
   type ProductionArtifacts,
   type SystemCompilationRevision,
@@ -31,6 +32,8 @@ export type SystemRealization<Adapter extends PlatformAdapterImplementation> = R
 }>;
 
 export type SystemRealizationOptions = Readonly<{ app?: string }>;
+export type SystemDevelopmentOptions = SystemRealizationOptions &
+  Readonly<{ report?: DevelopmentReporter }>;
 
 export type RunningSystem = AsyncDisposable &
   Readonly<{
@@ -71,7 +74,7 @@ export function resolveSystemRealization<Adapter extends PlatformAdapterImplemen
 export async function developSystem<Adapter extends PlatformAdapterImplementation>(
   directory: string,
   adapters: Readonly<Record<string, Adapter>>,
-  options: SystemRealizationOptions = {},
+  options: SystemDevelopmentOptions = {},
 ): Promise<RunningSystem> {
   const realization = resolveSystemRealization(directory, adapters, options);
   const started = await Promise.allSettled(
@@ -83,6 +86,7 @@ export async function developSystem<Adapter extends PlatformAdapterImplementatio
         ir: realization.ir,
         ...(realization.app ? { app: realization.app } : {}),
         revisions: realization.revisions,
+        ...(options.report ? { report: options.report } : {}),
         platform: adapter.name,
         programs: realization.programs.filter(
           ({ environment }) => environment.platform === adapter.name,

@@ -73,8 +73,30 @@ export type SystemRevisionSource = Readonly<{
   compile(changedFile: string): SystemCompilationRevision;
 }>;
 
+/** Framework development facts emitted by Platform Adapters without choosing a renderer. */
+export type DevelopmentEvent =
+  | Readonly<{
+      kind: "update";
+      platform: string;
+      scope: "interface" | "program" | "presentation";
+      outputs: readonly string[];
+      durationMs: number;
+    }>
+  | Readonly<{
+      kind: "diagnostic";
+      platform: string;
+      severity: "error" | "warning";
+      message: string;
+    }>;
+
+export type DevelopmentReporter = (event: DevelopmentEvent) => void;
+
 export type PlatformDevelopmentInput<Platform extends PlatformContract = PlatformContract> =
-  PlatformInput<Platform> & Readonly<{ revisions: SystemRevisionSource }>;
+  PlatformInput<Platform> &
+    Readonly<{
+      revisions: SystemRevisionSource;
+      report?: DevelopmentReporter;
+    }>;
 
 export type PlatformProductionInput<Platform extends PlatformContract = PlatformContract> =
   PlatformInput<Platform> & Readonly<{ output: string }>;

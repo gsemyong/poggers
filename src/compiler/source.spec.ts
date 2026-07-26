@@ -382,6 +382,7 @@ describe("System compiler", () => {
     const second = compiler.compile(entry);
 
     expect(serializeSystemIR(second.ir)).not.toBe(serializeSystemIR(first.ir));
+    expect(serializeSystemIR(second.ir)).toBe(serializeSystemIR(compileSystem(entry)));
   });
 
   test("assigns compiled Presentation meaning to its exact interface output", async () => {

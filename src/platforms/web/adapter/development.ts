@@ -25,6 +25,7 @@ export async function developWebSystem(
         strictPort: true,
         serverOrigin: options.serverOrigin,
         webLoaders: options.webLoaders,
+        report: input.report,
       }),
     ),
   );
