@@ -170,21 +170,8 @@ Focused tests should:
 - avoid HTTP, credentials, native compilation, and a complete System unless
   those boundaries are the behavior under test.
 
-The verification ladder follows ownership:
-
-| Change                 | Focused gate                                      |
-| ---------------------- | ------------------------------------------------- |
-| Feature behavior       | adjacent specification                            |
-| Feature public types   | adjacent type fixture and affected workspaces     |
-| Dependency contract    | contract, provider, and compatibility conformance |
-| Portable subset or IR  | compiler and JS/native differential conformance   |
-| Native provider        | targeted Cargo check/test                         |
-| Web UI or Presentation | web lowering and browser conformance              |
-| Platform realization   | targeted development or production artifact test  |
-| Public package surface | package, creation, example, and release checks    |
-
-`nub run check` is the complete repository gate. It runs after a coherent
-milestone, not after every Feature edit.
+The repository-wide verification ladder and focused commands are defined once
+in [`architecture.md`](./architecture.md#verification).
 
 ## Non-Goals
 
@@ -194,5 +181,3 @@ milestone, not after every Feature edit.
 - no global service locator or application dependency-wiring file;
 - no mandatory native provider when portable TypeScript is sufficient;
 - no duplicate simple and advanced factory APIs.
-
-Public factory changes are recorded in [`CHANGELOG.md`](../CHANGELOG.md).

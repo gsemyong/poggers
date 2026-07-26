@@ -2,6 +2,17 @@ import { resolve } from "node:path";
 
 const root = process.cwd();
 
+export const productionTestTag = {
+  name: "production",
+  description: "Builds and executes deployable System artifacts.",
+} as const;
+
+export const testDefaults = {
+  clearMocks: true,
+  restoreMocks: true,
+  tags: [productionTestTag],
+} as const;
+
 export default {
   root,
   resolve: {
@@ -9,16 +20,8 @@ export default {
     conditions: ["source"],
   },
   test: {
-    clearMocks: true,
     include: ["src/**/*.spec.ts", "src/**/*.spec.tsx"],
-    passWithNoTests: true,
-    restoreMocks: true,
-    tags: [
-      {
-        name: "production",
-        description: "Builds and executes deployable System artifacts.",
-      },
-    ],
+    ...testDefaults,
     tagsFilter: ["!production"],
   },
 };

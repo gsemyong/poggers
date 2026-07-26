@@ -1,4 +1,5 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
 import { connect } from "@tursodatabase/database";
@@ -77,7 +78,7 @@ dataStoreConformance.test(
       },
     },
     async configuration() {
-      const directory = await mkdtemp(resolve(process.cwd(), ".data/data-conformance-"));
+      const directory = await mkdtemp(resolve(tmpdir(), "data-conformance-"));
       return {
         values: { database: resolve(directory, "data.turso") },
         dispose: () => rm(directory, { force: true, recursive: true }),
@@ -99,12 +100,23 @@ dataStoreConformance.test({
 
 describe("semantic data Feature", () => {
   test("lowers a specialized factory through the production semantic compiler", async () => {
-    const parent = resolve(process.cwd(), ".data");
-    await mkdir(parent, { recursive: true });
-    const directory = await mkdtemp(resolve(parent, "data-compiler-"));
+    const directory = await mkdtemp(resolve(tmpdir(), "data-compiler-"));
     try {
       const entry = resolve(directory, "system.ts");
-      await writeFile(entry, dataSystemSource());
+      await Promise.all([
+        writeFile(entry, dataSystemSource()),
+        writeFile(
+          resolve(directory, "tsconfig.json"),
+          JSON.stringify({
+            extends: resolve(import.meta.dirname, "../../../tsconfig.json"),
+            include: ["system.ts"],
+            exclude: [],
+            compilerOptions: {
+              paths: { "@/*": [resolve(import.meta.dirname, "../../*")] },
+            },
+          }),
+        ),
+      ]);
       const ir = compileSystem(entry);
       const contributions = ir.programs.find(({ name }) => name === "server")!.contributions;
       expect(

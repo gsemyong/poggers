@@ -133,7 +133,7 @@ export const eventsDependency = defineServerProductionDependency({
     {
       name: "database",
       environment: "KIT_DATABASE",
-      default: ".data/system.sqlite",
+      default: ".kit/data/system.sqlite",
       allocation: {
         kind: "storage",
         name: "system.sqlite",

@@ -196,26 +196,43 @@ describe("architecture import graph", () => {
         Record<string, string | Readonly<{ source?: string; types?: string; default?: string }>>
       >;
     };
-    const tsconfig = JSON.parse(await readFile(resolve(root, "tsconfig.json"), "utf8")) as {
-      compilerOptions: { paths: Readonly<Record<string, readonly string[]>> };
+    const consumerConfig = JSON.parse(
+      await readFile(resolve(root, "config/tsconfig.json"), "utf8"),
+    ) as {
+      compilerOptions: Readonly<Record<string, unknown>>;
+      include?: unknown;
+      exclude?: unknown;
     };
     const sourceExports = Object.entries(packageManifest.exports)
       .filter(([, value]) => typeof value === "object" && value.source)
       .map(([name]) => (name === "." ? "kit" : `kit${name.slice(1)}`))
       .sort();
     const aliases = Object.keys(packageSources).sort();
-    const paths = Object.keys(tsconfig.compilerOptions.paths)
-      .filter((name) => name === "kit" || name.startsWith("kit/"))
-      .sort();
 
     expect(packageManifest.sideEffects).toBe(false);
+    expect(packageManifest.exports["./tsconfig"]).toBe("./config/tsconfig.json");
+    expect(consumerConfig.compilerOptions.paths).toEqual({
+      "@/*": ["${configDir}/src/*"],
+    });
+    expect(consumerConfig.include).toBeUndefined();
+    expect(consumerConfig.exclude).toBeUndefined();
     expect(aliases).toEqual(sourceExports);
-    expect(paths).toEqual(sourceExports);
     for (const [specifier, source] of Object.entries(packageSources)) {
       const name = specifier === "kit" ? "." : `.${specifier.slice(3)}`;
       const definition = packageManifest.exports[name];
       expect(typeof definition === "object" ? definition.source : undefined).toBe(
         `./dist/source/${source}.ts`,
+      );
+    }
+  });
+
+  test("keeps every example on the same minimal workspace configuration", async () => {
+    const root = resolve(import.meta.dirname, "..");
+    const expected = await readFile(resolve(root, "template/tsconfig.json"), "utf8");
+    for (const entry of await readdir(resolve(root, "examples"), { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      expect(await readFile(resolve(root, "examples", entry.name, "tsconfig.json"), "utf8")).toBe(
+        expected,
       );
     }
   });

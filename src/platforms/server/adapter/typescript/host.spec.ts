@@ -53,7 +53,7 @@ describe("server Platform host", () => {
 
     const empty = await createNodeHost({ dependencies: [], directory });
     expect(empty).toEqual({});
-    await expect(access(resolve(directory, ".data"))).rejects.toHaveProperty("code", "ENOENT");
+    await expect(access(resolve(directory, ".kit"))).rejects.toHaveProperty("code", "ENOENT");
 
     const utilities = await createNodeHost({
       dependencies: [
@@ -65,7 +65,7 @@ describe("server Platform host", () => {
     expect(Object.keys(utilities).sort()).toEqual(["clock", "identifiers"]);
     expect(typeof utilities.clock.now({})).toBe("number");
     expect(utilities.identifiers.create({})).toMatch(/^[0-9a-f-]{36}$/);
-    await expect(access(resolve(directory, ".data"))).rejects.toHaveProperty("code", "ENOENT");
+    await expect(access(resolve(directory, ".kit"))).rejects.toHaveProperty("code", "ENOENT");
   });
 
   test("rejects requirements the Platform cannot supply", async () => {

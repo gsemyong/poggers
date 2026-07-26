@@ -1,12 +1,10 @@
 node_modules/
 dist/
-target/
-Cargo.lock
 *.tsbuildinfo
+
+# Kit-owned local data, caches, and deployment state.
 .kit/
-.data/
+
 .DS_Store
 .env
 .env.*
-!.env.example
-mise.local.toml

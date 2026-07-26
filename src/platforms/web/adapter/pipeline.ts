@@ -663,7 +663,7 @@ export function webDevelopmentWorkspace(directory: string, interfaceId: string):
     .update(`${root}\0${interfaceId}`)
     .digest("hex")
     .slice(0, 12);
-  return resolve(root, "node_modules/.cache/kit/web", `${readable}-${identity}`);
+  return resolve(root, ".kit/cache/web", `${readable}-${identity}`);
 }
 
 async function pruneGeneratedSources(work: string, prepared: PreparedInterface): Promise<void> {

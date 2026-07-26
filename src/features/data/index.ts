@@ -283,7 +283,7 @@ const serverDataStoreProvider: ServerDependencyProvider<DataStore> = {
       {
         name: "database",
         environment: "KIT_DATA_DATABASE",
-        default: ".data/data.turso",
+        default: ".kit/data/data.turso",
         allocation: {
           kind: "storage",
           name: "data.turso",

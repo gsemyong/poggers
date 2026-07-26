@@ -4,6 +4,7 @@ import { createServer as createHttpServer, type Server as HttpServer } from "nod
 import { createServer as createPortServer } from "node:net";
 import { tmpdir } from "node:os";
 import { extname, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { describe, test } from "vitest";
 
@@ -68,10 +69,38 @@ export type SystemTestContext = Readonly<{
 export type SystemTestDefinition = Readonly<{
   name: string;
   /** Workspace root containing the canonical src/system.ts. Defaults to the current directory. */
-  directory?: string;
+  directory?: string | URL;
   timeout?: number;
   verify(context: SystemTestContext): void | PromiseLike<void>;
 }>;
+
+export type HttpTestSession = Readonly<{
+  get<Value>(path: string, init?: RequestInit): Promise<Value>;
+  post<Value>(path: string, body: unknown, init?: RequestInit): Promise<Value>;
+  patch<Value>(path: string, body: unknown, init?: RequestInit): Promise<Value>;
+  delete<Value>(path: string, init?: RequestInit): Promise<Value>;
+  subscribe<Value>(path: string, init?: RequestInit): Promise<HttpTestSubscription<Value>>;
+}>;
+
+export type HttpTestSubscription<Value> = AsyncDisposable &
+  Readonly<{
+    next(): Promise<Value>;
+    close(): Promise<void>;
+  }>;
+
+export class HttpTestResponseError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+/** Creates a cookie-preserving JSON and newline-delimited JSON test client. */
+export function createHttpTestSession(origin: string): HttpTestSession {
+  return new TestHttpSession(origin);
+}
 
 /** Runs one black-box System specification through development and production realizations. */
 export function testSystem(definition: SystemTestDefinition): void {
@@ -82,8 +111,118 @@ export function testSystem(definition: SystemTestDefinition): void {
   });
 }
 
+class TestHttpSession implements HttpTestSession {
+  readonly #cookies = new Map<string, string>();
+
+  constructor(readonly origin: string) {}
+
+  get<Value>(path: string, init?: RequestInit): Promise<Value> {
+    return this.request(path, init);
+  }
+
+  post<Value>(path: string, body: unknown, init?: RequestInit): Promise<Value> {
+    return this.request(path, { ...init, method: "POST", body: JSON.stringify(body) });
+  }
+
+  patch<Value>(path: string, body: unknown, init?: RequestInit): Promise<Value> {
+    return this.request(path, { ...init, method: "PATCH", body: JSON.stringify(body) });
+  }
+
+  delete<Value>(path: string, init?: RequestInit): Promise<Value> {
+    return this.request(path, { ...init, method: "DELETE" });
+  }
+
+  async subscribe<Value>(
+    path: string,
+    init: RequestInit = {},
+  ): Promise<HttpTestSubscription<Value>> {
+    const controller = new AbortController();
+    const response = await this.fetch(path, { ...init, signal: controller.signal });
+    await this.assert(response);
+    if (!response.body) throw new Error("The subscription returned no body.");
+    return new TestHttpSubscription<Value>(response.body, controller);
+  }
+
+  async request<Value>(path: string, init: RequestInit = {}): Promise<Value> {
+    const response = await this.fetch(path, init);
+    this.capture(response);
+    await this.assert(response);
+    return (await response.json()) as Value;
+  }
+
+  async fetch(path: string, init: RequestInit): Promise<Response> {
+    const headers = new Headers(init.headers);
+    headers.set("connection", "close");
+    if (init.body && !headers.has("content-type")) headers.set("content-type", "application/json");
+    const cookie = [...this.#cookies].map(([name, value]) => `${name}=${value}`).join("; ");
+    if (cookie) headers.set("cookie", cookie);
+    try {
+      return await fetch(new URL(path, this.origin), { ...init, headers });
+    } catch (cause) {
+      throw new Error(`${init.method ?? "GET"} ${path} failed.`, { cause });
+    }
+  }
+
+  capture(response: Response): void {
+    for (const value of response.headers.getSetCookie()) {
+      const pair = value.slice(0, value.indexOf(";"));
+      const separator = pair.indexOf("=");
+      if (separator < 0) continue;
+      const name = pair.slice(0, separator);
+      const cookie = pair.slice(separator + 1);
+      if (cookie) this.#cookies.set(name, cookie);
+      else this.#cookies.delete(name);
+    }
+  }
+
+  async assert(response: Response): Promise<void> {
+    if (response.ok) return;
+    const body = (await response.json().catch(() => ({}))) as { message?: string };
+    throw new HttpTestResponseError(
+      response.status,
+      body.message ?? `Request failed with ${response.status}.`,
+    );
+  }
+}
+
+class TestHttpSubscription<Value> implements HttpTestSubscription<Value> {
+  readonly #decoder = new TextDecoder();
+  readonly #reader: ReadableStreamDefaultReader<Uint8Array>;
+  #buffer = "";
+
+  constructor(
+    body: ReadableStream<Uint8Array>,
+    readonly controller: AbortController,
+  ) {
+    this.#reader = body.getReader();
+  }
+
+  async next(): Promise<Value> {
+    while (true) {
+      const newline = this.#buffer.indexOf("\n");
+      if (newline >= 0) {
+        const line = this.#buffer.slice(0, newline);
+        this.#buffer = this.#buffer.slice(newline + 1);
+        if (line) return JSON.parse(line) as Value;
+      }
+      const result = await this.#reader.read();
+      if (result.done) throw new Error("The subscription ended before the next value.");
+      this.#buffer += this.#decoder.decode(result.value, { stream: true });
+    }
+  }
+
+  async close(): Promise<void> {
+    this.controller.abort();
+    await this.#reader.cancel().catch(() => undefined);
+  }
+
+  async [Symbol.asyncDispose](): Promise<void> {
+    await this.close();
+  }
+}
+
 async function verifyDevelopment(definition: SystemTestDefinition): Promise<void> {
-  const directory = resolve(definition.directory ?? process.cwd());
+  const directory = testDirectory(definition.directory);
   const temporary = await mkdtemp(resolve(tmpdir(), "kit-system-development-"));
   const database = resolve(temporary, "system.sqlite");
   let system: RunningSystem | undefined;
@@ -141,7 +280,7 @@ async function verifyDevelopment(definition: SystemTestDefinition): Promise<void
 }
 
 async function verifyProduction(definition: SystemTestDefinition): Promise<void> {
-  const directory = resolve(definition.directory ?? process.cwd());
+  const directory = testDirectory(definition.directory);
   const temporary = await mkdtemp(resolve(tmpdir(), "kit-system-production-"));
   const database = resolve(temporary, "system.sqlite");
   const output = resolve(temporary, "dist");
@@ -184,6 +323,12 @@ async function verifyProduction(definition: SystemTestDefinition): Promise<void>
     await running?.dispose();
     await rm(temporary, { recursive: true, force: true });
   }
+}
+
+function testDirectory(directory: string | URL | undefined): string {
+  return resolve(
+    directory instanceof URL ? fileURLToPath(directory) : (directory ?? process.cwd()),
+  );
 }
 
 function testMetrics(input: {

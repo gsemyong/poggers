@@ -20,7 +20,7 @@ In a workspace created from this example, run:
 nub run dev
 ```
 
-Open `http://localhost:3000/auth`. Development data is retained under `.data/`.
+Open `http://localhost:3000/auth`. Development data is retained under `.kit/data/`.
 
 Build the production System with `nub run build`.
 

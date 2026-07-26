@@ -406,7 +406,7 @@ while true; do sleep 1; done
               name: "database",
               binding: { kind: "environment", name: "KIT_DATABASE" },
               required: false,
-              default: ".data/system.sqlite",
+              default: ".kit/data/system.sqlite",
               allocation: {
                 kind: "storage",
                 name: "system.sqlite",

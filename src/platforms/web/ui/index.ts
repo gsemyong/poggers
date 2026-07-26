@@ -882,7 +882,7 @@ function webUIRuntime(): WebUIRuntime {
   return runtime;
 }
 
-declare module "@/jsx/runtime" {
+declare module "kit/jsx-runtime" {
   interface JSXPlatforms {
     web: JSXPlatformRegistration<IntrinsicElements>;
   }

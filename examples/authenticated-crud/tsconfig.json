@@ -1,15 +1,3 @@
 {
-  "extends": "../../tsconfig.json",
-  "compilerOptions": {
-    "paths": {
-      "@/*": ["${configDir}/src/*"],
-      "kit": ["../../dist/source/index.ts"],
-      "kit/adapters/deployment/local": ["../../dist/source/deployment/adapters/local/index.ts"],
-      "kit/deployment": ["../../dist/source/deployment/index.ts"],
-      "kit/testing": ["../../dist/source/testing/index.ts"],
-      "kit/web": ["../../dist/source/platforms/web/index.ts"]
-    },
-    "types": ["node"]
-  },
-  "include": ["src/**/*.ts", "src/**/*.tsx"]
+  "extends": "kit/tsconfig"
 }

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
@@ -1676,12 +1676,23 @@ async function fixture(source: string): Promise<string> {
 }
 
 async function projectFixture(source: string): Promise<string> {
-  const parent = resolve(process.cwd(), ".data");
-  await mkdir(parent, { recursive: true });
-  const directory = await mkdtemp(resolve(parent, "compiler-fixture-"));
+  const directory = await mkdtemp(resolve(tmpdir(), "compiler-fixture-"));
   temporaryDirectories.push(directory);
   const entry = resolve(directory, "system.ts");
-  await writeFile(entry, source);
+  await Promise.all([
+    writeFile(entry, source),
+    writeFile(
+      resolve(directory, "tsconfig.json"),
+      JSON.stringify({
+        extends: resolve(import.meta.dirname, "../../tsconfig.json"),
+        include: ["system.ts"],
+        exclude: [],
+        compilerOptions: {
+          paths: { "@/*": [resolve(import.meta.dirname, "../*")] },
+        },
+      }),
+    ),
+  ]);
   return entry;
 }
 

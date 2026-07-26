@@ -72,8 +72,10 @@ describe("project template", () => {
       const packageJson = JSON.parse(await readFile(resolve(target, "package.json"), "utf8")) as {
         dependencies: Record<string, string>;
         devDependencies: Record<string, string>;
+        devEngines: {
+          packageManager: { name: string; version: string; onFail: string };
+        };
         engines: { node: string };
-        packageManager: string;
         scripts: Record<string, string>;
       };
       expect(Object.keys(packageJson.scripts)).toEqual([
@@ -86,9 +88,13 @@ describe("project template", () => {
         "check",
       ]);
       expect(packageJson.dependencies).toEqual({ kit: "latest" });
-      expect(packageJson.devDependencies["@types/node"]).toBe("^26.1.1");
+      expect(packageJson.devDependencies).toEqual({ vitest: "^4.1.10" });
       expect(packageJson.engines.node).toBe(">=26.0.0");
-      expect(packageJson.packageManager).toBe("nub@0.4.13");
+      expect(packageJson.devEngines.packageManager).toEqual({
+        name: "nub",
+        version: "^0.4.13",
+        onFail: "warn",
+      });
       expect(await readFile(resolve(target, ".node-version"), "utf8")).toBe("26.5.0\n");
       expect(await readFile(resolve(target, "mise.toml"), "utf8")).toContain(
         '"github:nubjs/nub" = "0.4.13"',
@@ -99,28 +105,7 @@ describe("project template", () => {
       expect(await readFile(resolve(target, ".gitignore"), "utf8")).not.toContain("app.d.ts");
       const modules = resolve(target, "node_modules");
       await mkdir(modules, { recursive: true });
-      await mkdir(resolve(modules, ".bin"));
-      await symlink(
-        resolve(import.meta.dirname, "../node_modules/typescript/bin/tsc"),
-        resolve(modules, ".bin/tsc"),
-      );
-      for (const [executable, path] of [
-        ["oxfmt", "oxfmt/bin/oxfmt"],
-        ["oxlint", "oxlint/bin/oxlint"],
-        ["vitest", "vitest/vitest.mjs"],
-      ] as const) {
-        await symlink(
-          resolve(import.meta.dirname, `../node_modules/${path}`),
-          resolve(modules, `.bin/${executable}`),
-        );
-      }
       await symlink(resolve(import.meta.dirname, ".."), resolve(modules, "kit"), "dir");
-      await mkdir(resolve(modules, "@types"), { recursive: true });
-      await symlink(
-        resolve(import.meta.dirname, "../node_modules/@types/node"),
-        resolve(modules, "@types/node"),
-        "dir",
-      );
       await symlink(
         resolve(import.meta.dirname, "../node_modules/vitest"),
         resolve(modules, "vitest"),
@@ -144,6 +129,7 @@ describe("project template", () => {
       await expect(runCli(["test", "--dir", target])).resolves.toBeUndefined();
       expect(process.exitCode).toBe(0);
 
+      await rm(resolve(target, ".kit"), { force: true, recursive: true });
       await runCli(["build", "--dir", target, "--outdir", "dist"]);
       await expect(access(resolve(target, ".kit"))).rejects.toHaveProperty("code", "ENOENT");
       await expect(access(resolve(target, "dist/system.ir.json"))).rejects.toHaveProperty(
@@ -448,7 +434,7 @@ while true; do sleep 1; done
 async function expectCanonicalSourceRoot(source: string): Promise<void> {
   const entries = await readdir(source, { withFileTypes: true });
   expect(entries.map(({ name }) => name).sort()).toEqual(
-    expect.arrayContaining(["system.ts", "features", "presentations"]),
+    expect.arrayContaining(["apps", "features", "presentations", "system.spec.ts", "system.ts"]),
   );
 
   const unexpected = entries

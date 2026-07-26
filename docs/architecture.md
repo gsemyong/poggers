@@ -306,6 +306,7 @@ names never encode incidental technologies through suffixes such as
 The repository separates shared project setup from executable product source:
 
 ```text
+config/                           shared TypeScript, test, lint, and format policy
 template/                         package and toolchain scaffold
 examples/basic/                   smallest complete System
 examples/authenticated-crud/      representative multi-Feature System
@@ -315,7 +316,14 @@ examples/presentation/             difficult web Presentation fixture
 Every example is a canonical runnable composition used for development,
 verification, and `kit create --example`. Creation overlays one selected
 example onto the scaffold, so there is no separate demo implementation to
-drift.
+drift. The repository `tsconfig.json` and `vitest.config.ts` add only
+framework-source concerns to the shared policy; generated workspaces inherit
+the package-owned configuration.
+
+`.kit/` is the sole framework-owned local state root. Persistent development
+data lives under `.kit/data/`; deployment state and generated caches use their
+own children beneath the same root. It is ignored because none of that state is
+product source.
 
 Platform adapters turn Program meaning into development sessions or immutable
 production artifacts. Deployment adapters consume those artifacts and realize
@@ -354,7 +362,7 @@ kit/deployment/oci
 
 Compiler and runtime implementation modules remain private. Public declarations
 are covered by type fixtures, example compilation, package verification, and
-release smoke tests. Intentional public changes require a `CHANGELOG.md` entry.
+release smoke tests. GitHub releases retain the human-readable change history.
 
 ## Verification
 
@@ -387,7 +395,7 @@ The verification ladder follows ownership:
 | Platform adapter       | adjacent adapter contract suite                                  |
 | Web UI or Presentation | focused web tests and browser verification                       |
 | Deployment adapter     | deployment contract suite against that adapter                   |
-| Public package meaning | API record and affected workspaces                               |
+| Public package meaning | type fixtures, affected examples, and package verification       |
 | Release                | complete repository gate and focused release-mode smoke          |
 
 Use the validation ladder while editing:
@@ -436,6 +444,5 @@ Platform contract it declares. Development and production realizations pass
 the same contract suites. Unsupported portable syntax is a compilation error,
 never a silent runtime fallback.
 
-The package is private and pre-1.0. Public changes still require a
-`CHANGELOG.md` entry and the affected type, package, example, and release
-checks.
+The package is private and pre-1.0. Public changes require the affected type,
+package, example, and release checks.

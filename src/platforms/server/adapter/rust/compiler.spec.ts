@@ -188,12 +188,7 @@ test(
     const directory = await temporaryDirectory();
     const source = resolve(directory, "src/system.ts");
     await mkdir(resolve(directory, "src"), { recursive: true });
-    await writeFile(
-      resolve(directory, "tsconfig.json"),
-      JSON.stringify({
-        extends: resolve(import.meta.dirname, "../../../../../tsconfig.json"),
-      }),
-    );
+    await writeFile(resolve(directory, "tsconfig.json"), compilerFixtureConfig());
     await writeFile(source, genericFeatureSource());
     const ir = compileSystem(source);
     const program = ir.programs.find(({ name }) => name === "worker");
@@ -260,12 +255,7 @@ test(
     const provider = resolve(directory, "missing-provider");
     await mkdir(resolve(directory, "src"), { recursive: true });
     await mkdir(resolve(provider, "src"), { recursive: true });
-    await writeFile(
-      resolve(directory, "tsconfig.json"),
-      JSON.stringify({
-        extends: resolve(import.meta.dirname, "../../../../../tsconfig.json"),
-      }),
-    );
+    await writeFile(resolve(directory, "tsconfig.json"), compilerFixtureConfig());
     await writeFile(source, genericFeatureSource());
     await writeFile(
       resolve(provider, "Cargo.toml"),
@@ -337,12 +327,7 @@ test(
     const directory = await temporaryDirectory();
     const source = resolve(directory, "src/system.ts");
     await mkdir(resolve(directory, "src"), { recursive: true });
-    await writeFile(
-      resolve(directory, "tsconfig.json"),
-      JSON.stringify({
-        extends: resolve(import.meta.dirname, "../../../../../tsconfig.json"),
-      }),
-    );
+    await writeFile(resolve(directory, "tsconfig.json"), compilerFixtureConfig());
     await writeFile(source, actorFeatureSource());
     const ir = compileSystem(source);
     const program = ir.programs.find(({ name }) => name === "server");
@@ -519,10 +504,7 @@ test.skipIf(spawnSync("nats-server", ["--version"], { stdio: "ignore" }).status 
     processes.push(nats);
     const source = resolve(directory, "src/system.ts");
     await mkdir(resolve(directory, "src"), { recursive: true });
-    await writeFile(
-      resolve(directory, "tsconfig.json"),
-      JSON.stringify({ extends: resolve(import.meta.dirname, "../../../../../tsconfig.json") }),
-    );
+    await writeFile(resolve(directory, "tsconfig.json"), compilerFixtureConfig());
     await writeFile(source, clusteredActorSource());
     const ir = compileSystem(source);
     const program = ir.programs.find(({ name }) => name === "server");
@@ -670,6 +652,15 @@ async function temporaryDirectory(): Promise<string> {
   const directory = await mkdtemp(resolve(tmpdir(), "kit-server-adapter-"));
   directories.push(directory);
   return directory;
+}
+
+function compilerFixtureConfig(): string {
+  return JSON.stringify({
+    extends: resolve(import.meta.dirname, "../../../../../tsconfig.json"),
+    compilerOptions: {
+      paths: { "@/*": [resolve(import.meta.dirname, "../../../../*")] },
+    },
+  });
 }
 
 function recorderDependency() {

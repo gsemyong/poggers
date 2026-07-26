@@ -40,7 +40,7 @@ describe("web development workspace", () => {
     const first = webDevelopmentWorkspace("/tmp/company", "interface/operations.web");
     expect(webDevelopmentWorkspace("/tmp/company", "interface/operations.web")).toBe(first);
     expect(webDevelopmentWorkspace("/tmp/company", "interface/customer.web")).not.toBe(first);
-    expect(first).toContain("/node_modules/.cache/kit/web/interface-operations-web-");
+    expect(first).toContain("/.kit/cache/web/interface-operations-web-");
   });
 
   it("retains the selected Route when one source Feature is reused by multiple Apps", async () => {

@@ -1,53 +1,5 @@
 {
-  "compilerOptions": {
-    "lib": ["ES2024", "ESNext.Disposable", "DOM", "DOM.Iterable"],
-    "target": "ESNext",
-    "module": "Preserve",
-    "moduleDetection": "force",
-    "jsx": "react-jsx",
-    "jsxImportSource": "kit",
-    "allowImportingTsExtensions": true,
-    "types": [],
-    "moduleResolution": "bundler",
-    "customConditions": ["source"],
-    "paths": {
-      "@/*": ["./src/*"],
-      "kit": ["./src/index.ts", "./dist/source/index.ts"],
-      "kit/ui": ["./src/ui.ts", "./dist/source/ui.ts"],
-      "kit/jsx-dev-runtime": ["./src/jsx/development.ts", "./dist/source/jsx/development.ts"],
-      "kit/jsx-runtime": ["./src/jsx/runtime.ts", "./dist/source/jsx/runtime.ts"],
-      "kit/web": ["./src/platforms/web/index.ts", "./dist/source/platforms/web/index.ts"],
-      "kit/adapters/web": [
-        "./src/platforms/web/adapter/index.ts",
-        "./dist/source/platforms/web/adapter/index.ts"
-      ],
-      "kit/server": ["./src/platforms/server/index.ts", "./dist/source/platforms/server/index.ts"],
-      "kit/testing": ["./src/testing/index.ts", "./dist/src/testing/index.d.ts"],
-      "kit/adapter": ["./src/adapter.ts", "./dist/source/adapter.ts"],
-      "kit/adapters/deployment/local": [
-        "./src/deployment/adapters/local/index.ts",
-        "./dist/source/deployment/adapters/local/index.ts"
-      ],
-      "kit/deployment/oci": [
-        "./src/deployment/artifacts/oci/index.ts",
-        "./dist/source/deployment/artifacts/oci/index.ts"
-      ],
-      "kit/adapters/server": [
-        "./src/platforms/server/adapter/index.ts",
-        "./dist/source/platforms/server/adapter/index.ts"
-      ],
-      "kit/cli": ["./src/cli.ts", "./dist/source/cli.ts"],
-      "kit/deployment": ["./src/deployment/index.ts", "./dist/source/deployment/index.ts"],
-      "kit/factory": ["./src/factory.ts", "./dist/source/factory.ts"]
-    },
-    "verbatimModuleSyntax": true,
-    "noEmit": true,
-    "strict": true,
-    "skipLibCheck": true,
-    "noFallthroughCasesInSwitch": true,
-    "noUncheckedIndexedAccess": true,
-    "noImplicitOverride": true
-  },
+  "extends": "./config/tsconfig.json",
   "include": [
     "${configDir}/src/**/*.ts",
     "${configDir}/src/**/*.tsx",

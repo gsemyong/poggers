@@ -12,21 +12,11 @@
   },
   "files": [
     "dist",
-    "CHANGELOG.md",
-    "docs/architecture.md",
-    "docs/actors.md",
-    "docs/data.md",
-    "docs/deployment.md",
-    "docs/features.md",
-    "docs/portable-typescript.md",
-    "docs/presentation.md",
+    "docs",
     "config",
     "examples",
     "template",
-    "template/.gitignore",
-    "tsconfig.json",
-    ".oxfmtrc.json",
-    ".oxlintrc.json"
+    "template/.gitignore"
   ],
   "type": "module",
   "sideEffects": false,
@@ -107,7 +97,7 @@
       "types": "./dist/src/factory.d.ts",
       "default": "./dist/src/factory.js"
     },
-    "./tsconfig": "./tsconfig.json"
+    "./tsconfig": "./config/tsconfig.json"
   },
   "scripts": {
     "build": "nub scripts/build.ts",
@@ -118,14 +108,14 @@
     "check:presentation": "vitest run src/core/ui/presentation.spec.ts src/compiler/presentation.spec.ts src/platforms/web/presentation src/platforms/web/adapter/presentation",
     "check:production": "KIT_NATIVE_PROFILE=release vitest run --tagsFilter=production src examples",
     "dev": "nub src/cli.ts dev --dir examples/basic",
-    "fmt": "oxfmt",
-    "fmt:check": "oxfmt --check",
-    "lint": "oxlint --disable-nested-config src scripts config template examples vitest.config.ts",
+    "fmt": "oxfmt --config config/format.json .",
+    "fmt:check": "oxfmt --config config/format.json --check .",
+    "lint": "oxlint --config config/lint.json --disable-nested-config src scripts config template examples vitest.config.ts",
     "release": "nub scripts/release.ts",
     "release:check": "nub scripts/release.ts --check",
     "test": "vitest run --tagsFilter='!compiler && !package && !provider && !production' --exclude='examples/**'",
     "typecheck": "tsc --noEmit",
-    "check": "nub run typecheck && nub run lint && nub run fmt:check && nub run test && nub run check:compiler && nub run check:providers && nub run check:presentation && nub run build && nub run check:examples && nub run check:distribution && nub run check:production"
+    "check": "nub run typecheck && nub run lint && nub run fmt:check && nub run test && nub run check:compiler && nub run check:providers && nub run build && nub run check:examples && nub run check:distribution && nub run check:production"
   },
   "dependencies": {
     "@nats-io/jetstream": "3.4.0",
@@ -133,21 +123,27 @@
     "@tanstack/virtual-core": "^3.17.6",
     "@tursodatabase/database": "0.7.1",
     "@tursodatabase/database-wasm": "0.7.1",
+    "@types/node": "^26.1.1",
     "@typescript/typescript6": "^6.0.2",
     "alien-signals": "^3.2.1",
     "better-auth": "^1.6.24",
+    "oxfmt": "^0.60.0",
+    "oxlint": "^1.75.0",
+    "typescript": "^7.0.2",
     "vite": "^8.1.5",
     "vitest": "^4.1.10"
   },
   "devDependencies": {
-    "@types/node": "^26.1.1",
-    "fast-check": "^4.9.0",
-    "oxfmt": "^0.60.0",
-    "oxlint": "^1.75.0",
-    "typescript": "^7.0.2"
+    "fast-check": "^4.9.0"
+  },
+  "devEngines": {
+    "packageManager": {
+      "name": "nub",
+      "version": "^0.4.13",
+      "onFail": "warn"
+    }
   },
   "engines": {
     "node": ">=26.0.0"
-  },
-  "packageManager": "nub@0.4.13"
+  }
 }

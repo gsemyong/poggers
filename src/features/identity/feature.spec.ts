@@ -1,4 +1,5 @@
 import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
@@ -48,7 +49,7 @@ authenticationConformance.test(
       },
     },
     async configuration() {
-      const directory = await mkdtemp(resolve(process.cwd(), ".data/identity-conformance-"));
+      const directory = await mkdtemp(resolve(tmpdir(), "identity-conformance-"));
       return {
         values: {
           database: resolve(directory, "identity.sqlite"),

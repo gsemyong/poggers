@@ -305,7 +305,7 @@ export async function createNodeHost<Event = unknown>(
   const eventStore = resolveEventStore(input);
   if (requested.has("events") && eventStore.kind === "sqlite") {
     const path =
-      input.database ?? process.env.KIT_DATABASE ?? resolve(directory, ".data/system.sqlite");
+      input.database ?? process.env.KIT_DATABASE ?? resolve(directory, ".kit/data/system.sqlite");
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
     database = new DatabaseSync(path);
   }

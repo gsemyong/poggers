@@ -2,6 +2,7 @@ import { resolve } from "node:path";
 
 import { defineConfig } from "vitest/config";
 
+import { productionTestTag, testDefaults } from "./config/vitest";
 import { transformPresentationSource } from "./src/compiler/presentation";
 import { packageSources } from "./src/package";
 
@@ -39,10 +40,9 @@ export default defineConfig({
     conditions: ["source"],
   },
   test: {
-    clearMocks: true,
+    ...testDefaults,
     include: ["src/**/*.spec.ts", "examples/**/*.spec.ts"],
     maxWorkers: 2,
-    restoreMocks: true,
     tags: [
       {
         name: "compiler",
@@ -56,10 +56,7 @@ export default defineConfig({
         name: "provider",
         description: "Runs TypeScript conformance against production Dependency providers.",
       },
-      {
-        name: "production",
-        description: "Builds and executes deployable System artifacts.",
-      },
+      productionTestTag,
     ],
   },
 });

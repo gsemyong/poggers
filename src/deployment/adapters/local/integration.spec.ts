@@ -54,6 +54,13 @@ test.skipIf(spawnSync("nats-server", ["--version"], { stdio: "ignore" }).status 
       resolve(directory, "tsconfig.json"),
       JSON.stringify({
         extends: resolve(import.meta.dirname, "../../../../tsconfig.json"),
+        compilerOptions: {
+          paths: {
+            "@/*": [resolve(import.meta.dirname, "../../../*")],
+            kit: [resolve(import.meta.dirname, "../../../index.ts")],
+            "kit/server": [resolve(import.meta.dirname, "../../../platforms/server/index.ts")],
+          },
+        },
       }),
     );
     await writeFile(source, actorSystemSource());

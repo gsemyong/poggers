@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 
 import { createServer, defaultServerConditions, type Plugin } from "vite";
 
@@ -29,21 +30,19 @@ const valueFlags = new Set([
   "outfile",
   "package",
 ]);
-const ignoredTemplateEntries = new Set([
-  ".data",
-  ".kit",
-  "coverage",
-  "dist",
-  "node_modules",
-  "nub.lock",
-  "target",
-]);
+const ignoredTemplateEntries = new Set([".kit", "dist", "node_modules", "nub.lock"]);
 const ignoredExampleEntries = new Set([
   ...ignoredTemplateEntries,
   "tsconfig.json",
   "tsconfig.tsbuildinfo",
 ]);
 const workspaceDirectories = ["src/apps", "src/features", "src/presentations"] as const;
+const tools = {
+  format: packageExecutable("oxfmt", "bin/oxfmt"),
+  lint: packageExecutable("oxlint", "bin/oxlint"),
+  test: packageExecutable("vitest", "vitest.mjs"),
+  typecheck: packageExecutable("typescript", "bin/tsc"),
+} as const;
 
 export async function runCli(
   arguments_ = process.argv.slice(2),
@@ -78,10 +77,7 @@ export async function runCli(
   } else if (command === "deploy") {
     await runDeploymentCli(directory, commandArguments, adapters, app);
   } else if (command === "typecheck") {
-    const code = await run(
-      [resolve(directory, "node_modules/.bin/tsc"), "-p", "tsconfig.json"],
-      directory,
-    );
+    const code = await run([process.execPath, tools.typecheck, "-p", "tsconfig.json"], directory);
     process.exitCode = code;
     if (code === 0) {
       resolveSystemRealization(directory, adapters, app ? { app } : {});
@@ -90,50 +86,50 @@ export async function runCli(
     const framework = await findPackageDirectory(import.meta.dirname);
     process.exitCode = await run(
       [
-        resolve(directory, "node_modules/.bin/vitest"),
+        process.execPath,
+        tools.test,
         "run",
         "--root",
         directory,
         "--config",
         resolve(framework, "config/vitest.ts"),
-        "--passWithNoTests",
       ],
       directory,
     );
   } else if (command === "format") {
     const framework = await findPackageDirectory(import.meta.dirname);
     process.exitCode = await run(
-      [
-        resolve(directory, "node_modules/.bin/oxfmt"),
-        "--config",
-        resolve(framework, ".oxfmtrc.json"),
-      ],
+      [process.execPath, tools.format, "--config", resolve(framework, "config/format.json"), "."],
       directory,
     );
   } else if (command === "check") {
     const framework = await findPackageDirectory(import.meta.dirname);
     const commands = [
-      [resolve(directory, "node_modules/.bin/tsc"), "-p", "tsconfig.json"],
+      [process.execPath, tools.typecheck, "-p", "tsconfig.json"],
       [
-        resolve(directory, "node_modules/.bin/oxlint"),
+        process.execPath,
+        tools.lint,
         "--config",
-        resolve(framework, ".oxlintrc.json"),
+        resolve(framework, "config/lint.json"),
+        "--disable-nested-config",
         "src",
       ],
       [
-        resolve(directory, "node_modules/.bin/oxfmt"),
+        process.execPath,
+        tools.format,
         "--config",
-        resolve(framework, ".oxfmtrc.json"),
+        resolve(framework, "config/format.json"),
         "--check",
+        ".",
       ],
       [
-        resolve(directory, "node_modules/.bin/vitest"),
+        process.execPath,
+        tools.test,
         "run",
         "--root",
         directory,
         "--config",
         resolve(framework, "config/vitest.ts"),
-        "--passWithNoTests",
       ],
     ];
     for (const current of commands) {
@@ -322,6 +318,7 @@ async function findPackageDirectory(start: string): Promise<string> {
   for (let directory = start; ; directory = dirname(directory)) {
     try {
       await Promise.all([
+        readdir(resolve(directory, "config")),
         readdir(resolve(directory, "template")),
         readdir(resolve(directory, "examples")),
       ]);
@@ -332,6 +329,11 @@ async function findPackageDirectory(start: string): Promise<string> {
     const parent = dirname(directory);
     if (parent === directory) throw new Error("Cannot locate Kit package resources.");
   }
+}
+
+function packageExecutable(name: string, path: string): string {
+  const manifest = fileURLToPath(import.meta.resolve(`${name}/package.json`));
+  return resolve(dirname(manifest), path);
 }
 
 async function listFiles(

@@ -2,7 +2,7 @@ import { testSystem } from "kit/testing";
 import { expect } from "vitest";
 
 testSystem({
-  name: "basic System",
+  name: "Presentation System",
   directory: new URL("..", import.meta.url),
   async verify({ location }) {
     const response = await fetch(location);

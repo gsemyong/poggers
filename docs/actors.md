@@ -155,21 +155,6 @@ outcome rather than introducing a second result API. Cancelling accepted work
 is a domain method. Generic transport deadlines and caller-wait cancellation
 belong to the Dependency runtime and do not change durable Actor semantics.
 
-## Migration
-
-The method-oriented API replaces the earlier command/query authoring split:
-
-- add one `Methods` map to the Actor model;
-- replace implementation `commands` and `queries` with one `methods` object;
-- use `Actor.Method` for durable writes and `Actor.Read` for read-only methods;
-- remove per-handler `Actor.Command` and `Actor.Query` annotations;
-- replace `Actor.CommandMigration` with `Actor.MethodMigration`;
-- replace handler `timers` with `reminders`, and reminder `command` with
-  `method`.
-
-Persisted journal event names remain unchanged so the authoring migration does
-not invalidate existing Actor state.
-
 ## Guarantees
 
 - Write methods commit in one total order per Actor key. There is no cross-key

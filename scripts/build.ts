@@ -6,6 +6,8 @@ import process from "node:process";
 
 import { build } from "vite";
 
+import { packageSources } from "../src/package";
+
 const packageDir = resolve(import.meta.dirname, "..");
 const distDir = resolve(packageDir, "dist");
 const sourceDir = resolve(packageDir, "src");
@@ -275,7 +277,18 @@ async function emitDeclarations(): Promise<number> {
         {
           extends: resolve(packageDir, "tsconfig.json"),
           files: entrypoints,
-          compilerOptions: { rootDir: packageDir },
+          compilerOptions: {
+            rootDir: packageDir,
+            paths: {
+              "@/*": [resolve(packageDir, "src/*")],
+              ...Object.fromEntries(
+                Object.entries(packageSources).map(([specifier, source]) => [
+                  specifier,
+                  [resolve(packageDir, "src", `${source}.ts`)],
+                ]),
+              ),
+            },
+          },
         },
         null,
         2,
