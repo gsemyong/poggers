@@ -330,6 +330,10 @@ export async function buildWebInterface(options: {
         outputSources: {},
         sourceFiles: [],
         cache: "miss",
+        work: {
+          features: { compiled: 0, reused: 0 },
+          presentations: { compiled: 0, reused: 0 },
+        },
       },
     );
     const contract = webInterfaceContract(prepared.ir, prepared.interface);
@@ -641,6 +645,7 @@ export async function runWebInterface(options: {
   await server.listen();
   await server.watcher.unwatch([
     prepared.candidate,
+    ...(prepared.documentEvaluator ? [prepared.documentEvaluator] : []),
     prepared.entry,
     ...prepared.routeEntries.map(({ source }) => source),
     ...prepared.workers.map(({ source }) => source),

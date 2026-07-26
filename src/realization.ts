@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, parse, resolve } from "node:path";
+import { dirname, parse, resolve, sep } from "node:path";
 
 import {
   selectPlatformAdapters,
@@ -140,11 +140,12 @@ export function createSystemRevisionSource(
   let revision = 0;
   let current: SystemCompilationRevision;
   let cacheInputs: Readonly<Record<string, string>>;
-  if (cached) {
-    compiler.prepare();
+  if (cached?.exact) {
+    compiler.restore(cached.compilation);
     current = { ...cached.compilation, revision, cache: "hit" };
     cacheInputs = cached.inputs;
   } else {
+    if (cached) compiler.restore(cached.compilation);
     const compilation = compiler.compile();
     cacheInputs = identity ? systemCompilationSignatures(system, compilation.sourceFiles) : {};
     if (identity) writeSystemCompilationCache(system, identity, compilation, cacheInputs);
@@ -188,7 +189,7 @@ export function createSystemRevisionSource(
   };
 }
 
-const SYSTEM_COMPILATION_CACHE_VERSION = 1;
+const SYSTEM_COMPILATION_CACHE_VERSION = 3;
 
 type CachedSystemCompilation = Readonly<{
   version: number;
@@ -199,12 +200,16 @@ type CachedSystemCompilation = Readonly<{
     presentationSources: readonly string[];
     outputSources: SystemCompilation["outputSources"];
     sourceFiles: readonly string[];
+    sourceStructures: SystemCompilation["sourceStructures"];
+    runtimeStructures: SystemCompilation["runtimeStructures"];
+    semanticGraph: SystemCompilation["semanticGraph"];
   }>;
 }>;
 
 type LoadedSystemCompilationCache = Readonly<{
   compilation: SystemCompilation;
   inputs: Readonly<Record<string, string>>;
+  exact: boolean;
 }>;
 
 function readSystemCompilationCache(
@@ -215,22 +220,48 @@ function readSystemCompilationCache(
     const cached = JSON.parse(
       readFileSync(systemCompilationCachePath(system), "utf8"),
     ) as CachedSystemCompilation;
-    if (
-      cached.version !== SYSTEM_COMPILATION_CACHE_VERSION ||
-      cached.compiler !== compiler ||
-      Object.entries(cached.inputs).some(
-        ([source, signature]) => sourceSignature(source) !== signature,
-      )
-    ) {
+    if (cached.version !== SYSTEM_COMPILATION_CACHE_VERSION || cached.compiler !== compiler) {
       return undefined;
     }
+    const invalid = new Set(
+      Object.entries(cached.inputs)
+        .filter(([source, signature]) => sourceSignature(source) !== signature)
+        .map(([source]) => source),
+    );
+    const sourceFiles = new Set(cached.compilation.sourceFiles);
+    const globallyInvalid = [...invalid].some((source) => !sourceFiles.has(source));
+    const semanticGraph = globallyInvalid
+      ? { version: 1 as const, features: [], presentations: [] }
+      : {
+          version: 1 as const,
+          features: cached.compilation.semanticGraph.features.filter((unit) =>
+            unit.sourceFiles.every((source) => !invalid.has(source)),
+          ),
+          presentations: cached.compilation.semanticGraph.presentations.filter((unit) =>
+            unit.sourceFiles.every((source) => !invalid.has(source)),
+          ),
+        };
     return {
       inputs: cached.inputs,
+      exact: invalid.size === 0,
       compilation: {
         ir: cached.compilation.ir,
         presentationSources: new Set(cached.compilation.presentationSources),
         outputSources: cached.compilation.outputSources,
         sourceFiles: Object.freeze([...cached.compilation.sourceFiles]),
+        sourceStructures: cached.compilation.sourceStructures,
+        runtimeStructures: cached.compilation.runtimeStructures,
+        semanticGraph,
+        work: {
+          features: {
+            compiled: 0,
+            reused: semanticGraph.features.length,
+          },
+          presentations: {
+            compiled: 0,
+            reused: semanticGraph.presentations.length,
+          },
+        },
       },
     };
   } catch {
@@ -254,6 +285,9 @@ function writeSystemCompilationCache(
       presentationSources: [...compilation.presentationSources].sort(),
       outputSources: compilation.outputSources,
       sourceFiles: compilation.sourceFiles,
+      sourceStructures: compilation.sourceStructures,
+      runtimeStructures: compilation.runtimeStructures,
+      semanticGraph: compilation.semanticGraph,
     },
   };
   mkdirSync(dirname(path), { recursive: true });
@@ -292,7 +326,11 @@ function updateSystemCompilationSignatures(
 }
 
 function systemCompilationInputs(system: string, sources: readonly string[]): readonly string[] {
-  const inputs = new Set(sources.map(canonicalSourceFile));
+  const inputs = new Set(
+    sources
+      .map(canonicalSourceFile)
+      .filter((source) => !source.includes(`${sep}node_modules${sep}`)),
+  );
   for (const name of ["tsconfig.json", "package.json", "nub.lock"]) {
     const path = nearestFile(dirname(system), name);
     if (path) inputs.add(path);

@@ -58,14 +58,54 @@ export type SystemCompilation = Readonly<{
   presentationSources: ReadonlySet<string>;
   outputSources: SystemOutputSources;
   sourceFiles: readonly string[];
+  sourceStructures: Readonly<Record<string, string>>;
+  runtimeStructures: Readonly<Record<string, string>>;
+  semanticGraph: SystemSemanticGraph;
+  work: SystemCompilationWork;
 }>;
 
 export type SystemCompiler = Readonly<{
   prepare(): void;
+  restore(compilation: SystemCompilation): void;
   compile(changedFile?: string): SystemCompilation;
 }>;
 
-const SYSTEM_COMPILER_CACHE_VERSION = 1;
+export type SystemCompilationWork = Readonly<{
+  features: Readonly<{ compiled: number; reused: number }>;
+  presentations: Readonly<{ compiled: number; reused: number }>;
+  durations?: Readonly<{
+    diagnostics: number;
+    extraction: number;
+    linking: number;
+    sources: number;
+    total: number;
+  }>;
+}>;
+
+type FeatureCompilationUnit = Readonly<{
+  id: string;
+  hash: string;
+  sourceFiles: readonly string[];
+  features: readonly FeatureIR[];
+  featureSourceFiles: Readonly<Record<string, readonly string[]>>;
+  programs: readonly UnassembledProgramIR[];
+  interfaces: readonly InterfaceSource[];
+}>;
+
+type PresentationCompilationUnit = Readonly<{
+  id: string;
+  hash: string;
+  sourceFiles: readonly string[];
+  presentation: InterfacePresentationIR;
+}>;
+
+export type SystemSemanticGraph = Readonly<{
+  version: 1;
+  features: readonly FeatureCompilationUnit[];
+  presentations: readonly PresentationCompilationUnit[];
+}>;
+
+const SYSTEM_COMPILER_CACHE_VERSION = 2;
 
 /** Resolves the one conventional System entry without executing it. */
 export function resolveSystem(directory: string): SystemPaths {
@@ -129,17 +169,45 @@ export function createSystemCompiler(
     if (!current) throw new Error(`Cannot create the semantic Program for ${file}.`);
     return current;
   };
+  let previous: SystemCompilation | undefined;
+  let restored = false;
   return {
     prepare() {
       program();
+    },
+    restore(compilation) {
+      previous = compilation;
+      restored = true;
     },
     compile(changedFile) {
       if (changedFile) {
         const changed = resolve(changedFile);
         versions.set(changed, (versions.get(changed) ?? 0) + 1);
         projectVersion++;
+        const presentation = compilePresentationChange(previous, changed);
+        if (presentation) {
+          previous = presentation;
+          restored = false;
+          return presentation;
+        }
+        const runtime = compileUIRuntimeChange(previous, changed);
+        if (runtime) {
+          previous = runtime;
+          restored = false;
+          return runtime;
+        }
       }
-      return compileSystemProgram(file, program(), changedFile, extensions);
+      const compilation = compileSystemProgram(
+        file,
+        program(),
+        changedFile,
+        extensions,
+        previous,
+        changedFile !== undefined || restored,
+      );
+      previous = compilation;
+      restored = false;
+      return compilation;
     },
   };
 }
@@ -314,21 +382,22 @@ function compileSystemProgram(
   program: ts.Program,
   changedFile?: string,
   extensions: readonly SourceCompilerExtension[] = [],
+  previous?: SystemCompilation,
+  incremental = changedFile !== undefined,
 ): SystemCompilation {
+  const compilationStarted = performance.now();
   validateCompilerExtensions(extensions);
   const file = resolve(entry);
   const configuration = ts.findConfigFile(dirname(file), ts.sys.fileExists, "tsconfig.json");
   const changedSource = changedFile ? program.getSourceFile(resolve(changedFile)) : undefined;
   const diagnostics = changedSource
-    ? [
-        ...program.getSyntacticDiagnostics(changedSource),
-        ...program.getSemanticDiagnostics(changedSource),
-      ]
+    ? program.getSyntacticDiagnostics(changedSource)
     : ts.getPreEmitDiagnostics(program);
   const first = diagnostics.find(
     (diagnostic) => diagnostic.category === ts.DiagnosticCategory.Error,
   );
   if (first) throw new Error(formatTypeScriptDiagnostic(first));
+  const diagnosticsCompleted = performance.now();
 
   const source = program.getSourceFile(file);
   if (!source) throw new Error(`Cannot read ${file}.`);
@@ -362,6 +431,12 @@ function compileSystemProgram(
   const featureSourceFiles = new Map<string, ReadonlySet<string>>();
   const contributions: UnassembledProgramIR[] = [];
   const interfaceSources: InterfaceSource[] = [];
+  const featureUnits: FeatureCompilationUnit[] = [];
+  const work = {
+    features: { compiled: 0, reused: 0 },
+    presentations: { compiled: 0, reused: 0 },
+  };
+  const extractionStarted = performance.now();
   extractFeatures(
     program,
     checker,
@@ -380,7 +455,18 @@ function compileSystemProgram(
     undefined,
     undefined,
     true,
+    undefined,
+    {
+      entry: file,
+      changedFile: changedFile ? canonicalSourceFile(changedFile) : undefined,
+      reuse: incremental,
+      previous: new Map(previous?.semanticGraph.features.map((unit) => [unit.id, unit])),
+      semanticSources: new Map(),
+      units: featureUnits,
+      work: work.features,
+    },
   );
+  const extractionCompleted = performance.now();
   validateProgramEnvironments(contributions);
   const programs = assemblePrograms(contributions);
 
@@ -389,16 +475,29 @@ function compileSystemProgram(
   const interfaceSourceFiles = new Map<string, ReadonlySet<string>>();
   const presentationIR: InterfacePresentationIR[] = [];
   const interfaces: PlatformInterfaceIR[] = [];
+  const presentationUnits: PresentationCompilationUnit[] = [];
+  const previousPresentations = new Map(
+    previous?.semanticGraph.presentations.map((unit) => [unit.id, unit]),
+  );
   for (const item of interfaceSources.sort((left, right) => left.path.localeCompare(right.path))) {
-    const sources = presentationImplementationSources(program, checker, item.implementation, root);
+    const sources = new Set(item.presentationSources);
     sources.forEach((path) => presentationSources.add(path));
     interfaceSourceFiles.set(item.path, sources);
     for (const path of sources) {
-      const implementation = program.getSourceFile(path);
-      if (!implementation) throw new Error(`Cannot read Presentation source ${path}.`);
-      const compiled = compilePresentationSource(implementation.text, relative(root, path)).ir;
-      if (compiled.animations.length || compiled.declarations.length) {
-        presentationIR.push({ interface: item.path, ...compiled });
+      const id = presentationUnitId(item.path, path);
+      const cached = previousPresentations.get(id);
+      const reusable =
+        incremental &&
+        cached !== undefined &&
+        (!changedFile || !cached.sourceFiles.includes(canonicalSourceFile(changedFile)));
+      const presentation = reusable
+        ? cached.presentation
+        : compileInterfacePresentation(program, root, item.path, path);
+      work.presentations[reusable ? "reused" : "compiled"] += 1;
+      const unit = presentationCompilationUnit(id, path, presentation);
+      presentationUnits.push(unit);
+      if (presentation.animations.length || presentation.declarations.length) {
+        presentationIR.push(presentation);
       }
     }
     interfaces.push({
@@ -444,35 +543,289 @@ function compileSystemProgram(
     configuration ? dirname(configuration) : root,
   );
   for (const extension of extensions) extension.validate?.(ir);
+  const linkingCompleted = performance.now();
+  const outputSources = collectSystemOutputSources({
+    checker,
+    entry: file,
+    featureSourceFiles,
+    interfaceSourceFiles,
+    interfaces,
+    program,
+    programs,
+    root,
+  });
+  const sourcesCompleted = performance.now();
   return {
     ir,
     presentationSources,
+    semanticGraph: Object.freeze({
+      version: 1,
+      features: Object.freeze(featureUnits.sort(byId)),
+      presentations: Object.freeze(presentationUnits.sort(byId)),
+    }),
+    work: Object.freeze({
+      features: Object.freeze({ ...work.features }),
+      presentations: Object.freeze({ ...work.presentations }),
+      durations: Object.freeze({
+        diagnostics: diagnosticsCompleted - compilationStarted,
+        extraction: extractionCompleted - extractionStarted,
+        linking: linkingCompleted - extractionCompleted,
+        sources: sourcesCompleted - linkingCompleted,
+        total: sourcesCompleted - compilationStarted,
+      }),
+    }),
     sourceFiles: Object.freeze(
       program
         .getSourceFiles()
         .filter((source) => !program.isSourceFileDefaultLibrary(source))
-        .map(({ fileName }) => canonicalSourcePath(fileName))
+        .map(({ fileName }) => canonicalSourceFile(fileName))
         .sort(),
     ),
-    outputSources: collectSystemOutputSources({
-      checker,
-      entry: file,
-      featureSourceFiles,
-      interfaceSourceFiles,
-      interfaces,
-      program,
-      programs,
-      root,
+    sourceStructures: sourceStructureSignatures(program, root),
+    runtimeStructures: sourceStructureSignatures(program, root, "ui-runtime"),
+    outputSources,
+  };
+}
+
+function compilePresentationChange(
+  previous: SystemCompilation | undefined,
+  changedFile: string,
+): SystemCompilation | undefined {
+  if (!previous) return undefined;
+  const source = canonicalSourceFile(changedFile);
+  if (
+    ![...previous.presentationSources].some(
+      (presentationSource) => canonicalSourceFile(presentationSource) === source,
+    )
+  ) {
+    return undefined;
+  }
+  const text = ts.sys.readFile(changedFile);
+  if (text === undefined) return undefined;
+  const structure = sourceStructureSignature(text, changedFile);
+  if (previous.sourceStructures[source] !== structure) return undefined;
+  const affected = previous.semanticGraph.presentations.filter((unit) =>
+    unit.sourceFiles.includes(source),
+  );
+  if (!affected.length) return undefined;
+
+  const started = performance.now();
+  const replacements = new Map<string, PresentationCompilationUnit>();
+  for (const unit of affected) {
+    const compiled = compilePresentationSource(text, unit.presentation.file).ir;
+    const presentation = Object.freeze({
+      interface: unit.presentation.interface,
+      ...compiled,
+    });
+    replacements.set(unit.id, presentationCompilationUnit(unit.id, changedFile, presentation));
+  }
+  const presentations = previous.semanticGraph.presentations.map(
+    (unit) => replacements.get(unit.id) ?? unit,
+  );
+  const ir = Object.freeze({
+    ...previous.ir,
+    presentations: Object.freeze(
+      presentations
+        .map(({ presentation }) => presentation)
+        .filter(({ animations, declarations }) => animations.length > 0 || declarations.length > 0)
+        .sort((left, right) =>
+          `${left.interface}/${left.file}`.localeCompare(`${right.interface}/${right.file}`),
+        ),
+    ),
+  });
+  return {
+    ...previous,
+    ir,
+    semanticGraph: Object.freeze({
+      ...previous.semanticGraph,
+      presentations: Object.freeze(presentations),
+    }),
+    sourceStructures: Object.freeze({
+      ...previous.sourceStructures,
+      [source]: structure,
+    }),
+    work: Object.freeze({
+      features: Object.freeze({
+        compiled: 0,
+        reused: previous.semanticGraph.features.length,
+      }),
+      presentations: Object.freeze({
+        compiled: affected.length,
+        reused: presentations.length - affected.length,
+      }),
+      durations: Object.freeze({
+        diagnostics: 0,
+        extraction: 0,
+        linking: performance.now() - started,
+        sources: 0,
+        total: performance.now() - started,
+      }),
     }),
   };
 }
 
-function canonicalSourcePath(path: string): string {
-  try {
-    return realpathSync.native(path);
-  } catch {
-    return resolve(path);
+function compileUIRuntimeChange(
+  previous: SystemCompilation | undefined,
+  changedFile: string,
+): SystemCompilation | undefined {
+  if (!previous) return undefined;
+  const source = canonicalSourceFile(changedFile);
+  if (
+    [...previous.presentationSources].some(
+      (presentationSource) => canonicalSourceFile(presentationSource) === source,
+    )
+  ) {
+    return undefined;
   }
+  const text = ts.sys.readFile(changedFile);
+  if (text === undefined) return undefined;
+  const structure = sourceStructureSignature(text, changedFile, "ui-runtime");
+  if (previous.runtimeStructures[source] !== structure) return undefined;
+  const outputs = Object.entries(previous.outputSources)
+    .filter(([, sources]) => sources.some((candidate) => canonicalSourceFile(candidate) === source))
+    .map(([identity]) => identity);
+  if (!outputs.length || outputs.some((identity) => !uiRuntimeOutput(previous.ir, identity))) {
+    return undefined;
+  }
+  return {
+    ...previous,
+    runtimeStructures: Object.freeze({
+      ...previous.runtimeStructures,
+      [source]: structure,
+    }),
+    work: Object.freeze({
+      features: Object.freeze({
+        compiled: 0,
+        reused: previous.semanticGraph.features.length,
+      }),
+      presentations: Object.freeze({
+        compiled: 0,
+        reused: previous.semanticGraph.presentations.length,
+      }),
+      durations: Object.freeze({
+        diagnostics: 0,
+        extraction: 0,
+        linking: 0,
+        sources: 0,
+        total: 0,
+      }),
+    }),
+  };
+}
+
+function uiRuntimeOutput(ir: SystemIR, identity: string): boolean {
+  const accepts = (program: ProgramIR | undefined) =>
+    Boolean(
+      program?.environment.ui &&
+      program.contributions.every(({ implementation }) => implementation.kind === "source"),
+    );
+  if (identity.startsWith("program/")) {
+    return accepts(ir.programs.find(({ id }) => id === identity));
+  }
+  const interface_ = ir.interfaces.find(({ id }) => id === identity);
+  return Boolean(
+    interface_ &&
+    interface_.programs.length > 0 &&
+    interface_.programs.every((program) => accepts(ir.programs.find(({ id }) => id === program))),
+  );
+}
+
+function sourceStructureSignatures(
+  program: ts.Program,
+  root: string,
+  mode: "presentation" | "ui-runtime" = "presentation",
+): Readonly<Record<string, string>> {
+  return Object.freeze(
+    Object.fromEntries(
+      program
+        .getSourceFiles()
+        .filter(
+          (source) => !program.isSourceFileDefaultLibrary(source) && inside(root, source.fileName),
+        )
+        .map(
+          (source) =>
+            [
+              canonicalSourceFile(source.fileName),
+              sourceStructureSignature(source.text, source.fileName, mode),
+            ] as const,
+        )
+        .sort(([left], [right]) => left.localeCompare(right)),
+    ),
+  );
+}
+
+function sourceStructureSignature(
+  source: string,
+  fileName: string,
+  mode: "presentation" | "ui-runtime" = "presentation",
+): string {
+  const file = ts.createSourceFile(
+    fileName,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    fileName.endsWith("x") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+  );
+  const parseDiagnostics = (file as ts.SourceFile & { parseDiagnostics?: readonly ts.Diagnostic[] })
+    .parseDiagnostics;
+  if (parseDiagnostics?.some(({ category }) => category === ts.DiagnosticCategory.Error)) {
+    return semanticHash(source);
+  }
+  const hash = createHash("sha256");
+  const visit = (node: ts.Node): void => {
+    hash.update(`${node.kind}:`);
+    if (
+      ts.isIdentifier(node) ||
+      ts.isPrivateIdentifier(node) ||
+      ts.isStringLiteralLike(node) ||
+      ts.isNumericLiteral(node) ||
+      ts.isBigIntLiteral(node) ||
+      ts.isNoSubstitutionTemplateLiteral(node)
+    ) {
+      hash.update(node.text);
+      hash.update(";");
+    }
+    ts.forEachChild(node, (child) => {
+      if (
+        ts.isFunctionLike(node) &&
+        "body" in node &&
+        child === node.body &&
+        (mode === "presentation" || isUIRuntimeFunction(node))
+      ) {
+        hash.update("<body>;");
+        return;
+      }
+      visit(child);
+    });
+  };
+  visit(file);
+  return hash.digest("hex");
+}
+
+function isUIRuntimeFunction(node: ts.SignatureDeclaration): boolean {
+  const name =
+    "name" in node && node.name
+      ? memberName(node as ts.NamedDeclaration)
+      : ts.isArrowFunction(node) || ts.isFunctionExpression(node)
+        ? ts.isPropertyAssignment(node.parent)
+          ? memberName(node.parent)
+          : undefined
+        : undefined;
+  if (name === "view" || name === "start") return true;
+  const member =
+    ts.isMethodDeclaration(node) || ts.isGetAccessorDeclaration(node)
+      ? node
+      : (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) &&
+          ts.isPropertyAssignment(node.parent)
+        ? node.parent
+        : undefined;
+  const object = member?.parent;
+  return Boolean(
+    object &&
+    ts.isObjectLiteralExpression(object) &&
+    ts.isPropertyAssignment(object.parent) &&
+    memberName(object.parent) === "actions",
+  );
 }
 
 function compilerOptions(file: string): ts.CompilerOptions {
@@ -507,10 +860,20 @@ type InterfaceSource = Readonly<{
   path: string;
   app: string;
   platform: string;
-  implementation: ts.ObjectLiteralExpression;
+  presentationSources: readonly string[];
 }>;
 
 type InterfaceOwner = Readonly<{ path: string; platform: string }>;
+
+type IncrementalFeatureExtraction = Readonly<{
+  entry: string;
+  changedFile?: string;
+  reuse: boolean;
+  previous: ReadonlyMap<string, FeatureCompilationUnit>;
+  semanticSources: Map<string, ReadonlySet<string>>;
+  units: FeatureCompilationUnit[];
+  work: { compiled: number; reused: number };
+}>;
 
 function validateProgramEnvironments(programs: readonly UnassembledProgramIR[]): void {
   const environments = new Map<string, ProgramIR["environment"]>();
@@ -611,15 +974,73 @@ function presentationImplementationSources(
   );
 }
 
+function compileInterfacePresentation(
+  program: ts.Program,
+  root: string,
+  interfacePath: string,
+  path: string,
+): InterfacePresentationIR {
+  const implementation = program.getSourceFile(path);
+  if (!implementation) throw new Error(`Cannot read Presentation source ${path}.`);
+  const compiled = compilePresentationSource(implementation.text, relative(root, path)).ir;
+  return Object.freeze({ interface: interfacePath, ...compiled });
+}
+
+function presentationCompilationUnit(
+  id: string,
+  path: string,
+  presentation: InterfacePresentationIR,
+): PresentationCompilationUnit {
+  return Object.freeze({
+    id,
+    hash: semanticHash(presentation),
+    sourceFiles: Object.freeze([canonicalSourceFile(path)]),
+    presentation,
+  });
+}
+
+function presentationUnitId(interfacePath: string, path: string): string {
+  return `presentation/${interfacePath}/${canonicalSourceFile(path)}`;
+}
+
+function semanticHash(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
 function transitiveLocalSources(
   program: ts.Program,
   checker: ts.TypeChecker,
   root: string,
   initial: Iterable<ts.SourceFile | string>,
 ): ReadonlySet<string> {
+  return transitiveSources(program, checker, root, initial, false);
+}
+
+function transitiveSemanticSources(
+  program: ts.Program,
+  checker: ts.TypeChecker,
+  root: string,
+  initial: Iterable<ts.SourceFile | string>,
+): ReadonlySet<string> {
+  return transitiveSources(program, checker, root, initial, true);
+}
+
+function transitiveSources(
+  program: ts.Program,
+  checker: ts.TypeChecker,
+  root: string,
+  initial: Iterable<ts.SourceFile | string>,
+  includeTypeOnly: boolean,
+): ReadonlySet<string> {
   const sources = new Set<string>();
   const pending = [...initial].flatMap((value): ts.SourceFile[] => {
-    const source = typeof value === "string" ? program.getSourceFile(resolve(value)) : value;
+    const source =
+      typeof value === "string"
+        ? (program.getSourceFile(resolve(value)) ??
+          program
+            .getSourceFiles()
+            .find(({ fileName }) => canonicalSourceFile(fileName) === canonicalSourceFile(value)))
+        : value;
     return source && !source.isDeclarationFile && inside(root, source.fileName) ? [source] : [];
   });
   while (pending.length) {
@@ -628,12 +1049,24 @@ function transitiveLocalSources(
     if (sources.has(file)) continue;
     sources.add(file);
     for (const statement of source.statements) {
-      const specifier = runtimeModuleSpecifier(statement);
+      const specifier = moduleSpecifier(statement, includeTypeOnly);
       if (!specifier) continue;
       const symbol = checker.getSymbolAtLocation(specifier);
       for (const declaration of symbol?.declarations ?? []) {
         const imported = declaration.getSourceFile();
         if (!imported.isDeclarationFile && inside(root, imported.fileName)) pending.push(imported);
+      }
+      if (ts.isStringLiteralLike(specifier)) {
+        const resolved = ts.resolveModuleName(
+          specifier.text,
+          source.fileName,
+          program.getCompilerOptions(),
+          ts.sys,
+        ).resolvedModule;
+        const imported = resolved ? program.getSourceFile(resolved.resolvedFileName) : undefined;
+        if (imported && !imported.isDeclarationFile && inside(root, imported.fileName)) {
+          pending.push(imported);
+        }
       }
     }
   }
@@ -643,10 +1076,14 @@ function transitiveLocalSources(
   return new Set([...sources].filter((source) => included.has(source)));
 }
 
-function runtimeModuleSpecifier(statement: ts.Statement): ts.Expression | undefined {
+function moduleSpecifier(
+  statement: ts.Statement,
+  includeTypeOnly: boolean,
+): ts.Expression | undefined {
   if (ts.isImportDeclaration(statement)) {
-    if (statement.importClause?.isTypeOnly) return undefined;
+    if (!includeTypeOnly && statement.importClause?.isTypeOnly) return undefined;
     if (
+      !includeTypeOnly &&
       statement.importClause?.namedBindings &&
       ts.isNamedImports(statement.importClause.namedBindings) &&
       statement.importClause.namedBindings.elements.every((element) => element.isTypeOnly)
@@ -655,7 +1092,7 @@ function runtimeModuleSpecifier(statement: ts.Statement): ts.Expression | undefi
     }
     return statement.moduleSpecifier;
   }
-  return ts.isExportDeclaration(statement) && !statement.isTypeOnly
+  return ts.isExportDeclaration(statement) && (includeTypeOnly || !statement.isTypeOnly)
     ? statement.moduleSpecifier
     : undefined;
 }
@@ -773,6 +1210,7 @@ function extractFeatures(
   interfaceOwner?: InterfaceOwner,
   contractsAreFeatureValues = false,
   ownerStatic?: StaticValue,
+  incremental?: IncrementalFeatureExtraction,
 ): void {
   const staticChildren = ownerStatic
     ? resolveStaticMember(checker, ownerStatic, "features")
@@ -780,6 +1218,29 @@ function extractFeatures(
   for (const symbol of sortedSymbols(contracts.getProperties())) {
     const name = symbol.getName();
     const path = parent ? `${parent}.${name}` : name;
+    const unitId = `feature/${path}`;
+    const previousUnit = parent ? undefined : incremental?.previous.get(unitId);
+    if (
+      previousUnit &&
+      incremental?.reuse &&
+      (!incremental.changedFile || !previousUnit.sourceFiles.includes(incremental.changedFile))
+    ) {
+      const prefix = `${unitId}.`;
+      const reused = [...incremental.previous.values()]
+        .filter((unit) => unit.id === unitId || unit.id.startsWith(prefix))
+        .sort(byId);
+      for (const unit of reused) {
+        appendFeatureCompilationUnit(unit, features, featureSourceFiles, programs, interfaces);
+      }
+      incremental.units.push(...reused);
+      incremental.work.reused += reused.length;
+      continue;
+    }
+    const unitStart = {
+      programs: programs.length,
+      interfaces: interfaces.length,
+      units: incremental?.units.length ?? 0,
+    };
     const location = symbol.valueDeclaration ?? at;
     const symbolType = checker.getTypeOfSymbolAtLocation(symbol, location);
     const contract = contractsAreFeatureValues
@@ -869,7 +1330,9 @@ function extractFeatures(
         path,
         app: ownedApp,
         platform: interfacePlatform,
-        implementation: featureValue,
+        presentationSources: Object.freeze(
+          [...presentationImplementationSources(program, checker, featureValue, root)].sort(),
+        ),
       });
     }
     const programContracts = propertyType(checker, contract, "Programs", location);
@@ -951,6 +1414,8 @@ function extractFeatures(
       }
     }
 
+    const directProgramEnd = programs.length;
+    const directInterfaceEnd = interfaces.length;
     if (childContracts) {
       if (featureValue && !childValues)
         throw diagnostic(featureValue, `Feature ${JSON.stringify(path)} needs features.`);
@@ -976,6 +1441,7 @@ function extractFeatures(
         ownedInterface,
         false,
         staticFeature,
+        incremental,
       );
     }
 
@@ -999,7 +1465,119 @@ function extractFeatures(
         root,
       }),
     });
+    if (incremental) {
+      const unit = createFeatureCompilationUnit({
+        id: unitId,
+        entry: incremental.entry,
+        features: [features.at(-1)!],
+        featureSourceFiles,
+        programs: programs.slice(unitStart.programs, directProgramEnd),
+        interfaces: interfaces.slice(unitStart.interfaces, directInterfaceEnd),
+        descendants: incremental.units.slice(unitStart.units),
+        program,
+        checker,
+        root,
+        semanticSources: incremental.semanticSources,
+      });
+      for (const [unitPath, sources] of Object.entries(unit.featureSourceFiles)) {
+        featureSourceFiles.set(unitPath, new Set(sources));
+      }
+      incremental.units.push(unit);
+      incremental.work.compiled += 1;
+    }
   }
+}
+
+function appendFeatureCompilationUnit(
+  unit: FeatureCompilationUnit,
+  features: FeatureIR[],
+  featureSourceFiles: Map<string, ReadonlySet<string>>,
+  programs: UnassembledProgramIR[],
+  interfaces: InterfaceSource[],
+): void {
+  features.push(...unit.features);
+  programs.push(...unit.programs);
+  interfaces.push(...unit.interfaces);
+  for (const [path, sources] of Object.entries(unit.featureSourceFiles)) {
+    featureSourceFiles.set(path, new Set(sources));
+  }
+}
+
+function createFeatureCompilationUnit(input: {
+  id: string;
+  entry: string;
+  features: readonly FeatureIR[];
+  featureSourceFiles: ReadonlyMap<string, ReadonlySet<string>>;
+  programs: readonly UnassembledProgramIR[];
+  interfaces: readonly InterfaceSource[];
+  descendants: readonly FeatureCompilationUnit[];
+  program: ts.Program;
+  checker: ts.TypeChecker;
+  root: string;
+  semanticSources: Map<string, ReadonlySet<string>>;
+}): FeatureCompilationUnit {
+  const path = input.id.slice("feature/".length);
+  const directFeatureSourceFiles = Object.fromEntries(
+    [...input.featureSourceFiles]
+      .filter(([candidate]) => candidate === path)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([candidate, sources]) => [
+        candidate,
+        Object.freeze([...new Set([...sources].map(canonicalSourceFile))].sort()),
+      ]),
+  );
+  const featureSourceFiles = Object.freeze(directFeatureSourceFiles) as Readonly<
+    Record<string, readonly string[]>
+  >;
+  const direct = new Set<string>([
+    input.entry,
+    ...Object.values(featureSourceFiles).flat(),
+    ...input.programs.flatMap(({ implementation }) =>
+      programImplementationSourceFiles(implementation),
+    ),
+    ...input.interfaces.flatMap(({ presentationSources }) => presentationSources),
+  ]);
+  const semantic = new Set<string>();
+  for (const source of direct) {
+    const canonical = canonicalSourceFile(source);
+    if (canonical === canonicalSourceFile(input.entry)) continue;
+    let closure = input.semanticSources.get(canonical);
+    if (!closure) {
+      closure = transitiveSemanticSources(input.program, input.checker, input.root, [source]);
+      input.semanticSources.set(canonical, closure);
+    }
+    closure.forEach((dependency) => semantic.add(dependency));
+  }
+  const ownSourceFiles = Object.freeze(
+    [...new Set([input.entry, ...direct, ...semantic].map(canonicalSourceFile))].sort(),
+  );
+  const sourceFiles = Object.freeze(
+    [
+      ...new Set([
+        ...ownSourceFiles,
+        ...input.descendants.flatMap(({ sourceFiles: descendants }) => descendants),
+      ]),
+    ].sort(),
+  );
+  const ownedSourceFiles = Object.freeze({
+    ...featureSourceFiles,
+    [path]: ownSourceFiles,
+  });
+  const meaning = {
+    features: input.features,
+    featureSourceFiles: ownedSourceFiles,
+    programs: input.programs,
+    interfaces: input.interfaces,
+  };
+  return Object.freeze({
+    id: input.id,
+    hash: semanticHash(meaning),
+    sourceFiles,
+    features: Object.freeze([...input.features]),
+    featureSourceFiles: ownedSourceFiles,
+    programs: Object.freeze([...input.programs]),
+    interfaces: Object.freeze([...input.interfaces]),
+  });
 }
 
 function extractDependencyProviders(

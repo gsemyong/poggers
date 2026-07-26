@@ -32,7 +32,7 @@ afterEach(async () => {
   );
 });
 
-describe("local Deployment adapter", () => {
+describe("local Deployment adapter", { tags: ["production"] }, () => {
   test("fences concurrent applies against one atomically persisted revision", async () => {
     const fixture = await localFixture();
     const adapter = createLocalDeploymentAdapter({

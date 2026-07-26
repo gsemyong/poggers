@@ -56,6 +56,10 @@ describe("web Platform Adapter", () => {
             outputSources: {},
             sourceFiles: [],
             cache: "miss",
+            work: {
+              features: { compiled: 0, reused: 0 },
+              presentations: { compiled: 0, reused: 0 },
+            },
           },
           compile: () => ({
             revision: 0,
@@ -64,6 +68,10 @@ describe("web Platform Adapter", () => {
             outputSources: {},
             sourceFiles: [],
             cache: "miss",
+            work: {
+              features: { compiled: 0, reused: 0 },
+              presentations: { compiled: 0, reused: 0 },
+            },
           }),
         },
         programs: [program],
@@ -73,72 +81,76 @@ describe("web Platform Adapter", () => {
     ).rejects.toThrow('does not yet realize "program/worker"');
   });
 
-  test("emits the document and worker Programs as explicit artifacts", async () => {
-    const directory = await mkdtemp(resolve(tmpdir(), "kit-web-adapter-"));
-    temporaryDirectories.push(directory);
-    const source = resolve(directory, "src");
-    const system = resolve(source, "system.ts");
-    const output = resolve(directory, "dist");
-    await mkdir(source, { recursive: true });
-    await writeFile(system, webProgramsSource());
-    const ir = compileSystem(system, [webCompilerExtension]);
+  test(
+    "emits the document and worker Programs as explicit artifacts",
+    { tags: ["production"], timeout: 120_000 },
+    async () => {
+      const directory = await mkdtemp(resolve(tmpdir(), "kit-web-adapter-"));
+      temporaryDirectories.push(directory);
+      const source = resolve(directory, "src");
+      const system = resolve(source, "system.ts");
+      const output = resolve(directory, "dist");
+      await mkdir(source, { recursive: true });
+      await writeFile(system, webProgramsSource());
+      const ir = compileSystem(system, [webCompilerExtension]);
 
-    const result = await createWebPlatformAdapter().build({
-      directory,
-      system,
-      ir,
-      programs: ir.programs,
-      interfaces: ir.interfaces,
-      platform: "web",
-      output,
-    });
+      const result = await createWebPlatformAdapter().build({
+        directory,
+        system,
+        ir,
+        programs: ir.programs,
+        interfaces: ir.interfaces,
+        platform: "web",
+        output,
+      });
 
-    expect(
-      result.entries.map(({ identity, kind, environment }) => [identity, kind, environment]),
-    ).toEqual([
-      ["interface/product.web", "interface", "browser-main"],
-      ["program/product.web.background", "program", "browser-worker"],
-      ["program/product.web.offline", "program", "browser-service-worker"],
-    ]);
-    await Promise.all(result.entries.map(({ path }) => access(path)));
-    const interfaceArtifact = result.entries.find(({ kind }) => kind === "interface")!;
-    const interfaceRoot = interfaceArtifact.path;
-    expect(interfaceArtifact.entrypoint).toBe(resolve(interfaceRoot, "index.html"));
-    for (const artifact of result.entries.filter(({ kind }) => kind === "program")) {
-      expect(artifact.entrypoint).toBe(artifact.path);
-      expect(artifact.dependencies).toEqual(
-        artifact.environment === "browser-worker" ? ["http"] : [],
+      expect(
+        result.entries.map(({ identity, kind, environment }) => [identity, kind, environment]),
+      ).toEqual([
+        ["interface/product.web", "interface", "browser-main"],
+        ["program/product.web.background", "program", "browser-worker"],
+        ["program/product.web.offline", "program", "browser-service-worker"],
+      ]);
+      await Promise.all(result.entries.map(({ path }) => access(path)));
+      const interfaceArtifact = result.entries.find(({ kind }) => kind === "interface")!;
+      const interfaceRoot = interfaceArtifact.path;
+      expect(interfaceArtifact.entrypoint).toBe(resolve(interfaceRoot, "index.html"));
+      for (const artifact of result.entries.filter(({ kind }) => kind === "program")) {
+        expect(artifact.entrypoint).toBe(artifact.path);
+        expect(artifact.dependencies).toEqual(
+          artifact.environment === "browser-worker" ? ["http"] : [],
+        );
+      }
+      expect(
+        JSON.parse(await readFile(resolve(interfaceRoot, "assets.ir.json"), "utf8")),
+      ).toMatchObject({
+        version: 2,
+        crossOriginIsolated: true,
+      });
+      const browserAssets = (await readdir(resolve(interfaceRoot, "assets")))
+        .filter((path) => path.startsWith("app-") && path.endsWith(".js"))
+        .map((path) => resolve(interfaceRoot, "assets", path));
+      expect(browserAssets).toHaveLength(1);
+      const document = await readFile(browserAssets[0]!, "utf8");
+      const worker = await readFile(
+        result.entries.find(({ environment }) => environment === "browser-worker")!.path,
+        "utf8",
       );
-    }
-    expect(
-      JSON.parse(await readFile(resolve(interfaceRoot, "assets.ir.json"), "utf8")),
-    ).toMatchObject({
-      version: 2,
-      crossOriginIsolated: true,
-    });
-    const browserAssets = (await readdir(resolve(interfaceRoot, "assets")))
-      .filter((path) => path.startsWith("app-") && path.endsWith(".js"))
-      .map((path) => resolve(interfaceRoot, "assets", path));
-    expect(browserAssets).toHaveLength(1);
-    const document = await readFile(browserAssets[0]!, "utf8");
-    const worker = await readFile(
-      result.entries.find(({ environment }) => environment === "browser-worker")!.path,
-      "utf8",
-    );
-    expect(document).toContain("kit:dispose");
-    expect(document).toContain("kit:disposed");
-    expect(worker).toContain("kit:dispose");
-    expect(worker).toContain("kit:disposed");
-    expect(worker).toContain(
-      "dependencies:[{name:`http`,operations:[{name:`request`,mode:`asynchronous`",
-    );
-    const bundledJavaScript = await Promise.all(
-      (await readdir(output, { recursive: true }))
-        .filter((path) => path.endsWith(".js"))
-        .map((path) => readFile(resolve(output, path), "utf8")),
-    );
-    expect(bundledJavaScript.join("\n")).toContain("/api/telemetry");
-  });
+      expect(document).toContain("kit:dispose");
+      expect(document).toContain("kit:disposed");
+      expect(worker).toContain("kit:dispose");
+      expect(worker).toContain("kit:disposed");
+      expect(worker).toContain(
+        "dependencies:[{name:`http`,operations:[{name:`request`,mode:`asynchronous`",
+      );
+      const bundledJavaScript = await Promise.all(
+        (await readdir(output, { recursive: true }))
+          .filter((path) => path.endsWith(".js"))
+          .map((path) => readFile(resolve(output, path), "utf8")),
+      );
+      expect(bundledJavaScript.join("\n")).toContain("/api/telemetry");
+    },
+  );
 });
 
 function webProgramsSource(): string {

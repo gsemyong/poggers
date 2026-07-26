@@ -337,137 +337,142 @@ export const audio = web.createAudioAsset(new URL("./assets/control.wav", import
     }
   });
 
-  it("emits byte-identical web artifacts from identical product meaning", async () => {
-    const directory = await mkdtemp(resolve(tmpdir(), "kit-web-determinism-"));
-    try {
-      const workspace = resolve(import.meta.dirname, "fixtures/request-render");
-      const ir = compileSystem(resolve(workspace, "src/system.ts"), [webCompilerExtension]);
-      const interfaceId = ir.interfaces.find(({ id }) => id === "interface/product.web")?.id;
-      if (!interfaceId) throw new Error("The request-render fixture has no product web interface.");
-      const first = await buildWebInterface({
-        directory: workspace,
-        outdir: resolve(directory, "first"),
-        interface: interfaceId,
-        ir,
-      });
-      const second = await buildWebInterface({
-        directory: workspace,
-        outdir: resolve(directory, "second"),
-        interface: interfaceId,
-        ir,
-      });
-      const firstFiles = await snapshotFiles(first.directory);
-      expect(await snapshotFiles(second.directory)).toEqual(firstFiles);
-      const textualArtifacts = Object.entries(firstFiles)
-        .filter(([name]) => /\.(?:html|js|json)$/.test(name))
-        .map(([, value]) => Buffer.from(value, "base64").toString("utf8"));
-      expect(textualArtifacts.every((artifact) => !artifact.includes("file://"))).toBe(true);
-      expect(
-        textualArtifacts.some((artifact) => artifact.includes("data:image/svg+xml;base64,")),
-      ).toBe(true);
-      const javascript = Object.entries(firstFiles)
-        .filter(([name]) => name.endsWith(".js"))
-        .map(([name, value]) => [name, Buffer.from(value, "base64").toString("utf8")] as const);
-      const applicationEntry = javascript.find(([name]) => /assets\/app-[^/]+\.js$/.test(name));
-      expect(applicationEntry?.[1]).not.toContain("Rendered in the browser");
-      expect(
-        javascript
-          .filter(([, source]) => source.includes("Rendered in the browser"))
-          .map(([name]) => name),
-      ).toEqual([expect.stringContaining("route-product-web-greeting-client-")]);
-      expect(javascript.every(([, source]) => !source.includes("sensitive fixture failure"))).toBe(
-        true,
-      );
+  it(
+    "emits byte-identical web artifacts from identical product meaning",
+    { tags: ["production"], timeout: 120_000 },
+    async () => {
+      const directory = await mkdtemp(resolve(tmpdir(), "kit-web-determinism-"));
+      try {
+        const workspace = resolve(import.meta.dirname, "fixtures/request-render");
+        const ir = compileSystem(resolve(workspace, "src/system.ts"), [webCompilerExtension]);
+        const interfaceId = ir.interfaces.find(({ id }) => id === "interface/product.web")?.id;
+        if (!interfaceId)
+          throw new Error("The request-render fixture has no product web interface.");
+        const first = await buildWebInterface({
+          directory: workspace,
+          outdir: resolve(directory, "first"),
+          interface: interfaceId,
+          ir,
+        });
+        const second = await buildWebInterface({
+          directory: workspace,
+          outdir: resolve(directory, "second"),
+          interface: interfaceId,
+          ir,
+        });
+        const firstFiles = await snapshotFiles(first.directory);
+        expect(await snapshotFiles(second.directory)).toEqual(firstFiles);
+        const textualArtifacts = Object.entries(firstFiles)
+          .filter(([name]) => /\.(?:html|js|json)$/.test(name))
+          .map(([, value]) => Buffer.from(value, "base64").toString("utf8"));
+        expect(textualArtifacts.every((artifact) => !artifact.includes("file://"))).toBe(true);
+        expect(
+          textualArtifacts.some((artifact) => artifact.includes("data:image/svg+xml;base64,")),
+        ).toBe(true);
+        const javascript = Object.entries(firstFiles)
+          .filter(([name]) => name.endsWith(".js"))
+          .map(([name, value]) => [name, Buffer.from(value, "base64").toString("utf8")] as const);
+        const applicationEntry = javascript.find(([name]) => /assets\/app-[^/]+\.js$/.test(name));
+        expect(applicationEntry?.[1]).not.toContain("Rendered in the browser");
+        expect(
+          javascript
+            .filter(([, source]) => source.includes("Rendered in the browser"))
+            .map(([name]) => name),
+        ).toEqual([expect.stringContaining("route-product-web-greeting-client-")]);
+        expect(
+          javascript.every(([, source]) => !source.includes("sensitive fixture failure")),
+        ).toBe(true);
 
-      const variant = resolve(directory, "variant");
-      await mkdir(resolve(variant, "src"), { recursive: true });
-      const marker = "Rendered in the browser";
-      const payload = `${marker}:${"x".repeat(160_000)}`;
-      const authored = await readFile(resolve(workspace, "src/product.tsx"), "utf8");
-      expect(authored).toContain(marker);
-      await writeFile(resolve(variant, "src/product.tsx"), authored.replace(marker, payload));
-      await writeFile(
-        resolve(variant, "src/system.ts"),
-        await readFile(resolve(workspace, "src/system.ts"), "utf8"),
-      );
-      await writeFile(
-        resolve(variant, "tsconfig.json"),
-        `${JSON.stringify({
-          extends: resolve(import.meta.dirname, "../../../..", "tsconfig.json"),
-          compilerOptions: {
-            paths: {
-              "@/*": ["${configDir}/src/*"],
-              kit: [resolve(import.meta.dirname, "../../../..", "dist/source/index.ts")],
-              "kit/jsx-runtime": [
-                resolve(import.meta.dirname, "../../../..", "dist/source/jsx/runtime.ts"),
-              ],
-              "kit/jsx-dev-runtime": [
-                resolve(import.meta.dirname, "../../../..", "dist/source/jsx/development.ts"),
-              ],
-              "kit/server": [
-                resolve(
-                  import.meta.dirname,
-                  "../../../..",
-                  "dist/source/platforms/server/index.ts",
-                ),
-              ],
-              "kit/web": [
-                resolve(import.meta.dirname, "../../../..", "dist/source/platforms/web/index.ts"),
-              ],
+        const variant = resolve(directory, "variant");
+        await mkdir(resolve(variant, "src"), { recursive: true });
+        const marker = "Rendered in the browser";
+        const payload = `${marker}:${"x".repeat(160_000)}`;
+        const authored = await readFile(resolve(workspace, "src/product.tsx"), "utf8");
+        expect(authored).toContain(marker);
+        await writeFile(resolve(variant, "src/product.tsx"), authored.replace(marker, payload));
+        await writeFile(
+          resolve(variant, "src/system.ts"),
+          await readFile(resolve(workspace, "src/system.ts"), "utf8"),
+        );
+        await writeFile(
+          resolve(variant, "tsconfig.json"),
+          `${JSON.stringify({
+            extends: resolve(import.meta.dirname, "../../../..", "tsconfig.json"),
+            compilerOptions: {
+              paths: {
+                "@/*": ["${configDir}/src/*"],
+                kit: [resolve(import.meta.dirname, "../../../..", "dist/source/index.ts")],
+                "kit/jsx-runtime": [
+                  resolve(import.meta.dirname, "../../../..", "dist/source/jsx/runtime.ts"),
+                ],
+                "kit/jsx-dev-runtime": [
+                  resolve(import.meta.dirname, "../../../..", "dist/source/jsx/development.ts"),
+                ],
+                "kit/server": [
+                  resolve(
+                    import.meta.dirname,
+                    "../../../..",
+                    "dist/source/platforms/server/index.ts",
+                  ),
+                ],
+                "kit/web": [
+                  resolve(import.meta.dirname, "../../../..", "dist/source/platforms/web/index.ts"),
+                ],
+              },
+              typeRoots: [resolve(import.meta.dirname, "../../../../node_modules/@types")],
+              types: ["node"],
             },
-            typeRoots: [resolve(import.meta.dirname, "../../../../node_modules/@types")],
-            types: ["node"],
-          },
-          include: ["src/**/*.ts", "src/**/*.tsx"],
-        })}\n`,
-      );
-      const variantIR = compileSystem(resolve(variant, "src/system.ts"), [webCompilerExtension]);
-      const variantInterfaceId = variantIR.interfaces.find(
-        ({ id }) => id === "interface/product.web",
-      )?.id;
-      if (!variantInterfaceId) {
-        throw new Error("The request-render variant has no product web interface.");
+            include: ["src/**/*.ts", "src/**/*.tsx"],
+          })}\n`,
+        );
+        const variantIR = compileSystem(resolve(variant, "src/system.ts"), [webCompilerExtension]);
+        const variantInterfaceId = variantIR.interfaces.find(
+          ({ id }) => id === "interface/product.web",
+        )?.id;
+        if (!variantInterfaceId) {
+          throw new Error("The request-render variant has no product web interface.");
+        }
+        const variantBuild = await buildWebInterface({
+          directory: variant,
+          outdir: resolve(directory, "variant-output"),
+          interface: variantInterfaceId,
+          ir: variantIR,
+        });
+        const variantFiles = await snapshotFiles(variantBuild.directory);
+        const variantJavascript = Object.entries(variantFiles)
+          .filter(([name]) => name.endsWith(".js"))
+          .map(([name, value]) => [name, Buffer.from(value, "base64").toString("utf8")] as const);
+        const baselineClient = javascript.find(([name]) =>
+          name.includes("route-product-web-greeting-client-"),
+        );
+        const variantClient = variantJavascript.find(([name]) =>
+          name.includes("route-product-web-greeting-client-"),
+        );
+        expect(baselineClient?.[0]).toContain("route-product-web-greeting-client-");
+        expect(variantClient?.[0]).toContain("route-product-web-greeting-client-");
+        const baselineClientBytes = await initialRouteClosureBytes(
+          first.directory,
+          "product.web.greeting.client",
+        );
+        const variantClientBytes = await initialRouteClosureBytes(
+          variantBuild.directory,
+          "product.web.greeting.client",
+        );
+        expect(variantClientBytes).toBeGreaterThan(baselineClientBytes + 150_000);
+        const baselineInitialBytes = await initialRouteClosureBytes(
+          first.directory,
+          "product.web.greeting.greeting",
+        );
+        const variantInitialBytes = await initialRouteClosureBytes(
+          variantBuild.directory,
+          "product.web.greeting.greeting",
+        );
+        expect(Math.abs(variantInitialBytes - baselineInitialBytes)).toBeLessThan(1_024);
+      } finally {
+        await rm(directory, { force: true, recursive: true });
       }
-      const variantBuild = await buildWebInterface({
-        directory: variant,
-        outdir: resolve(directory, "variant-output"),
-        interface: variantInterfaceId,
-        ir: variantIR,
-      });
-      const variantFiles = await snapshotFiles(variantBuild.directory);
-      const variantJavascript = Object.entries(variantFiles)
-        .filter(([name]) => name.endsWith(".js"))
-        .map(([name, value]) => [name, Buffer.from(value, "base64").toString("utf8")] as const);
-      const baselineClient = javascript.find(([name]) =>
-        name.includes("route-product-web-greeting-client-"),
-      );
-      const variantClient = variantJavascript.find(([name]) =>
-        name.includes("route-product-web-greeting-client-"),
-      );
-      expect(baselineClient?.[0]).toContain("route-product-web-greeting-client-");
-      expect(variantClient?.[0]).toContain("route-product-web-greeting-client-");
-      const baselineClientBytes = await initialRouteClosureBytes(
-        first.directory,
-        "product.web.greeting.client",
-      );
-      const variantClientBytes = await initialRouteClosureBytes(
-        variantBuild.directory,
-        "product.web.greeting.client",
-      );
-      expect(variantClientBytes).toBeGreaterThan(baselineClientBytes + 150_000);
-      const baselineInitialBytes = await initialRouteClosureBytes(
-        first.directory,
-        "product.web.greeting.greeting",
-      );
-      const variantInitialBytes = await initialRouteClosureBytes(
-        variantBuild.directory,
-        "product.web.greeting.greeting",
-      );
-      expect(Math.abs(variantInitialBytes - baselineInitialBytes)).toBeLessThan(1_024);
-    } finally {
-      await rm(directory, { force: true, recursive: true });
-    }
-  }, 120_000);
+    },
+  );
 });
 
 describe("production web Route realization", () => {

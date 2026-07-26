@@ -683,7 +683,6 @@ test("evaluates each interface and child Feature Presentation scope once per roo
     }),
     interface: "web",
     logicalProgram: "browser",
-    presentationRevision: () => 0,
     presentation: () => presentation,
     adapter,
     boundary,
@@ -745,7 +744,6 @@ test("invalidates only compiler-identified consumers of shared Presentation moti
     }),
     interface: "web",
     logicalProgram: "browser",
-    presentationRevision: () => 0,
     presentation: () => presentation,
     adapter,
     boundary,
@@ -772,6 +770,67 @@ test("invalidates only compiler-identified consumers of shared Presentation moti
   await Promise.resolve();
   expect(graph.revision(first)).toBe(1);
   expect(graph.revision(second)).toBe(0);
+  graph.dispose();
+});
+
+test("invalidates every component after replacing the authored Presentation", async () => {
+  const adapter = {
+    environment: {} as WebPresentationLanguage["Environment"],
+    create(options: { readonly scopes?: readonly object[] }) {
+      return {
+        render(
+          frame: (input: {
+            elements: Record<string, never>;
+            scopes: readonly { evaluate<Value>(read: () => Value): Value }[];
+          }) => unknown,
+        ) {
+          frame({
+            elements: {},
+            scopes: (options.scopes ?? []).map(() => ({
+              evaluate: <Value>(read: () => Value) => read(),
+            })),
+          });
+        },
+        reconfigure() {},
+        dispose() {},
+      };
+    },
+    dispose() {},
+  } as unknown as PresentationAdapterInstance<WebPresentationLanguage, Element>;
+  const first = "@feature/web.dashboard/component/First";
+  const second = "@feature/web.dashboard/component/Second";
+  const presentation = {
+    parameters: {},
+    create: () => ({ Dashboard: () => ({ First: () => ({}), Second: () => ({}) }) }),
+  };
+  const graph = createPresentationGraph({
+    system: testSystem({
+      dashboard: {
+        programs: { browser: { components: { First: {}, Second: {} } } },
+      },
+    }),
+    interface: "web",
+    logicalProgram: "browser",
+    presentation: () => presentation,
+    adapter,
+    boundary,
+    featureAPIs: { "web.dashboard": {} },
+    featureEvents: { "web.dashboard": {} },
+    eventRevision: () => 0,
+    rootComponents: [],
+  });
+
+  graph.mount();
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(graph.revision(first)).toBe(0);
+  expect(graph.revision(second)).toBe(0);
+
+  graph.reconfigure();
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(graph.revision(first)).toBe(1);
+  expect(graph.revision(second)).toBe(1);
   graph.dispose();
 });
 
@@ -813,7 +872,6 @@ test("coalesces shared-scope invalidation when the consumer already rendered tha
     }),
     interface: "web",
     logicalProgram: "browser",
-    presentationRevision: () => 0,
     presentation: () => presentation,
     adapter,
     boundary,
@@ -832,13 +890,14 @@ test("coalesces shared-scope invalidation when the consumer already rendered tha
   });
 
   graph.mount();
-  graph.acknowledge(component);
+  graph.acknowledge(component, graph.generation());
   await Promise.resolve();
   await Promise.resolve();
   expect(graph.revision(component)).toBe(0);
 
   replay?.();
-  queueMicrotask(() => graph.acknowledge(component));
+  const generation = graph.generation();
+  queueMicrotask(() => graph.acknowledge(component, generation));
   await Promise.resolve();
   await Promise.resolve();
   expect(graph.revision(component)).toBe(0);
@@ -901,7 +960,6 @@ test("does not reevaluate unrelated Feature Presentation scopes on adapter-owned
     }),
     interface: "web",
     logicalProgram: "browser",
-    presentationRevision: () => 0,
     presentation: () => presentation,
     adapter,
     boundary,

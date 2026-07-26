@@ -432,8 +432,20 @@ artifacts remain under `.kit/cache/web`, while repeated `kit typecheck` and
 An exact restart reuses compiled System meaning from `.kit/cache/compiler`.
 The cache is accepted only when the resolved TypeScript graph, relevant
 configuration and package manifests, lockfile, TypeScript/compiler versions,
-and Platform compiler extensions have identical content. TypeScript's language
-service is still prepared on a hit, so the next semantic edit remains warm.
+and Platform compiler extensions have identical content. External package
+contents are represented by their manifests and the lockfile instead of being
+rehashed file by file. TypeScript's language service is initialized lazily
+after a cache hit: Presentation bodies and UI `view`, `actions`, and `start`
+bodies can update from retained semantic meaning, while a structural edit
+creates the semantic Program and falls back to the complete compiler.
+
+The retained compiler stores independently hashed Feature and Presentation
+units. A stale restart discards only units whose source closure changed, and
+every incremental compiler test compares the resulting IR with a clean
+compilation. Web HMR also distinguishes authored UI bodies from Presentation
+bodies: the former replaces the compatible interface while preserving Program
+state; the latter explicitly reconfigures the mounted Presentation graph and
+its generated styles without rebuilding the Program.
 
 Generated native verification is similarly staged. Exact semantic matches use
 the bounded content-addressed cache without invoking Cargo. IR and lowering

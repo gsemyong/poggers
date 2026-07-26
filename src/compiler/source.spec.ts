@@ -39,7 +39,7 @@ afterEach(async () => {
   );
 });
 
-describe("System compiler", () => {
+describe("System compiler", { tags: ["compiler"] }, () => {
   test("extracts stable System meaning and portable control flow without executing source", async () => {
     const entry = await fixture(systemSource());
     const first = compileSystem(entry);
@@ -357,16 +357,49 @@ describe("System compiler", () => {
       )}`,
     );
     const presentation = resolve(entry, "../presentation.ts");
-    await writeFile(presentation, "export const clean = {};\n");
+    await writeFile(presentation, 'export const clean = () => ({ tone: "first" });\n');
     const compiler = createSystemCompiler(entry);
 
     const first = compiler.compile();
-    await writeFile(presentation, "export const clean = Object.freeze({});\n");
-    const second = compiler.compile();
+    await writeFile(presentation, 'export const clean = () => ({ tone: "second" });\n');
+    const second = compiler.compile(presentation);
 
     expect(first.presentationSources).toEqual(new Set([presentation]));
     expect(second.presentationSources).toEqual(new Set([presentation]));
+    expect(second.work.features).toEqual({
+      compiled: 0,
+      reused: first.semanticGraph.features.length,
+    });
+    expect(second.work.presentations).toEqual({ compiled: 1, reused: 0 });
     expect(serializeSystemIR(second.ir)).toBe(serializeSystemIR(first.ir));
+  });
+
+  test("reuses compiled meaning for a UI runtime body edit", async () => {
+    const source = `import { clean } from "./presentation";\n${componentSystemSource().replace(
+      "presentation,",
+      "presentation: clean,",
+    )}`;
+    const entry = await fixture(source);
+    await writeFile(resolve(entry, "../presentation.ts"), "export const clean = {};\n");
+    const compiler = createSystemCompiler(entry);
+
+    const first = compiler.compile();
+    await writeFile(
+      entry,
+      source.replace("view() { return null; }", "view() { void 1; return null; }"),
+    );
+    const second = compiler.compile(entry);
+
+    expect(second.work.features).toEqual({
+      compiled: 0,
+      reused: first.semanticGraph.features.length,
+    });
+    expect(second.work.presentations).toEqual({
+      compiled: 0,
+      reused: first.semanticGraph.presentations.length,
+    });
+    expect(serializeSystemIR(second.ir)).toBe(serializeSystemIR(first.ir));
+    expect(serializeSystemIR(second.ir)).toBe(serializeSystemIR(compileSystem(entry)));
   });
 
   test("reuses the semantic graph while reading an edited source file", async () => {

@@ -1,5 +1,6 @@
 import type { SourceCompilerExtension } from "@/compiler/extension";
 import type { PlatformInterfaceIR, ProgramIR, SystemIR, SystemOutputSources } from "@/compiler/ir";
+import type { SystemCompilationWork } from "@/compiler/source";
 import type { PlatformContract } from "@/core/program";
 import type { UIChild, UIContract, UIDefinition, UITarget } from "@/core/ui/language";
 import type {
@@ -66,6 +67,7 @@ export type SystemCompilationRevision = Readonly<{
   outputSources: SystemOutputSources;
   sourceFiles: readonly string[];
   cache: "hit" | "miss";
+  work: SystemCompilationWork;
   change?: SystemCompilationChange;
 }>;
 

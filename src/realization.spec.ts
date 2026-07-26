@@ -12,6 +12,7 @@ import type {
 import type { SourceCompilerExtension } from "@/compiler/extension";
 import { serializeSystemIR } from "@/compiler/ir";
 import { linkProgram } from "@/compiler/linker";
+import { compileSystem } from "@/compiler/source";
 import { webCompilerExtension } from "@/platforms/web/adapter/compiler";
 import {
   buildSystem,
@@ -28,7 +29,7 @@ afterEach(async () => {
   );
 });
 
-describe("System realization", () => {
+describe("System realization", { tags: ["compiler"] }, () => {
   test("selects whole-System and focused-App outputs without duplicating shared Programs", async () => {
     const directory = await fixture();
     const adapters = {
@@ -135,6 +136,16 @@ describe("System realization", () => {
         path.endsWith("/customer.ts"),
       ),
     ).toBe(false);
+    expect(
+      revisions.current.outputSources["interface/operations.web"]?.some((path) =>
+        path.endsWith("/operations-label.ts"),
+      ),
+    ).toBe(true);
+    expect(
+      revisions.current.outputSources["interface/customer.web"]?.some((path) =>
+        path.endsWith("/operations-label.ts"),
+      ),
+    ).toBe(false);
 
     await writeFile(
       fixture.operations,
@@ -142,25 +153,58 @@ describe("System realization", () => {
     );
     const operationsRevision = revisions.compile(fixture.operations);
     expect(operationsRevision.revision).toBe(1);
+    expect(operationsRevision.work.features).toEqual({ compiled: 2, reused: 3 });
+    expect(operationsRevision.work.presentations).toEqual({ compiled: 1, reused: 5 });
     expect(operationsRevision.change?.outputs).toEqual([
       "interface/operations.web",
       "program/operations.web.operations.web.browser",
     ]);
+    expect(serializeSystemIR(operationsRevision.ir)).toBe(
+      serializeSystemIR(compileSystem(fixture.system)),
+    );
     expect(revisions.compile(fixture.operations)).toBe(operationsRevision);
 
+    await writeFile(
+      fixture.operationsType,
+      fixture.operationsTypeSource.replace('"operations"', '"operations-typed"'),
+    );
+    const typeRevision = revisions.compile(fixture.operationsType);
+    expect(typeRevision.work.features).toEqual({ compiled: 2, reused: 3 });
+    expect(typeRevision.work.presentations).toEqual({ compiled: 0, reused: 6 });
+    expect(typeRevision.change?.outputs).toEqual([
+      "interface/operations.web",
+      "program/operations.web.operations.web.browser",
+    ]);
+    expect(serializeSystemIR(typeRevision.ir)).toBe(
+      serializeSystemIR(compileSystem(fixture.system)),
+    );
+    expect(revisions.compile(fixture.operationsType)).toBe(typeRevision);
+
     await writeFile(fixture.sharedUI, 'export const marker = "shared-2";\n');
-    expect(revisions.compile(fixture.sharedUI).change?.outputs).toEqual([
+    const sharedUIRevision = revisions.compile(fixture.sharedUI);
+    expect(sharedUIRevision.work.features).toEqual({ compiled: 4, reused: 1 });
+    expect(sharedUIRevision.work.presentations).toEqual({ compiled: 2, reused: 4 });
+    expect(sharedUIRevision.change?.outputs).toEqual([
       "interface/customer.web",
       "interface/operations.web",
       "program/customer.web.customer.web.browser",
       "program/operations.web.operations.web.browser",
     ]);
+    expect(serializeSystemIR(sharedUIRevision.ir)).toBe(
+      serializeSystemIR(compileSystem(fixture.system)),
+    );
 
     await writeFile(
       fixture.shared,
       fixture.sharedSource.replace('label: "shared"', 'label: "shared-2"'),
     );
-    expect(revisions.compile(fixture.shared).change?.outputs).toEqual(["program/api"]);
+    const sharedRevision = revisions.compile(fixture.shared);
+    expect(sharedRevision.work.features).toEqual({ compiled: 1, reused: 4 });
+    expect(sharedRevision.work.presentations).toEqual({ compiled: 0, reused: 6 });
+    expect(sharedRevision.change?.outputs).toEqual(["program/api"]);
+    expect(serializeSystemIR(sharedRevision.ir)).toBe(
+      serializeSystemIR(compileSystem(fixture.system)),
+    );
   });
 
   test("reuses exact cached System meaning and invalidates it from resolved source changes", async () => {
@@ -171,6 +215,8 @@ describe("System realization", () => {
 
     const second = createSystemRevisionSource(fixture.system, [], true);
     expect(second.current.cache).toBe("hit");
+    expect(second.current.work.features).toEqual({ compiled: 0, reused: 5 });
+    expect(second.current.work.presentations).toEqual({ compiled: 0, reused: 6 });
     expect(serializeSystemIR(second.current.ir)).toBe(serializeSystemIR(first.current.ir));
 
     const extensionSource = resolve(fixture.system, "../../cache-extension.ts");
@@ -200,6 +246,33 @@ describe("System realization", () => {
     const changed = createSystemRevisionSource(fixture.system, [], true);
     expect(changed.current.cache).toBe("miss");
     expect(serializeSystemIR(changed.current.ir)).not.toBe(serializeSystemIR(first.current.ir));
+  });
+
+  test("restores unaffected semantic units from a stale development cache", async () => {
+    const fixture = await incrementalFixture();
+    const first = createSystemRevisionSource(fixture.system, [], true);
+    expect(first.current.cache).toBe("miss");
+
+    await writeFile(
+      fixture.operations,
+      fixture.operationsSource.replace('label: "operations"', 'label: "operations-restored"'),
+    );
+    const restored = createSystemRevisionSource(fixture.system, [], true);
+
+    expect(restored.current.cache).toBe("miss");
+    expect(restored.current.work.features).toEqual({ compiled: 2, reused: 3 });
+    expect(restored.current.work.presentations).toEqual({ compiled: 1, reused: 5 });
+    expect(serializeSystemIR(restored.current.ir)).toBe(
+      serializeSystemIR(compileSystem(fixture.system)),
+    );
+
+    await writeFile(resolve(fixture.system, "../../.kit/cache/compiler/system.json"), "{broken");
+    const recovered = createSystemRevisionSource(fixture.system, [], true);
+    expect(recovered.current.cache).toBe("miss");
+    expect(recovered.current.work.features).toEqual({ compiled: 5, reused: 0 });
+    expect(serializeSystemIR(recovered.current.ir)).toBe(
+      serializeSystemIR(compileSystem(fixture.system)),
+    );
   });
 
   test("keeps unchanged multi-App meaning stable across retained compilations", () => {
@@ -415,9 +488,11 @@ async function incrementalFixture(): Promise<{
   shared: string;
   sharedUI: string;
   operations: string;
+  operationsType: string;
   customer: string;
   sharedSource: string;
   operationsSource: string;
+  operationsTypeSource: string;
 }> {
   const directory = await mkdtemp(resolve(tmpdir(), "kit-incremental-"));
   directories.push(directory);
@@ -446,11 +521,15 @@ export const shared = createFeature<Shared>({ programs: { api: {} } });
   const appSource = (name: "operations" | "customer") => `
 import { createFeature, type Browser, type Program } from "./contracts";
 import { marker } from "./shared-ui";
+${name === "operations" ? 'import type { OperationsLabel } from "./operations-label";' : ""}
 void marker;
 type Web = {
   Interface: { Platform: { Name: "web" } };
   Programs: {
-    "${name}.web.browser": Program<Browser, { State: { label: "${name}" } }>;
+    "${name}.web.browser": Program<Browser, { State: {
+      label: "${name}";
+      ${name === "operations" ? "typed: OperationsLabel;" : ""}
+    } }>;
   };
 };
 type App = { App: true; Features: { web: Web } };
@@ -461,11 +540,13 @@ const web = createFeature<Web>({
 export const ${name} = createFeature<App>({ features: { web } });
 `;
   const operationsSource = appSource("operations");
+  const operationsTypeSource = 'export type OperationsLabel = "operations";\n';
   const files = {
     system: resolve(source, "system.ts"),
     shared: resolve(source, "shared.ts"),
     sharedUI: resolve(source, "shared-ui.ts"),
     operations: resolve(source, "operations.ts"),
+    operationsType: resolve(source, "operations-label.ts"),
     customer: resolve(source, "customer.ts"),
   };
   await Promise.all([
@@ -473,6 +554,7 @@ export const ${name} = createFeature<App>({ features: { web } });
     writeFile(files.shared, sharedSource),
     writeFile(files.sharedUI, 'export const marker = "shared";\n'),
     writeFile(files.operations, operationsSource),
+    writeFile(files.operationsType, operationsTypeSource),
     writeFile(files.customer, appSource("customer")),
     writeFile(
       files.system,
@@ -488,5 +570,5 @@ export default createSystem({
 `,
     ),
   ]);
-  return { ...files, sharedSource, operationsSource };
+  return { ...files, sharedSource, operationsSource, operationsTypeSource };
 }

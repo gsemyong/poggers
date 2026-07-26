@@ -229,7 +229,7 @@ export async function createInterfaceUI<Contract extends SystemContract>({
     boundary,
     snapshot: hotState?.presentation,
   });
-  const presentationRevision = signal(0);
+  let presentationRevision = 0;
   const eventRevision = signal(0);
   const notifyActionEvent = () => eventRevision(eventRevision() + 1);
   const runtimeComponents = normalizeRuntimeComponents(components);
@@ -267,7 +267,6 @@ export async function createInterfaceUI<Contract extends SystemContract>({
     interface: interfacePath,
     logicalProgram,
     presentation: () => configuredPresentation,
-    presentationRevision,
     adapter: presentationInstance,
     boundary,
     featureAPIs: programUI.apis,
@@ -286,7 +285,7 @@ export async function createInterfaceUI<Contract extends SystemContract>({
         system: runtimeSystem,
         program: logicalProgram,
         config: runtimeComponents[componentName] ?? { elements: {} },
-        presentationRevision,
+        presentationRevision: () => presentationRevision,
         presentationInstance,
         presentationGraph,
         props,
@@ -352,7 +351,8 @@ export async function createInterfaceUI<Contract extends SystemContract>({
     updatePresentation(next) {
       validatePresentation(next);
       configuredPresentation = next;
-      presentationRevision(presentationRevision() + 1);
+      presentationRevision += 1;
+      presentationGraph.reconfigure();
     },
     async dispose() {
       captureHotState();
@@ -1219,9 +1219,11 @@ type RuntimePresentationComponent = (scope: {
 
 type RuntimePresentationGraph = Readonly<{
   revision(component: string): number;
-  acknowledge(component: string): void;
+  generation(): number;
+  acknowledge(component: string, generation: number): void;
   dynamic(component: string): boolean;
   mount(): void;
+  reconfigure(): void;
   component(name: string): RuntimePresentationComponent | undefined;
   scopes(component: string): readonly object[];
   dispose(): void;
@@ -1267,6 +1269,7 @@ function mountAuthoredPresentationComponent(options: {
       }
       const revision = options.presentationRevision();
       void options.graph.revision(options.componentName);
+      const graphGeneration = options.graph.generation();
       const graphDynamic = options.graph.dynamic(options.componentName);
       if (
         (currentPresentationRevision !== undefined && revision !== currentPresentationRevision) ||
@@ -1294,7 +1297,7 @@ function mountAuthoredPresentationComponent(options: {
           behavior: { state: options.state, props: options.props },
         },
       );
-      queueMicrotask(() => options.graph.acknowledge(options.componentName));
+      queueMicrotask(() => options.graph.acknowledge(options.componentName, graphGeneration));
     });
     return () => {
       disposeEffect();
@@ -1318,7 +1321,6 @@ export function createPresentationGraph(options: {
   interface: string;
   logicalProgram: string;
   presentation: () => RuntimeConfiguredPresentation;
-  presentationRevision: () => number;
   adapter: PresentationAdapterInstance<WebPresentationLanguage, Element>;
   boundary: Element;
   featureAPIs: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
@@ -1339,8 +1341,7 @@ export function createPresentationGraph(options: {
   let components = new Map<string, RuntimePresentationComponent>();
   let session: ReturnType<typeof options.adapter.create> | undefined;
   let disposeEffect: (() => void) | undefined;
-  let currentPresentationRevision: number | undefined;
-  let authoredEvaluation = false;
+  let initialized = false;
   let disposed = false;
   let generation = 0;
 
@@ -1352,9 +1353,11 @@ export function createPresentationGraph(options: {
     }
     return current;
   };
-  const notifyConsumers = () => {
+  const notifyConsumers = (all = false) => {
     generation += 1;
-    for (const component of sharedConsumers) pendingConsumers.add(component);
+    for (const component of all ? components.keys() : sharedConsumers) {
+      pendingConsumers.add(component);
+    }
     if (notifyQueued || pendingConsumers.size === 0) return;
     notifyQueued = true;
     queueMicrotask(() => {
@@ -1371,6 +1374,46 @@ export function createPresentationGraph(options: {
     });
   };
 
+  const evaluate = (presentationChanged: boolean) => {
+    session?.render(({ scopes }) => {
+      const next = new Map<string, RuntimePresentationComponent>();
+      const configured = options.presentation();
+      const rootScope = scopes[scopeIndexes.get("")!];
+      const tree = rootScope!.evaluate(() =>
+        configured.create({
+          parameters: configured.parameters,
+          environment: options.adapter.environment,
+          state: createPresentationState(options.featureAPIs[options.interface] ?? {}, {}),
+          events: options.featureEvents[options.interface] ?? {},
+        }),
+      );
+      for (const name of options.rootComponents) {
+        const component = tree[componentLocalName(name)];
+        if (typeof component === "function") {
+          next.set(name, component as RuntimePresentationComponent);
+        }
+      }
+      collectPresentationComponents({
+        features: interfaceFeature.features,
+        logicalProgram: options.logicalProgram,
+        tree,
+        parent: options.interface,
+        scopeIndexes,
+        scopes,
+        featureAPIs: options.featureAPIs,
+        featureEvents: options.featureEvents,
+        previous: components,
+        refreshAll: !initialized || presentationChanged,
+        sharedConsumers,
+        result: next,
+      });
+      components = next;
+      notifyConsumers(presentationChanged);
+      initialized = true;
+      return {};
+    });
+  };
+
   const mount = () => {
     if (disposed) throw new Error("Cannot mount a disposed Presentation graph.");
     if (session) return;
@@ -1381,70 +1424,29 @@ export function createPresentationGraph(options: {
       scopes: scopePaths.map((path) => scopeIdentities[path]!),
     });
     disposeEffect = effect(() => {
-      const nextPresentationRevision = options.presentationRevision();
       void options.eventRevision();
-      if (
-        currentPresentationRevision !== undefined &&
-        nextPresentationRevision !== currentPresentationRevision
-      ) {
-        session?.reconfigure({ scopes: true });
-      }
-      currentPresentationRevision = nextPresentationRevision;
-      authoredEvaluation = true;
-      try {
-        session?.render(({ scopes }) => {
-          const next = new Map<string, RuntimePresentationComponent>();
-          const configured = options.presentation();
-          const rootScope = scopes[scopeIndexes.get("")!];
-          const tree = rootScope!.evaluate(() =>
-            configured.create({
-              parameters: configured.parameters,
-              environment: options.adapter.environment,
-              state: createPresentationState(options.featureAPIs[options.interface] ?? {}, {}),
-              events: options.featureEvents[options.interface] ?? {},
-            }),
-          );
-          for (const name of options.rootComponents) {
-            const component = tree[componentLocalName(name)];
-            if (typeof component === "function") {
-              next.set(name, component as RuntimePresentationComponent);
-            }
-          }
-          collectPresentationComponents({
-            features: interfaceFeature.features,
-            logicalProgram: options.logicalProgram,
-            tree,
-            parent: options.interface,
-            scopeIndexes,
-            scopes,
-            featureAPIs: options.featureAPIs,
-            featureEvents: options.featureEvents,
-            previous: components,
-            refreshAll: authoredEvaluation,
-            sharedConsumers,
-            result: next,
-          });
-          components = next;
-          notifyConsumers();
-          return {};
-        });
-      } finally {
-        authoredEvaluation = false;
-      }
+      evaluate(false);
     });
   };
 
   return {
     revision: (component) => revisionFor(component)(),
-    acknowledge(component) {
+    generation: () => generation,
+    acknowledge(component, observedGeneration) {
       if (disposed) return;
-      acknowledgements.set(component, generation);
+      acknowledgements.set(component, observedGeneration);
     },
     dynamic(component) {
       if (!options.dependencies) return true;
       return Boolean(options.dependencies[component]?.length);
     },
     mount,
+    reconfigure() {
+      if (disposed) throw new Error("Cannot reconfigure a disposed Presentation graph.");
+      if (!session) return;
+      session.reconfigure({ scopes: true });
+      evaluate(true);
+    },
     component: (name) => components.get(name),
     scopes(component) {
       const owner = componentOwner(component);
