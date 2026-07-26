@@ -1,4 +1,4 @@
-import { relative } from "node:path";
+import { extname, relative, resolve } from "node:path";
 
 import * as ts from "@typescript/typescript6";
 
@@ -26,6 +26,10 @@ import {
 /** Extracts web-only address and rendering meaning without teaching generic core about Routes. */
 export const webCompilerExtension: SourceCompilerExtension = Object.freeze({
   name: "web",
+  cacheSources: [
+    import.meta.filename,
+    resolve(import.meta.dirname, `lowering${extname(import.meta.filename)}`),
+  ],
   feature(context) {
     const { contract, implementation, location, source } = context;
     const routePath = source.optionalLiteral(contract, "RoutePath", location);

@@ -163,6 +163,45 @@ describe("System realization", () => {
     expect(revisions.compile(fixture.shared).change?.outputs).toEqual(["program/api"]);
   });
 
+  test("reuses exact cached System meaning and invalidates it from resolved source changes", async () => {
+    const fixture = await incrementalFixture();
+
+    const first = createSystemRevisionSource(fixture.system, [], true);
+    expect(first.current.cache).toBe("miss");
+
+    const second = createSystemRevisionSource(fixture.system, [], true);
+    expect(second.current.cache).toBe("hit");
+    expect(serializeSystemIR(second.current.ir)).toBe(serializeSystemIR(first.current.ir));
+
+    const extensionSource = resolve(fixture.system, "../../cache-extension.ts");
+    await writeFile(extensionSource, "export const revision = 1;\n");
+    const extension: SourceCompilerExtension = {
+      name: "cache-probe",
+      cacheSources: [extensionSource],
+      system() {
+        return { revision: 1 };
+      },
+    };
+    const extended = createSystemRevisionSource(fixture.system, [extension], true);
+    expect(extended.current.cache).toBe("miss");
+    expect(extended.current.ir.system.extensions).toEqual({
+      "cache-probe": { revision: 1 },
+    });
+    expect(createSystemRevisionSource(fixture.system, [extension], true).current.cache).toBe("hit");
+    await writeFile(extensionSource, "export const revision = 2;\n");
+    expect(createSystemRevisionSource(fixture.system, [extension], true).current.cache).toBe(
+      "miss",
+    );
+
+    await writeFile(
+      fixture.operations,
+      fixture.operationsSource.replace('label: "operations"', 'label: "cached-operations"'),
+    );
+    const changed = createSystemRevisionSource(fixture.system, [], true);
+    expect(changed.current.cache).toBe("miss");
+    expect(serializeSystemIR(changed.current.ir)).not.toBe(serializeSystemIR(first.current.ir));
+  });
+
   test("keeps unchanged multi-App meaning stable across retained compilations", () => {
     const system = resolve(import.meta.dirname, "../examples/authenticated-crud/src/system.ts");
     const revisions = createSystemRevisionSource(system, [webCompilerExtension]);

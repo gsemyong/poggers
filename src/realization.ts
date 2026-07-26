@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { readFileSync, realpathSync } from "node:fs";
-import { resolve } from "node:path";
+import { mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import { dirname, parse, resolve } from "node:path";
 
 import {
   selectPlatformAdapters,
@@ -17,7 +17,12 @@ import {
   type ProgramIR,
   type SystemIR,
 } from "@/compiler/ir";
-import { createSystemCompiler, resolveSystem } from "@/compiler/source";
+import {
+  createSystemCompiler,
+  resolveSystem,
+  systemCompilerIdentity,
+  type SystemCompilation,
+} from "@/compiler/source";
 import { createRelease, type Release } from "@/deployment";
 
 export type SystemRealization<Adapter extends PlatformAdapterImplementation> = Readonly<{
@@ -53,10 +58,11 @@ export function resolveSystemRealization<Adapter extends PlatformAdapterImplemen
   directory: string,
   adapters: Readonly<Record<string, Adapter>>,
   options: SystemRealizationOptions = {},
+  developmentCache = false,
 ): SystemRealization<Adapter> {
   const paths = resolveSystem(directory);
   const extensions = Object.values(adapters).flatMap(({ compiler = [] }) => compiler);
-  const revisions = createSystemRevisionSource(paths.system, extensions);
+  const revisions = createSystemRevisionSource(paths.system, extensions, developmentCache);
   const outputs = selectSystemOutputs(revisions.current.ir, options.app);
   return {
     directory: paths.directory,
@@ -76,7 +82,7 @@ export async function developSystem<Adapter extends PlatformAdapterImplementatio
   adapters: Readonly<Record<string, Adapter>>,
   options: SystemDevelopmentOptions = {},
 ): Promise<RunningSystem> {
-  const realization = resolveSystemRealization(directory, adapters, options);
+  const realization = resolveSystemRealization(directory, adapters, options, true);
   const started = await Promise.allSettled(
     realization.adapters.map(async (adapter) => ({
       adapter,
@@ -126,10 +132,24 @@ export async function developSystem<Adapter extends PlatformAdapterImplementatio
 export function createSystemRevisionSource(
   system: string,
   extensions: Parameters<typeof createSystemCompiler>[1],
+  cache = false,
 ): SystemRevisionSource {
   const compiler = createSystemCompiler(system, extensions);
+  const identity = cache ? systemCompilerIdentity(extensions) : undefined;
+  const cached = identity ? readSystemCompilationCache(system, identity) : undefined;
   let revision = 0;
-  let current: SystemCompilationRevision = { ...compiler.compile(), revision };
+  let current: SystemCompilationRevision;
+  let cacheInputs: Readonly<Record<string, string>>;
+  if (cached) {
+    compiler.prepare();
+    current = { ...cached.compilation, revision, cache: "hit" };
+    cacheInputs = cached.inputs;
+  } else {
+    const compilation = compiler.compile();
+    cacheInputs = identity ? systemCompilationSignatures(system, compilation.sourceFiles) : {};
+    if (identity) writeSystemCompilationCache(system, identity, compilation, cacheInputs);
+    current = { ...compilation, revision, cache: "miss" };
+  }
   const signatures = new Map<string, string>();
   retainOutputSignatures(signatures, current);
   return {
@@ -142,9 +162,19 @@ export function createSystemRevisionSource(
       if (signatures.get(source) === signature) return current;
       const previous = current;
       const compiled = compiler.compile(changedFile);
+      if (identity) {
+        cacheInputs = updateSystemCompilationSignatures(
+          system,
+          previous,
+          compiled,
+          cacheInputs,
+          source,
+        );
+      }
       current = {
         ...compiled,
         revision: ++revision,
+        cache: "miss",
         change: {
           source,
           outputs: affectedOutputs(previous, compiled, changedFile),
@@ -152,9 +182,143 @@ export function createSystemRevisionSource(
       };
       signatures.set(source, signature);
       retainOutputSignatures(signatures, current);
+      if (identity) writeSystemCompilationCache(system, identity, compiled, cacheInputs);
       return current;
     },
   };
+}
+
+const SYSTEM_COMPILATION_CACHE_VERSION = 1;
+
+type CachedSystemCompilation = Readonly<{
+  version: number;
+  compiler: string;
+  inputs: Readonly<Record<string, string>>;
+  compilation: Readonly<{
+    ir: SystemCompilation["ir"];
+    presentationSources: readonly string[];
+    outputSources: SystemCompilation["outputSources"];
+    sourceFiles: readonly string[];
+  }>;
+}>;
+
+type LoadedSystemCompilationCache = Readonly<{
+  compilation: SystemCompilation;
+  inputs: Readonly<Record<string, string>>;
+}>;
+
+function readSystemCompilationCache(
+  system: string,
+  compiler: string,
+): LoadedSystemCompilationCache | undefined {
+  try {
+    const cached = JSON.parse(
+      readFileSync(systemCompilationCachePath(system), "utf8"),
+    ) as CachedSystemCompilation;
+    if (
+      cached.version !== SYSTEM_COMPILATION_CACHE_VERSION ||
+      cached.compiler !== compiler ||
+      Object.entries(cached.inputs).some(
+        ([source, signature]) => sourceSignature(source) !== signature,
+      )
+    ) {
+      return undefined;
+    }
+    return {
+      inputs: cached.inputs,
+      compilation: {
+        ir: cached.compilation.ir,
+        presentationSources: new Set(cached.compilation.presentationSources),
+        outputSources: cached.compilation.outputSources,
+        sourceFiles: Object.freeze([...cached.compilation.sourceFiles]),
+      },
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function writeSystemCompilationCache(
+  system: string,
+  compiler: string,
+  compilation: SystemCompilation,
+  inputs: Readonly<Record<string, string>>,
+): void {
+  const path = systemCompilationCachePath(system);
+  const cached: CachedSystemCompilation = {
+    version: SYSTEM_COMPILATION_CACHE_VERSION,
+    compiler,
+    inputs,
+    compilation: {
+      ir: compilation.ir,
+      presentationSources: [...compilation.presentationSources].sort(),
+      outputSources: compilation.outputSources,
+      sourceFiles: compilation.sourceFiles,
+    },
+  };
+  mkdirSync(dirname(path), { recursive: true });
+  const temporary = `${path}.${process.pid}.tmp`;
+  writeFileSync(temporary, JSON.stringify(cached));
+  renameSync(temporary, path);
+}
+
+function systemCompilationSignatures(
+  system: string,
+  sources: readonly string[],
+): Readonly<Record<string, string>> {
+  return Object.freeze(
+    Object.fromEntries(
+      systemCompilationInputs(system, sources).map((source) => [source, sourceSignature(source)]),
+    ),
+  );
+}
+
+function updateSystemCompilationSignatures(
+  system: string,
+  previous: Pick<SystemCompilationRevision, "sourceFiles">,
+  current: Pick<SystemCompilation, "sourceFiles">,
+  inputs: Readonly<Record<string, string>>,
+  changedFile: string,
+): Readonly<Record<string, string>> {
+  if (
+    previous.sourceFiles.length !== current.sourceFiles.length ||
+    previous.sourceFiles.some((source, index) => source !== current.sourceFiles[index])
+  ) {
+    return systemCompilationSignatures(system, current.sourceFiles);
+  }
+  const source = canonicalSourceFile(changedFile);
+  if (!(source in inputs)) return systemCompilationSignatures(system, current.sourceFiles);
+  return Object.freeze({ ...inputs, [source]: sourceSignature(source) });
+}
+
+function systemCompilationInputs(system: string, sources: readonly string[]): readonly string[] {
+  const inputs = new Set(sources.map(canonicalSourceFile));
+  for (const name of ["tsconfig.json", "package.json", "nub.lock"]) {
+    const path = nearestFile(dirname(system), name);
+    if (path) inputs.add(path);
+  }
+  for (const source of sources) {
+    const manifest = nearestFile(dirname(source), "package.json");
+    if (manifest) inputs.add(manifest);
+  }
+  return Object.freeze([...inputs].sort());
+}
+
+function nearestFile(directory: string, name: string): string | undefined {
+  let current = resolve(directory);
+  while (true) {
+    const candidate = resolve(current, name);
+    try {
+      if (readFileSync(candidate).length >= 0) return canonicalSourceFile(candidate);
+    } catch {}
+    const parent = dirname(current);
+    if (parent === current || current === parse(current).root) return undefined;
+    current = parent;
+  }
+}
+
+function systemCompilationCachePath(system: string): string {
+  return resolve(dirname(system), "../.kit/cache/compiler/system.json");
 }
 
 function retainOutputSignatures(

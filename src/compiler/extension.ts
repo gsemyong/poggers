@@ -66,6 +66,7 @@ export type SystemSourceContext = Readonly<{
 /** Lets a Platform compiler own meaning carried by generic core as versioned extension IR. */
 export type SourceCompilerExtension = Readonly<{
   name: string;
+  cacheSources?: readonly string[];
   system?(context: SystemSourceContext): ExtensionIR | undefined;
   feature?(context: FeatureSourceContext): ExtensionIR | undefined;
   program?(context: ProgramSourceContext): ExtensionIR | undefined;

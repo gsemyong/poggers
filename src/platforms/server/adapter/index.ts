@@ -30,6 +30,7 @@ export type ServerPlatformAdapterOptions = ServerDevelopmentOptions &
 
 const serverCompilerExtension: SourceCompilerExtension = Object.freeze({
   name: "server",
+  cacheSources: [import.meta.filename],
   validate(ir) {
     assertPortableServerPrograms(ir.programs);
   },

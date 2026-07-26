@@ -403,19 +403,23 @@ Use the validation ladder while editing:
 ```sh
 nub exec vitest run path/to/feature.spec.ts -t "changed behavior"
 nub run typecheck
-nub run test
+nub run check:source
 nub run check:compiler
 nub run check:providers
 nub run check:presentation
 nub run check:production
 ```
 
-The first two commands are the application and Feature-factory inner loop.
-They never invoke Cargo. `test` is the complete TypeScript development
-milestone and does not compile generated Programs. Compiler, provider, adapter,
-browser, and production gates run only for changes to their owned surfaces.
-`check` remains the complete repository acceptance gate and builds the package
-at most once.
+The targeted test and incremental typecheck are the application and
+Feature-factory inner loop. They never invoke Cargo. `check:source` is the
+complete TypeScript milestone: typecheck, lint, formatting, and source tests,
+without compiling generated Programs. Compiler, provider, adapter, browser, and
+production gates run only for changes to their owned surfaces. `check` remains
+the complete repository acceptance gate and builds the package at most once.
+It runs `check:source`, compiler differential conformance, provider/native
+conformance, one package build, examples/package consumption, distribution
+typing, and focused release-mode production smoke in that order. It is not an
+edit-loop command.
 
 `kit dev` does not run `tsc`, package builds, or native compilation. It retains
 one TypeScript semantic graph, ignores duplicate file notifications, computes
@@ -424,6 +428,12 @@ report semantic updates and diagnostics through one framework event stream;
 the CLI owns how those facts are rendered. Web generated sources and Vite
 artifacts remain under `.kit/cache/web`, while repeated `kit typecheck` and
 `nub run typecheck` calls reuse `.kit/cache/typescript.tsbuildinfo`.
+
+An exact restart reuses compiled System meaning from `.kit/cache/compiler`.
+The cache is accepted only when the resolved TypeScript graph, relevant
+configuration and package manifests, lockfile, TypeScript/compiler versions,
+and Platform compiler extensions have identical content. TypeScript's language
+service is still prepared on a hit, so the next semantic edit remains warm.
 
 Generated native verification is similarly staged. Exact semantic matches use
 the bounded content-addressed cache without invoking Cargo. IR and lowering

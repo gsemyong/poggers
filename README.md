@@ -53,9 +53,13 @@ Develop the framework with:
 ```sh
 mise install
 nub install
-nub run check
+nub run check:source
 nub run build
 ```
+
+`check:source` is the routine TypeScript milestone. Use `nub run check` only
+for the complete compiler, provider, package, example, distribution, and
+production acceptance gate.
 
 Verify or publish a release from a clean, pushed commit:
 

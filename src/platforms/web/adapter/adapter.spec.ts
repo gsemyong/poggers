@@ -49,12 +49,21 @@ describe("web Platform Adapter", () => {
         system: "/tmp/test/src/system.ts",
         ir,
         revisions: {
-          current: { revision: 0, ir, presentationSources: new Set(), outputSources: {} },
+          current: {
+            revision: 0,
+            ir,
+            presentationSources: new Set(),
+            outputSources: {},
+            sourceFiles: [],
+            cache: "miss",
+          },
           compile: () => ({
             revision: 0,
             ir,
             presentationSources: new Set(),
             outputSources: {},
+            sourceFiles: [],
+            cache: "miss",
           }),
         },
         programs: [program],

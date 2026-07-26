@@ -1,5 +1,6 @@
+import { createHash } from "node:crypto";
 import { realpathSync, statSync } from "node:fs";
-import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { dirname, extname, isAbsolute, relative, resolve } from "node:path";
 
 import * as ts from "@typescript/typescript6";
 
@@ -56,11 +57,15 @@ export type SystemCompilation = Readonly<{
   ir: SystemIR;
   presentationSources: ReadonlySet<string>;
   outputSources: SystemOutputSources;
+  sourceFiles: readonly string[];
 }>;
 
 export type SystemCompiler = Readonly<{
+  prepare(): void;
   compile(changedFile?: string): SystemCompilation;
 }>;
+
+const SYSTEM_COMPILER_CACHE_VERSION = 1;
 
 /** Resolves the one conventional System entry without executing it. */
 export function resolveSystem(directory: string): SystemPaths {
@@ -119,18 +124,51 @@ export function createSystemCompiler(
     },
     ts.createDocumentRegistry(),
   );
+  const program = (): ts.Program => {
+    const current = service.getProgram();
+    if (!current) throw new Error(`Cannot create the semantic Program for ${file}.`);
+    return current;
+  };
   return {
+    prepare() {
+      program();
+    },
     compile(changedFile) {
       if (changedFile) {
         const changed = resolve(changedFile);
         versions.set(changed, (versions.get(changed) ?? 0) + 1);
         projectVersion++;
       }
-      const program = service.getProgram();
-      if (!program) throw new Error(`Cannot create the semantic Program for ${file}.`);
-      return compileSystemProgram(file, program, changedFile, extensions);
+      return compileSystemProgram(file, program(), changedFile, extensions);
     },
   };
+}
+
+/** @internal Identifies every implementation that can change compiled System meaning. */
+export function systemCompilerIdentity(
+  extensions: readonly SourceCompilerExtension[] = [],
+): string {
+  const hash = createHash("sha256");
+  hash.update(`${SYSTEM_COMPILER_CACHE_VERSION}\0${SYSTEM_IR_VERSION}\0${ts.version}\0`);
+  const extension = extname(import.meta.filename);
+  for (const name of ["source", "presentation", "ir", "extension"]) {
+    const file = resolve(dirname(import.meta.filename), `${name}${extension}`);
+    hash.update(ts.sys.readFile(file) ?? file);
+    hash.update("\0");
+  }
+  for (const compiler of extensions) {
+    hash.update(compiler.name);
+    hash.update("\0");
+    for (const source of compiler.cacheSources ?? []) {
+      hash.update(ts.sys.readFile(source) ?? source);
+      hash.update("\0");
+    }
+    for (const hook of [compiler.system, compiler.feature, compiler.program, compiler.validate]) {
+      hash.update(hook?.toString() ?? "");
+      hash.update("\0");
+    }
+  }
+  return hash.digest("hex");
 }
 
 function validateCompilerExtensions(extensions: readonly SourceCompilerExtension[]): void {
@@ -409,6 +447,13 @@ function compileSystemProgram(
   return {
     ir,
     presentationSources,
+    sourceFiles: Object.freeze(
+      program
+        .getSourceFiles()
+        .filter((source) => !program.isSourceFileDefaultLibrary(source))
+        .map(({ fileName }) => canonicalSourcePath(fileName))
+        .sort(),
+    ),
     outputSources: collectSystemOutputSources({
       checker,
       entry: file,
@@ -420,6 +465,14 @@ function compileSystemProgram(
       root,
     }),
   };
+}
+
+function canonicalSourcePath(path: string): string {
+  try {
+    return realpathSync.native(path);
+  } catch {
+    return resolve(path);
+  }
 }
 
 function compilerOptions(file: string): ts.CompilerOptions {

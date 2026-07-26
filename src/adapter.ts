@@ -64,6 +64,8 @@ export type SystemCompilationRevision = Readonly<{
   ir: SystemIR;
   presentationSources: ReadonlySet<string>;
   outputSources: SystemOutputSources;
+  sourceFiles: readonly string[];
+  cache: "hit" | "miss";
   change?: SystemCompilationChange;
 }>;
 

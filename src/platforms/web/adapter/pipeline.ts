@@ -323,7 +323,14 @@ export async function buildWebInterface(options: {
       work,
       options.interface,
       options.development ?? false,
-      { revision: 0, ir: options.ir, presentationSources: new Set(), outputSources: {} },
+      {
+        revision: 0,
+        ir: options.ir,
+        presentationSources: new Set(),
+        outputSources: {},
+        sourceFiles: [],
+        cache: "miss",
+      },
     );
     const contract = webInterfaceContract(prepared.ir, prepared.interface);
     const crossOriginIsolated = webInterfaceRequiresCrossOriginIsolation(

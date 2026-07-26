@@ -107,6 +107,7 @@
     "check:providers": "vitest run --tagsFilter=provider src/features src/platforms/server && cargo test --workspace",
     "check:presentation": "vitest run src/core/ui/presentation.spec.ts src/compiler/presentation.spec.ts src/platforms/web/presentation src/platforms/web/adapter/presentation",
     "check:production": "KIT_NATIVE_PROFILE=release vitest run --tagsFilter=production src examples",
+    "check:source": "nub run typecheck && nub run lint && nub run fmt:check && nub run test",
     "dev": "nub src/cli.ts dev --dir examples/basic",
     "fmt": "oxfmt --config config/format.json .",
     "fmt:check": "oxfmt --config config/format.json --check .",
@@ -115,7 +116,7 @@
     "release:check": "nub scripts/release.ts --check",
     "test": "vitest run --tagsFilter='!compiler && !package && !provider && !production' --exclude='examples/**'",
     "typecheck": "tsc --noEmit",
-    "check": "nub run typecheck && nub run lint && nub run fmt:check && nub run test && nub run check:compiler && nub run check:providers && nub run build && nub run check:examples && nub run check:distribution && nub run check:production"
+    "check": "nub run check:source && nub run check:compiler && nub run check:providers && nub run build && nub run check:examples && nub run check:distribution && nub run check:production"
   },
   "dependencies": {
     "@nats-io/jetstream": "3.4.0",
