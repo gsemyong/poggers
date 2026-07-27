@@ -5,7 +5,7 @@ import type {
   UIElementName,
   UIElementProps,
   UIElementTarget,
-} from "@/core/ui/language";
+} from "@/platforms/web/ui/language";
 
 type Empty = Record<never, never>;
 type ActionRecord = Record<string, (...args: never[]) => unknown>;

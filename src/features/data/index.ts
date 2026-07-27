@@ -6,7 +6,6 @@ import {
 } from "@/core/dependency";
 import { createFeature, type Feature } from "@/core/feature";
 import { distinctStream, mapStream } from "@/core/stream";
-import { startFeatureFixture } from "@/execution/process";
 import {
   createEntity,
   createMemoryEventStore,
@@ -1041,6 +1040,10 @@ export async function createDataFixture<Model extends DataModelDefinition>(
       as(principal: Model["Principal"]): DataApi<Model>;
     }>
 > {
+  const [{ startFeatureFixture }, { serverProgramLanguageRuntime }] = await Promise.all([
+    import("@/execution/process"),
+    import("@/platforms/server/adapter/typescript/runtime"),
+  ]);
   const name = "data" as Model["Name"];
   const sourceName = `${name}Source`;
   const events = createMemoryEventStore<EntityEvent<Model["Record"]>>();
@@ -1050,6 +1053,7 @@ export async function createDataFixture<Model extends DataModelDefinition>(
   const process = await startFeatureFixture<DataFeature<Model>>({
     feature: data,
     program: "server",
+    language: serverProgramLanguageRuntime,
     contributions: [
       { feature: "", requires: [sourceName, "dataStore"], provides: [name] },
       {
@@ -1101,6 +1105,15 @@ export async function createDataBrowserFixture<Model extends DataModelDefinition
       store: DataStore<Model["Record"]>;
     }>
 > {
+  const [
+    { startFeatureFixture },
+    { serverProgramLanguageRuntime },
+    { webContributionRuntime, webProgramLanguageRuntime },
+  ] = await Promise.all([
+    import("@/execution/process"),
+    import("@/platforms/server/adapter/typescript/runtime"),
+    import("@/platforms/web/adapter/ui/process"),
+  ]);
   const name = "data" as Model["Name"];
   const sourceName = `${name}Source`;
   const events = createMemoryEventStore<EntityEvent<Model["Record"]>>();
@@ -1112,6 +1125,7 @@ export async function createDataBrowserFixture<Model extends DataModelDefinition
   const server = await startFeatureFixture<DataFeature<Model>>({
     feature: data,
     program: "server",
+    language: serverProgramLanguageRuntime,
     contributions: [
       { feature: "", requires: [sourceName, "dataStore"], provides: [name] },
       {
@@ -1137,6 +1151,7 @@ export async function createDataBrowserFixture<Model extends DataModelDefinition
   const browser = await startFeatureFixture<DataFeature<Model>>({
     feature: data,
     program: "browser",
+    language: webProgramLanguageRuntime,
     contributions: [
       { feature: "", requires: [sourceName, "dataStore"], provides: [name] },
       {
@@ -1181,10 +1196,11 @@ export async function createDataBrowserFixture<Model extends DataModelDefinition
   return {
     api,
     get state() {
-      return browser.ui["feature.source"] as EntityState<DataSourceModel<Model>>;
+      return browser.exposed["feature.source"] as EntityState<DataSourceModel<Model>>;
     },
-    actions: browser.contributions.find(({ address }) => address.feature === "feature.source")!.ui!
-      .actions as EntityActions<DataSourceModel<Model>>,
+    actions: webContributionRuntime(
+      browser.contributions.find(({ address }) => address.feature === "feature.source")!.runtime,
+    ).actions as EntityActions<DataSourceModel<Model>>,
     events,
     store,
     async [Symbol.asyncDispose]() {

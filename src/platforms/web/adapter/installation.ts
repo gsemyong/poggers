@@ -14,9 +14,29 @@ export { WEB_MANIFEST_PATH } from "@/platforms/web/routing";
 export type WebInstallationPlan = Readonly<{
   name: string;
   shortName?: string;
+  description?: string;
   start: string;
   display: "browser" | "fullscreen" | "minimal-ui" | "standalone";
+  orientation?:
+    | "any"
+    | "natural"
+    | "landscape"
+    | "landscape-primary"
+    | "landscape-secondary"
+    | "portrait"
+    | "portrait-primary"
+    | "portrait-secondary";
+  themeColor?: string;
+  backgroundColor?: string;
+  categories: readonly string[];
   icons: readonly WebInstallationIconIR[];
+  screenshots: readonly Readonly<{
+    src: string;
+    sizes: string;
+    type?: string;
+    formFactor?: "narrow" | "wide";
+    label?: string;
+  }>[];
   shortcuts: readonly Readonly<{
     name: string;
     url: string;
@@ -37,14 +57,21 @@ export function planWebInstallation(
   if (!extension) return undefined;
   const installation = webInterfaceCompilerIR(extension).installation;
   if (!installation) return undefined;
+  const application = system.apps.find(({ path }) => path === interface_.app);
   const start = resolveWebDestination(routes, installation.start);
   const fallback = resolveWebDestination(routes, installation.offline.fallback);
   return Object.freeze({
-    name: system.system.name,
+    name: application?.name ?? system.system.name,
     ...(installation.shortName ? { shortName: installation.shortName } : {}),
+    ...(installation.description ? { description: installation.description } : {}),
     start,
     display: installation.display,
+    ...(installation.orientation ? { orientation: installation.orientation } : {}),
+    ...(installation.themeColor ? { themeColor: installation.themeColor } : {}),
+    ...(installation.backgroundColor ? { backgroundColor: installation.backgroundColor } : {}),
+    categories: installation.categories ?? [],
     icons: installation.icons,
+    screenshots: installation.screenshots ?? [],
     shortcuts: Object.freeze(
       installation.shortcuts.map((shortcut) =>
         Object.freeze({
@@ -63,11 +90,27 @@ export function renderWebManifest(plan: WebInstallationPlan): string {
     {
       name: plan.name,
       ...(plan.shortName ? { short_name: plan.shortName } : {}),
+      ...(plan.description ? { description: plan.description } : {}),
       id: plan.start,
       start_url: plan.start,
       scope: "/",
       display: plan.display,
+      ...(plan.orientation ? { orientation: plan.orientation } : {}),
+      ...(plan.themeColor ? { theme_color: plan.themeColor } : {}),
+      ...(plan.backgroundColor ? { background_color: plan.backgroundColor } : {}),
+      ...(plan.categories.length ? { categories: plan.categories } : {}),
       icons: plan.icons.map(manifestIcon),
+      ...(plan.screenshots.length
+        ? {
+            screenshots: plan.screenshots.map((screenshot) => ({
+              src: screenshot.src,
+              sizes: screenshot.sizes,
+              ...(screenshot.type ? { type: screenshot.type } : {}),
+              ...(screenshot.formFactor ? { form_factor: screenshot.formFactor } : {}),
+              ...(screenshot.label ? { label: screenshot.label } : {}),
+            })),
+          }
+        : {}),
       shortcuts: plan.shortcuts.map((shortcut) => ({
         name: shortcut.name,
         url: shortcut.url,
@@ -180,6 +223,7 @@ export function renderWebServiceWorker(plan: WebServiceWorkerPlan): string {
   return `${imports}${imports ? "\n" : ""}const VERSION = ${JSON.stringify(plan.version)};
 const CACHE_ENABLED = ${plan.caching === "always" ? "true" : 'new URL(self.location.href).searchParams.get("pwa") === "preview"'};
 const PROGRAMS = self.__kitServiceWorkerPrograms ?? [];
+const SUBSCRIPTIONS = self.__kitServiceWorkerSubscriptions ??= new Set();
 const ASSET_CACHE = "kit-assets-" + VERSION;
 const DOCUMENT_CACHE = "kit-documents-" + VERSION;
 const ASSETS = ${JSON.stringify(plan.assets)};
@@ -221,7 +265,33 @@ self.addEventListener("message", (event) => {
       warm(ASSET_CACHE, WARM_ASSETS),
       warm(DOCUMENT_CACHE, WARM_DOCUMENTS),
     ]));
+    return;
   }
+  dispatch(event, "message", () => ({
+    data: event.data,
+    respond(value) {
+      event.source?.postMessage(value);
+    },
+  }));
+});
+
+self.addEventListener("push", (event) => {
+  dispatch(event, "push", () => event.data ? { data: event.data.text() } : {});
+});
+
+self.addEventListener("sync", (event) => {
+  dispatch(event, "synchronize", () => ({
+    tag: event.tag,
+    lastChance: event.lastChance ?? false,
+  }));
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  dispatch(event, "notificationClick", () => ({
+    action: event.action ?? "",
+    data: event.notification.data,
+  }));
 });
 
 self.addEventListener("fetch", (event) => {
@@ -266,6 +336,12 @@ const warm = async (name, paths) => {
     const response = await fetch(path, { credentials: "same-origin" });
     if (response.ok) await cache.put(path, response);
   }));
+};
+
+const dispatch = (event, name, project) => {
+  event.waitUntil(Promise.all(PROGRAMS).then(() => Promise.all(
+    [...SUBSCRIPTIONS].map((handlers) => handlers[name]?.(project())),
+  )));
 };
 `;
 }

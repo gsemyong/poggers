@@ -15,6 +15,11 @@ export type SourceCompilerAPI = Readonly<{
   object(value: ts.Expression | undefined): ts.ObjectLiteralExpression | undefined;
   member(object: ts.ObjectLiteralExpression | undefined, name: string): ts.Expression | undefined;
   resolveMember(object: ts.ObjectLiteralExpression, name: string): ts.Expression | undefined;
+  callable(
+    object: ts.ObjectLiteralExpression,
+    name: string,
+  ): ts.FunctionLikeDeclaration | ts.ObjectLiteralElementLike | undefined;
+  sources(value: ts.Expression): readonly Readonly<{ path: string; text: string }>[];
   memberDeclaration(
     object: ts.ObjectLiteralExpression,
     name: string,
@@ -22,14 +27,20 @@ export type SourceCompilerAPI = Readonly<{
   constant(value: ts.Expression): ExtensionIR | undefined;
   literal(type: ts.Type, name: string, at: ts.Node): string;
   optionalLiteral(type: ts.Type, name: string, at: ts.Node): string | undefined;
+  numberLiteral(type: ts.Type, name: string, at: ts.Node): number;
   lower(type: ts.Type, at: ts.Node): TypeIR;
   dependencies(type: ts.Type, at: ts.Node): readonly DependencyIR[];
   portable(
-    declaration: ts.ObjectLiteralElementLike | ts.FunctionLikeDeclaration,
+    declaration: ts.ObjectLiteralElementLike | ts.FunctionLikeDeclaration | ts.Expression,
     options: Readonly<{
+      context?: Readonly<{
+        dependencies: string;
+        provides?: string;
+      }>;
       id: string;
       name: string;
       parameterIRTypes?: readonly TypeIR[];
+      provides?: readonly string[];
     }>,
   ): Readonly<{ entry: FunctionIR; functions: readonly FunctionIR[] }>;
   emptyRecord(): TypeIR;
@@ -52,7 +63,9 @@ export type ProgramSourceContext = FeatureSourceContext &
     app?: string;
     feature: string;
     interface?: string;
+    implementationOrigin: "direct" | "expanded" | "unresolved";
     name: string;
+    platform: string;
   }>;
 
 export type InterfaceSourceContext = FeatureSourceContext &
@@ -70,13 +83,23 @@ export type SystemSourceContext = Readonly<{
   root: string;
 }>;
 
+/** Serializable, independently versioned meaning owned by one Platform dialect. */
+export type VersionedExtensionIR = object & Readonly<{ version: number }>;
+
+/** One dialect compilation plus the exact source ownership used for invalidation. */
+export type SourceDialectCompilation = Readonly<{
+  ir: VersionedExtensionIR;
+  sources?: readonly string[];
+}>;
+
 /** Lets a Platform compiler own meaning carried by generic core as versioned extension IR. */
 export type SourceCompilerExtension = Readonly<{
+  /** The Platform identity whose Program and Application-interface languages this owns. */
   name: string;
   cacheSources?: readonly string[];
   system?(context: SystemSourceContext): ExtensionIR | undefined;
   feature?(context: FeatureSourceContext): ExtensionIR | undefined;
-  interface?(context: InterfaceSourceContext): ExtensionIR | undefined;
-  program?(context: ProgramSourceContext): ExtensionIR | undefined;
+  interface?(context: InterfaceSourceContext): SourceDialectCompilation;
+  program?(context: ProgramSourceContext): SourceDialectCompilation;
   validate?(ir: SystemIR): void;
 }>;

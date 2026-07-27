@@ -1,13 +1,13 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 
-import { compilePresentationSource } from "@/compiler/presentation";
 import {
   compileWebDynamicStyle,
   compileWebStyle,
   planWebPresentationArtifacts,
   validateWebPresentationSource,
 } from "@/platforms/web/adapter/presentation/compiler";
+import { compilePresentationSource } from "@/platforms/web/adapter/presentation/source";
 import { createContainer, type WebStyle } from "@/platforms/web/presentation";
 import { spring } from "@/platforms/web/presentation/dynamics";
 

@@ -2,6 +2,7 @@ import * as ts from "@typescript/typescript6";
 
 import type { SourceSpan } from "@/compiler/ir";
 
+/** Serializable Presentation meaning owned by the web compiler extension. */
 export type PresentationAnimationIR = Readonly<{
   id: string;
   scope: string;

@@ -1,103 +1,14 @@
 import type {
   ApplicationInterfaceKind,
   DevelopmentSession,
-  PresentationAdapter,
   PlatformAdapter,
   PlatformAdapters,
   ProgramDefinitionKind,
   ProductionArtifacts,
-  UIAdapter,
 } from "@/adapter";
 import { createFeature } from "@/core/feature";
 import { createApplication } from "@/core/system";
-import type { UIElement } from "@/core/ui/language";
-
-type IOSView = { readonly kind: "ios-view" };
-type OtherTarget = { readonly kind: "other" };
-
-type IOSUI = {
-  readonly Name: "ios";
-  readonly Child: string;
-  readonly Elements: {
-    readonly stack: UIElement<object, IOSView>;
-  };
-};
-
-type OtherUI = {
-  readonly Name: "other";
-  readonly Child: number;
-  readonly Elements: {
-    readonly surface: UIElement<object, OtherTarget>;
-  };
-};
-
-type IOSPresentation = {
-  readonly Declarations: { readonly stack: Readonly<{ color?: string }> };
-  readonly Environment: Readonly<{ scale: number }>;
-  readonly Observations: { readonly stack: Readonly<{ size: number }> };
-};
-
-type OtherPresentation = {
-  readonly Declarations: { readonly surface: Readonly<{ material?: string }> };
-  readonly Environment: Readonly<Record<never, never>>;
-  readonly Observations: { readonly surface: Readonly<{ visible: boolean }> };
-};
-
-type ServerPlatform = { readonly Name: "server" };
-type IOSPlatform = {
-  readonly Name: "ios";
-  readonly UI: IOSUI;
-  readonly Program: IOSProgramDefinitionKind;
-  readonly Application: IOSApplicationInterfaceKind;
-};
-type Server = { readonly Name: "server"; readonly Platform: ServerPlatform };
-type IOSForeground = {
-  readonly Name: "ios-foreground";
-  readonly Platform: IOSPlatform;
-};
-type IOSBackground = { readonly Name: "ios-background"; readonly Platform: IOSPlatform };
-type IOSWidget = {
-  readonly Name: "ios-widget";
-  readonly Platform: IOSPlatform;
-};
-
-type Program<Environment, Contract extends object = object> = Readonly<
-  Contract & { Environment: Environment }
->;
-
-type ServerProgram = Program<Server>;
-type IOSProgram = Program<IOSForeground, { Components: { Root: { Elements: { Root: "stack" } } } }>;
-type IOSBackgroundProgram = Program<IOSBackground>;
-type IOSWidgetProgram = Program<
-  IOSWidget,
-  { Components: { Root: { Elements: { Root: "stack" } } } }
->;
-
-const serverProgram: ServerProgram = { Environment: {} as Server };
-const iosProgram: IOSProgram = {
-  Environment: {} as IOSForeground,
-  Components: { Root: { Elements: { Root: "stack" } } },
-};
-const iosBackgroundProgram: IOSBackgroundProgram = { Environment: {} as IOSBackground };
-const iosWidgetProgram: IOSWidgetProgram = {
-  Environment: {} as IOSWidget,
-  Components: { Root: { Elements: { Root: "stack" } } },
-};
-void [serverProgram, iosProgram, iosBackgroundProgram, iosWidgetProgram];
-
-type HeadlessUIFeature = {
-  Programs: {
-    server: {
-      Environment: Server;
-      Components: {};
-    };
-  };
-};
-
-createFeature<HeadlessUIFeature>({
-  // @ts-expect-error A process-only Platform cannot receive UI declarations.
-  programs: { server: {} },
-});
+import type { ServerPlatform } from "@/platforms/server";
 
 type IOSProgramDefinition<Name> = Readonly<{ scene: Extract<Name, string> }>;
 
@@ -107,107 +18,134 @@ interface IOSProgramDefinitionKind extends ProgramDefinitionKind {
 
 interface IOSApplicationInterfaceKind extends ApplicationInterfaceKind {
   readonly Definition: Readonly<{
-    title: string;
+    navigation: Readonly<{ title: string }>;
+    appearance: Readonly<{ tint: string }>;
   }>;
 }
 
-type IOSFeature = {
+type IOSPlatform = {
+  readonly Name: "ios";
+  readonly Program: IOSProgramDefinitionKind;
+  readonly Application: IOSApplicationInterfaceKind;
+};
+type CanvasProgramDefinition<Contract> = Contract extends {
+  World: infer World extends object;
+}
+  ? Readonly<{ world: World }>
+  : never;
+interface CanvasProgramDefinitionKind extends ProgramDefinitionKind {
+  readonly Definition: CanvasProgramDefinition<this["Contract"]>;
+}
+interface CanvasApplicationInterfaceKind extends ApplicationInterfaceKind {
+  readonly Definition: Readonly<{
+    surface: "full-screen" | "embedded";
+    shader: Readonly<{ clearColor: readonly [number, number, number, number] }>;
+  }>;
+}
+type CanvasPlatform = {
+  readonly Name: "canvas";
+  readonly Program: CanvasProgramDefinitionKind;
+  readonly Application: CanvasApplicationInterfaceKind;
+};
+
+type Server = { readonly Name: "server"; readonly Platform: ServerPlatform };
+type IOSForeground = { readonly Name: "ios-foreground"; readonly Platform: IOSPlatform };
+type CanvasMain = { readonly Name: "canvas-main"; readonly Platform: CanvasPlatform };
+
+type MultiPlatformFeature = {
   Programs: {
-    foreground: {
-      Environment: IOSForeground;
+    server: { Environment: Server };
+    ios: { Environment: IOSForeground };
+    canvas: { Environment: CanvasMain; World: { gravity: number } };
+  };
+};
+
+const feature = createFeature<MultiPlatformFeature>({
+  programs: {
+    server: {},
+    ios: { scene: "ios" },
+    canvas: { world: { gravity: 9.81 } },
+  },
+});
+
+createFeature<MultiPlatformFeature>({
+  programs: {
+    server: {},
+    // @ts-expect-error The iOS Program language owns and requires its scene declaration.
+    ios: {},
+    canvas: { world: { gravity: 9.81 } },
+  },
+});
+
+createFeature<MultiPlatformFeature>({
+  programs: {
+    server: {},
+    ios: { scene: "ios" },
+    // @ts-expect-error The Canvas Program language owns its implementation shape.
+    canvas: { scene: "canvas" },
+  },
+});
+
+type HeadlessUIFeature = {
+  Programs: {
+    server: {
+      Environment: Server;
+      Scene: {};
     };
   };
 };
 
-const iosFeature = createFeature<IOSFeature>({
-  programs: {
-    foreground: {
-      scene: "foreground",
-    },
-  },
-});
-
-createFeature<IOSFeature>({
-  programs: {
-    // @ts-expect-error The iOS adapter requires its Program-specific scene declaration.
-    foreground: {},
-  },
+createFeature<HeadlessUIFeature>({
+  // @ts-expect-error The headless language rejects every undeclared dialect field.
+  programs: { server: {} },
 });
 
 createApplication<{
-  Features: { root: IOSFeature };
-  Interfaces: IOSPlatform;
+  Features: { root: MultiPlatformFeature };
+  Interfaces: IOSPlatform | CanvasPlatform;
 }>({
-  features: { root: iosFeature },
   interfaces: {
     ios: {
-      title: "Application",
+      navigation: { title: "Application" },
+      appearance: { tint: "accent" },
+    },
+    canvas: {
+      surface: "full-screen",
+      shader: { clearColor: [0, 0, 0, 1] },
     },
   },
 });
 
 createApplication<{
-  Features: { root: IOSFeature };
+  Features: { root: MultiPlatformFeature };
   Interfaces: IOSPlatform;
 }>({
-  features: { root: iosFeature },
   interfaces: {
     ios: {
-      // @ts-expect-error The iOS interface contract owns the title value type.
-      title: 42,
+      navigation: {
+        // @ts-expect-error The iOS Application interface owns the title value type.
+        title: 42,
+      },
+      appearance: { tint: "accent" },
     },
   },
 });
 
 const session = {} as DevelopmentSession;
 const artifacts = {} as ProductionArtifacts;
-const iosComponentAdapter = {
-  createInterfaceUI() {
-    return {
-      renderRoot() {
-        return "ios";
-      },
-      dispose() {},
-    };
-  },
-};
-const iosPresentationAdapter = {} as PresentationAdapter<IOSPresentation, IOSView>;
-const iosUIAdapter = {
-  name: "ios",
-  component: iosComponentAdapter,
-  presentation: iosPresentationAdapter,
-} satisfies UIAdapter<IOSUI, typeof iosComponentAdapter, typeof iosPresentationAdapter>;
 
-const wrongComponentAdapter = {
-  createInterfaceUI() {
-    return { renderRoot: () => 1, dispose() {} };
-  },
-};
-const wrongComponentUIAdapter = {
-  name: "ios",
-  // @ts-expect-error A Component adapter must render the UI language's Child type.
-  component: wrongComponentAdapter,
-  presentation: iosPresentationAdapter,
-} satisfies UIAdapter<IOSUI, typeof wrongComponentAdapter, typeof iosPresentationAdapter>;
-void wrongComponentUIAdapter;
-
-const wrongPresentationLanguage = {} as PresentationAdapter<OtherPresentation, IOSView>;
-const wrongPresentationUIAdapter = {
-  name: "ios",
-  component: iosComponentAdapter,
-  // @ts-expect-error Presentation declarations and observations must cover the same UI Elements.
-  presentation: wrongPresentationLanguage,
-} satisfies UIAdapter<IOSUI, typeof iosComponentAdapter, typeof wrongPresentationLanguage>;
-void wrongPresentationUIAdapter;
-
-const wrongPresentationTarget = {} as PresentationAdapter<IOSPresentation, OtherTarget>;
-const wrongTargetUIAdapter = {
-  name: "ios",
-  component: iosComponentAdapter,
-  // @ts-expect-error Presentation targets must accept every target exposed by the UI language.
-  presentation: wrongPresentationTarget,
-} satisfies UIAdapter<IOSUI, typeof iosComponentAdapter, typeof wrongPresentationTarget>;
-void wrongTargetUIAdapter;
+type IOSAdapter = PlatformAdapter<IOSPlatform> &
+  Readonly<{
+    ui: Readonly<{
+      mount(): Readonly<{ render(view: string): void }>;
+    }>;
+  }>;
+type CanvasAdapter = PlatformAdapter<CanvasPlatform> &
+  Readonly<{
+    renderer: Readonly<{
+      draw(world: Readonly<{ gravity: number }>): void;
+    }>;
+  }>;
 
 const serverAdapter = {
   name: "server",
@@ -221,71 +159,48 @@ const serverAdapter = {
 
 const iosAdapter = {
   name: "ios",
-  ui: iosUIAdapter,
+  ui: {
+    mount() {
+      return { render(_view: string) {} };
+    },
+  },
   async develop() {
     return session;
   },
   async build() {
     return artifacts;
   },
-} satisfies PlatformAdapter<IOSPlatform, typeof iosUIAdapter>;
+} satisfies IOSAdapter;
+
+const canvasAdapter = {
+  name: "canvas",
+  renderer: { draw(_world: Readonly<{ gravity: number }>) {} },
+  async develop() {
+    return session;
+  },
+  async build() {
+    return artifacts;
+  },
+} satisfies CanvasAdapter;
 
 const adapters = {
+  canvas: canvasAdapter,
   ios: iosAdapter,
   server: serverAdapter,
-} satisfies PlatformAdapters<IOSPlatform | ServerPlatform>;
-void adapters;
+} satisfies PlatformAdapters<CanvasPlatform | IOSPlatform | ServerPlatform>;
+void [feature, adapters];
 
 const missingAdapter = {
   ios: iosAdapter,
-  // @ts-expect-error Every declared Platform requires an adapter binding.
-} satisfies PlatformAdapters<IOSPlatform | ServerPlatform>;
+  server: serverAdapter,
+  // @ts-expect-error Every declared Platform requires one adapter binding.
+} satisfies PlatformAdapters<CanvasPlatform | IOSPlatform | ServerPlatform>;
 void missingAdapter;
 
-const extraAdapter = {
-  ios: iosAdapter,
-  server: serverAdapter,
-  // @ts-expect-error Adapter maps reject undeclared Platform bindings.
-  other: iosAdapter,
-} satisfies PlatformAdapters<IOSPlatform | ServerPlatform>;
-void extraAdapter;
-
 const wrongAdapter = {
+  canvas: canvasAdapter,
   // @ts-expect-error Adapter identity must match its Platform key.
   ios: serverAdapter,
   server: serverAdapter,
-} satisfies PlatformAdapters<IOSPlatform | ServerPlatform>;
+} satisfies PlatformAdapters<CanvasPlatform | IOSPlatform | ServerPlatform>;
 void wrongAdapter;
-
-const otherComponentAdapter = {
-  createInterfaceUI() {
-    return { renderRoot: () => 1, dispose() {} };
-  },
-};
-const crossedUIAdapter = {
-  name: "other",
-  component: otherComponentAdapter,
-  presentation: {} as PresentationAdapter<OtherPresentation, OtherTarget>,
-} satisfies UIAdapter<
-  OtherUI,
-  typeof otherComponentAdapter,
-  PresentationAdapter<OtherPresentation, OtherTarget>
->;
-
-const crossedPlatformAdapter = {
-  name: "ios",
-  ui: crossedUIAdapter,
-  async develop() {
-    return session;
-  },
-  async build() {
-    return artifacts;
-  },
-};
-// @ts-expect-error A Platform Adapter cannot realize another Platform's UI contract.
-const invalidIOSAdapter: PlatformAdapter<IOSPlatform> = crossedPlatformAdapter;
-void invalidIOSAdapter;
-
-type MultiPlatformPrograms = readonly [ServerProgram, IOSProgram, IOSBackgroundProgram];
-const multiPlatformPrograms = [] as unknown as MultiPlatformPrograms;
-void multiPlatformPrograms;

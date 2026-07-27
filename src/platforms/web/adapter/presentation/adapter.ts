@@ -1,17 +1,15 @@
-import type {
-  PresentationAdapter,
-  PresentationAdapterInstance,
-  PresentationAdapterSession,
-  PresentationElementResolver,
-} from "@/adapter";
-import { evaluatePresentationFrame, isPresentationTemporalValue } from "@/core/ui/presentation";
-import { createPresentationFrame, type PresentationFrame } from "@/execution/presentation";
 import {
   planWebPresentationArtifacts,
   webResetCss,
   type CompiledWebStyle,
   type WebPresentationArtifactPlan,
 } from "@/platforms/web/adapter/presentation/compiler";
+import type {
+  PresentationAdapter,
+  PresentationAdapterInstance,
+  PresentationAdapterSession,
+  PresentationElementResolver,
+} from "@/platforms/web/adapter/presentation/contract";
 import {
   createNativeWebFrameHost,
   createWebAnimationHost,
@@ -50,6 +48,14 @@ import type {
   WebLayoutContinuity,
   WebPresentationLanguage,
 } from "@/platforms/web/presentation";
+import {
+  evaluatePresentationFrame,
+  isPresentationTemporalValue,
+} from "@/platforms/web/presentation/language";
+import {
+  createPresentationFrame,
+  type PresentationFrame,
+} from "@/platforms/web/presentation/runtime";
 
 export type WebPresentationHotSnapshot = Readonly<{
   shared: readonly WebAnimationHostSnapshot[];

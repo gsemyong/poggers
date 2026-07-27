@@ -216,7 +216,7 @@ export function createSystemRevisionSource(
   };
 }
 
-const SYSTEM_COMPILATION_CACHE_VERSION = 3;
+const SYSTEM_COMPILATION_CACHE_VERSION = 4;
 
 type CachedSystemCompilation = Readonly<{
   version: number;
@@ -224,11 +224,8 @@ type CachedSystemCompilation = Readonly<{
   inputs: Readonly<Record<string, string>>;
   compilation: Readonly<{
     ir: SystemCompilation["ir"];
-    presentationSources: readonly string[];
     outputSources: SystemCompilation["outputSources"];
     sourceFiles: readonly string[];
-    sourceStructures: SystemCompilation["sourceStructures"];
-    runtimeStructures: SystemCompilation["runtimeStructures"];
     semanticGraph: SystemCompilation["semanticGraph"];
   }>;
 }>;
@@ -258,13 +255,10 @@ function readSystemCompilationCache(
     const sourceFiles = new Set(cached.compilation.sourceFiles);
     const globallyInvalid = [...invalid].some((source) => !sourceFiles.has(source));
     const semanticGraph = globallyInvalid
-      ? { version: 1 as const, features: [], presentations: [] }
+      ? { version: 1 as const, features: [] }
       : {
           version: 1 as const,
           features: cached.compilation.semanticGraph.features.filter((unit) =>
-            unit.sourceFiles.every((source) => !invalid.has(source)),
-          ),
-          presentations: cached.compilation.semanticGraph.presentations.filter((unit) =>
             unit.sourceFiles.every((source) => !invalid.has(source)),
           ),
         };
@@ -273,20 +267,13 @@ function readSystemCompilationCache(
       exact: invalid.size === 0,
       compilation: {
         ir: cached.compilation.ir,
-        presentationSources: new Set(cached.compilation.presentationSources),
         outputSources: cached.compilation.outputSources,
         sourceFiles: Object.freeze([...cached.compilation.sourceFiles]),
-        sourceStructures: cached.compilation.sourceStructures,
-        runtimeStructures: cached.compilation.runtimeStructures,
         semanticGraph,
         work: {
           features: {
             compiled: 0,
             reused: semanticGraph.features.length,
-          },
-          presentations: {
-            compiled: 0,
-            reused: semanticGraph.presentations.length,
           },
         },
       },
@@ -309,11 +296,8 @@ function writeSystemCompilationCache(
     inputs,
     compilation: {
       ir: compilation.ir,
-      presentationSources: [...compilation.presentationSources].sort(),
       outputSources: compilation.outputSources,
       sourceFiles: compilation.sourceFiles,
-      sourceStructures: compilation.sourceStructures,
-      runtimeStructures: compilation.runtimeStructures,
       semanticGraph: compilation.semanticGraph,
     },
   };
@@ -443,10 +427,7 @@ function outputMeaning(ir: SystemIR, identity: string): string {
   }
   const interface_ = ir.interfaces.find(({ id }) => id === identity);
   if (!interface_) return "undefined";
-  return JSON.stringify({
-    interface: interface_,
-    presentations: ir.presentations.filter(({ interface: owner }) => owner === interface_.path),
-  });
+  return JSON.stringify(interface_);
 }
 
 function canonicalSourceFile(path: string): string {

@@ -1,19 +1,17 @@
 import { createFeature, type FeatureEnvironmentConflict } from "@/core/feature";
-import {
-  createApplication,
-  createSystem,
-  type ApplicationFeatureContract,
-  type SystemContractOf,
-} from "@/core/system";
-import type { ConfiguredPresentationFor, PresentationRecipe } from "@/core/ui/presentation";
+import { createApplication, createSystem, type SystemContractOf } from "@/core/system";
+import type { ServerPlatform } from "@/platforms/server";
 import {
   type BrowserMainThread,
-  type Validate,
+  type UUID,
   type WebPlatform,
   type WebPresentationLanguage,
 } from "@/platforms/web";
+import type {
+  ConfiguredPresentationFor,
+  PresentationRecipe,
+} from "@/platforms/web/presentation/language";
 
-type ServerPlatform = Readonly<{ Name: "server" }>;
 type Server = Readonly<{ Name: "server"; Platform: ServerPlatform }>;
 
 type Principal = Readonly<{ id: string }>;
@@ -53,7 +51,7 @@ type ShellFeature = {
         home: { Path: "" };
         task: {
           Path: "tasks/:id";
-          Params: { id: Validate<string, { Format: "uuid" }> };
+          Params: { id: UUID };
         };
       };
     };
@@ -66,7 +64,7 @@ type Operations = {
     tasks: TasksFeature;
     shell: ShellFeature;
   };
-  Interfaces: WebPlatform;
+  Interfaces: WebPlatform<{ Mounts: { shell: { Path: "" } } }>;
 };
 
 const identity = createFeature<IdentityFeature>({
@@ -143,15 +141,13 @@ const operationsPresentation = {
 } satisfies ConfiguredPresentationFor<Operations, WebPresentationLanguage>;
 
 const operations = createApplication<Operations>({
-  features: { identity, tasks, shell },
   interfaces: {
     web: {
       presentation: operationsPresentation,
-      routes: { shell: "" },
       installation: {
-        start: { to: "shell.home" },
+        start: { feature: "shell", route: "home" },
         icons: [],
-        offline: { fallback: { to: "shell.home" } },
+        offline: { fallback: { feature: "shell", route: "home" } },
       },
     },
   },
@@ -159,14 +155,12 @@ const operations = createApplication<Operations>({
 
 const system = createSystem({
   metadata: { name: "Company" },
+  features: { identity, tasks, shell },
   applications: { operations },
 });
 
 type Contract = SystemContractOf<typeof system>;
-type OperationsProof =
-  Contract["Applications"]["operations"] extends ApplicationFeatureContract<Operations>
-    ? true
-    : never;
+type OperationsProof = Contract["Applications"]["operations"] extends Operations ? true : never;
 const operationsProof: OperationsProof = true;
 void operationsProof;
 
@@ -184,9 +178,7 @@ type WrongApplication = {
   Interfaces: WebPlatform;
 };
 
-createApplication<WrongApplication>({
-  // @ts-expect-error The declared Feature roles must all have concrete implementations.
-  features: {},
+const wrongApplication = createApplication<WrongApplication>({
   interfaces: {
     web: {
       presentation: {
@@ -202,7 +194,6 @@ createApplication<WrongApplication>({
 void identity.features.tasks;
 
 createApplication<Operations>({
-  features: { identity, tasks, shell },
   interfaces: {
     web: { presentation: operationsPresentation },
   },
@@ -211,12 +202,20 @@ createApplication<Operations>({
 });
 
 createApplication<Operations>({
-  features: { identity, tasks, shell },
   interfaces: {
     web: { presentation: operationsPresentation },
   },
   // @ts-expect-error Programs belong to Features, not Applications.
   programs: {},
+});
+
+createSystem<{
+  Features: { identity: IdentityFeature };
+  Applications: { wrong: WrongApplication };
+}>({
+  // @ts-expect-error Every declared System Feature needs one concrete implementation.
+  features: {},
+  applications: { wrong: wrongApplication },
 });
 
 void system;

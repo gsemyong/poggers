@@ -7,7 +7,7 @@ mutations, indexes, and searchable text. Platform Adapters supply storage.
 ## Define
 
 ```ts
-import { createData, type DataModel } from "kit";
+import { createData, type DataModel } from "kit/features/data";
 
 type Principal = Readonly<{ id: string }>;
 

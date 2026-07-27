@@ -10,13 +10,13 @@ import type {
   ProgramSourceContext,
   SourceCompilerAPI,
   SourceCompilerExtension,
+  SourceDialectCompilation,
   SystemSourceContext,
 } from "@/compiler/extension";
 import {
   SYSTEM_IR_VERSION,
   type DependencyIR,
   type DependencyProviderIR,
-  type ComponentIR,
   type CompilerExtensionsIR,
   type ExtensionIR,
   type ExpressionIR,
@@ -24,7 +24,6 @@ import {
   type FeatureIR,
   type FieldIR,
   type FunctionIR,
-  type InterfacePresentationIR,
   type PlatformInterfaceIR,
   type SystemIR,
   type ProgramContributionIR,
@@ -35,7 +34,6 @@ import {
   type SystemOutputSources,
   type TypeIR,
 } from "@/compiler/ir";
-import { compilePresentationSource } from "@/compiler/presentation";
 
 export class SystemDiagnostic extends Error {
   readonly span: SourceSpan;
@@ -57,11 +55,8 @@ export type { SystemOutputSources } from "@/compiler/ir";
 
 export type SystemCompilation = Readonly<{
   ir: SystemIR;
-  presentationSources: ReadonlySet<string>;
   outputSources: SystemOutputSources;
   sourceFiles: readonly string[];
-  sourceStructures: Readonly<Record<string, string>>;
-  runtimeStructures: Readonly<Record<string, string>>;
   semanticGraph: SystemSemanticGraph;
   work: SystemCompilationWork;
 }>;
@@ -82,20 +77,12 @@ type FeatureCompilationUnit = Readonly<{
   interfaces: readonly InterfaceSource[];
 }>;
 
-type PresentationCompilationUnit = Readonly<{
-  id: string;
-  hash: string;
-  sourceFiles: readonly string[];
-  presentation: InterfacePresentationIR;
-}>;
-
 export type SystemSemanticGraph = Readonly<{
   version: 1;
   features: readonly FeatureCompilationUnit[];
-  presentations: readonly PresentationCompilationUnit[];
 }>;
 
-const SYSTEM_COMPILER_CACHE_VERSION = 2;
+const SYSTEM_COMPILER_CACHE_VERSION = 4;
 
 /** Resolves the one conventional System entry without executing it. */
 export function resolveSystem(directory: string): SystemPaths {
@@ -174,18 +161,6 @@ export function createSystemCompiler(
         const changed = resolve(changedFile);
         versions.set(changed, (versions.get(changed) ?? 0) + 1);
         projectVersion++;
-        const presentation = compilePresentationChange(previous, changed);
-        if (presentation) {
-          previous = presentation;
-          restored = false;
-          return presentation;
-        }
-        const runtime = compileUIRuntimeChange(previous, changed);
-        if (runtime) {
-          previous = runtime;
-          restored = false;
-          return runtime;
-        }
       }
       const compilation = compileSystemProgram(
         file,
@@ -210,7 +185,7 @@ export function systemCompilerIdentity(
   hash.update(JSON.stringify([SYSTEM_COMPILER_CACHE_VERSION, SYSTEM_IR_VERSION, ts.version]));
   hash.update("\0");
   const extension = extname(import.meta.filename);
-  for (const name of ["source", "presentation", "ir", "extension"]) {
+  for (const name of ["source", "ir", "extension"]) {
     const file = resolve(dirname(import.meta.filename), `${name}${extension}`);
     hash.update(ts.sys.readFile(file) ?? file);
     hash.update("\0");
@@ -222,7 +197,13 @@ export function systemCompilerIdentity(
       hash.update(ts.sys.readFile(source) ?? source);
       hash.update("\0");
     }
-    for (const hook of [compiler.system, compiler.feature, compiler.program, compiler.validate]) {
+    for (const hook of [
+      compiler.system,
+      compiler.feature,
+      compiler.interface,
+      compiler.program,
+      compiler.validate,
+    ]) {
       hash.update(hook?.toString() ?? "");
       hash.update("\0");
     }
@@ -243,7 +224,12 @@ function validateCompilerExtensions(extensions: readonly SourceCompilerExtension
   }
 }
 
-function sourceCompilerAPI(checker: ts.TypeChecker, scope?: StaticValue): SourceCompilerAPI {
+function sourceCompilerAPI(
+  program: ts.Program,
+  checker: ts.TypeChecker,
+  scope?: StaticValue,
+  root?: string,
+): SourceCompilerAPI {
   return Object.freeze({
     properties: (type) => sortedSymbols(type?.getProperties() ?? []),
     property: (type, name, at) => propertyType(checker, type, name, at),
@@ -264,7 +250,62 @@ function sourceCompilerAPI(checker: ts.TypeChecker, scope?: StaticValue): Source
         : undefined;
     },
     member: (object, name) => objectMember(checker, object, name),
-    resolveMember: (object, name) => resolveObjectMember(checker, object, name),
+    resolveMember(object, name) {
+      const member = resolveObjectMember(checker, object, name);
+      if (!member) return undefined;
+      const resolved = resolveStaticValue(
+        checker,
+        {
+          node: member,
+          bindings: scope?.bindings ?? new Map(),
+          types: scope?.types ?? new Map(),
+        },
+        new Set(),
+      );
+      return resolved?.node && ts.isExpression(resolved.node)
+        ? unwrapExpression(resolved.node)
+        : member;
+    },
+    callable(object, name) {
+      const member = objectMemberDeclaration(object, name);
+      const expression = objectMember(checker, object, name);
+      const resolved = expression
+        ? resolveStaticValue(
+            checker,
+            {
+              node: expression,
+              bindings: scope?.bindings ?? new Map(),
+              types: scope?.types ?? new Map(),
+            },
+            new Set(),
+          )
+        : undefined;
+      if (resolved?.node && isFunctionImplementation(resolved.node)) return resolved.node;
+      return member && (isFunctionImplementation(member) || functionFromMember(member))
+        ? member
+        : undefined;
+    },
+    sources(value) {
+      if (!root) throw diagnostic(value, "Source ownership requires a compiler root.");
+      return Object.freeze(
+        [
+          ...transitiveLocalSources(
+            program,
+            checker,
+            root,
+            expressionDeclarations(checker, value).map((declaration) =>
+              declaration.getSourceFile(),
+            ),
+          ),
+        ]
+          .sort()
+          .map((path) => {
+            const source = program.getSourceFile(path);
+            if (!source) throw new Error(`Cannot read extension source ${path}.`);
+            return Object.freeze({ path, text: source.text });
+          }),
+      );
+    },
     memberDeclaration: objectMemberDeclaration,
     constant: (value) =>
       staticConstant(
@@ -278,29 +319,66 @@ function sourceCompilerAPI(checker: ts.TypeChecker, scope?: StaticValue): Source
       ),
     literal: (type, name, at) => literalProperty(checker, type, name, at),
     optionalLiteral: (type, name, at) => literalPropertyOptional(checker, type, name, at),
+    numberLiteral: (type, name, at) => numberLiteralProperty(checker, type, name, at),
     lower: (type, at) => lowerType(checker, type, at),
     dependencies: (type, at) => dependencyList(checker, type, at),
     portable(declaration, options) {
       const functionLike = isFunctionImplementation(declaration)
         ? declaration
-        : functionFromMember(declaration);
+        : functionFromMember(declaration as ts.ObjectLiteralElementLike);
       if (!functionLike?.body) {
         throw diagnostic(declaration, "Portable functions require a statically known body.");
       }
-      const lowering = createPortableLowering(checker);
-      const entry = lowerFunction(lowering, functionLike, {
-        ...options,
-        dependenciesName: dependencyBinding(functionLike.parameters[0]) ?? "@dependencies",
-      });
+      const contextParameter = options.context ? functionLike.parameters[0] : undefined;
+      const providedBinding = options.context?.provides
+        ? contextBindingSymbol(checker, contextParameter, options.context.provides)
+        : undefined;
+      const dependencyName = options.context
+        ? (contextBindingName(contextParameter, options.context.dependencies) ?? "@dependencies")
+        : (dependencyBinding(functionLike.parameters[0]) ?? "@dependencies");
+      const lowering = createPortableLowering(
+        checker,
+        scope?.bindings,
+        scope?.types,
+        options.provides,
+      );
+      const entry = lowerFunction(
+        {
+          ...lowering,
+          ...(providedBinding ? { providedBinding } : {}),
+        },
+        functionLike,
+        {
+          ...options,
+          dependenciesName: dependencyName,
+          ...(options.context ? { omitFirstParameter: true } : {}),
+        },
+      );
+      const functions = [...lowering.functions.values()].sort((left, right) =>
+        left.id.localeCompare(right.id),
+      );
+      const contextBindings = options.context
+        ? [
+            dependencyName,
+            "@dependencies",
+            options.context.dependencies,
+            ...(options.context.provides ? [options.context.provides] : []),
+          ]
+        : [];
+      validatePortableLocals(entry, contextBindings);
+      functions.forEach((function_) => validatePortableLocals(function_));
       return {
-        entry,
-        functions: [...lowering.functions.values()].sort((left, right) =>
-          left.id.localeCompare(right.id),
-        ),
+        entry: root ? normalizePortableFunction(entry, root) : entry,
+        functions: root
+          ? functions.map((function_) => normalizePortableFunction(function_, root))
+          : functions,
       };
     },
     emptyRecord,
-    span: spanOf,
+    span: (node) => {
+      const span = spanOf(node);
+      return root ? { ...span, file: relative(root, span.file).replaceAll("\\", "/") } : span;
+    },
     fail(node, message) {
       throw diagnostic(node, message);
     },
@@ -319,38 +397,90 @@ function extensionField(
 ): Readonly<{ extensions?: CompilerExtensionsIR }>;
 function extensionField(
   extensions: readonly SourceCompilerExtension[],
-  kind: "interface",
-  context: InterfaceSourceContext,
-): Readonly<{ extensions?: CompilerExtensionsIR }>;
-function extensionField(
-  extensions: readonly SourceCompilerExtension[],
-  kind: "program",
-  context: ProgramSourceContext,
-): Readonly<{ extensions?: CompilerExtensionsIR }>;
-function extensionField(
-  extensions: readonly SourceCompilerExtension[],
-  kind: "system" | "feature" | "interface" | "program",
-  context:
-    | SystemSourceContext
-    | FeatureSourceContext
-    | InterfaceSourceContext
-    | ProgramSourceContext,
+  kind: "system" | "feature",
+  context: SystemSourceContext | FeatureSourceContext,
 ): Readonly<{ extensions?: CompilerExtensionsIR }> {
   const values: Record<string, ExtensionIR> = Object.create(null);
   for (const extension of extensions) {
     const value =
       kind === "system"
         ? extension.system?.(context as SystemSourceContext)
-        : kind === "feature"
-          ? extension.feature?.(context as FeatureSourceContext)
-          : kind === "interface"
-            ? extension.interface?.(context as InterfaceSourceContext)
-            : extension.program?.(context as ProgramSourceContext);
+        : extension.feature?.(context as FeatureSourceContext);
     if (value === undefined) continue;
     assertExtensionIR(value, extension.name, new Set());
     values[extension.name] = value;
   }
   return Object.keys(values).length ? { extensions: Object.freeze(values) } : {};
+}
+
+function dialectField(
+  extensions: readonly SourceCompilerExtension[],
+  kind: "interface",
+  platform: string,
+  context: InterfaceSourceContext,
+): Readonly<{ extensions: CompilerExtensionsIR; extensionSources?: readonly string[] }>;
+function dialectField(
+  extensions: readonly SourceCompilerExtension[],
+  kind: "program",
+  platform: string,
+  context: ProgramSourceContext,
+): Readonly<{ extensions: CompilerExtensionsIR; extensionSources?: readonly string[] }>;
+function dialectField(
+  extensions: readonly SourceCompilerExtension[],
+  kind: "interface" | "program",
+  platform: string,
+  context: InterfaceSourceContext | ProgramSourceContext,
+): Readonly<{ extensions: CompilerExtensionsIR; extensionSources?: readonly string[] }> {
+  const extension = extensions.find(({ name }) => name === platform);
+  if (!extension) {
+    throw new SystemDiagnostic(
+      `Platform ${JSON.stringify(platform)} has no registered compiler dialect.`,
+      spanOf(context.location),
+    );
+  }
+  const compile = kind === "interface" ? extension.interface : extension.program;
+  if (!compile) {
+    throw new SystemDiagnostic(
+      `Platform ${JSON.stringify(platform)} does not compile ${kind} meaning.`,
+      spanOf(context.location),
+    );
+  }
+  const result = compile(context as InterfaceSourceContext & ProgramSourceContext);
+  assertDialectCompilation(result, platform, kind);
+  return {
+    extensions: Object.freeze({ [platform]: result.ir }),
+    ...(result.sources?.length
+      ? {
+          extensionSources: Object.freeze(
+            [...new Set(result.sources.map(canonicalSourceFile))].sort(),
+          ),
+        }
+      : {}),
+  };
+}
+
+function assertDialectCompilation(
+  result: SourceDialectCompilation,
+  platform: string,
+  kind: "interface" | "program",
+): void {
+  assertExtensionIR(result.ir, platform, new Set());
+  if (
+    !result.ir ||
+    typeof result.ir !== "object" ||
+    Array.isArray(result.ir) ||
+    !Number.isSafeInteger(result.ir.version) ||
+    result.ir.version < 1
+  ) {
+    throw new TypeError(
+      `Platform ${JSON.stringify(platform)} returned unversioned ${kind} meaning.`,
+    );
+  }
+  if (result.sources?.some((source) => typeof source !== "string" || source.length === 0)) {
+    throw new TypeError(
+      `Platform ${JSON.stringify(platform)} returned invalid ${kind} source ownership.`,
+    );
+  }
 }
 
 function assertExtensionIR(
@@ -447,7 +577,7 @@ function compileSystemProgram(
   const root = dirname(file);
   const systemExtensions = extensionField(extensions, "system", {
     checker,
-    source: sourceCompilerAPI(checker),
+    source: sourceCompilerAPI(program, checker),
     contract,
     implementation: systemObject,
     location: exported,
@@ -457,20 +587,52 @@ function compileSystemProgram(
   const featureSourceFiles = new Map<string, ReadonlySet<string>>();
   const contributions: UnassembledProgramIR[] = [];
   const interfaceSources: InterfaceSource[] = [];
+  const applicationSources: AppSource[] = [];
   const featureUnits: FeatureCompilationUnit[] = [];
   const work = {
     features: { compiled: 0, reused: 0 },
-    presentations: { compiled: 0, reused: 0 },
   };
   const extractionStarted = performance.now();
   const previousFeatures = new Map(previous?.semanticGraph.features.map((unit) => [unit.id, unit]));
-  for (const values of [featureValues, applicationValues]) {
-    if (!values) continue;
+  const featureCatalog = featureValues
+    ? collectSystemFeatureCatalog(checker, featureValues)
+    : new Map<string, SystemFeatureSource>();
+  const usedFeatures = new Set<string>();
+  if (applicationValues) {
+    extractApplications({
+      program,
+      checker,
+      values: applicationValues,
+      featureCatalog,
+      usedFeatures,
+      features,
+      featureSourceFiles,
+      programs: contributions,
+      interfaces: interfaceSources,
+      applications: applicationSources,
+      extensions,
+      root,
+      systemSource: file,
+      incremental: {
+        entry: file,
+        changedFile: changedFile ? canonicalSourceFile(changedFile) : undefined,
+        reuse: incremental,
+        previous: previousFeatures,
+        semanticSources: new Map(),
+        units: featureUnits,
+        work: work.features,
+      },
+    });
+  }
+  if (featureValues) {
+    const standalone = new Set(
+      [...featureCatalog.keys()].filter((name) => !usedFeatures.has(name)),
+    );
     extractFeatures(
       program,
       checker,
-      checker.getTypeAtLocation(values),
-      values,
+      checker.getTypeAtLocation(featureValues),
+      featureValues,
       "",
       features,
       featureSourceFiles,
@@ -479,7 +641,7 @@ function compileSystemProgram(
       extensions,
       root,
       new Set([file]),
-      values,
+      featureValues,
       undefined,
       undefined,
       undefined,
@@ -494,60 +656,44 @@ function compileSystemProgram(
         units: featureUnits,
         work: work.features,
       },
+      standalone,
     );
   }
   const extractionCompleted = performance.now();
   validateProgramEnvironments(contributions);
   const programs = assemblePrograms(contributions);
 
-  const platforms = [...new Set(programs.map(({ environment }) => environment.platform))].sort();
-  const presentationSources = new Set<string>();
+  const platforms = [
+    ...new Set([
+      ...programs.map(({ environment }) => environment.platform),
+      ...interfaceSources.map(({ platform }) => platform),
+    ]),
+  ].sort();
   const interfaceSourceFiles = new Map<string, ReadonlySet<string>>();
-  const presentationIR: InterfacePresentationIR[] = [];
   const interfaces: PlatformInterfaceIR[] = [];
-  const presentationUnits: PresentationCompilationUnit[] = [];
-  const previousPresentations = new Map(
-    previous?.semanticGraph.presentations.map((unit) => [unit.id, unit]),
-  );
   for (const item of interfaceSources.sort((left, right) => left.path.localeCompare(right.path))) {
-    const sources = new Set(item.presentationSources);
-    sources.forEach((path) => presentationSources.add(path));
-    interfaceSourceFiles.set(item.path, sources);
-    for (const path of sources) {
-      const id = presentationUnitId(item.path, path);
-      const cached = previousPresentations.get(id);
-      const reusable =
-        incremental &&
-        cached !== undefined &&
-        (!changedFile || !cached.sourceFiles.includes(canonicalSourceFile(changedFile)));
-      const presentation = reusable
-        ? cached.presentation
-        : compileInterfacePresentation(program, root, item.path, path);
-      work.presentations[reusable ? "reused" : "compiled"] += 1;
-      const unit = presentationCompilationUnit(id, path, presentation);
-      presentationUnits.push(unit);
-      if (presentation.animations.length || presentation.declarations.length) {
-        presentationIR.push(presentation);
-      }
-    }
+    interfaceSourceFiles.set(
+      item.path,
+      new Set([...(item.sourceFiles ?? []), ...(item.extensionSources ?? [])]),
+    );
     interfaces.push({
       id: `interface/${item.path}`,
       path: item.path,
       app: item.app,
       platform: item.platform,
+      features: item.features,
       programs: programs
         .filter((candidate) => candidate.interface === item.path)
         .map(({ id }) => id)
         .sort(),
-      presentationSources: [...sources].map((path) => relative(root, path)).sort(),
       ...(item.extensions ? { extensions: item.extensions } : {}),
     });
   }
-  const apps = features
-    .filter(({ kind }) => kind === "app")
-    .map(({ path }) => ({
+  const apps = applicationSources
+    .map(({ path, name }) => ({
       id: `app/${path}`,
-      feature: path,
+      path,
+      ...(name ? { name } : {}),
       interfaces: interfaces
         .filter(({ app }) => app === path)
         .map(({ id }) => id)
@@ -565,11 +711,8 @@ function compileSystemProgram(
       platforms,
       apps,
       interfaces: interfaces.sort(byId),
-      features: features.sort(byId),
+      features: deduplicateFeatures(features).sort(byId),
       programs: programs.sort(byId),
-      presentations: presentationIR.sort((left, right) =>
-        `${left.interface}/${left.file}`.localeCompare(`${right.interface}/${right.file}`),
-      ),
     },
     configuration ? dirname(configuration) : root,
   );
@@ -588,15 +731,12 @@ function compileSystemProgram(
   const sourcesCompleted = performance.now();
   return {
     ir,
-    presentationSources,
     semanticGraph: Object.freeze({
       version: 1,
       features: Object.freeze(featureUnits.sort(byId)),
-      presentations: Object.freeze(presentationUnits.sort(byId)),
     }),
     work: Object.freeze({
       features: Object.freeze({ ...work.features }),
-      presentations: Object.freeze({ ...work.presentations }),
       durations: Object.freeze({
         diagnostics: diagnosticsCompleted - compilationStarted,
         extraction: extractionCompleted - extractionStarted,
@@ -612,251 +752,8 @@ function compileSystemProgram(
         .map(({ fileName }) => canonicalSourceFile(fileName))
         .sort(),
     ),
-    sourceStructures: sourceStructureSignatures(program, root),
-    runtimeStructures: sourceStructureSignatures(program, root, "ui-runtime"),
     outputSources,
   };
-}
-
-function compilePresentationChange(
-  previous: SystemCompilation | undefined,
-  changedFile: string,
-): SystemCompilation | undefined {
-  if (!previous) return undefined;
-  const source = canonicalSourceFile(changedFile);
-  if (
-    ![...previous.presentationSources].some(
-      (presentationSource) => canonicalSourceFile(presentationSource) === source,
-    )
-  ) {
-    return undefined;
-  }
-  const text = ts.sys.readFile(changedFile);
-  if (text === undefined) return undefined;
-  const structure = sourceStructureSignature(text, changedFile);
-  if (previous.sourceStructures[source] !== structure) return undefined;
-  const affected = previous.semanticGraph.presentations.filter((unit) =>
-    unit.sourceFiles.includes(source),
-  );
-  if (!affected.length) return undefined;
-
-  const started = performance.now();
-  const replacements = new Map<string, PresentationCompilationUnit>();
-  for (const unit of affected) {
-    const compiled = compilePresentationSource(text, unit.presentation.file).ir;
-    const presentation = Object.freeze({
-      interface: unit.presentation.interface,
-      ...compiled,
-    });
-    replacements.set(unit.id, presentationCompilationUnit(unit.id, changedFile, presentation));
-  }
-  const presentations = previous.semanticGraph.presentations.map(
-    (unit) => replacements.get(unit.id) ?? unit,
-  );
-  const ir = Object.freeze({
-    ...previous.ir,
-    presentations: Object.freeze(
-      presentations
-        .map(({ presentation }) => presentation)
-        .filter(({ animations, declarations }) => animations.length > 0 || declarations.length > 0)
-        .sort((left, right) =>
-          `${left.interface}/${left.file}`.localeCompare(`${right.interface}/${right.file}`),
-        ),
-    ),
-  });
-  return {
-    ...previous,
-    ir,
-    semanticGraph: Object.freeze({
-      ...previous.semanticGraph,
-      presentations: Object.freeze(presentations),
-    }),
-    sourceStructures: Object.freeze({
-      ...previous.sourceStructures,
-      [source]: structure,
-    }),
-    work: Object.freeze({
-      features: Object.freeze({
-        compiled: 0,
-        reused: previous.semanticGraph.features.length,
-      }),
-      presentations: Object.freeze({
-        compiled: affected.length,
-        reused: presentations.length - affected.length,
-      }),
-      durations: Object.freeze({
-        diagnostics: 0,
-        extraction: 0,
-        linking: performance.now() - started,
-        sources: 0,
-        total: performance.now() - started,
-      }),
-    }),
-  };
-}
-
-function compileUIRuntimeChange(
-  previous: SystemCompilation | undefined,
-  changedFile: string,
-): SystemCompilation | undefined {
-  if (!previous) return undefined;
-  const source = canonicalSourceFile(changedFile);
-  if (
-    [...previous.presentationSources].some(
-      (presentationSource) => canonicalSourceFile(presentationSource) === source,
-    )
-  ) {
-    return undefined;
-  }
-  const text = ts.sys.readFile(changedFile);
-  if (text === undefined) return undefined;
-  const structure = sourceStructureSignature(text, changedFile, "ui-runtime");
-  if (previous.runtimeStructures[source] !== structure) return undefined;
-  const outputs = Object.entries(previous.outputSources)
-    .filter(([, sources]) => sources.some((candidate) => canonicalSourceFile(candidate) === source))
-    .map(([identity]) => identity);
-  if (!outputs.length || outputs.some((identity) => !uiRuntimeOutput(previous.ir, identity))) {
-    return undefined;
-  }
-  return {
-    ...previous,
-    runtimeStructures: Object.freeze({
-      ...previous.runtimeStructures,
-      [source]: structure,
-    }),
-    work: Object.freeze({
-      features: Object.freeze({
-        compiled: 0,
-        reused: previous.semanticGraph.features.length,
-      }),
-      presentations: Object.freeze({
-        compiled: 0,
-        reused: previous.semanticGraph.presentations.length,
-      }),
-      durations: Object.freeze({
-        diagnostics: 0,
-        extraction: 0,
-        linking: 0,
-        sources: 0,
-        total: 0,
-      }),
-    }),
-  };
-}
-
-function uiRuntimeOutput(ir: SystemIR, identity: string): boolean {
-  const accepts = (program: ProgramIR | undefined) =>
-    Boolean(
-      program?.environment.ui &&
-      program.contributions.every(({ implementation }) => implementation.kind === "source"),
-    );
-  if (identity.startsWith("program/")) {
-    return accepts(ir.programs.find(({ id }) => id === identity));
-  }
-  const interface_ = ir.interfaces.find(({ id }) => id === identity);
-  return Boolean(
-    interface_ &&
-    interface_.programs.length > 0 &&
-    interface_.programs.every((program) => accepts(ir.programs.find(({ id }) => id === program))),
-  );
-}
-
-function sourceStructureSignatures(
-  program: ts.Program,
-  root: string,
-  mode: "presentation" | "ui-runtime" = "presentation",
-): Readonly<Record<string, string>> {
-  return Object.freeze(
-    Object.fromEntries(
-      program
-        .getSourceFiles()
-        .filter(
-          (source) => !program.isSourceFileDefaultLibrary(source) && inside(root, source.fileName),
-        )
-        .map(
-          (source) =>
-            [
-              canonicalSourceFile(source.fileName),
-              sourceStructureSignature(source.text, source.fileName, mode),
-            ] as const,
-        )
-        .sort(([left], [right]) => left.localeCompare(right)),
-    ),
-  );
-}
-
-function sourceStructureSignature(
-  source: string,
-  fileName: string,
-  mode: "presentation" | "ui-runtime" = "presentation",
-): string {
-  const file = ts.createSourceFile(
-    fileName,
-    source,
-    ts.ScriptTarget.Latest,
-    true,
-    fileName.endsWith("x") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
-  );
-  const parseDiagnostics = (file as ts.SourceFile & { parseDiagnostics?: readonly ts.Diagnostic[] })
-    .parseDiagnostics;
-  if (parseDiagnostics?.some(({ category }) => category === ts.DiagnosticCategory.Error)) {
-    return semanticHash(source);
-  }
-  const hash = createHash("sha256");
-  const visit = (node: ts.Node): void => {
-    hash.update(`${node.kind}:`);
-    if (
-      ts.isIdentifier(node) ||
-      ts.isPrivateIdentifier(node) ||
-      ts.isStringLiteralLike(node) ||
-      ts.isNumericLiteral(node) ||
-      ts.isBigIntLiteral(node) ||
-      ts.isNoSubstitutionTemplateLiteral(node)
-    ) {
-      hash.update(node.text);
-      hash.update(";");
-    }
-    ts.forEachChild(node, (child) => {
-      if (
-        ts.isFunctionLike(node) &&
-        "body" in node &&
-        child === node.body &&
-        (mode === "presentation" || isUIRuntimeFunction(node))
-      ) {
-        hash.update("<body>;");
-        return;
-      }
-      visit(child);
-    });
-  };
-  visit(file);
-  return hash.digest("hex");
-}
-
-function isUIRuntimeFunction(node: ts.SignatureDeclaration): boolean {
-  const name =
-    "name" in node && node.name
-      ? memberName(node as ts.NamedDeclaration)
-      : ts.isArrowFunction(node) || ts.isFunctionExpression(node)
-        ? ts.isPropertyAssignment(node.parent)
-          ? memberName(node.parent)
-          : undefined
-        : undefined;
-  if (name === "view" || name === "start") return true;
-  const member =
-    ts.isMethodDeclaration(node) || ts.isGetAccessorDeclaration(node)
-      ? node
-      : (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) &&
-          ts.isPropertyAssignment(node.parent)
-        ? node.parent
-        : undefined;
-  const object = member?.parent;
-  return Boolean(
-    object &&
-    ts.isObjectLiteralExpression(object) &&
-    ts.isPropertyAssignment(object.parent) &&
-    memberName(object.parent) === "actions",
-  );
 }
 
 function compilerOptions(file: string): ts.CompilerOptions {
@@ -880,6 +777,7 @@ type UnassembledProgramIR = ProgramContributionIR &
   Readonly<{
     instance: string;
     app?: string;
+    extensionSources?: readonly string[];
     name: string;
     logicalName: string;
     environment: ProgramIR["environment"];
@@ -890,11 +788,19 @@ type InterfaceSource = Readonly<{
   path: string;
   app: string;
   platform: string;
-  presentationSources: readonly string[];
+  features: Readonly<Record<string, string>>;
+  sourceFiles?: readonly string[];
+  extensionSources?: readonly string[];
   extensions?: CompilerExtensionsIR;
 }>;
 
 type InterfaceOwner = Readonly<{ path: string; platform: string }>;
+type AppSource = Readonly<{ path: string; name?: string }>;
+type SystemFeatureSource = Readonly<{
+  name: string;
+  contract: ts.Type;
+  implementation: StaticValue;
+}>;
 
 type IncrementalFeatureExtraction = Readonly<{
   entry: string;
@@ -955,17 +861,6 @@ function assemblePrograms(contributions: readonly UnassembledProgramIR[]): Progr
       };
     }
     const environment = members[0]!.environment;
-    const roots = members.flatMap(({ feature, ui }) =>
-      ui?.root ? [{ feature, component: ui.root }] : [],
-    );
-    if (roots.length > 1) {
-      throw new SystemDiagnostic(
-        `Program ${JSON.stringify(name)} declares multiple UI roots: ${roots
-          .map(({ feature, component }) => `${feature}.${component}`)
-          .join(", ")}.`,
-        members[1]!.span,
-      );
-    }
     return {
       id: `program/${name}`,
       name,
@@ -977,60 +872,18 @@ function assemblePrograms(contributions: readonly UnassembledProgramIR[]): Progr
           name: _name,
           logicalName: _logicalName,
           environment: _environment,
-          interface: _interface,
+          interface: interface_,
           instance: _instance,
-          app: _app,
+          app,
+          extensionSources: _extensionSources,
           ...member
-        }) => member,
+        }) => ({
+          ...member,
+          ...(member.apps ? {} : app && !interface_ ? { apps: [app] } : {}),
+        }),
       ),
-      ...(roots[0] ? { ui: { root: roots[0] } } : {}),
     };
   });
-}
-
-function presentationImplementationSources(
-  program: ts.Program,
-  checker: ts.TypeChecker,
-  interfaceImplementation: ts.ObjectLiteralExpression,
-  root: string,
-): ReadonlySet<string> {
-  const presentation = objectMember(checker, interfaceImplementation, "presentation");
-  if (!presentation) return new Set();
-  return transitiveLocalSources(
-    program,
-    checker,
-    root,
-    expressionDeclarations(checker, presentation).map((declaration) => declaration.getSourceFile()),
-  );
-}
-
-function compileInterfacePresentation(
-  program: ts.Program,
-  root: string,
-  interfacePath: string,
-  path: string,
-): InterfacePresentationIR {
-  const implementation = program.getSourceFile(path);
-  if (!implementation) throw new Error(`Cannot read Presentation source ${path}.`);
-  const compiled = compilePresentationSource(implementation.text, relative(root, path)).ir;
-  return Object.freeze({ interface: interfacePath, ...compiled });
-}
-
-function presentationCompilationUnit(
-  id: string,
-  path: string,
-  presentation: InterfacePresentationIR,
-): PresentationCompilationUnit {
-  return Object.freeze({
-    id,
-    hash: semanticHash(presentation),
-    sourceFiles: Object.freeze([canonicalSourceFile(path)]),
-    presentation,
-  });
-}
-
-function presentationUnitId(interfacePath: string, path: string): string {
-  return `presentation/${interfacePath}/${canonicalSourceFile(path)}`;
 }
 
 function semanticHash(value: unknown): string {
@@ -1143,17 +996,10 @@ function collectSystemOutputSources(input: {
       program.id,
       new Set([
         canonicalSourceFile(input.entry),
+        ...(program.interface ? (input.interfaceSourceFiles.get(program.interface) ?? []) : []),
         ...program.contributions.flatMap(({ feature }) => [
           ...(input.featureSourceFiles.get(feature) ?? []),
         ]),
-        ...transitiveLocalSources(
-          input.program,
-          input.checker,
-          input.root,
-          program.contributions.flatMap(({ implementation }) =>
-            programImplementationSourceFiles(implementation),
-          ),
-        ),
       ]),
     );
   }
@@ -1182,12 +1028,307 @@ function collectSystemOutputSources(input: {
   );
 }
 
-function programImplementationSourceFiles(
-  implementation: ProgramContributionIR["implementation"],
-): readonly string[] {
-  if (implementation.kind === "none") return [];
-  if (implementation.kind === "source") return [implementation.span.file];
-  return [implementation.start.span.file, ...implementation.functions.map(({ span }) => span.file)];
+function collectSystemFeatureCatalog(
+  checker: ts.TypeChecker,
+  values: ts.ObjectLiteralExpression,
+): ReadonlyMap<string, SystemFeatureSource> {
+  const catalog = new Map<string, SystemFeatureSource>();
+  const contracts = checker.getTypeAtLocation(values);
+  for (const symbol of sortedSymbols(contracts.getProperties())) {
+    const name = symbol.getName();
+    const implementation = resolveObjectMember(checker, values, name);
+    if (!implementation) {
+      throw diagnostic(values, `System Feature ${JSON.stringify(name)} has no implementation.`);
+    }
+    const location = symbol.valueDeclaration ?? implementation;
+    const valueType = checker.getTypeOfSymbolAtLocation(symbol, location);
+    const contract = retainedFeatureContract(checker, valueType, location);
+    const staticValue = resolveStaticValue(
+      checker,
+      { node: implementation, bindings: new Map(), types: new Map() },
+      new Set(),
+    ) ?? { node: implementation, bindings: new Map(), types: new Map() };
+    catalog.set(name, { name, contract, implementation: staticValue });
+  }
+  return catalog;
+}
+
+function extractApplications(input: {
+  program: ts.Program;
+  checker: ts.TypeChecker;
+  values: ts.ObjectLiteralExpression;
+  featureCatalog: ReadonlyMap<string, SystemFeatureSource>;
+  usedFeatures: Set<string>;
+  features: FeatureIR[];
+  featureSourceFiles: Map<string, ReadonlySet<string>>;
+  programs: UnassembledProgramIR[];
+  interfaces: InterfaceSource[];
+  applications: AppSource[];
+  extensions: readonly SourceCompilerExtension[];
+  root: string;
+  systemSource: string;
+  incremental: IncrementalFeatureExtraction;
+}): void {
+  const {
+    program,
+    checker,
+    values,
+    featureCatalog,
+    usedFeatures,
+    features,
+    featureSourceFiles,
+    programs,
+    interfaces,
+    applications,
+    extensions,
+    root,
+    systemSource,
+    incremental,
+  } = input;
+  const applicationValues = checker.getTypeAtLocation(values);
+  for (const symbol of sortedSymbols(applicationValues.getProperties())) {
+    const path = symbol.getName();
+    const implementation = resolveObjectMember(checker, values, path);
+    if (!implementation) {
+      throw diagnostic(values, `Application ${JSON.stringify(path)} has no implementation.`);
+    }
+    const location = symbol.valueDeclaration ?? implementation;
+    const valueType = checker.getTypeOfSymbolAtLocation(symbol, location);
+    const contract = retainedApplicationCompilerContract(checker, valueType, location);
+    const staticApplication = resolveStaticValue(
+      checker,
+      { node: implementation, bindings: new Map(), types: new Map() },
+      new Set(),
+    ) ?? { node: implementation, bindings: new Map(), types: new Map() };
+    const applicationValue = staticObjectValue(checker, staticApplication);
+    if (!applicationValue) {
+      throw diagnostic(
+        implementation,
+        `Application ${JSON.stringify(path)} must expose compiler-readable metadata.`,
+      );
+    }
+    const sourceFiles = new Set<string>([
+      canonicalSourceFile(systemSource),
+      canonicalSourceFile(applicationValue.getSourceFile().fileName),
+    ]);
+    for (const declaration of expressionDeclarations(checker, implementation)) {
+      const source = declaration.getSourceFile();
+      if (!source.isDeclarationFile && inside(root, source.fileName)) {
+        sourceFiles.add(canonicalSourceFile(source.fileName));
+      }
+    }
+    const required = propertyType(checker, contract, "Features", location);
+    const implementations = new Map<string, StaticValue>();
+    const paths = new Map<string, string>();
+    if (required?.getProperties().length) {
+      for (const feature of sortedSymbols(required.getProperties())) {
+        const role = feature.getName();
+        const roleLocation = feature.valueDeclaration ?? location;
+        const roleContract = checker.getTypeOfSymbolAtLocation(feature, roleLocation);
+        const matches = [...featureCatalog.values()].filter((candidate) =>
+          equivalentType(checker, roleContract, candidate.contract),
+        );
+        if (!matches.length) {
+          throw diagnostic(
+            roleLocation,
+            `Application ${JSON.stringify(path)} Feature role ${JSON.stringify(role)} ` +
+              "has no exact System Feature implementation.",
+          );
+        }
+        if (matches.length > 1) {
+          throw diagnostic(
+            roleLocation,
+            `Application ${JSON.stringify(path)} Feature role ${JSON.stringify(role)} is ` +
+              `ambiguous between System Features ${matches
+                .map(({ name }) => JSON.stringify(name))
+                .join(", ")}. Retain a semantic instance discriminator in the Feature contract.`,
+          );
+        }
+        const selected = matches[0]!;
+        usedFeatures.add(selected.name);
+        implementations.set(role, selected.implementation);
+        paths.set(role, selected.name);
+      }
+    }
+    const featureBindings = Object.freeze(
+      Object.fromEntries([...paths].sort(([left], [right]) => left.localeCompare(right))),
+    );
+    const localInterfaces = extractApplicationInterfaces({
+      program,
+      checker,
+      contract,
+      implementation: applicationValue,
+      staticApplication,
+      location,
+      path,
+      features: featureBindings,
+      interfaces,
+      extensions,
+      root,
+      sourceFiles,
+    });
+    if (required?.getProperties().length) {
+      extractFeatures(
+        program,
+        checker,
+        required,
+        undefined,
+        "",
+        features,
+        featureSourceFiles,
+        programs,
+        interfaces,
+        extensions,
+        root,
+        new Set([canonicalSourceFile(systemSource)]),
+        location,
+        undefined,
+        path,
+        localInterfaces,
+        false,
+        undefined,
+        incremental,
+        undefined,
+        implementations,
+        paths,
+      );
+    }
+    const declaredApplication =
+      propertyType(checker, contract, "Application", location) ?? contract;
+    const applicationName = literalPropertyOptional(checker, declaredApplication, "Name", location);
+    applications.push({ path, ...(applicationName ? { name: applicationName } : {}) });
+  }
+}
+
+function extractApplicationInterfaces(input: {
+  program: ts.Program;
+  checker: ts.TypeChecker;
+  contract: ts.Type;
+  implementation: ts.ObjectLiteralExpression;
+  staticApplication: StaticValue;
+  location: ts.Node;
+  path: string;
+  features: Readonly<Record<string, string>>;
+  interfaces: InterfaceSource[];
+  extensions: readonly SourceCompilerExtension[];
+  root: string;
+  sourceFiles: Set<string>;
+}): readonly InterfaceOwner[] {
+  const {
+    program,
+    checker,
+    contract,
+    implementation,
+    staticApplication,
+    location,
+    path,
+    features,
+    interfaces,
+    extensions,
+    root,
+    sourceFiles,
+  } = input;
+  const contracts = propertyType(checker, contract, "Interfaces", location);
+  if (!contracts) return [];
+  const staticInterfaces = resolveStaticMember(checker, staticApplication, "interfaces");
+  const values = objectExpression(checker, objectMember(checker, implementation, "interfaces"));
+  if (!values) {
+    throw diagnostic(
+      implementation,
+      `Application ${JSON.stringify(path)} needs compiler-readable interfaces.`,
+    );
+  }
+  const owners: InterfaceOwner[] = [];
+  for (const symbol of sortedSymbols(contracts.getProperties())) {
+    const name = symbol.getName();
+    const interfacePath = `${path}.${name}`;
+    const interfaceLocation = symbol.valueDeclaration ?? location;
+    const interfaceContract = checker.getTypeOfSymbolAtLocation(symbol, interfaceLocation);
+    const marker = propertyType(checker, interfaceContract, "Interface", interfaceLocation);
+    const platformContract = marker
+      ? propertyType(checker, marker, "Platform", interfaceLocation)
+      : undefined;
+    if (!platformContract) {
+      throw diagnostic(
+        interfaceLocation,
+        `Interface ${JSON.stringify(interfacePath)} has no Platform.`,
+      );
+    }
+    const platform = literalProperty(checker, platformContract, "Name", interfaceLocation);
+    if (owners.some((candidate) => candidate.platform === platform)) {
+      throw diagnostic(
+        interfaceLocation,
+        `Application ${JSON.stringify(path)} has more than one ${JSON.stringify(platform)} interface.`,
+      );
+    }
+    const value = resolveObjectMember(checker, values, name);
+    const staticInterface = staticInterfaces
+      ? resolveStaticMember(checker, staticInterfaces, name)
+      : undefined;
+    const interfaceValue =
+      staticObjectValue(checker, staticInterface) ??
+      (value ? objectExpression(checker, value) : undefined);
+    if (!interfaceValue) {
+      throw diagnostic(
+        value ?? values,
+        `Interface ${JSON.stringify(interfacePath)} must expose compiler-readable metadata.`,
+      );
+    }
+    const source = interfaceValue.getSourceFile();
+    if (!source.isDeclarationFile && inside(root, source.fileName)) {
+      sourceFiles.add(canonicalSourceFile(source.fileName));
+    }
+    const owner = { path: interfacePath, platform };
+    owners.push(owner);
+    const dialect = dialectField(extensions, "interface", platform, {
+      checker,
+      source: sourceCompilerAPI(program, checker, staticInterface, root),
+      contract: interfaceContract,
+      implementation: interfaceValue,
+      location: value ?? interfaceLocation,
+      path: interfacePath,
+      root,
+      app: path,
+      platform,
+    });
+    interfaces.push({
+      path: interfacePath,
+      app: path,
+      platform,
+      features,
+      sourceFiles: Object.freeze([...sourceFiles].sort()),
+      ...(dialect.extensionSources ? { extensionSources: dialect.extensionSources } : {}),
+      extensions: dialect.extensions,
+    });
+  }
+  return owners;
+}
+
+function equivalentType(checker: ts.TypeChecker, left: ts.Type, right: ts.Type): boolean {
+  return checker.isTypeAssignableTo(left, right) && checker.isTypeAssignableTo(right, left);
+}
+
+function deduplicateFeatures(values: readonly FeatureIR[]): FeatureIR[] {
+  const features = new Map<string, FeatureIR>();
+  for (const value of values) {
+    const current = features.get(value.id);
+    if (!current) {
+      features.set(value.id, value);
+      continue;
+    }
+    const comparable = (feature: FeatureIR) => ({
+      ...feature,
+      programs: [],
+    });
+    if (JSON.stringify(comparable(current)) !== JSON.stringify(comparable(value))) {
+      throw new Error(`System Feature ${JSON.stringify(value.path)} has conflicting projections.`);
+    }
+    features.set(value.id, {
+      ...current,
+      programs: [...new Set([...current.programs, ...value.programs])].sort(),
+    });
+  }
+  return [...features.values()];
 }
 
 function canonicalSourceFile(path: string): string {
@@ -1241,14 +1382,19 @@ function extractFeatures(
   contractsAreFeatureValues = false,
   ownerStatic?: StaticValue,
   incremental?: IncrementalFeatureExtraction,
+  selectedNames?: ReadonlySet<string>,
+  implementations?: ReadonlyMap<string, StaticValue>,
+  canonicalPaths?: ReadonlyMap<string, string>,
 ): void {
   const staticChildren = ownerStatic
     ? resolveStaticMember(checker, ownerStatic, "features")
     : undefined;
   for (const symbol of sortedSymbols(contracts.getProperties())) {
     const name = symbol.getName();
-    const path = parent ? `${parent}.${name}` : name;
-    const unitId = `feature/${path}`;
+    if (selectedNames && !selectedNames.has(name)) continue;
+    const segment = canonicalPaths?.get(name) ?? name;
+    const path = parent ? `${parent}.${segment}` : segment;
+    const unitId = app ? `application/${app}/feature/${path}` : `feature/${path}`;
     const previousUnit = parent ? undefined : incremental?.previous.get(unitId);
     if (
       previousUnit &&
@@ -1277,6 +1423,7 @@ function extractFeatures(
       ? retainedFeatureContract(checker, symbolType, location)
       : symbolType;
     const inherited =
+      implementations?.get(name) ??
       (staticChildren ? resolveStaticMember(checker, staticChildren, name) : undefined) ??
       (owner ? resolveFeatureChild(checker, owner, name) : undefined);
     const value = values
@@ -1284,7 +1431,7 @@ function extractFeatures(
       : inherited && ts.isExpression(inherited.node)
         ? inherited.node
         : undefined;
-    if ((values || owner) && !value)
+    if ((values || owner || implementations) && !value)
       throw diagnostic(
         values ?? owner ?? at,
         `Feature ${JSON.stringify(path)} has no implementation.`,
@@ -1314,109 +1461,6 @@ function extractFeatures(
       }
     }
     const featureLocation = value ?? location;
-    const isApp = booleanLiteralProperty(checker, contract, "App", location) === true;
-    if (isApp && app) {
-      throw diagnostic(
-        featureLocation,
-        `Application ${JSON.stringify(path)} cannot be nested in another Application.`,
-      );
-    }
-    const ownedApp = isApp ? path : app;
-    let ownedInterfaces = interfaceOwners;
-    const appInterfaceContracts = isApp
-      ? propertyType(checker, contract, "Interfaces", location)
-      : undefined;
-    if (isApp && appInterfaceContracts) {
-      const staticInterfaces = staticFeature
-        ? resolveStaticMember(checker, staticFeature, "interfaces")
-        : undefined;
-      const appInterfaceValues = objectExpression(
-        checker,
-        objectMember(checker, featureValue, "interfaces"),
-      );
-      if (featureValue && !appInterfaceValues) {
-        throw diagnostic(featureValue, `Application ${JSON.stringify(path)} needs interfaces.`);
-      }
-      const localInterfaces: InterfaceOwner[] = [];
-      for (const interfaceSymbol of sortedSymbols(appInterfaceContracts.getProperties())) {
-        const interfaceName = interfaceSymbol.getName();
-        const interfacePath = `${path}.${interfaceName}`;
-        const interfaceLocation = interfaceSymbol.valueDeclaration ?? featureLocation;
-        const interfaceContract = checker.getTypeOfSymbolAtLocation(
-          interfaceSymbol,
-          interfaceLocation,
-        );
-        const interfaceMarker = propertyType(
-          checker,
-          interfaceContract,
-          "Interface",
-          interfaceLocation,
-        );
-        const platformContract = interfaceMarker
-          ? propertyType(checker, interfaceMarker, "Platform", interfaceLocation)
-          : undefined;
-        if (!platformContract) {
-          throw diagnostic(
-            interfaceLocation,
-            `Interface ${JSON.stringify(interfacePath)} has no Platform.`,
-          );
-        }
-        const platform = literalProperty(checker, platformContract, "Name", interfaceLocation);
-        if (localInterfaces.some((candidate) => candidate.platform === platform)) {
-          throw diagnostic(
-            interfaceLocation,
-            `Application ${JSON.stringify(path)} has more than one ${JSON.stringify(platform)} interface.`,
-          );
-        }
-        const implementation = appInterfaceValues
-          ? resolveObjectMember(checker, appInterfaceValues, interfaceName)
-          : undefined;
-        const staticInterface = staticInterfaces
-          ? resolveStaticMember(checker, staticInterfaces, interfaceName)
-          : undefined;
-        const interfaceValue =
-          staticObjectValue(checker, staticInterface) ??
-          (implementation ? objectExpression(checker, implementation) : undefined);
-        if (appInterfaceValues && !interfaceValue) {
-          throw diagnostic(
-            implementation ?? appInterfaceValues,
-            `Interface ${JSON.stringify(interfacePath)} must expose compiler-readable metadata.`,
-          );
-        }
-        if (interfaceValue) {
-          const source = interfaceValue.getSourceFile();
-          if (!source.isDeclarationFile && inside(root, source.fileName)) {
-            sourceFiles.add(canonicalSourceFile(source.fileName));
-          }
-        }
-        const interfaceOwner = { path: interfacePath, platform };
-        localInterfaces.push(interfaceOwner);
-        interfaces.push({
-          path: interfacePath,
-          app: path,
-          platform,
-          presentationSources: interfaceValue
-            ? Object.freeze(
-                [
-                  ...presentationImplementationSources(program, checker, interfaceValue, root),
-                ].sort(),
-              )
-            : Object.freeze([]),
-          ...extensionField(extensions, "interface", {
-            checker,
-            source: sourceCompilerAPI(checker, staticInterface),
-            contract: interfaceContract,
-            implementation: interfaceValue,
-            location: implementation ?? interfaceLocation,
-            path: interfacePath,
-            root,
-            app: path,
-            platform,
-          }),
-        });
-      }
-      ownedInterfaces = localInterfaces;
-    }
     const programContracts = propertyType(checker, contract, "Programs", location);
     const programValues = objectExpression(
       checker,
@@ -1466,10 +1510,8 @@ function extractFeatures(
             ? resolveStaticMember(checker, expandedPrograms, programName)
             : undefined) ??
           (value ? resolveFeatureProgram(checker, value, programName) : undefined);
-        const expandedStart = expandedProgram
-          ? resolveStaticMember(checker, expandedProgram, "start")
-          : undefined;
         const extracted = extractProgram(
+          program,
           checker,
           programContract,
           programValue,
@@ -1478,10 +1520,9 @@ function extractFeatures(
           featureLocation,
           Boolean((value && !featureValue) || (implementation && !programValue)),
           expandedProgram,
-          expandedStart,
           extensions,
           root,
-          ownedInterfaces,
+          interfaceOwners,
           staticValueIdentity(
             staticFeature ?? {
               node: value ?? featureLocation,
@@ -1489,7 +1530,7 @@ function extractFeatures(
               types: new Map(),
             },
           ),
-          ownedApp,
+          app,
         );
         programs.push(extracted);
         programIds.push(`program/${extracted.name}`);
@@ -1519,8 +1560,8 @@ function extractFeatures(
         sourceFiles,
         featureLocation,
         value,
-        ownedApp,
-        ownedInterfaces,
+        app,
+        interfaceOwners,
         false,
         staticFeature,
         incremental,
@@ -1530,14 +1571,12 @@ function extractFeatures(
     features.push({
       id: `feature/${path}`,
       path,
-      kind: isApp ? "app" : "feature",
-      ...(ownedApp ? { app: ownedApp } : {}),
       children: childIds.sort(),
       programs: [...new Set(programIds)].sort(),
       ...(providers.length ? { providers } : {}),
       ...extensionField(extensions, "feature", {
         checker,
-        source: sourceCompilerAPI(checker, staticFeature),
+        source: sourceCompilerAPI(program, checker, staticFeature),
         contract,
         implementation: featureValue,
         location: featureLocation,
@@ -1548,6 +1587,7 @@ function extractFeatures(
     if (incremental) {
       const unit = createFeatureCompilationUnit({
         id: unitId,
+        path,
         entry: incremental.entry,
         features: [features.at(-1)!],
         featureSourceFiles,
@@ -1585,6 +1625,7 @@ function appendFeatureCompilationUnit(
 
 function createFeatureCompilationUnit(input: {
   id: string;
+  path: string;
   entry: string;
   features: readonly FeatureIR[];
   featureSourceFiles: ReadonlyMap<string, ReadonlySet<string>>;
@@ -1596,7 +1637,7 @@ function createFeatureCompilationUnit(input: {
   root: string;
   semanticSources: Map<string, ReadonlySet<string>>;
 }): FeatureCompilationUnit {
-  const path = input.id.slice("feature/".length);
+  const path = input.path;
   const directFeatureSourceFiles = Object.fromEntries(
     [...input.featureSourceFiles]
       .filter(([candidate]) => candidate === path)
@@ -1612,10 +1653,11 @@ function createFeatureCompilationUnit(input: {
   const direct = new Set<string>([
     input.entry,
     ...Object.values(featureSourceFiles).flat(),
-    ...input.programs.flatMap(({ implementation }) =>
-      programImplementationSourceFiles(implementation),
-    ),
-    ...input.interfaces.flatMap(({ presentationSources }) => presentationSources),
+    ...input.programs.flatMap(({ extensionSources }) => extensionSources ?? []),
+    ...input.interfaces.flatMap(({ extensionSources, sourceFiles }) => [
+      ...(sourceFiles ?? []),
+      ...(extensionSources ?? []),
+    ]),
   ]);
   const semantic = new Set<string>();
   for (const source of direct) {
@@ -1792,6 +1834,7 @@ function staticObjectValue(
 }
 
 function extractProgram(
+  program: ts.Program,
   checker: ts.TypeChecker,
   contract: ts.Type,
   value: ts.ObjectLiteralExpression | undefined,
@@ -1800,7 +1843,6 @@ function extractProgram(
   at: ts.Node = value!,
   factory = false,
   expandedProgram?: StaticValue,
-  expandedStart?: StaticValue,
   extensions: readonly SourceCompilerExtension[] = [],
   sourceRoot = dirname(at.getSourceFile().fileName),
   interfaceOwners: readonly InterfaceOwner[] = [],
@@ -1822,32 +1864,11 @@ function extractProgram(
     interfaceOwner && interfaceOwner.platform === platform
       ? `${interfaceOwner.path}.${name}`
       : name;
-  const uiContract = propertyType(checker, platformContract, "UI", location);
-  const ui = uiContract ? literalProperty(checker, uiContract, "Name", location) : undefined;
-  const state = propertyType(checker, contract, "State", location);
-  const actions = propertyType(checker, contract, "Actions", location);
-  const components = propertyType(checker, contract, "Components", location);
   const expandedValue =
     expandedProgram && ts.isExpression(expandedProgram.node)
       ? objectExpression(checker, expandedProgram.node)
       : undefined;
-  if (!value && !expandedValue && components?.getProperties().length) {
-    throw diagnostic(
-      location,
-      `UI Program ${JSON.stringify(name)} with Components must expose compiler-readable Feature metadata.`,
-    );
-  }
   const readableValue = value ?? expandedValue;
-  const componentValues = objectExpression(
-    checker,
-    objectMember(checker, readableValue, "components"),
-  );
-  const directStart = value ? objectMemberDeclaration(value, "start") : undefined;
-  const start =
-    directStart && (isFunctionImplementation(directStart) || functionFromMember(directStart))
-      ? directStart
-      : functionNode(expandedStart?.node);
-  const root = stringMember(checker, readableValue, "root");
   const requires = dependencyList(
     checker,
     propertyType(checker, contract, "Requires", location),
@@ -1858,16 +1879,6 @@ function extractProgram(
     propertyType(checker, contract, "Provides", location),
     location,
   );
-  const implementation = programImplementation(
-    checker,
-    start,
-    Boolean(state || actions || components),
-    factory && !expandedProgram,
-    readableValue ?? location,
-    provides,
-    expandedStart?.bindings,
-    expandedStart?.types,
-  );
   return {
     id: `feature/${feature}/program/${name}`,
     feature,
@@ -1875,24 +1886,13 @@ function extractProgram(
     ...(app ? { app } : {}),
     name: concreteName,
     logicalName: name,
-    environment: { name: environmentName, platform, ...(ui ? { ui } : {}) },
+    environment: { name: environmentName, platform },
     ...(interfaceOwner ? { interface: interfaceOwner.path } : {}),
     requires,
     provides,
-    ...(state || actions || components
-      ? {
-          ui: {
-            state: state ? lowerType(checker, state, location) : emptyRecord(),
-            actions: sortedSymbols(actions?.getProperties() ?? []).map((item) => item.getName()),
-            components: componentList(checker, components, componentValues, location),
-            ...(root ? { root } : {}),
-          },
-        }
-      : {}),
-    implementation,
-    ...extensionField(extensions, "program", {
+    ...dialectField(extensions, "program", platform, {
       checker,
-      source: sourceCompilerAPI(checker, expandedProgram),
+      source: sourceCompilerAPI(program, checker, expandedProgram, sourceRoot),
       contract,
       implementation: readableValue,
       location,
@@ -1901,74 +1901,23 @@ function extractProgram(
       ...(app ? { app } : {}),
       feature,
       ...(interfaceOwner ? { interface: interfaceOwner.path } : {}),
+      implementationOrigin:
+        factory && !expandedProgram ? "unresolved" : value ? "direct" : "expanded",
       name,
+      platform,
     }),
     span: spanOf(location),
   };
 }
 
-function programImplementation(
-  checker: ts.TypeChecker,
-  start: ts.ObjectLiteralElementLike | ts.FunctionLikeDeclaration | undefined,
-  ui: boolean,
-  factory: boolean,
-  at: ts.Node,
-  provides: readonly DependencyIR[],
-  bindings: ReadonlyMap<ts.Symbol, StaticValue> = new Map(),
-  types: ReadonlyMap<ts.Type, ts.Type> = new Map(),
-): ProgramContributionIR["implementation"] {
-  if (ui) return { kind: "source", reason: "platform-ui", span: spanOf(at) };
-  if (factory) {
-    return {
-      kind: "source",
-      reason: "host-source",
-      diagnostic: {
-        message: "Feature factory output could not be expanded by the portable frontend.",
-        span: spanOf(at),
-      },
-      span: spanOf(at),
-    };
-  }
-  if (!start) return { kind: "none" };
-  const lowering = createPortableLowering(
-    checker,
-    bindings,
-    types,
-    provides.map(({ name }) => name),
-  );
-  try {
-    const portableStart = lowerStartFunction(lowering, start);
-    const functions = [...lowering.functions.values()].sort((left, right) =>
-      left.id.localeCompare(right.id),
-    );
-    validatePortableLocals(portableStart);
-    functions.forEach(validatePortableLocals);
-    return {
-      kind: "portable",
-      start: portableStart,
-      functions,
-    };
-  } catch (error) {
-    if (
-      error instanceof SystemDiagnostic &&
-      /Unsupported portable (expression|statement)/.test(error.message)
-    ) {
-      return {
-        kind: "source",
-        reason: "host-source",
-        diagnostic: { message: error.message, span: error.span },
-        span: spanOf(start),
-      };
-    }
-    throw error;
-  }
-}
-
-function validatePortableLocals(function_: FunctionIR): void {
+function validatePortableLocals(
+  function_: FunctionIR,
+  contextBindings: readonly string[] = [],
+): void {
   const initial = new Set([
     ...function_.captures.map(({ name }) => name),
     ...function_.parameters.map(({ name }) => name),
-    ...(function_.id === "start" ? ["dependencies", "@dependencies"] : []),
+    ...contextBindings,
   ]);
   const expression = (value: ExpressionIR, names: ReadonlySet<string>): void => {
     switch (value.kind) {
@@ -2227,59 +2176,6 @@ function dependencyList(
         : {}),
     };
   });
-}
-
-function componentList(
-  checker: ts.TypeChecker,
-  type: ts.Type | undefined,
-  values: ts.ObjectLiteralExpression | undefined,
-  at: ts.Node,
-): ComponentIR[] {
-  return sortedSymbols(type?.getProperties() ?? []).map((symbol) => {
-    const location = symbol.valueDeclaration ?? at;
-    const component = checker.getTypeOfSymbolAtLocation(symbol, location);
-    const props = propertyType(checker, component, "Props", location);
-    const state = propertyType(checker, component, "State", location);
-    const actions = propertyType(checker, component, "Actions", location);
-    const elements = propertyType(checker, component, "Elements", location);
-    const implementation = values
-      ? objectExpression(checker, resolveObjectMember(checker, values, symbol.getName()))
-      : undefined;
-    return {
-      name: symbol.getName(),
-      propCallbacks: sortedSymbols(props?.getProperties() ?? [])
-        .filter(
-          (field) =>
-            checker
-              .getNonNullableType(
-                checker.getTypeOfSymbolAtLocation(field, field.valueDeclaration ?? location),
-              )
-              .getCallSignatures().length,
-        )
-        .map((field) => field.getName()),
-      state: state ? lowerType(checker, state, location) : emptyRecord(),
-      actions: sortedSymbols(actions?.getProperties() ?? []).map((action) => action.getName()),
-      elements: sortedSymbols(elements?.getProperties() ?? []).map((element) => ({
-        name: element.getName(),
-        element: literalType(
-          checker.getTypeOfSymbolAtLocation(element, element.valueDeclaration ?? location),
-          element.valueDeclaration ?? location,
-          `Component Element ${JSON.stringify(element.getName())}`,
-        ),
-      })),
-      implementation: {
-        state: Boolean(implementation && objectMemberDeclaration(implementation, "state")),
-        actions: Boolean(implementation && objectMemberDeclaration(implementation, "actions")),
-        mount: Boolean(implementation && objectMemberDeclaration(implementation, "mount")),
-        view: Boolean(implementation && objectMemberDeclaration(implementation, "view")),
-      },
-    };
-  });
-}
-
-function literalType(type: ts.Type, at: ts.Node, label: string): string {
-  if (type.flags & ts.TypeFlags.StringLiteral) return (type as ts.StringLiteralType).value;
-  throw diagnostic(at, `${label} must be a string literal.`);
 }
 
 function lowerType(
@@ -2602,33 +2498,6 @@ function createPortableLowering(
     staticBindings: flattenStaticBindings(staticBindings),
     providedNames,
   };
-}
-
-function lowerStartFunction(
-  lowering: PortableLowering,
-  node: ts.ObjectLiteralElementLike | ts.FunctionLikeDeclaration,
-): FunctionIR {
-  const functionLike = isFunctionImplementation(node) ? node : functionFromMember(node);
-  if (!functionLike?.body)
-    throw diagnostic(node, "Program start must have a statically known body.");
-  const providedBinding = contextBindingSymbol(
-    lowering.checker,
-    functionLike.parameters[0],
-    "provides",
-  );
-  return lowerFunction(
-    {
-      ...lowering,
-      ...(providedBinding ? { providedBinding } : {}),
-    },
-    functionLike,
-    {
-      id: "start",
-      name: "start",
-      dependenciesName: dependencyBinding(functionLike.parameters[0]) ?? "@dependencies",
-      omitFirstParameter: true,
-    },
-  );
 }
 
 function lowerFunction(
@@ -4683,10 +4552,17 @@ function fieldValueType(type: ts.Type, optional: boolean): ts.Type {
 }
 
 function dependencyBinding(parameter: ts.ParameterDeclaration | undefined): string | undefined {
+  return contextBindingName(parameter, "dependencies");
+}
+
+function contextBindingName(
+  parameter: ts.ParameterDeclaration | undefined,
+  name: string,
+): string | undefined {
   if (!parameter || !ts.isObjectBindingPattern(parameter.name)) return undefined;
   for (const binding of parameter.name.elements) {
     const source = binding.propertyName ? memberName(binding) : memberName(binding);
-    if (source === "dependencies" && ts.isIdentifier(binding.name)) return binding.name.text;
+    if (source === name && ts.isIdentifier(binding.name)) return binding.name.text;
   }
   return undefined;
 }
@@ -4776,17 +4652,6 @@ function propertyType(
     : undefined;
 }
 
-function booleanLiteralProperty(
-  checker: ts.TypeChecker,
-  owner: ts.Type,
-  name: string,
-  at: ts.Node,
-): boolean | undefined {
-  const value = propertyType(checker, owner, name, at);
-  if (!value || !(value.flags & ts.TypeFlags.BooleanLiteral)) return undefined;
-  return checker.typeToString(value, at) === "true";
-}
-
 function retainedFeatureContract(checker: ts.TypeChecker, feature: ts.Type, at: ts.Node): ts.Type {
   for (const symbol of feature.getProperties()) {
     const retained = symbol.declarations?.some((declaration) => {
@@ -4804,6 +4669,30 @@ function retainedFeatureContract(checker: ts.TypeChecker, feature: ts.Type, at: 
   throw diagnostic(
     at,
     "System Features must be created by a typed Feature or reusable Feature factory.",
+  );
+}
+
+function retainedApplicationCompilerContract(
+  checker: ts.TypeChecker,
+  application: ts.Type,
+  at: ts.Node,
+): ts.Type {
+  for (const symbol of application.getProperties()) {
+    const retained = symbol.declarations?.some((declaration) => {
+      if (!ts.isPropertySignature(declaration) || !ts.isComputedPropertyName(declaration.name)) {
+        return false;
+      }
+      return (
+        ts.isIdentifier(declaration.name.expression) &&
+        declaration.name.expression.text === "applicationContract"
+      );
+    });
+    if (!retained) continue;
+    return fieldValueType(checker.getTypeOfSymbolAtLocation(symbol, at), true);
+  }
+  throw diagnostic(
+    at,
+    "System Applications must be created by createApplication with an exact contract.",
   );
 }
 
@@ -4830,6 +4719,19 @@ function literalPropertyOptional(
   if (!type) return undefined;
   if (type.flags & ts.TypeFlags.StringLiteral) return (type as ts.StringLiteralType).value;
   throw diagnostic(at, `${name} must be a string literal.`);
+}
+
+function numberLiteralProperty(
+  checker: ts.TypeChecker,
+  owner: ts.Type,
+  name: string,
+  at: ts.Node,
+): number {
+  const type = propertyType(checker, owner, name, at);
+  if (type && type.flags & ts.TypeFlags.NumberLiteral) {
+    return (type as ts.NumberLiteralType).value;
+  }
+  throw diagnostic(at, `${name} must be a number literal.`);
 }
 
 function primitive(name: "boolean" | "null" | "number" | "string" | "void"): TypeIR {
@@ -5416,11 +5318,6 @@ function staticFunctionResult(
   return undefined;
 }
 
-function functionNode(node: ts.Node | undefined): ts.FunctionLikeDeclaration | undefined {
-  if (!node) return undefined;
-  return isFunctionImplementation(node) ? node : undefined;
-}
-
 function isFunctionImplementation(node: ts.Node): node is ts.FunctionLikeDeclaration {
   return (
     ts.isArrowFunction(node) ||
@@ -5615,12 +5512,8 @@ function readCompilerOptions(configuration: string): ts.CompilerOptions {
   return parsed.options;
 }
 
-function normalizeSourceFiles(ir: SystemIR, root: string): SystemIR {
-  const normalizeSpan = (span: SourceSpan): SourceSpan => ({
-    ...span,
-    file: relative(root, span.file).replaceAll("\\", "/"),
-  });
-  const normalizeFunctionId = (id: string): string => {
+function normalizePortableFunction(function_: FunctionIR, root: string): FunctionIR {
+  const normalizeIdentity = (id: string): string => {
     const prefixEnd = id.indexOf("/");
     const pathEnd = id.indexOf("#", prefixEnd + 1);
     if (prefixEnd >= 0 && pathEnd > prefixEnd) {
@@ -5634,257 +5527,46 @@ function normalizeSourceFiles(ir: SystemIR, root: string): SystemIR {
     if (!match) return id;
     return `${match[1]}/${relative(root, match[2]!).replaceAll("\\", "/")}:${match[3]}:${match[4]}${match[5] ?? ""}`;
   };
-  const normalizeExpression = (expression: ExpressionIR): ExpressionIR => {
-    const span = normalizeSpan(expression.span);
-    switch (expression.kind) {
-      case "array":
-        return { ...expression, values: expression.values.map(normalizeExpression), span };
-      case "error":
-        return {
-          ...expression,
-          arguments: expression.arguments.map(normalizeExpression),
-          fields: expression.fields.map((field) => ({
-            ...field,
-            value: normalizeExpression(field.value),
-          })),
-          span,
-        };
-      case "record":
-        return {
-          ...expression,
-          fields: expression.fields.map((field) => ({
-            ...field,
-            value: normalizeExpression(field.value),
-          })),
-          span,
-        };
-      case "record-merge":
-        return {
-          ...expression,
-          entries: expression.entries.map((entry) => ({
-            ...entry,
-            value: normalizeExpression(entry.value),
-          })),
-          span,
-        };
-      case "property":
-      case "unary":
-        return { ...expression, value: normalizeExpression(expression.value), span };
-      case "index":
-        return {
-          ...expression,
-          value: normalizeExpression(expression.value),
-          index: normalizeExpression(expression.index),
-          span,
-        };
-      case "binary":
-        return {
-          ...expression,
-          left: normalizeExpression(expression.left),
-          right: normalizeExpression(expression.right),
-          span,
-        };
-      case "conditional":
-        return {
-          ...expression,
-          condition: normalizeExpression(expression.condition),
-          consequent: normalizeExpression(expression.consequent),
-          alternate: normalizeExpression(expression.alternate),
-          span,
-        };
-      case "concurrent":
-        return {
-          ...expression,
-          values: expression.values.map(normalizeExpression),
-          span,
-        };
-      case "call":
-        return {
-          ...expression,
-          function: normalizeFunctionId(expression.function),
-          arguments: expression.arguments.map(normalizeExpression),
-          span,
-        };
-      case "invoke":
-        return {
-          ...expression,
-          callee: normalizeExpression(expression.callee),
-          arguments: expression.arguments.map(normalizeExpression),
-          span,
-        };
-      case "error-match":
-        return { ...expression, value: normalizeExpression(expression.value), span };
-      case "method-call":
-        return {
-          ...expression,
-          receiver: normalizeExpression(expression.receiver),
-          arguments: expression.arguments.map(normalizeExpression),
-          span,
-        };
-      case "json-parse":
-      case "json-stringify":
-      case "object-keys":
-      case "to-string":
-        return { ...expression, value: normalizeExpression(expression.value), span };
-      case "stream-map":
-        return {
-          ...expression,
-          source: normalizeExpression(expression.source),
-          transform: normalizeExpression(expression.transform),
-          span,
-        };
-      case "stream-distinct":
-        return {
-          ...expression,
-          source: normalizeExpression(expression.source),
-          select: normalizeExpression(expression.select),
-          span,
-        };
-      case "closure":
-        return {
-          ...expression,
-          function: normalizeFunctionId(expression.function),
-          captures: expression.captures.map(normalizeExpression),
-          span,
-        };
-      case "dependency-call":
-        return {
-          ...expression,
-          arguments: expression.arguments.map(normalizeExpression),
-          span,
-        };
-      case "dependency-reference":
-        return {
-          ...expression,
-          binding: normalizeExpression(expression.binding),
-          span,
-        };
-      case "dependency-reference-call":
-        return {
-          ...expression,
-          reference: normalizeExpression(expression.reference),
-          ...(expression.input ? { input: normalizeExpression(expression.input) } : {}),
-          ...(expression.options ? { options: normalizeExpression(expression.options) } : {}),
-          span,
-        };
-      case "literal":
-      case "none":
-      case "local":
-        return { ...expression, span };
-    }
-  };
-  const normalizeStatements = (statements: readonly StatementIR[]): StatementIR[] =>
-    statements.map((statement): StatementIR => {
-      if (statement.kind === "if") {
-        return {
-          ...statement,
-          condition: normalizeExpression(statement.condition),
-          consequent: normalizeStatements(statement.consequent),
-          alternate: normalizeStatements(statement.alternate),
-          span: normalizeSpan(statement.span),
-        };
-      }
-      if (statement.kind === "for-of") {
-        return {
-          ...statement,
-          values: normalizeExpression(statement.values),
-          body: normalizeStatements(statement.body),
-          span: normalizeSpan(statement.span),
-        };
-      }
-      if (statement.kind === "for-range") {
-        return {
-          ...statement,
-          from: normalizeExpression(statement.from),
-          to: normalizeExpression(statement.to),
-          body: normalizeStatements(statement.body),
-          span: normalizeSpan(statement.span),
-        };
-      }
-      if (statement.kind === "while") {
-        return {
-          ...statement,
-          condition: normalizeExpression(statement.condition),
-          body: normalizeStatements(statement.body),
-          span: normalizeSpan(statement.span),
-        };
-      }
-      if (statement.kind === "try") {
-        return {
-          ...statement,
-          body: normalizeStatements(statement.body),
-          ...(statement.catch
-            ? {
-                catch: {
-                  ...statement.catch,
-                  body: normalizeStatements(statement.catch.body),
-                },
-              }
-            : {}),
-          finally: normalizeStatements(statement.finally),
-          span: normalizeSpan(statement.span),
-        };
-      }
-      if (statement.kind === "let" || statement.kind === "assign") {
-        return {
-          ...statement,
-          value: normalizeExpression(statement.value),
-          span: normalizeSpan(statement.span),
-        };
-      }
-      if (statement.kind === "property-assign") {
-        return {
-          ...statement,
-          target: normalizeExpression(statement.target),
-          value: normalizeExpression(statement.value),
-          span: normalizeSpan(statement.span),
-        };
-      }
-      if (statement.kind === "index-assign") {
-        return {
-          ...statement,
-          target: normalizeExpression(statement.target),
-          index: normalizeExpression(statement.index),
-          value: normalizeExpression(statement.value),
-          span: normalizeSpan(statement.span),
-        };
-      }
-      if (statement.kind === "array-push") {
-        return {
-          ...statement,
-          value: normalizeExpression(statement.value),
-          span: normalizeSpan(statement.span),
-        };
-      }
-      if (statement.kind === "throw") {
-        return {
-          ...statement,
-          value: normalizeExpression(statement.value),
-          span: normalizeSpan(statement.span),
-        };
-      }
-      if (statement.kind === "expression") {
-        return {
-          ...statement,
-          expression: normalizeExpression(statement.expression),
-          span: normalizeSpan(statement.span),
-        };
-      }
+  const normalize = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(normalize);
+    if (!value || typeof value !== "object") return value;
+    const record = value as Readonly<Record<string, unknown>>;
+    if (
+      typeof record.file === "string" &&
+      typeof record.line === "number" &&
+      typeof record.column === "number"
+    ) {
       return {
-        ...statement,
-        ...(statement.value ? { value: normalizeExpression(statement.value) } : {}),
-        span: normalizeSpan(statement.span),
+        ...record,
+        file: relative(root, record.file).replaceAll("\\", "/"),
       };
-    });
-  const normalizeFunction = (function_: FunctionIR): FunctionIR => {
-    const span = normalizeSpan(function_.span);
-    return {
-      ...function_,
-      id: normalizeFunctionId(function_.id),
-      span,
-      body: normalizeStatements(function_.body),
-    };
+    }
+    const normalized = Object.fromEntries(
+      Object.entries(record).map(([name, child]) => [name, normalize(child)]),
+    );
+    if (
+      typeof record.id === "string" &&
+      Array.isArray(record.body) &&
+      Array.isArray(record.parameters)
+    ) {
+      normalized.id = normalizeIdentity(record.id);
+    }
+    if (
+      typeof record.function === "string" &&
+      (record.kind === "call" || record.kind === "closure")
+    ) {
+      normalized.function = normalizeIdentity(record.function);
+    }
+    return normalized;
   };
+  return normalize(function_) as FunctionIR;
+}
+
+function normalizeSourceFiles(ir: SystemIR, root: string): SystemIR {
+  const normalizeSpan = (span: SourceSpan): SourceSpan => ({
+    ...span,
+    file: relative(root, span.file).replaceAll("\\", "/"),
+  });
   return {
     ...ir,
     features: ir.features.map((feature) => ({
@@ -5910,27 +5592,6 @@ function normalizeSourceFiles(ir: SystemIR, root: string): SystemIR {
       contributions: program.contributions.map((contribution) => ({
         ...contribution,
         span: normalizeSpan(contribution.span),
-        implementation:
-          contribution.implementation.kind === "portable"
-            ? {
-                kind: "portable",
-                start: normalizeFunction(contribution.implementation.start),
-                functions: contribution.implementation.functions.map(normalizeFunction),
-              }
-            : contribution.implementation.kind === "source"
-              ? {
-                  ...contribution.implementation,
-                  ...(contribution.implementation.diagnostic
-                    ? {
-                        diagnostic: {
-                          ...contribution.implementation.diagnostic,
-                          span: normalizeSpan(contribution.implementation.diagnostic.span),
-                        },
-                      }
-                    : {}),
-                  span: normalizeSpan(contribution.implementation.span),
-                }
-              : contribution.implementation,
       })),
     })),
   };

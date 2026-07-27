@@ -12,13 +12,14 @@ import type { ProgramIR, SourceSpan } from "@/compiler/ir";
 import { linkProgram } from "@/compiler/linker";
 import { compileSystem } from "@/compiler/source";
 import { dependencyInvocation } from "@/core/dependency";
-import { executeLinkedProgramIR } from "@/execution/interpreter";
 import { createMemoryEventStore } from "@/features/entity";
+import { SERVER_COMPILER_IR_VERSION, serverCompilerExtension } from "@/platforms/server/adapter";
 import { buildServerProgram } from "@/platforms/server/adapter/rust/compiler";
 import {
   defineServerProductionDependency,
   jetStreamEventsDependency,
 } from "@/platforms/server/adapter/rust/providers";
+import { executeServerLinkedProgramIR as executeLinkedProgramIR } from "@/platforms/server/adapter/typescript/runtime";
 
 const directories: string[] = [];
 const processes: ChildProcess[] = [];
@@ -120,10 +121,14 @@ test("rejects unknown external Dependencies and host source before Cargo", async
         contributions: [
           {
             ...program.contributions[0]!,
-            implementation: {
-              kind: "source",
-              reason: "host-source",
-              span: { file: "program.ts", line: 4, column: 3 },
+            extensions: {
+              server: {
+                version: SERVER_COMPILER_IR_VERSION,
+                execution: {
+                  kind: "source",
+                  span: { file: "program.ts", line: 4, column: 3 },
+                },
+              },
             },
           },
         ],
@@ -190,7 +195,7 @@ test(
     await mkdir(resolve(directory, "src"), { recursive: true });
     await writeFile(resolve(directory, "tsconfig.json"), compilerFixtureConfig());
     await writeFile(source, genericFeatureSource());
-    const ir = compileSystem(source);
+    const ir = compileSystem(source, [serverCompilerExtension]);
     const program = ir.programs.find(({ name }) => name === "worker");
     if (!program) throw new Error("Fixture has no worker Program.");
     const executable = resolve(directory, "worker");
@@ -295,7 +300,7 @@ impl Dependency for Provider {
 }
 `,
     );
-    const ir = compileSystem(source);
+    const ir = compileSystem(source, [serverCompilerExtension]);
     const program = ir.programs.find(({ name }) => name === "worker");
     if (!program) throw new Error("Fixture has no worker Program.");
 
@@ -329,7 +334,7 @@ test(
     await mkdir(resolve(directory, "src"), { recursive: true });
     await writeFile(resolve(directory, "tsconfig.json"), compilerFixtureConfig());
     await writeFile(source, actorFeatureSource());
-    const ir = compileSystem(source);
+    const ir = compileSystem(source, [serverCompilerExtension]);
     const program = ir.programs.find(({ name }) => name === "server");
     if (!program) throw new Error("Actor fixture has no server Program.");
     const build = await buildServerProgram({
@@ -424,7 +429,7 @@ test.skipIf(spawnSync("nats-server", ["--version"], { stdio: "ignore" }).status 
     const source = resolve(directory, "src/system.ts");
     await mkdir(resolve(directory, "src"), { recursive: true });
     await writeFile(source, networkFeatureSource());
-    const ir = compileSystem(source);
+    const ir = compileSystem(source, [serverCompilerExtension]);
     const program = ir.programs.find(({ name }) => name === "worker");
     if (!program) throw new Error("Network fixture has no worker Program.");
     const executable = resolve(directory, "worker");
@@ -506,7 +511,7 @@ test.skipIf(spawnSync("nats-server", ["--version"], { stdio: "ignore" }).status 
     await mkdir(resolve(directory, "src"), { recursive: true });
     await writeFile(resolve(directory, "tsconfig.json"), compilerFixtureConfig());
     await writeFile(source, clusteredActorSource());
-    const ir = compileSystem(source);
+    const ir = compileSystem(source, [serverCompilerExtension]);
     const program = ir.programs.find(({ name }) => name === "server");
     if (!program) throw new Error("Cluster Actor fixture has no server Program.");
     const executable = resolve(directory, "actor-cluster");
@@ -641,7 +646,12 @@ function emptyProgram(span: SourceSpan): ProgramIR {
         feature: "worker",
         requires: [],
         provides: [],
-        implementation: { kind: "none" },
+        extensions: {
+          server: {
+            version: SERVER_COMPILER_IR_VERSION,
+            execution: { kind: "none" },
+          },
+        },
         span,
       },
     ],
@@ -913,13 +923,12 @@ export default createSystem({
 function actorFeatureSource(): string {
   return `
 import {
-  createActor,
   createFeature,
   createSystem,
-  type Actor,
   type Dependency,
   type Feature,
 } from "@/index";
+import { createActor, type Actor } from "@/features/actor";
 import type {
   Clock,
   EventStore,
@@ -1298,12 +1307,11 @@ export default createSystem({
 function clusteredActorSource(): string {
   return `
 import {
-  createActor,
   createFeature,
   createSystem,
-  type Actor,
   type Dependency,
 } from "@/index";
+import { createActor, type Actor } from "@/features/actor";
 import type { Alarm, Clock, ServerProcess, Timer } from "@/platforms/server";
 
 type ActorClock = Dependency<{ Operations: Clock }>;

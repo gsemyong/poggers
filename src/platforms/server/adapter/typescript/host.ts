@@ -54,7 +54,7 @@ export type NodeHostOptions = Readonly<{
   host?: string;
   port?: number;
   shutdownTimeout?: number;
-  webOrigins?: readonly string[];
+  allowedOrigins?: readonly string[];
   appName?: string;
   eventStore?: NodeEventStoreOptions;
 }>;
@@ -137,7 +137,7 @@ type NodeFeatureProviderContext = Readonly<{
   configuration: NodeHostOptions["configuration"];
   directory: string;
   origin: string;
-  webOrigins: readonly string[];
+  allowedOrigins: readonly string[];
 }>;
 
 export type NodeFeatureProviderReplacement = AsyncDisposable &
@@ -286,14 +286,14 @@ export async function createNodeHost<Event = unknown>(
   const host = input.host ?? "localhost";
   const port = input.port ?? numberEnvironment("PORT") ?? 3010;
   const origin = `http://${host}:${port}`;
-  const webOrigins = normalizeWebOrigins(input.webOrigins ?? ["http://localhost:3000"]);
+  const allowedOrigins = normalizeAllowedOrigins(input.allowedOrigins ?? []);
   const directory = input.directory ?? process.cwd();
   const providerContext: NodeFeatureProviderContext = {
     appName: input.appName ?? "Kit",
     configuration: input.configuration,
     directory,
     origin,
-    webOrigins,
+    allowedOrigins,
   };
   let database: DatabaseSync | undefined;
   let databaseClosed = false;
@@ -358,7 +358,7 @@ export async function createNodeHost<Event = unknown>(
         origin,
         shutdownTimeout:
           input.shutdownTimeout ?? durationEnvironment("KIT_HTTP_SHUTDOWN_TIMEOUT_MS") ?? 10_000,
-        webOrigins,
+        allowedOrigins,
       });
     }
     const dependencies = conformExternalDependencies(
@@ -400,7 +400,7 @@ async function realizeNodeFeatureProvider(
         context.directory,
       ),
       origin: context.origin,
-      webOrigins: context.webOrigins,
+      allowedOrigins: context.allowedOrigins,
       sqlite(path) {
         const resolved =
           path === ":memory:" || isAbsolute(path) ? path : resolve(context.directory, path);
@@ -1317,21 +1317,21 @@ async function createNodeHttpServer(input: {
   port: number;
   origin: string;
   shutdownTimeout: number;
-  webOrigins: readonly string[];
+  allowedOrigins: readonly string[];
 }): Promise<ReloadableHttpServer> {
   if (!Number.isSafeInteger(input.shutdownTimeout) || input.shutdownTimeout < 1) {
     throw new TypeError("HTTP shutdownTimeout must be a positive integer.");
   }
   type Route = Readonly<{ handle(request: HttpRequest): Promise<HttpResponse> }>;
   const routes = new Map<string, Route[]>();
-  const webOrigins = new Set(input.webOrigins);
+  const allowedOrigins = new Set(input.allowedOrigins);
   const streams = new Set<ServerResponse>();
   const shutdown = new AbortController();
   let replacementScopes = 0;
   const server = createServer(async (incoming, outgoing) => {
     try {
       if (incoming.method === "OPTIONS") {
-        writeCors(incoming, outgoing, webOrigins);
+        writeCors(incoming, outgoing, allowedOrigins);
         outgoing.writeHead(204).end();
         return;
       }
@@ -1346,7 +1346,7 @@ async function createNodeHttpServer(input: {
       const response = route
         ? await route[1].at(-1)!.handle(request)
         : jsonHttpResponse({ message: "Not found." }, 404);
-      await writeResponse(incoming, outgoing, response, webOrigins, shutdown.signal, streams);
+      await writeResponse(incoming, outgoing, response, allowedOrigins, shutdown.signal, streams);
     } catch (error) {
       if (outgoing.headersSent) {
         outgoing.destroy(error instanceof Error ? error : new Error(String(error)));
@@ -1356,7 +1356,7 @@ async function createNodeHttpServer(input: {
         incoming,
         outgoing,
         jsonHttpResponse({ message: error instanceof Error ? error.message : String(error) }, 500),
-        webOrigins,
+        allowedOrigins,
         shutdown.signal,
         streams,
       );
@@ -1488,14 +1488,14 @@ async function writeResponse(
   request: IncomingMessage,
   response: ServerResponse,
   value: HttpResponse,
-  webOrigins: ReadonlySet<string>,
+  allowedOrigins: ReadonlySet<string>,
   shutdown: AbortSignal,
   streams: Set<ServerResponse>,
 ): Promise<void> {
   if (!Number.isInteger(value.status) || !Array.isArray(value.headers)) {
     throw new TypeError(`HTTP handler returned an invalid response: ${JSON.stringify(value)}.`);
   }
-  writeCors(request, response, webOrigins);
+  writeCors(request, response, allowedOrigins);
   for (const { name, value: header } of value.headers) response.appendHeader(name, header);
   response.writeHead(value.status);
   if (value.body !== undefined) {
@@ -1544,10 +1544,10 @@ function jsonHttpResponse(value: object, status: number): HttpResponse {
 function writeCors(
   request: IncomingMessage,
   response: ServerResponse,
-  webOrigins: ReadonlySet<string>,
+  allowedOrigins: ReadonlySet<string>,
 ): void {
   const origin = request.headers.origin;
-  if (origin && webOrigins.has(origin)) {
+  if (origin && allowedOrigins.has(origin)) {
     response.setHeader("access-control-allow-origin", origin);
     response.setHeader("vary", "origin");
   }
@@ -1556,7 +1556,7 @@ function writeCors(
   response.setHeader("access-control-allow-methods", "DELETE, GET, OPTIONS, PATCH, POST");
 }
 
-function normalizeWebOrigins(origins: readonly string[]): readonly string[] {
+function normalizeAllowedOrigins(origins: readonly string[]): readonly string[] {
   return Object.freeze(
     [...new Set(origins.map((origin) => new URL(origin).origin))].sort((left, right) =>
       left.localeCompare(right),

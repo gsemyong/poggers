@@ -7,19 +7,24 @@ import type { IdentityClient, Session } from "@/features/identity";
 type AuthMode = "sign-in" | "sign-up";
 type AuthPhase = "loading" | "signed-out" | "signed-in";
 type ShellRoutes = {
+  workspace: {
+    Path: "";
+  };
   auth: {
+    Parent: "workspace";
     Path: "auth";
     Metadata: { Title: "Sign in"; Robots: "noindex" };
   };
 };
 
-export type ShellFeature = Readonly<{
+export type ShellFeature<Name extends string = string> = Readonly<{
+  Instance: Name;
   Programs: {
     browser: {
       Environment: BrowserMainThread;
       Requires: {
         identity: IdentityClient;
-        navigation: Navigation<ShellRoutes, Workspace>;
+        navigation: Navigation<ShellRoutes, Workspace<Name>>;
       };
       State: {
         phase: AuthPhase;
@@ -73,8 +78,8 @@ export type ShellFeature = Readonly<{
   };
 }>;
 
-export function createShell(input: Readonly<{ name: string }>) {
-  return createFeature<ShellFeature>({
+export function createShell<const Name extends string>(input: Readonly<{ name: Name }>) {
+  return createFeature<ShellFeature<Name>>({
     programs: {
       browser: {
         state: {
@@ -131,7 +136,11 @@ export function createShell(input: Readonly<{ name: string }>) {
                     });
               state.password = "";
               state.phase = "signed-in";
-              dependencies.navigation.navigate({ to: "tasks.list", replace: true });
+              dependencies.navigation.navigate({
+                feature: "tasks",
+                route: "list",
+                replace: true,
+              });
             } catch (error) {
               state.error = message(error);
             } finally {
@@ -144,7 +153,7 @@ export function createShell(input: Readonly<{ name: string }>) {
               await dependencies.identity.signOut();
               state.session = undefined;
               state.phase = "signed-out";
-              dependencies.navigation.navigate({ to: "auth", replace: true });
+              dependencies.navigation.navigate({ route: "auth", replace: true });
             } catch (error) {
               state.error = message(error);
             } finally {
@@ -299,9 +308,14 @@ export function createShell(input: Readonly<{ name: string }>) {
           },
         },
         routes: {
+          workspace: {
+            view({ children, components: { Layout } }) {
+              return <Layout Content={children} />;
+            },
+          },
           auth: {
-            view({ components: { Layout } }) {
-              return <Layout Content={null} />;
+            view() {
+              return null;
             },
           },
         },
@@ -310,17 +324,17 @@ export function createShell(input: Readonly<{ name: string }>) {
   });
 }
 
-function redirectForSession(
-  navigation: Navigation<ShellRoutes, Workspace>,
+function redirectForSession<Name extends string>(
+  navigation: Navigation<ShellRoutes, Workspace<Name>>,
   authenticated: boolean,
 ) {
   const current = navigation.current();
-  const auth = navigation.href({ to: "auth" });
+  const auth = navigation.href({ route: "auth" });
   const onAuthRoute = `${current.pathname}${current.search}` === auth;
   if (authenticated && onAuthRoute) {
-    navigation.navigate({ to: "tasks.list", replace: true });
+    navigation.navigate({ feature: "tasks", route: "list", replace: true });
   } else if (!authenticated && !onAuthRoute) {
-    navigation.navigate({ to: "auth", replace: true });
+    navigation.navigate({ route: "auth", replace: true });
   }
 }
 

@@ -6,12 +6,13 @@ import type {
   ProductionArtifact,
   ProductionArtifacts,
   ProductionConfiguration,
+  ProductionExposure,
   ProductionLifecycle,
   ProductionTarget,
 } from "@/adapter";
 import type { ProgramExternalDependencies, ProgramName } from "@/core/dependency";
 import type { FeatureContract } from "@/core/feature";
-import type { System, SystemContract, SystemContractOf } from "@/core/system";
+import type { ApplicationContract, System, SystemContract, SystemContractOf } from "@/core/system";
 
 declare const deploymentAdapterContract: unique symbol;
 declare const dependencyBindingContract: unique symbol;
@@ -32,7 +33,7 @@ type InterfacesOf<Contract> = Contract extends {
   ? Interfaces
   : Empty;
 type ApplicationsOf<Contract> = Contract extends {
-  Applications: infer Applications extends Record<string, FeatureContract>;
+  Applications: infer Applications extends Record<string, ApplicationContract>;
 }
   ? Applications
   : Empty;
@@ -76,6 +77,7 @@ export type ReleaseArtifact = Readonly<{
   configuration: readonly ProductionConfiguration[];
   lifecycle?: ProductionLifecycle;
   target?: ProductionTarget;
+  exposure?: ProductionExposure;
 }>;
 
 /** Immutable, content-addressed production output for one selected System/Application. */
@@ -918,6 +920,7 @@ export async function createRelease(input: {
         : artifact.lifecycle?.status
           ? canonicalLifecycle(artifact.lifecycle)
           : undefined;
+      const exposure = artifact.exposure ? canonicalExposure(artifact.exposure) : undefined;
       const meaning = {
         identity: artifact.identity,
         kind: artifact.kind,
@@ -931,6 +934,7 @@ export async function createRelease(input: {
         configuration,
         ...(lifecycle ? { lifecycle } : {}),
         ...(target ? { target } : {}),
+        ...(exposure ? { exposure } : {}),
       };
       artifacts.push(
         Object.freeze({
@@ -1036,6 +1040,9 @@ function canonicalConfiguration(configuration: ProductionConfiguration): Product
               : {
                   kind: configuration.source.kind,
                   format: configuration.source.format,
+                  ...(configuration.source.artifact
+                    ? { artifact: configuration.source.artifact }
+                    : {}),
                   ...(configuration.source.platform
                     ? { platform: configuration.source.platform }
                     : {}),
@@ -1079,6 +1086,116 @@ function canonicalLifecycle(
         }
       : {}),
   });
+}
+
+function canonicalExposure(exposure: ProductionExposure): ProductionExposure {
+  if (exposure.kind !== "http-assets") {
+    throw new TypeError(`Unsupported production exposure ${JSON.stringify(exposure)}.`);
+  }
+  const fallback = exposure.fallback
+    ? canonicalAssetPath(exposure.fallback, "HTTP asset fallback")
+    : undefined;
+  const headers = exposure.headers
+    ? canonicalHeaders(exposure.headers, "HTTP asset response")
+    : undefined;
+  const files = [...exposure.files]
+    .map(({ path, cacheControl }) =>
+      Object.freeze({
+        path: canonicalAssetPath(path, "HTTP asset"),
+        cacheControl: requiredText(cacheControl, "HTTP asset cache control"),
+      }),
+    )
+    .sort((left, right) => left.path.localeCompare(right.path));
+  if (new Set(files.map(({ path }) => path)).size !== files.length) {
+    throw new TypeError("HTTP asset exposure contains duplicate file policies.");
+  }
+  const responses = [...exposure.responses]
+    .map((response) => {
+      if (
+        !response.path.startsWith("/") ||
+        response.path.includes("?") ||
+        response.path.includes("#")
+      ) {
+        throw new TypeError(
+          `HTTP fixed response path ${JSON.stringify(response.path)} must be an absolute URL path.`,
+        );
+      }
+      if (
+        !Number.isSafeInteger(response.status) ||
+        response.status < 100 ||
+        response.status > 599
+      ) {
+        throw new TypeError(`HTTP fixed response ${JSON.stringify(response.path)} has bad status.`);
+      }
+      return Object.freeze({
+        path: response.path,
+        status: response.status,
+        headers: Object.freeze(
+          Object.fromEntries(
+            Object.entries(response.headers)
+              .map(
+                ([name, value]) =>
+                  [
+                    requiredText(name.toLowerCase(), "HTTP response header name"),
+                    requiredText(value, `HTTP response header ${name}`),
+                  ] as const,
+              )
+              .sort(([left], [right]) => left.localeCompare(right)),
+          ),
+        ),
+        body: response.body,
+        ...(response.substitutions?.length
+          ? { substitutions: Object.freeze([...new Set(response.substitutions)].sort()) }
+          : {}),
+      });
+    })
+    .sort((left, right) => left.path.localeCompare(right.path));
+  if (new Set(responses.map(({ path }) => path)).size !== responses.length) {
+    throw new TypeError("HTTP asset exposure contains duplicate fixed responses.");
+  }
+  return Object.freeze({
+    kind: "http-assets",
+    ...(fallback ? { fallback } : {}),
+    ...(headers ? { headers } : {}),
+    files: Object.freeze(files),
+    responses: Object.freeze(responses),
+  });
+}
+
+function canonicalHeaders(
+  headers: Readonly<Record<string, string>>,
+  label: string,
+): Readonly<Record<string, string>> {
+  return Object.freeze(
+    Object.fromEntries(
+      Object.entries(headers)
+        .map(
+          ([name, value]) =>
+            [
+              requiredText(name.toLowerCase(), `${label} header name`),
+              requiredText(value, `${label} header ${name}`),
+            ] as const,
+        )
+        .sort(([left], [right]) => left.localeCompare(right)),
+    ),
+  );
+}
+
+function canonicalAssetPath(path: string, name: string): string {
+  const value = path.replaceAll("\\", "/");
+  if (
+    !value ||
+    value.startsWith("/") ||
+    value.split("/").some((segment) => !segment || segment === "." || segment === "..")
+  ) {
+    throw new TypeError(`${name} path ${JSON.stringify(path)} must be relative and normalized.`);
+  }
+  return value;
+}
+
+function requiredText(value: string, name: string): string {
+  if (!value.trim()) throw new TypeError(`${name} cannot be empty.`);
+  return value;
 }
 
 function digest(value: unknown): string {

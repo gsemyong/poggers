@@ -1,8 +1,5 @@
-import type { PresentationAdapter, PresentationAdapterInstance } from "@/adapter";
 import type { ProgramManifest } from "@/compiler/ir";
 import type { System, SystemContract } from "@/core/system";
-import type { ComponentProps, ComponentName, ComponentState } from "@/core/ui/component";
-import { createActionEventLedger } from "@/execution/presentation";
 import { assembleProgram, bindDependenciesToScope, ResourceScope } from "@/execution/process";
 import { createReactiveState } from "@/execution/state";
 import {
@@ -15,11 +12,16 @@ import {
   type WebRouteHydrationIR,
 } from "@/platforms/web/adapter/document";
 import {
+  matchWebRouteBranch,
   matchWebRoute,
   validateWebRouteMetadata,
-  type WebRouteIR,
+  type WebClientRouteIR,
   type WebRouteMatch,
 } from "@/platforms/web/adapter/lowering";
+import type {
+  PresentationAdapter,
+  PresentationAdapterInstance,
+} from "@/platforms/web/adapter/presentation/contract";
 import {
   allocatePresenceOwner,
   captureSignalOnHotRefresh,
@@ -42,9 +44,15 @@ import {
   type Signal,
 } from "@/platforms/web/adapter/ui/component/runtime";
 import { PresenceGraph } from "@/platforms/web/adapter/ui/presence";
+import {
+  createWebProgramLanguageRuntime,
+  webContributionRuntime,
+} from "@/platforms/web/adapter/ui/process";
 import { publishWebDeferredState, readWebJSONLines } from "@/platforms/web/adapter/ui/stream";
 import type { WebElementPresentation, WebPresentationLanguage } from "@/platforms/web/presentation";
-import type { WebDestination } from "@/platforms/web/routing";
+import { createActionEventLedger } from "@/platforms/web/presentation/runtime";
+import type { WebDestination, WebNavigationType } from "@/platforms/web/routing";
+import type { ComponentProps, ComponentName, ComponentState } from "@/platforms/web/ui/component";
 
 export type ComponentRuntimeElements<Contract extends SystemContract> = {
   [Name in ComponentName<Contract>]?: {
@@ -79,6 +87,8 @@ export type InterfaceUI = Readonly<{
 export type CreateInterfaceUIOptions<Contract extends SystemContract> = Readonly<{
   system: System<Contract>;
   interface: string;
+  /** @internal Application Feature roles resolved by the compiler. */
+  features?: Readonly<Record<string, string>>;
   program: string;
   logicalProgram?: string;
   presentation: RuntimeConfiguredPresentation;
@@ -88,9 +98,9 @@ export type CreateInterfaceUIOptions<Contract extends SystemContract> = Readonly
   hotState?: HotRenderState;
   dependencies?: Readonly<Record<string, unknown>>;
   programManifest?: ProgramManifest;
-  routes?: readonly WebRouteIR[];
+  routes?: readonly WebClientRouteIR[];
   /** @internal Lazily resolves the authored implementation for one compiler-known Route. */
-  loadRoute?(route: WebRouteIR): Promise<RuntimeRouteDefinition>;
+  loadRoute?(route: WebClientRouteIR): Promise<RuntimeRouteDefinition>;
   /** @internal Route identities whose server data can start alongside their code chunk. */
   routeLoaders?: readonly string[];
   boundary: Element;
@@ -112,6 +122,8 @@ type RuntimeComponentConfig = {
 type RuntimeComponentContracts = Record<string, RuntimeComponentConfig>;
 type RuntimeComponentProps = Record<string, unknown>;
 type RuntimeFeature = Readonly<{
+  /** @internal Canonical System Feature path for an Application projection. */
+  path?: string;
   programs?: Readonly<Record<string, RuntimeProgramDefinition>>;
   features?: Readonly<Record<string, RuntimeFeature>>;
 }>;
@@ -155,6 +167,15 @@ type RuntimeRouteLoadContext = Readonly<{
   search: Readonly<Record<string, unknown>>;
 }>;
 
+type RuntimeWebDestination = Readonly<{
+  feature?: string;
+  route: string;
+  params?: Readonly<Record<string, unknown>>;
+  search?: Readonly<Record<string, unknown>>;
+  hash?: string;
+  replace?: boolean;
+}>;
+
 type RuntimeRouteViewContext = Readonly<{
   data: unknown;
   params: Readonly<Record<string, unknown>>;
@@ -162,6 +183,7 @@ type RuntimeRouteViewContext = Readonly<{
   feature: Readonly<Record<string, unknown>>;
   features: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
   components: Record<string, unknown>;
+  children: Child;
 }>;
 
 type RuntimeComponentDefinition = {
@@ -209,6 +231,7 @@ type RuntimeComponentViewContext = {
 export async function createInterfaceUI<Contract extends SystemContract>({
   system,
   interface: interfacePath,
+  features,
   program,
   logicalProgram = program,
   presentation,
@@ -225,7 +248,7 @@ export async function createInterfaceUI<Contract extends SystemContract>({
 }: CreateInterfaceUIOptions<Contract>): Promise<InterfaceUI> {
   const runtimeSystem = system as RuntimeSystem;
   const appPath = interfaceAppPath(interfacePath);
-  const appFeature = requireRuntimeFeature(runtimeSystem, appPath);
+  const appFeature = projectApplicationFeature(runtimeSystem, appPath, features);
   let configuredPresentation = presentation;
   validatePresentation(configuredPresentation);
   const presentationInstance = presentationAdapter.mount({
@@ -246,11 +269,12 @@ export async function createInterfaceUI<Contract extends SystemContract>({
   const programUI = await createProgramUI(
     runtimeSystem,
     interfacePath,
+    features,
     program,
     logicalProgram,
     dependencies,
     programManifest ??
-      inferEmptyProgramManifest(runtimeSystem, interfacePath, program, logicalProgram),
+      inferEmptyProgramManifest(runtimeSystem, interfacePath, features, program, logicalProgram),
     hotState,
     notifyActionEvent,
     routes.length > 0,
@@ -268,6 +292,7 @@ export async function createInterfaceUI<Contract extends SystemContract>({
   const presentationGraph = createPresentationGraph({
     system: runtimeSystem,
     interface: interfacePath,
+    features,
     logicalProgram,
     presentation: () => configuredPresentation,
     adapter: presentationInstance,
@@ -339,7 +364,7 @@ export async function createInterfaceUI<Contract extends SystemContract>({
     components: localComponents,
     renderRoot() {
       if (router) return router.render();
-      const rootName = collectProgramRoots(runtimeSystem, interfacePath, logicalProgram);
+      const rootName = collectProgramRoots(runtimeSystem, interfacePath, features, logicalProgram);
       if (!rootName)
         throw new Error(`UI Program ${JSON.stringify(program)} has no root Component.`);
       const root = renderers[rootName];
@@ -390,31 +415,42 @@ export async function createInterfaceUI<Contract extends SystemContract>({
 async function createRouteRuntime(options: {
   system: RuntimeSystem;
   program: string;
-  routes: readonly WebRouteIR[];
+  routes: readonly WebClientRouteIR[];
   dependencies: Readonly<Record<string, unknown>>;
   apis: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
   featureDependencies: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
   composition: RuntimeComponentComposition;
-  loadRoute?(route: WebRouteIR): Promise<RuntimeRouteDefinition>;
+  loadRoute?(route: WebClientRouteIR): Promise<RuntimeRouteDefinition>;
   routeLoaders?: readonly string[];
   boundary: Element;
 }): Promise<Readonly<{ render(): Child; dispose(): void }>> {
+  type ResolvedRouteEntry = Readonly<{
+    match: WebRouteMatch<WebClientRouteIR>;
+    definition: RuntimeRouteDefinition;
+    data: unknown;
+    metadata: WebClientRouteIR["metadata"];
+  }>;
+  type RenderedRouteEntry = Readonly<{
+    source: ResolvedRouteEntry;
+    child: Signal<Child>;
+    render: Child;
+  }>;
   const navigation = options.dependencies.navigation as
     | Readonly<{
         current(): URL;
-        navigate(destination: WebDestination & Readonly<{ replace?: boolean }>): void;
-        subscribe(receive: (location: URL) => void): Disposable;
+        navigate(destination: RuntimeWebDestination): void;
+        subscribe(receive: (location: URL, type: WebNavigationType) => void): Disposable;
       }>
     | undefined;
   if (!navigation) throw new Error("A routed web Program requires the navigation Dependency.");
-  const revision = signal(0);
+  const renderedRoot = runtimeSignal<Child>(null);
+  let renderedBranch: readonly RenderedRouteEntry[] = [];
   let generation = 0;
   let current:
     | Readonly<{
-        match: WebRouteMatch;
-        definition: RuntimeRouteDefinition;
-        data: unknown;
-        metadata: WebRouteIR["metadata"];
+        match: WebRouteMatch<WebClientRouteIR>;
+        branch: readonly ResolvedRouteEntry[];
+        metadata: WebClientRouteIR["metadata"];
       }>
     | undefined;
   let failure: unknown;
@@ -423,7 +459,7 @@ async function createRouteRuntime(options: {
   const hydration: WebRouteHydrationIR | undefined = consumeWebRouteHydration();
   const knownLoaders = options.routeLoaders ? new Set(options.routeLoaders) : undefined;
   const definitions = new Map<string, Promise<RuntimeRouteDefinition>>();
-  const loadDefinition = (route: WebRouteIR): Promise<RuntimeRouteDefinition> => {
+  const loadDefinition = (route: WebClientRouteIR): Promise<RuntimeRouteDefinition> => {
     const identity = routeIdentity(route);
     let definition = definitions.get(identity);
     if (!definition) {
@@ -438,8 +474,51 @@ async function createRouteRuntime(options: {
     }
     return definition;
   };
+  const commitBranch = (branch: readonly ResolvedRouteEntry[]): void => {
+    let retained = 0;
+    while (
+      retained < branch.length &&
+      retained < renderedBranch.length &&
+      equivalentRouteEntry(renderedBranch[retained]!.source, branch[retained]!)
+    ) {
+      retained += 1;
+    }
 
-  const resolve = async (location: URL): Promise<void> => {
+    let child: Child = null;
+    const next: RenderedRouteEntry[] = [];
+    for (let index = branch.length - 1; index >= 0; index -= 1) {
+      const source = branch[index]!;
+      if (index < retained) {
+        const existing = renderedBranch[index]!;
+        existing.child(child);
+        next[index] = existing;
+        child = existing.render;
+        continue;
+      }
+      const childState = runtimeSignal<Child>(child);
+      const render = scoped(() =>
+        source.definition.view({
+          data: source.data,
+          params: source.match.params,
+          search: source.match.search,
+          feature: options.apis[source.match.route.feature] ?? {},
+          features: childFeatureAPIs(source.match.route.feature, options.apis),
+          components: componentsForOwner(source.match.route.feature, options.composition),
+          children: () => childState(),
+        }),
+      );
+      const created = Object.freeze({ source, child: childState, render });
+      next[index] = created;
+      child = render;
+    }
+    renderedBranch = Object.freeze(next);
+    renderedRoot(child);
+  };
+
+  const resolve = async (
+    location: URL,
+    navigationType: WebNavigationType | "initial",
+  ): Promise<void> => {
     const ownGeneration = ++generation;
     pending?.abort();
     const controller = new AbortController();
@@ -450,8 +529,9 @@ async function createRouteRuntime(options: {
       if (!match) {
         invalidatePendingHydration(options.boundary);
         current = undefined;
+        renderedBranch = [];
+        renderedRoot("Not found.");
         applyRouteMetadata(options.system, {});
-        revision(revision() + 1);
         return;
       }
       let activeLocation = location;
@@ -459,31 +539,31 @@ async function createRouteRuntime(options: {
       let seeded =
         hydrationPending && hydrationMatches(hydration, match, location) ? hydration : undefined;
       if (hydrationPending && !seeded) invalidatePendingHydration(options.boundary);
-      let outcome: unknown;
-      let definition: RuntimeRouteDefinition;
+      let resolvedBranch: ResolvedRouteEntry[] = [];
+      let resolvedMetadata: WebClientRouteIR["metadata"] = {};
       for (let redirects = 0; ; redirects += 1) {
         if (redirects > 10) throw new Error("The Route state request redirected too many times.");
         const requested = match;
-        const identity = routeIdentity(requested.route);
-        const definitionTask = loadDefinition(requested.route);
-        const serverDataTask =
-          !seeded && requested.route.document === "content" && knownLoaders?.has(identity)
-            ? requestWebRouteData(activeLocation, controller.signal)
-            : undefined;
-        definition = await definitionTask;
+        const requestedBranch = matchWebRouteBranch(options.routes, requested, activeLocation);
+        const definitions = await Promise.all(
+          requestedBranch.map(({ route }) => loadDefinition(route)),
+        );
         if (controller.signal.aborted || disposed || ownGeneration !== generation) return;
-        if (knownLoaders && knownLoaders.has(identity) !== Boolean(definition.load)) {
-          throw new Error(
-            `Browser Route module ${JSON.stringify(identity)} disagrees with its compiler manifest.`,
-          );
+        for (const [index, branchMatch] of requestedBranch.entries()) {
+          const definition = definitions[index]!;
+          const identity = routeIdentity(branchMatch.route);
+          if (knownLoaders && knownLoaders.has(identity) !== Boolean(definition.load)) {
+            throw new Error(
+              `Browser Route module ${JSON.stringify(identity)} disagrees with its compiler manifest.`,
+            );
+          }
         }
-        if (seeded) {
-          outcome = routeHydrationOutcome(seeded);
-          break;
-        }
-        if (definition.load && requested.route.document === "content") {
-          const remote = await (serverDataTask ??
-            requestWebRouteData(activeLocation, controller.signal));
+        const needsRemoteData =
+          !seeded &&
+          requested.route.document === "content" &&
+          requestedBranch.some(({ route }) => knownLoaders?.has(routeIdentity(route)));
+        if (needsRemoteData) {
+          const remote = await requestWebRouteData(activeLocation, controller.signal);
           if ("redirect" in remote) {
             activeLocation = remote.redirect;
             const remoteMatch = matchWebRoute(options.routes, activeLocation);
@@ -512,86 +592,122 @@ async function createRouteRuntime(options: {
             );
           }
           match = remoteMatch;
-          if (routeIdentity(match.route) !== identity)
-            definition = await loadDefinition(match.route);
-          outcome = routeHydrationOutcome(remote.hydration);
-          break;
+          seeded = remote.hydration;
+          continue;
         }
-        if (definition.load) {
-          outcome = await definition.load({
-            dependencies: options.featureDependencies[requested.route.feature] ?? {},
-            url: activeLocation.href,
-            signal: controller.signal,
-            params: requested.params,
-            search: requested.search,
+        const metadata: WebClientRouteIR["metadata"][] = [];
+        for (const [index, branchMatch] of requestedBranch.entries()) {
+          const definition = definitions[index]!;
+          const previous = current?.branch[index];
+          const retained =
+            navigationType !== "reload" &&
+            previous &&
+            equivalentRouteMatch(previous.match, branchMatch) &&
+            previous.definition === definition
+              ? previous
+              : undefined;
+          const outcome = retained
+            ? undefined
+            : seeded
+              ? routeHydrationOutcome(seeded, branchMatch.route)
+              : definition.load
+                ? await definition.load({
+                    dependencies: options.featureDependencies[branchMatch.route.feature] ?? {},
+                    url: activeLocation.href,
+                    signal: controller.signal,
+                    params: branchMatch.params,
+                    search: branchMatch.search,
+                  })
+                : { data: undefined };
+          if (isRecord(outcome) && "redirect" in outcome) {
+            const scoped = options.featureDependencies[branchMatch.route.feature]?.navigation as
+              | typeof navigation
+              | undefined;
+            (scoped ?? navigation).navigate({
+              ...(outcome.redirect as WebDestination),
+              replace: true,
+            });
+            return;
+          }
+          const data = retained
+            ? retained.data
+            : isRecord(outcome) && "data" in outcome
+              ? prepareDeferredRouteData(
+                  outcome.data,
+                  branchMatch.route.deferred,
+                  controller.signal,
+                )
+              : undefined;
+          const resolvedEntryMetadata =
+            retained?.metadata ??
+            mergeRouteMetadata(branchMatch.route.metadata, isRecord(outcome) ? outcome : undefined);
+          resolvedBranch.push({
+            match: branchMatch,
+            definition,
+            data,
+            metadata: resolvedEntryMetadata,
           });
-        } else {
-          outcome = { data: undefined };
+          metadata.push(resolvedEntryMetadata);
         }
+        resolvedMetadata = seeded
+          ? seeded.metadata
+          : metadata.reduce<WebClientRouteIR["metadata"]>(
+              (result, value) => Object.freeze({ ...result, ...value }),
+              {},
+            );
         break;
       }
       if (disposed || ownGeneration !== generation) return;
-      if (isRecord(outcome) && "redirect" in outcome) {
-        const scoped = options.featureDependencies[match.route.feature]?.navigation as
-          | typeof navigation
-          | undefined;
-        (scoped ?? navigation).navigate({
-          ...(outcome.redirect as WebDestination),
-          replace: true,
-        });
-        return;
-      }
       current = {
         match,
-        definition,
-        data:
-          isRecord(outcome) && "data" in outcome
-            ? prepareDeferredRouteData(outcome.data, match.route.deferred, controller.signal)
-            : undefined,
-        metadata: mergeRouteMetadata(match.route.metadata, outcome),
+        branch: Object.freeze(resolvedBranch),
+        metadata: resolvedMetadata,
       };
       applyRouteMetadata(options.system, current.metadata);
+      commitBranch(current.branch);
     } catch (error) {
       if (disposed || ownGeneration !== generation) return;
       current = undefined;
       failure = error;
+      renderedBranch = [];
+      renderedRoot(`Route failed: ${failure instanceof Error ? failure.message : String(failure)}`);
       applyRouteMetadata(options.system, {});
     }
-    revision(revision() + 1);
+    if (navigationType !== "initial") {
+      settleWebNavigation(
+        options.boundary,
+        location,
+        navigationType,
+        ownGeneration,
+        () => generation,
+      );
+    }
   };
 
-  const routeNavigation = installRouteNavigation(options.boundary, options.routes, loadDefinition);
+  const routeNavigation = installRouteNavigation(
+    options.boundary,
+    options.routes,
+    loadDefinition,
+    navigation,
+  );
   let activeResolution: Promise<void> | undefined;
-  const beginResolution = (location: URL): Promise<void> => {
-    const task = resolve(location);
+  const beginResolution = (location: URL, type: WebNavigationType | "initial"): Promise<void> => {
+    const task = resolve(location, type);
     activeResolution = task;
     return task;
   };
-  const subscription = navigation.subscribe((location) => void beginResolution(location));
-  let initialResolution = beginResolution(navigation.current());
+  const subscription = navigation.subscribe(
+    (location, type) => void beginResolution(location, type),
+  );
+  let initialResolution = beginResolution(navigation.current(), "initial");
   for (;;) {
     await initialResolution;
     if (activeResolution === initialResolution) break;
     initialResolution = activeResolution!;
   }
-  const renderCurrent = (): Child => {
-    if (failure)
-      return `Route failed: ${failure instanceof Error ? failure.message : String(failure)}`;
-    if (!current) return "Not found.";
-    const feature = current.match.route.feature;
-    return current.definition.view({
-      data: current.data,
-      params: current.match.params,
-      search: current.match.search,
-      feature: options.apis[feature] ?? {},
-      features: childFeatureAPIs(feature, options.apis),
-      components: componentsForOwner(feature, options.composition),
-    });
-  };
   return {
     render() {
-      void revision();
-      return scoped(renderCurrent);
+      return renderedRoot();
     },
     dispose() {
       if (disposed) return;
@@ -633,10 +749,21 @@ function prepareDeferredRouteData(
 
 function routeHydrationOutcome(
   hydration: WebRouteHydrationIR,
+  route: Pick<WebClientRouteIR, "feature" | "metadata" | "name">,
 ): Readonly<{ data: unknown; metadata: WebRouteHydrationIR["metadata"] }> {
+  const branch = hydration.branch?.find(
+    (entry) => entry.route.feature === route.feature && entry.route.name === route.name,
+  );
+  if (branch) {
+    return {
+      data: branch.loader === false ? undefined : branch.loader.data,
+      metadata: branch.metadata,
+    };
+  }
+  const leaf = hydration.route.feature === route.feature && hydration.route.name === route.name;
   return {
-    data: hydration.loader === false ? undefined : hydration.loader.data,
-    metadata: hydration.metadata,
+    data: leaf && hydration.loader !== false ? hydration.loader.data : undefined,
+    metadata: leaf ? hydration.metadata : route.metadata,
   };
 }
 
@@ -697,7 +824,7 @@ async function readInitialWebRouteRecord(
 
 function hydrationMatches(
   hydration: WebRouteHydrationIR | undefined,
-  match: WebRouteMatch,
+  match: WebRouteMatch<WebClientRouteIR>,
   location: URL,
 ): hydration is WebRouteHydrationIR {
   return Boolean(
@@ -717,7 +844,7 @@ function invalidatePendingHydration(boundary: Element): void {
 function routeDefinition(
   system: RuntimeSystem,
   program: string,
-  route: WebRouteIR,
+  route: WebClientRouteIR,
 ): RuntimeRouteDefinition {
   const feature = resolveRuntimeFeature(system, route.feature);
   const definition = feature?.programs?.[program]?.routes?.[route.name];
@@ -726,14 +853,66 @@ function routeDefinition(
   return definition;
 }
 
-function routeIdentity(route: Pick<WebRouteIR, "feature" | "name">): string {
+function routeIdentity(route: Pick<WebClientRouteIR, "feature" | "name">): string {
   return `${route.feature}.${route.name}`;
+}
+
+function equivalentRouteEntry(
+  left: Readonly<{
+    match: WebRouteMatch<WebClientRouteIR>;
+    definition: RuntimeRouteDefinition;
+    data: unknown;
+    metadata: WebClientRouteIR["metadata"];
+  }>,
+  right: Readonly<{
+    match: WebRouteMatch<WebClientRouteIR>;
+    definition: RuntimeRouteDefinition;
+    data: unknown;
+    metadata: WebClientRouteIR["metadata"];
+  }>,
+): boolean {
+  return (
+    equivalentRouteMatch(left.match, right.match) &&
+    left.definition === right.definition &&
+    Object.is(left.data, right.data) &&
+    Object.is(left.metadata, right.metadata)
+  );
+}
+
+function equivalentRouteMatch(
+  left: WebRouteMatch<WebClientRouteIR>,
+  right: WebRouteMatch<WebClientRouteIR>,
+): boolean {
+  return (
+    routeIdentity(left.route) === routeIdentity(right.route) &&
+    equivalentRouteValues(left.params, right.params) &&
+    equivalentRouteValues(left.search, right.search)
+  );
+}
+
+function equivalentRouteValues(
+  left: Readonly<Record<string, unknown>>,
+  right: Readonly<Record<string, unknown>>,
+): boolean {
+  const names = Object.keys(left);
+  if (names.length !== Object.keys(right).length) return false;
+  return names.every((name) => {
+    const leftValue = left[name];
+    const rightValue = right[name];
+    return Array.isArray(leftValue) && Array.isArray(rightValue)
+      ? leftValue.length === rightValue.length &&
+          leftValue.every((value, index) => Object.is(value, rightValue[index]))
+      : Object.is(leftValue, rightValue);
+  });
 }
 
 function installRouteNavigation(
   boundary: Element,
-  routes: readonly WebRouteIR[],
-  load: (route: WebRouteIR) => Promise<RuntimeRouteDefinition>,
+  routes: readonly WebClientRouteIR[],
+  load: (route: WebClientRouteIR) => Promise<RuntimeRouteDefinition>,
+  navigation: Readonly<{
+    navigate(destination: RuntimeWebDestination): void;
+  }>,
 ): Disposable {
   if (typeof boundary.addEventListener !== "function") {
     return { [Symbol.dispose]() {} };
@@ -744,7 +923,7 @@ function installRouteNavigation(
     const anchor = target.closest("a[href]");
     return anchor instanceof HTMLAnchorElement && boundary.contains(anchor) ? anchor : undefined;
   };
-  const matchAnchor = (anchor: HTMLAnchorElement): WebRouteMatch | undefined => {
+  const matchAnchor = (anchor: HTMLAnchorElement): WebRouteMatch<WebClientRouteIR> | undefined => {
     const target = new URL(anchor.href, location.href);
     if (target.origin !== location.origin) return undefined;
     return matchWebRoute(routes, target);
@@ -810,7 +989,8 @@ function installRouteNavigation(
       return;
     }
     const target = new URL(anchor.href, location.href);
-    if (!matchAnchor(anchor)) return;
+    const match = matchAnchor(anchor);
+    if (!match) return;
     if (
       target.pathname === location.pathname &&
       target.search === location.search &&
@@ -819,8 +999,13 @@ function installRouteNavigation(
       return;
     }
     click.preventDefault();
-    history.pushState(null, "", `${target.pathname}${target.search}${target.hash}`);
-    dispatchEvent(new PopStateEvent("popstate"));
+    navigation.navigate({
+      feature: match.route.address ?? match.route.feature,
+      route: match.route.name,
+      ...(Object.keys(match.params).length ? { params: match.params } : {}),
+      ...(Object.keys(match.search).length ? { search: match.search } : {}),
+      ...(target.hash ? { hash: target.hash.slice(1) } : {}),
+    });
   };
   boundary.addEventListener("pointerover", onPointerOver);
   boundary.addEventListener("pointerout", onPointerOut);
@@ -840,21 +1025,65 @@ function installRouteNavigation(
   };
 }
 
+function settleWebNavigation(
+  boundary: Element,
+  location: URL,
+  type: WebNavigationType,
+  generation: number,
+  currentGeneration: () => number,
+): void {
+  const commit = () => {
+    if (generation !== currentGeneration()) return;
+    if (type === "reload") return;
+    const hash = location.hash ? decodeURIComponent(location.hash.slice(1)) : "";
+    const hashTarget =
+      hash && typeof document !== "undefined" ? document.getElementById(hash) : null;
+    if (hashTarget) {
+      hashTarget.scrollIntoView();
+      focusNavigationTarget(hashTarget);
+      return;
+    }
+    if (type !== "traverse" && typeof scrollTo === "function") {
+      scrollTo({ top: 0, left: 0, behavior: "instant" });
+    }
+    const target = boundary.querySelector?.("main,[role='main'],h1") ?? boundary;
+    focusNavigationTarget(target);
+  };
+  if (typeof requestAnimationFrame === "function") requestAnimationFrame(commit);
+  else queueMicrotask(commit);
+}
+
+function focusNavigationTarget(target: Element): void {
+  if (
+    typeof HTMLElement === "undefined" ||
+    !(target instanceof HTMLElement) ||
+    typeof target.focus !== "function"
+  ) {
+    return;
+  }
+  const temporary = !target.hasAttribute("tabindex");
+  if (temporary) target.setAttribute("tabindex", "-1");
+  target.focus({ preventScroll: true });
+  if (temporary) {
+    target.addEventListener("blur", () => target.removeAttribute("tabindex"), { once: true });
+  }
+}
+
 function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
 function mergeRouteMetadata(
-  base: WebRouteIR["metadata"],
+  base: WebClientRouteIR["metadata"],
   outcome: unknown,
-): WebRouteIR["metadata"] {
+): WebClientRouteIR["metadata"] {
   if (!isRecord(outcome) || !isRecord(outcome.metadata)) return base;
-  const dynamic = outcome.metadata as WebRouteIR["metadata"];
+  const dynamic = outcome.metadata as WebClientRouteIR["metadata"];
   validateWebRouteMetadata(dynamic, "dynamic");
   return Object.freeze({ ...base, ...dynamic });
 }
 
-function applyRouteMetadata(system: RuntimeSystem, metadata: WebRouteIR["metadata"]): void {
+function applyRouteMetadata(system: RuntimeSystem, metadata: WebClientRouteIR["metadata"]): void {
   applyWebDocumentHead({
     title: metadata.title ?? system.metadata?.name ?? "Kit",
     language: metadata.language ?? "en",
@@ -865,21 +1094,23 @@ function applyRouteMetadata(system: RuntimeSystem, metadata: WebRouteIR["metadat
 function inferEmptyProgramManifest(
   system: RuntimeSystem,
   interfacePath: string,
+  features: Readonly<Record<string, string>> | undefined,
   name: string,
   logicalName: string,
 ): ProgramManifest {
   const appPath = interfaceAppPath(interfacePath);
   const contributions: Array<ProgramManifest["contributions"][number]> = [];
   const visit = (feature: RuntimeFeature, path: string): void => {
+    const owner = feature.path ?? path;
     if (feature.programs?.[logicalName]) {
-      contributions.push({ feature: path, requires: [], provides: [] });
+      contributions.push({ feature: owner, requires: [], provides: [] });
     }
     for (const [name, child] of Object.entries(feature.features ?? {})) {
-      const childPath = `${path}.${name}`;
+      const childPath = `${owner}.${name}`;
       visit(child, childPath);
     }
   };
-  visit(requireRuntimeFeature(system, appPath), appPath);
+  visit(projectApplicationFeature(system, appPath, features), appPath);
   return { name, bindings: [], contributions };
 }
 
@@ -1142,6 +1373,46 @@ function requireRuntimeFeature(system: RuntimeSystem, path: string): RuntimeFeat
   return feature;
 }
 
+function projectApplicationFeature(
+  system: RuntimeSystem,
+  appPath: string,
+  bindings: Readonly<Record<string, string>> | undefined,
+): RuntimeFeature {
+  if (!bindings || Object.keys(bindings).length === 0) {
+    return requireRuntimeFeature(system, appPath);
+  }
+  return {
+    features: Object.freeze(
+      Object.fromEntries(
+        Object.entries(bindings)
+          .sort(([left], [right]) => left.localeCompare(right))
+          .map(([role, path]) => [
+            role,
+            projectRuntimeFeature(requireRuntimeFeature(system, path), path),
+          ]),
+      ),
+    ),
+  };
+}
+
+function projectRuntimeFeature(feature: RuntimeFeature, path: string): RuntimeFeature {
+  return {
+    ...feature,
+    path,
+    ...(feature.features
+      ? {
+          features: Object.freeze(
+            Object.fromEntries(
+              Object.entries(feature.features)
+                .sort(([left], [right]) => left.localeCompare(right))
+                .map(([name, child]) => [name, projectRuntimeFeature(child, `${path}.${name}`)]),
+            ),
+          ),
+        }
+      : {}),
+  };
+}
+
 function interfaceAppPath(path: string): string {
   const segments = path.split(".").filter(Boolean);
   if (segments.length < 2) {
@@ -1174,7 +1445,7 @@ function collectFeatureComponentScopes(
   for (const name of Object.keys(features ?? {}).sort()) {
     const feature = features?.[name];
     if (!feature) continue;
-    const path = parent ? `${parent}.${name}` : name;
+    const path = feature.path ?? (parent ? `${parent}.${name}` : name);
     const local: Record<string, (props?: RuntimeComponentProps) => Child> = Object.create(null);
     for (const component of Object.keys(feature.programs?.[program]?.components ?? {}).sort()) {
       const renderer = renderers[featureComponentName(path, component)];
@@ -1328,6 +1599,7 @@ export function ownedPresentationTargets(
 export function createPresentationGraph(options: {
   system: RuntimeSystem;
   interface: string;
+  features?: Readonly<Record<string, string>>;
   logicalProgram: string;
   presentation: () => RuntimeConfiguredPresentation;
   adapter: PresentationAdapterInstance<WebPresentationLanguage, Element>;
@@ -1339,7 +1611,7 @@ export function createPresentationGraph(options: {
   dependencies?: PresentationDependencyManifest;
 }): RuntimePresentationGraph {
   const appPath = interfaceAppPath(options.interface);
-  const appFeature = requireRuntimeFeature(options.system, appPath);
+  const appFeature = projectApplicationFeature(options.system, appPath, options.features);
   const scopeIdentities = collectPresentationScopes(appFeature, appPath);
   const scopePaths = Object.keys(scopeIdentities).sort();
   const scopeIndexes = new Map(scopePaths.map((path, index) => [path, index]));
@@ -1502,7 +1774,7 @@ function collectPresentationComponents(options: {
   for (const [name, feature] of Object.entries(options.features ?? {}).sort(([left], [right]) =>
     left.localeCompare(right),
   )) {
-    const path = options.parent ? `${options.parent}.${name}` : name;
+    const path = feature.path ?? (options.parent ? `${options.parent}.${name}` : name);
     if (!options.refreshAll && !hasPresentationConsumer(options.sharedConsumers, path)) {
       copyPresentationSubtree(options.previous, options.result, path);
       continue;
@@ -1706,6 +1978,7 @@ function normalizeRuntimeComponents<Contract extends SystemContract>(
 async function createProgramUI(
   system: RuntimeSystem,
   interfacePath: string,
+  featureBindings: Readonly<Record<string, string>> | undefined,
   program: string,
   logicalProgram: string,
   externalDependencies: Readonly<Record<string, unknown>>,
@@ -1726,32 +1999,32 @@ async function createProgramUI(
     system,
     name: program,
     logicalName: logicalProgram,
+    language: createWebProgramLanguageRuntime({ onActionEvent }),
     dependencies: externalDependencies,
     manifest,
     initialState: hotState?.programs,
-    onActionEvent,
   });
-  const apis = { ...assembly.ui };
+  const apis = { ...assembly.exposed };
   const dependencies: Record<string, Readonly<Record<string, unknown>>> = Object.create(null);
   const events: Record<string, Readonly<Record<string, unknown>>> = Object.create(null);
   for (const instance of assembly.contributions) {
     dependencies[instance.address.feature] = instance.dependencies;
-    events[instance.address.feature] = instance.ui?.events ?? Object.freeze({});
+    events[instance.address.feature] = webContributionRuntime(instance.runtime).events;
   }
 
-  const root = collectProgramRoots(system, interfacePath, logicalProgram, !routed);
+  const root = collectProgramRoots(system, interfacePath, featureBindings, logicalProgram, !routed);
   const owner = root ? componentOwner(root) : undefined;
   const appPath = interfaceAppPath(interfacePath);
   const api = apis[owner ?? appPath] ?? Object.freeze({});
-  const appFeature = requireRuntimeFeature(system, appPath);
+  const appFeature = projectApplicationFeature(system, appPath, featureBindings);
 
   let disposed = false;
   const captureHotState = (): HotRenderState => {
     const state = hotState ?? {};
     state.programs = Object.fromEntries(
-      assembly.contributions.flatMap((instance) =>
-        instance.ui ? [[instance.address.feature, instance.ui.snapshot()]] : [],
-      ),
+      assembly.contributions.flatMap((instance) => [
+        [instance.address.feature, webContributionRuntime(instance.runtime).snapshot()],
+      ]),
     );
     return state;
   };
@@ -1760,7 +2033,7 @@ async function createProgramUI(
     features: Object.fromEntries(
       Object.keys(appFeature.features ?? {}).map((name) => [
         name,
-        apis[`${appPath}.${name}`] ?? {},
+        apis[appFeature.features?.[name]?.path ?? `${appPath}.${name}`] ?? {},
       ]),
     ),
     apis,
@@ -1779,22 +2052,24 @@ async function createProgramUI(
 function collectProgramRoots(
   system: RuntimeSystem,
   interfacePath: string,
+  featureBindings: Readonly<Record<string, string>> | undefined,
   program: string,
   required = true,
 ): string | undefined {
   const appPath = interfaceAppPath(interfacePath);
   const roots: string[] = [];
   const visit = (feature: RuntimeFeature, path: string) => {
+    const owner = feature.path ?? path;
     const root = feature.programs?.[program]?.root;
-    if (root) roots.push(featureComponentName(path, root));
+    if (root) roots.push(featureComponentName(owner, root));
     const features = feature.features;
     for (const [name, feature] of Object.entries(features ?? {}).sort(([left], [right]) =>
       left.localeCompare(right),
     )) {
-      visit(feature, `${path}.${name}`);
+      visit(feature, `${owner}.${name}`);
     }
   };
-  visit(requireRuntimeFeature(system, appPath), appPath);
+  visit(projectApplicationFeature(system, appPath, featureBindings), appPath);
   if (roots.length !== 1 && (required || roots.length > 1)) {
     throw new Error(
       `UI Program "${program}" must define exactly one root Component; found ${roots.length}.`,
@@ -1827,7 +2102,7 @@ function collectPresentationScopes(
     parent: string,
   ) => {
     for (const [name, feature] of Object.entries(children ?? {})) {
-      const path = parent ? `${parent}.${name}` : name;
+      const path = feature.path ?? (parent ? `${parent}.${name}` : name);
       scopes[path] = Object.freeze({});
       visit(feature.features, path);
     }

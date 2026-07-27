@@ -81,6 +81,27 @@ describe("web host", () => {
     ).toBe("window:ready");
   });
 
+  test("keeps server-projected Route loader Dependencies out of browser activation", async () => {
+    const greetings = dependency("greetings", [
+      operation("message", true, { kind: "primitive", name: "string" }),
+    ]);
+
+    await expect(createWebHost({ dependencies: [greetings] })).rejects.toThrow(
+      "cannot implement Dependency greetings",
+    );
+    const host = await createWebHost({
+      dependencies: [greetings],
+      routeDependencies: ["greetings"],
+    });
+    expect(() =>
+      (
+        host as Readonly<{
+          greetings: { message(input: { name: string }): string };
+        }>
+      ).greetings.message({ name: "Ada" }),
+    ).toThrow("available to server Route loaders but has no browser provider");
+  });
+
   test("resolves one destination shape locally and globally across every history operation", async () => {
     const calls: unknown[][] = [];
     const routes: WebRouteIR[] = [
@@ -88,6 +109,7 @@ describe("web host", () => {
         feature: "tasks",
         name: "list",
         path: "/tasks",
+        status: 200,
         document: "content",
         cache: false,
         metadata: {},
@@ -99,6 +121,7 @@ describe("web host", () => {
         feature: "tasks",
         name: "edit",
         path: "/tasks/:id",
+        status: 200,
         document: "content",
         cache: false,
         metadata: {},
@@ -125,15 +148,17 @@ describe("web host", () => {
       feature: "tasks",
     }) as TestNavigation;
 
-    expect(host.navigation.href({ to: "tasks.list" })).toBe("/tasks");
-    expect(local.href({ to: "edit", params: { id: "one" } })).toBe("/tasks/one");
-    const receive = vi.fn();
+    expect(host.navigation.href({ feature: "tasks", route: "list" })).toBe("/tasks");
+    expect(local.href({ route: "edit", params: { id: "one" } })).toBe("/tasks/one");
+    const receive =
+      vi.fn<(location: URL, type: "push" | "replace" | "traverse" | "reload") => void>();
     using _subscription = local.subscribe(receive);
-    local.navigate({ to: "edit", params: { id: "two" } });
-    local.navigate({ to: "list", replace: true });
+    local.navigate({ route: "edit", params: { id: "two" } });
+    local.navigate({ route: "list", replace: true });
     local.back();
     local.forward();
     popstate?.();
+    local.reload();
 
     expect(calls).toEqual([
       ["push", null, "", "/tasks/two"],
@@ -141,7 +166,13 @@ describe("web host", () => {
       ["back"],
       ["forward"],
     ]);
-    expect(receive).toHaveBeenCalledTimes(3);
+    expect(receive).toHaveBeenCalledTimes(4);
+    expect(receive.mock.calls.map(([, type]) => type)).toEqual([
+      "push",
+      "replace",
+      "traverse",
+      "reload",
+    ]);
     (host.navigation as Navigation & Disposable)[Symbol.dispose]();
   });
 
@@ -210,6 +241,23 @@ describe("web host", () => {
     expect(notifications).toEqual([{ title: "Ready", options: { body: "Complete" } }]);
     expect(opened).toEqual(["https://example.test/tasks"]);
     expect(closed).toBe(true);
+  });
+
+  test("registers semantic handlers with the physical service-worker event router", () => {
+    const subscriptions = new Set<object>();
+    const scope = {
+      __kitServiceWorkerSubscriptions: subscriptions,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    } as unknown as Parameters<typeof createWebServiceWorkerRuntime>[0];
+    const runtime = createWebServiceWorkerRuntime(scope);
+    const handlers = { message: vi.fn() };
+    const subscription = runtime.subscribe(handlers);
+
+    expect(subscriptions).toEqual(new Set([handlers]));
+    expect(scope.addEventListener).not.toHaveBeenCalled();
+    subscription[Symbol.dispose]();
+    expect(subscriptions).toEqual(new Set());
   });
 
   test("exposes the service-worker Dependency only in its matching environment", async () => {

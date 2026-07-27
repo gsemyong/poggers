@@ -1,12 +1,4 @@
-import {
-  Virtualizer,
-  defaultRangeExtractor,
-  elementScroll,
-  measureElement as measureVirtualElement,
-  observeElementOffset,
-  observeElementRect,
-  type VirtualizerOptions,
-} from "@tanstack/virtual-core";
+import type * as VirtualCoreModule from "@tanstack/virtual-core";
 import {
   computed as alienComputed,
   effect as alienEffect,
@@ -74,7 +66,18 @@ export type Props = Record<string, unknown> & {
 
 export type Component<P extends object = Record<string, never>> = (props: P) => Child;
 
+type HotControlState = Readonly<{
+  checked?: boolean;
+  id?: string;
+  path: readonly number[];
+  selected?: readonly number[];
+  tag: string;
+  type?: string;
+  value?: string;
+}>;
+
 export type HotRenderState = {
+  controls?: readonly HotControlState[];
   focus?: Readonly<{
     id?: string;
     path: readonly number[];
@@ -90,6 +93,10 @@ export type HotRenderState = {
   values?: unknown[];
   mounted?: boolean;
 };
+
+type HotControlProperty = "checked" | "value";
+
+const hotControlledProperties = new WeakMap<Element, Set<HotControlProperty>>();
 
 export type RenderDisposer = (() => void) & {
   capture(): HotRenderState;
@@ -412,6 +419,7 @@ function renderAttempt(
         if (typeof cleanup === "function") owner.cleanups.push(cleanup);
       }
     }
+    if (hotRefresh && hotState?.controls) restoreHotControls(root, hotState.controls);
     if (hotRefresh && hotScroll) restoreHotScroll(root, hotScroll);
     if (!hydration && !hotRefresh && root.getAttribute("data-kit-rendering") === "client") {
       releaseServerStyles(root);
@@ -448,6 +456,7 @@ function renderAttempt(
     const state = owner.hotState ?? {};
     if (!owner.hotState) return state;
     const captured = new Map(owner.signals.map((current) => [current, readHotSignal(current)]));
+    state.controls = captureHotControls(root);
     state.scroll = captureHotScroll(root);
     state.focus = captureHotFocus(root);
     state.values = owner.signals.map((current) => captured.get(current));
@@ -585,6 +594,112 @@ function focusMatches(root: Element, focus: NonNullable<HotRenderState["focus"]>
 
 function readHotSignal(current: Signal<unknown>): unknown {
   return hotSignalCaptures.get(current)?.() ?? current();
+}
+
+function captureHotControls(root: Element): NonNullable<HotRenderState["controls"]> {
+  if (typeof root.querySelectorAll !== "function") return [];
+  return [
+    ...root.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(
+      "input,select,textarea",
+    ),
+  ].flatMap<HotControlState>((element) => {
+    const controlled = hotControlledProperties.get(element);
+    const common = {
+      id: element.id || undefined,
+      path: elementPath(root, element),
+      tag: element.tagName,
+    };
+    if (element.tagName === "SELECT") {
+      if (controlled?.has("value")) return [];
+      const select = element as HTMLSelectElement;
+      const changed = [...select.options].some(
+        (option) => option.selected !== option.defaultSelected,
+      );
+      if (!changed) return [];
+      return [
+        {
+          ...common,
+          selected: [...select.options].flatMap((option, index) =>
+            option.selected ? [index] : [],
+          ),
+        },
+      ];
+    }
+    if (element.tagName === "TEXTAREA") {
+      if (controlled?.has("value")) return [];
+      const textarea = element as HTMLTextAreaElement;
+      return textarea.value === textarea.defaultValue ? [] : [{ ...common, value: textarea.value }];
+    }
+    const input = element as HTMLInputElement;
+    const type = input.type;
+    if (type === "checkbox" || type === "radio") {
+      return controlled?.has("checked") || input.checked === input.defaultChecked
+        ? []
+        : [{ ...common, checked: input.checked, type }];
+    }
+    return controlled?.has("value") || type === "file" || input.value === input.defaultValue
+      ? []
+      : [{ ...common, type, value: input.value }];
+  });
+}
+
+function restoreHotControls(
+  root: Element,
+  controls: NonNullable<HotRenderState["controls"]>,
+): void {
+  for (const state of controls) {
+    const element = resolveHotElement(root, state);
+    if (!element || element.tagName !== state.tag) continue;
+    const controlled = hotControlledProperties.get(element);
+    if (element.tagName === "SELECT") {
+      if (controlled?.has("value") || !state.selected) continue;
+      const selected = new Set(state.selected);
+      for (const [index, option] of [...(element as HTMLSelectElement).options].entries()) {
+        option.selected = selected.has(index);
+      }
+      continue;
+    }
+    if (element.tagName === "TEXTAREA") {
+      if (!controlled?.has("value") && state.value !== undefined) {
+        (element as HTMLTextAreaElement).value = state.value;
+      }
+      continue;
+    }
+    const input = element as HTMLInputElement;
+    if (input.type !== state.type) continue;
+    if (!controlled?.has("checked") && state.checked !== undefined) {
+      input.checked = state.checked;
+    }
+    if (!controlled?.has("value") && state.value !== undefined && input.type !== "file") {
+      input.value = state.value;
+    }
+  }
+}
+
+function resolveHotElement(
+  root: Element,
+  state: Readonly<{ id?: string; path: readonly number[] }>,
+): Element | undefined {
+  const identified = state.id ? root.ownerDocument?.getElementById(state.id) : undefined;
+  if (identified && root.contains(identified)) return identified;
+  let current = root;
+  for (const index of state.path) {
+    const child = current.children.item(index);
+    if (!child) return;
+    current = child;
+  }
+  return current;
+}
+
+function elementPath(root: Element, element: Element): number[] {
+  const path: number[] = [];
+  for (let current: Element | null = element; current && current !== root;) {
+    const parent: Element | null = current.parentElement;
+    if (!parent) return [];
+    path.push([...parent.children].indexOf(current));
+    current = parent;
+  }
+  return path.reverse();
 }
 
 function captureHotScroll(root: Element): Record<string, { left: number; top: number }> {
@@ -866,20 +981,67 @@ type VirtualKeyedScopedNodes<Item> = KeyedScopedNodes<Item> & {
   readonly root: HTMLElement;
 };
 
+type VirtualCore = typeof VirtualCoreModule;
+let virtualCore: Promise<VirtualCore> | undefined;
+
+function loadVirtualCore(): Promise<VirtualCore> {
+  return (virtualCore ??= import("@tanstack/virtual-core"));
+}
+
 function virtualFor<Items extends readonly unknown[]>(props: VirtualForProps<Items>): Child {
   const host = currentChildHost;
   if (!host) {
     throw new Error("A virtual For must be the direct child of a rendered Component Element.");
   }
+  const space = document.createElement("div");
+  space.style.position = "relative";
+  space.style.flexShrink = "0";
+  space.style.minInlineSize = "100%";
+  const owner = currentOwner;
+  const scope: LifecycleScope = {
+    cleanups: [],
+    mounts: [],
+    disposed: false,
+    mounted: false,
+  };
+  let disposed = false;
+  registerCleanup(() => {
+    disposed = true;
+    disposeLifecycleScope(scope);
+  });
+  void loadVirtualCore()
+    .then((core) => {
+      if (disposed) return;
+      runInRuntimeContext(owner, scope, () => {
+        mountVirtualFor(props, host, space, core);
+        mountLifecycleScope(scope);
+      });
+    })
+    .catch((error: unknown) => {
+      if (!disposed) queueMicrotask(() => Promise.reject(error));
+    });
+  return space;
+}
+
+function mountVirtualFor<Items extends readonly unknown[]>(
+  props: VirtualForProps<Items>,
+  host: HTMLElement,
+  space: HTMLElement,
+  core: VirtualCore,
+): void {
+  const {
+    Virtualizer,
+    defaultRangeExtractor,
+    elementScroll,
+    measureElement: measureVirtualElement,
+    observeElementOffset,
+    observeElementRect,
+  } = core;
   const readGeometry =
     virtualCollectionHosts.get(host) ??
     runtimeSignal<VirtualCollectionGeometry | undefined>(undefined);
   virtualCollectionHosts.set(host, readGeometry);
 
-  const space = document.createElement("div");
-  space.style.position = "relative";
-  space.style.flexShrink = "0";
-  space.style.minInlineSize = "100%";
   let items = readSource(props.each);
   let geometry: VirtualCollectionGeometry = {
     axis: "block",
@@ -942,7 +1104,7 @@ function virtualFor<Items extends readonly unknown[]>(props: VirtualForProps<Ite
     });
   };
 
-  let virtualizer: Virtualizer<HTMLElement, HTMLElement>;
+  let virtualizer: VirtualCoreModule.Virtualizer<HTMLElement, HTMLElement>;
   const scrollPinnedActive = () => {
     const activeIndex = pinnedActiveIndex;
     if (!mounted || disposed || activeIndex < 0) return;
@@ -977,7 +1139,7 @@ function virtualFor<Items extends readonly unknown[]>(props: VirtualForProps<Ite
     refresh();
     requestPresenceFrame(refresh);
   };
-  const options = (): VirtualizerOptions<HTMLElement, HTMLElement> => {
+  const options = (): VirtualCoreModule.VirtualizerOptions<HTMLElement, HTMLElement> => {
     const virtualOptions = readVirtualOptions();
     return {
       count: items.length,
@@ -1242,8 +1404,6 @@ function virtualFor<Items extends readonly unknown[]>(props: VirtualForProps<Ite
     fallback = undefined;
     clear();
   });
-
-  return space;
 }
 
 function sameVirtualGeometry(
@@ -1605,6 +1765,11 @@ function applyProp(element: HTMLElement, name: string, value: unknown) {
   }
 
   const attributeName = attributeNameForProp(name);
+  if (name === "value" || name === "checked") {
+    const properties = hotControlledProperties.get(element) ?? new Set<HotControlProperty>();
+    properties.add(name);
+    hotControlledProperties.set(element, properties);
+  }
   bindValue((next) => {
     const ariaAttribute = attributeName.startsWith("aria-");
     if ((next === false && !ariaAttribute) || next == null) {
@@ -2080,6 +2245,7 @@ function toNodes(child: Child): Node[] {
   const resolved = resolveChild(child);
   if (resolved == null || resolved === false || resolved === true) return [];
   if (Array.isArray(resolved)) return resolved.flatMap(toNodes);
+  if (isScopedChild(resolved)) return dynamicNodes(() => resolved);
   if (isHydrationElement(resolved)) return [materializeHydrationElement(resolved)];
   if (resolved instanceof Node && resolved.nodeType === 11) {
     return Array.from(resolved.childNodes);
@@ -2223,6 +2389,24 @@ function registerCleanup(cleanup: () => void) {
   else currentOwner?.cleanups.push(cleanup);
 }
 
+function mountLifecycleScope(scope: LifecycleScope): void {
+  if (scope.mounted || scope.disposed) return;
+  scope.mounted = true;
+  while (scope.mounts.length) {
+    for (const mount of scope.mounts.splice(0)) {
+      const cleanup = mount();
+      if (typeof cleanup === "function") scope.cleanups.push(cleanup);
+    }
+  }
+}
+
+function disposeLifecycleScope(scope: LifecycleScope): void {
+  if (scope.disposed) return;
+  scope.disposed = true;
+  scope.mounts.length = 0;
+  for (const cleanup of scope.cleanups.splice(0).reverse()) cleanup();
+}
+
 function blockEffect(fn: () => void | (() => void)) {
   const owner = currentOwner;
   const scope = currentLifecycleScope;
@@ -2358,7 +2542,7 @@ function createScopedNodes(readNodes: () => Child): ScopedNodes {
   alienSetActiveSub(undefined);
   try {
     const dispose = alienEffectScope(() => {
-      nodes = toNodes(resolveChild(readNodes()));
+      nodes = toNodes(readNodes());
     });
     scope.cleanups.push(dispose);
   } finally {

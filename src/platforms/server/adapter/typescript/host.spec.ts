@@ -281,7 +281,7 @@ describe("server Platform host", () => {
       dependencies: [httpDependency],
       host: "127.0.0.1",
       port,
-      webOrigins: ["http://localhost:3000", "http://localhost:3001"],
+      allowedOrigins: ["http://localhost:3000", "http://localhost:3001"],
     });
     for (const origin of ["http://localhost:3000", "http://localhost:3001"]) {
       const response = await fetch(`http://127.0.0.1:${port}/api/tasks`, {

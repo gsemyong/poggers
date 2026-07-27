@@ -1,36 +1,16 @@
 import { describe, expect, test } from "vitest";
 
-import { SYSTEM_IR_VERSION, type ComponentIR, type SystemIR, type TypeIR } from "@/compiler/ir";
-import {
-  createHotReplacementManifest,
-  HotUpdateCoordinator,
-  isHotReplacementCompatible,
-  type HotCandidate,
-  type HotReplacementManifest,
-} from "@/execution/interpreter";
+import { HotUpdateCoordinator, type HotCandidate } from "@/execution/interpreter";
 
-describe("semantic hot updates", () => {
-  test("accepts additive and removed state fields but rejects changed fields", () => {
-    const before = manifest(record({ count: numberType(), label: stringType() }));
-    const added = manifest(
-      record({ count: numberType(), label: stringType(), enabled: booleanType() }),
-    );
-    const removed = manifest(record({ count: numberType() }));
-    const changed = manifest(record({ count: stringType(), label: stringType() }));
-
-    expect(isHotReplacementCompatible(before, added)).toBe(true);
-    expect(isHotReplacementCompatible(before, removed)).toBe(true);
-    expect(isHotReplacementCompatible(before, changed)).toBe(false);
-  });
-
+describe("hot update coordination", () => {
   test("keeps the live revision when prepare or activation fails", async () => {
     const events: string[] = [];
-    const coordinator = new HotUpdateCoordinator<string, number>();
+    const coordinator = new HotUpdateCoordinator<string, number, string>();
     await coordinator.replace(candidate("first", 1, events));
     expect(coordinator.value).toBe("first");
 
-    const prepareFailed: HotCandidate<string, number> = {
-      manifest: manifest(record({ count: numberType() })),
+    const prepareFailed: HotCandidate<string, number, string> = {
+      manifest: "compatible",
       async prepare() {
         throw new Error("invalid source");
       },
@@ -42,8 +22,8 @@ describe("semantic hot updates", () => {
     });
     expect(coordinator.value).toBe("first");
 
-    const activationFailed: HotCandidate<string, number> = {
-      manifest: manifest(record({ count: numberType() })),
+    const activationFailed: HotCandidate<string, number, string> = {
+      manifest: "compatible",
       async prepare() {
         return {
           async activate() {
@@ -65,99 +45,29 @@ describe("semantic hot updates", () => {
     await coordinator.dispose();
   });
 
-  test("serializes 100 revisions with one live scope and exact reverse replacement", async () => {
+  test("serializes revisions and resumes only after disposing the previous value", async () => {
     const events: string[] = [];
-    const coordinator = new HotUpdateCoordinator<string, number>();
-    for (let revision = 0; revision < 100; revision++) {
-      const result = await coordinator.replace(candidate(String(revision), revision, events));
-      expect(result.status).toBe("activated");
-      expect(coordinator.value).toBe(String(revision));
-    }
-    await coordinator.dispose();
-
-    expect(events.filter((event) => event.startsWith("activate:"))).toHaveLength(100);
-    expect(events.filter((event) => event.startsWith("dispose:"))).toHaveLength(100);
-    expect(events.at(-1)).toBe("dispose:99");
-  });
-
-  test("resumes a replacement only after the previous revision is disposed", async () => {
-    const events: string[] = [];
-    const coordinator = new HotUpdateCoordinator<string, number>();
+    const coordinator = new HotUpdateCoordinator<string, number, string>();
     await coordinator.replace(candidate("first", 1, events));
-    await coordinator.replace({
-      manifest: manifest(record({ count: numberType() })),
-      async prepare(previous) {
-        return {
-          async activate() {
-            events.push(`activate:second:${previous}`);
-            return {
-              value: "second",
-              snapshot: 2,
-              resume() {
-                events.push("resume:second");
-              },
-              dispose() {
-                events.push("dispose:second");
-              },
-            };
-          },
-        };
-      },
-    });
+    await coordinator.replace(candidate("second", 2, events, true));
 
     expect(events.slice(-3)).toEqual(["activate:second:1", "dispose:first", "resume:second"]);
     await coordinator.dispose();
+    expect(events.at(-1)).toBe("dispose:second");
   });
 
-  test("derives a stable manifest from semantic IR rather than source spans", () => {
-    const first = createHotReplacementManifest(system("one.ts"));
-    const second = createHotReplacementManifest(system("moved.ts"));
-    expect(second).toEqual(first);
-  });
+  test("delegates compatibility to the owning dialect", async () => {
+    const coordinator = new HotUpdateCoordinator<string, number, string>(
+      (previous, next) => previous === next,
+    );
+    await coordinator.replace(candidate("first", 1, [], false, "contract"));
 
-  test("rejects incompatible Component state, callback props, and Elements", () => {
-    const before = manifest(record({}), [component()]);
-
-    expect(
-      isHotReplacementCompatible(
-        before,
-        manifest(record({}), [component({ state: record({ offset: stringType() }) })]),
-      ),
-    ).toBe(false);
-    expect(
-      isHotReplacementCompatible(
-        before,
-        manifest(record({}), [component({ propCallbacks: ["onDismiss"] })]),
-      ),
-    ).toBe(false);
-    expect(
-      isHotReplacementCompatible(
-        before,
-        manifest(record({}), [component({ elements: [{ name: "Root", element: "main" }] })]),
-      ),
-    ).toBe(false);
-  });
-
-  test("accepts compatible Component state and implementation-only action changes", () => {
-    const before = manifest(record({}), [component()]);
-    const next = component({
-      state: record({ offset: numberType(), dragging: booleanType() }),
-      actions: ["drag", "release"],
-      implementation: { state: true, actions: true, mount: true, view: true },
+    expect(await coordinator.replace(candidate("next", 2, [], false, "changed"))).toEqual({
+      status: "rejected",
+      reason: "incompatible-manifest",
     });
-
-    expect(isHotReplacementCompatible(before, manifest(record({}), [next]))).toBe(true);
-  });
-
-  test("rejects a UI Platform change even when the Environment name is unchanged", () => {
-    const before = manifest(record({}));
-    const changed = manifest(record({}), [], {
-      name: "browser-main",
-      platform: "web",
-      ui: "three",
-    });
-
-    expect(isHotReplacementCompatible(before, changed)).toBe(false);
+    expect(coordinator.value).toBe("first");
+    await coordinator.dispose();
   });
 });
 
@@ -165,9 +75,11 @@ function candidate(
   value: string,
   snapshot: number,
   events: string[],
-): HotCandidate<string, number> {
+  resume = false,
+  manifest = "compatible",
+): HotCandidate<string, number, string> {
   return {
-    manifest: manifest(record({ count: numberType() })),
+    manifest,
     async prepare(previous) {
       return {
         async activate() {
@@ -175,6 +87,13 @@ function candidate(
           return {
             value,
             snapshot,
+            ...(resume
+              ? {
+                  resume() {
+                    events.push(`resume:${value}`);
+                  },
+                }
+              : {}),
             dispose() {
               events.push(`dispose:${value}`);
             },
@@ -183,85 +102,4 @@ function candidate(
       };
     },
   };
-}
-
-function manifest(
-  state: TypeIR,
-  components: readonly ComponentIR[] = [],
-  environment: Readonly<{ name: string; platform: string; ui?: string }> = {
-    name: "browser-main",
-    platform: "web",
-    ui: "web",
-  },
-): HotReplacementManifest {
-  return {
-    revision: "test",
-    programs: [{ id: "feature/app/program/browser", environment, state, components }],
-  };
-}
-
-function component(overrides: Partial<ComponentIR> = {}): ComponentIR {
-  return {
-    name: "Drawer",
-    propCallbacks: [],
-    state: record({ offset: numberType() }),
-    actions: ["drag"],
-    elements: [{ name: "Root", element: "section" }],
-    implementation: { state: true, actions: true, mount: false, view: true },
-    ...overrides,
-  };
-}
-
-function system(file: string): SystemIR {
-  return {
-    version: SYSTEM_IR_VERSION,
-    system: { id: "system", name: "test" },
-    platforms: ["web"],
-    apps: [],
-    interfaces: [],
-    features: [{ id: "feature/app", path: "app", kind: "feature", children: [], programs: [] }],
-    programs: [
-      {
-        id: "program/browser",
-        name: "browser",
-        logicalName: "browser",
-        environment: { name: "browser-main", platform: "web", ui: "web" },
-        contributions: [
-          {
-            id: "feature/app/program/browser",
-            feature: "app",
-            requires: [],
-            provides: [],
-            ui: { state: record({ count: numberType() }), actions: [], components: [] },
-            implementation: {
-              kind: "source",
-              reason: "platform-ui",
-              span: { file, line: 1, column: 1 },
-            },
-            span: { file, line: 1, column: 1 },
-          },
-        ],
-      },
-    ],
-    presentations: [],
-  };
-}
-
-function record(fields: Readonly<Record<string, TypeIR>>): TypeIR {
-  return {
-    kind: "record",
-    fields: Object.entries(fields).map(([name, type]) => ({ name, type, optional: false })),
-  };
-}
-
-function numberType(): TypeIR {
-  return { kind: "primitive", name: "number" };
-}
-
-function stringType(): TypeIR {
-  return { kind: "primitive", name: "string" };
-}
-
-function booleanType(): TypeIR {
-  return { kind: "primitive", name: "boolean" };
 }

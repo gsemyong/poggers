@@ -17,7 +17,9 @@ import {
   type TursoDatabase,
 } from "@/features/data";
 import { dataStoreConformance } from "@/features/data/testing";
+import { serverCompilerExtension, serverProgramExecution } from "@/platforms/server/adapter";
 import { rustServerDependencyTarget } from "@/platforms/server/adapter/rust/testing";
+import { webCompilerExtension } from "@/platforms/web/adapter/compiler";
 
 type Note = Readonly<{
   id: string;
@@ -146,12 +148,15 @@ describe("semantic data Feature", () => {
           }),
         ),
       ]);
-      const ir = compileSystem(entry);
+      const ir = compileSystem(entry, [serverCompilerExtension, webCompilerExtension]);
       const contributions = ir.programs.find(({ name }) => name === "server")!.contributions;
       expect(
         contributions
-          .filter(({ implementation }) => implementation.kind !== "portable")
-          .map(({ id, implementation }) => ({ id, implementation })),
+          .map((contribution) => ({
+            id: contribution.id,
+            implementation: serverProgramExecution(contribution),
+          }))
+          .filter(({ implementation }) => implementation.kind !== "portable"),
       ).toEqual([]);
       expect(contributions).toHaveLength(3);
     } finally {
@@ -298,12 +303,10 @@ async function pending<Value>(value: PromiseLike<Value>): Promise<boolean> {
 function dataSystemSource(): string {
   return `
 import {
-  createData,
-  createIdentity,
   createSystem,
-  type DataModel,
-  type IdentityModel,
 } from "@/index";
+import { createData, type DataModel } from "@/features/data";
+import { createIdentity, type IdentityModel } from "@/features/identity";
 
 type Users = IdentityModel<{
   Name: "identity";

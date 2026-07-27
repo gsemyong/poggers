@@ -18,7 +18,7 @@ The type supplies semantic meaning once. The implementation supplies only
 behavior:
 
 ```ts
-import { createActor, type Actor } from "kit";
+import { createActor, type Actor } from "kit/features/actor";
 
 type Inventory = Actor<{
   Name: "inventory";

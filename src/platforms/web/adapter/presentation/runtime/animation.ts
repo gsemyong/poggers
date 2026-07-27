@@ -1,16 +1,16 @@
 import {
-  type Animation,
-  type AnimationSample,
-  type Event,
-  type PresentationAnimationHost,
-} from "@/core/ui/presentation";
-import { eventCursor, readEventOccurrences } from "@/execution/presentation";
-import {
   createDynamicsTrajectory,
   type WebPulse,
   type WebScalarAnimation,
   type WebTrajectory,
 } from "@/platforms/web/presentation/dynamics";
+import {
+  type Animation,
+  type AnimationSample,
+  type Event,
+  type PresentationAnimationHost,
+} from "@/platforms/web/presentation/language";
+import { eventCursor, readEventOccurrences } from "@/platforms/web/presentation/runtime";
 
 export type WebAnimationHostOptions = Readonly<{
   now(): number;

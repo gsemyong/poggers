@@ -1,6 +1,4 @@
-import type { PresentationSourceIR } from "@/compiler/presentation";
-
-export const SYSTEM_IR_VERSION = 29 as const;
+export const SYSTEM_IR_VERSION = 32 as const;
 
 /** Maps semantic source files to the generated outputs affected by each source. */
 export type SystemOutputSources = Readonly<Record<string, readonly string[]>>;
@@ -8,7 +6,6 @@ export type SystemOutputSources = Readonly<Record<string, readonly string[]>>;
 /** Work performed by one semantic compilation, reported to development adapters. */
 export type SystemCompilationWork = Readonly<{
   features: Readonly<{ compiled: number; reused: number }>;
-  presentations: Readonly<{ compiled: number; reused: number }>;
   durations?: Readonly<{
     diagnostics: number;
     extraction: number;
@@ -314,12 +311,12 @@ export type FunctionIR = Readonly<{
   span: SourceSpan;
 }>;
 
-export type ProgramImplementationIR =
+/** Target-independent procedural meaning selected by a Program-language extension. */
+export type PortableProgramExecutionIR =
   | Readonly<{ kind: "none" }>
-  | Readonly<{ kind: "portable"; start: FunctionIR; functions: readonly FunctionIR[] }>
+  | Readonly<{ kind: "portable"; entry: FunctionIR; functions: readonly FunctionIR[] }>
   | Readonly<{
       kind: "source";
-      reason: "host-source" | "platform-ui";
       diagnostic?: Readonly<{ message: string; span: SourceSpan }>;
       span: SourceSpan;
     }>;
@@ -360,20 +357,6 @@ export type DependencyContractIR = Readonly<{
   reference?: DependencyReferenceIR;
 }>;
 
-export type ComponentIR = Readonly<{
-  name: string;
-  propCallbacks: readonly string[];
-  state: TypeIR;
-  actions: readonly string[];
-  elements: readonly Readonly<{ name: string; element: string }>[];
-  implementation: Readonly<{
-    state: boolean;
-    actions: boolean;
-    mount: boolean;
-    view: boolean;
-  }>;
-}>;
-
 export type ProgramContributionIR = Readonly<{
   id: string;
   feature: string;
@@ -381,13 +364,6 @@ export type ProgramContributionIR = Readonly<{
   apps?: readonly string[];
   requires: readonly DependencyIR[];
   provides: readonly DependencyIR[];
-  ui?: Readonly<{
-    state: TypeIR;
-    actions: readonly string[];
-    components: readonly ComponentIR[];
-    root?: string;
-  }>;
-  implementation: ProgramImplementationIR;
   extensions?: CompilerExtensionsIR;
   span: SourceSpan;
 }>;
@@ -397,10 +373,9 @@ export type ProgramIR = Readonly<{
   id: string;
   name: string;
   logicalName: string;
-  environment: Readonly<{ name: string; platform: string; ui?: string }>;
+  environment: Readonly<{ name: string; platform: string }>;
   interface?: string;
   contributions: readonly ProgramContributionIR[];
-  ui?: Readonly<{ root: Readonly<{ feature: string; component: string }> }>;
 }>;
 
 export type LinkedProgramContributionIR = Readonly<{
@@ -559,8 +534,6 @@ function canonicalTypeMeaning(type: TypeIR): unknown {
 export type FeatureIR = Readonly<{
   id: string;
   path: string;
-  kind: "app" | "feature";
-  app?: string;
   children: readonly string[];
   programs: readonly string[];
   providers?: readonly DependencyProviderIR[];
@@ -583,7 +556,8 @@ export type SelectedDependencyProviderIR = DependencyProviderIR & Readonly<{ fea
 
 export type AppIR = Readonly<{
   id: string;
-  feature: string;
+  path: string;
+  name?: string;
   interfaces: readonly string[];
 }>;
 
@@ -592,15 +566,11 @@ export type PlatformInterfaceIR = Readonly<{
   path: string;
   app: string;
   platform: string;
+  /** Application Feature roles resolved to canonical System Feature paths. */
+  features: Readonly<Record<string, string>>;
   programs: readonly string[];
-  presentationSources: readonly string[];
   extensions?: CompilerExtensionsIR;
 }>;
-
-export type InterfacePresentationIR = PresentationSourceIR &
-  Readonly<{
-    interface: string;
-  }>;
 
 export type SystemIR = Readonly<{
   version: typeof SYSTEM_IR_VERSION;
@@ -614,7 +584,6 @@ export type SystemIR = Readonly<{
   interfaces: readonly PlatformInterfaceIR[];
   features: readonly FeatureIR[];
   programs: readonly ProgramIR[];
-  presentations: readonly InterfacePresentationIR[];
 }>;
 
 /**
@@ -691,7 +660,7 @@ export type SystemOutputSelection = Readonly<{
 /** Selects whole-System outputs or one Application plus every System-shared contribution. */
 export function selectSystemOutputs(ir: SystemIR, app?: string): SystemOutputSelection {
   assertSystemIRVersion(ir);
-  const selectedApp = app ? ir.apps.find(({ feature }) => feature === app) : undefined;
+  const selectedApp = app ? ir.apps.find(({ path }) => path === app) : undefined;
   if (app && !selectedApp) throw new Error(`Unknown Application ${JSON.stringify(app)}.`);
   if (!selectedApp) {
     return {
@@ -701,31 +670,26 @@ export function selectSystemOutputs(ir: SystemIR, app?: string): SystemOutputSel
     };
   }
 
-  const interfaces = ir.interfaces.filter(({ app: owner }) => owner === selectedApp.feature);
+  const interfaces = ir.interfaces.filter(({ app: owner }) => owner === selectedApp.path);
   const interfacePaths = new Set(interfaces.map(({ path }) => path));
   const features = new Map(ir.features.map((feature) => [feature.path, feature]));
   const programs = ir.programs.flatMap((program): ProgramIR[] => {
     if (program.interface && !interfacePaths.has(program.interface)) return [];
     const contributions = program.contributions.filter((contribution) => {
-      if (contribution.apps) return contribution.apps.includes(selectedApp.feature);
+      if (contribution.apps) return contribution.apps.includes(selectedApp.path);
       const feature = features.get(contribution.feature);
       if (!feature) {
         throw new Error(
           `Program ${JSON.stringify(program.id)} references unknown Feature ${JSON.stringify(contribution.feature)}.`,
         );
       }
-      return feature.app === undefined || feature.app === selectedApp.feature;
+      return true;
     });
     if (!contributions.length) return [];
-    const roots = contributions.flatMap(({ feature, ui }) =>
-      ui?.root ? [{ feature, component: ui.root }] : [],
-    );
-    const { ui: _ui, ...meaning } = program;
     return [
       {
-        ...meaning,
+        ...program,
         contributions,
-        ...(roots[0] ? { ui: { root: roots[0] } } : {}),
       },
     ];
   });
@@ -736,7 +700,7 @@ export function selectSystemOutputs(ir: SystemIR, app?: string): SystemOutputSel
     ]),
   ].sort();
   return {
-    app: selectedApp.feature,
+    app: selectedApp.path,
     platforms,
     programs,
     interfaces,

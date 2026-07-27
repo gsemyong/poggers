@@ -1,6 +1,7 @@
-import type { JSXElement } from "@/core/ui/language";
-
-export type { JSXElement } from "@/core/ui/language";
+/** Opaque result shared by Platform-owned JSX languages. */
+export interface JSXElement {
+  readonly __kitJSXElement: true;
+}
 
 export type JSXPlatformRegistration<IntrinsicElements extends object> = Readonly<{
   IntrinsicElements: IntrinsicElements;

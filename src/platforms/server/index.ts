@@ -2,11 +2,53 @@ import type {
   Dependency,
   DependencyContract,
   DependencyImplementation,
+  DependencyImplementations,
   DependencyProvider,
 } from "@/core/dependency";
+import type { ProgramContract, ProgramDefinitionKind, ProgramRequires } from "@/core/program";
+
+type Empty = Record<never, never>;
+type ProgramResource = Disposable | AsyncDisposable | AsyncIterable<unknown>;
+type ProgramResourceResult = void | ProgramResource | PromiseLike<void | ProgramResource>;
+
+type ServerProgramStartContext<Contract extends ProgramContract> = Readonly<
+  {
+    dependencies: ProgramRequires<Contract>;
+  } & (Contract extends { Provides: infer Provides extends object }
+    ? { provides: readonly Extract<keyof Provides, string>[] }
+    : Empty)
+>;
+
+type ServerProgramStartResult<Contract extends ProgramContract> = Contract extends {
+  Provides: infer Provides extends object;
+}
+  ? DependencyImplementations<Provides> | PromiseLike<DependencyImplementations<Provides>>
+  : ProgramResourceResult;
+
+type ServerProgramDefinition<Contract extends ProgramContract> = [
+  Exclude<keyof Contract, keyof ProgramContract>,
+] extends [never]
+  ? Contract extends {
+      Provides: object;
+    }
+    ? Readonly<{
+        start(context: ServerProgramStartContext<Contract>): ServerProgramStartResult<Contract>;
+      }>
+    : Readonly<{
+        start?(context: ServerProgramStartContext<Contract>): ServerProgramStartResult<Contract>;
+      }>
+  : never;
+
+/** The headless Program language owned by the server Platform. */
+export interface ServerProgramDefinitionKind extends ProgramDefinitionKind {
+  readonly Definition: ServerProgramDefinition<Extract<this["Contract"], ProgramContract>>;
+}
 
 /** A headless server realization family. */
-export type ServerPlatform = Readonly<{ Name: "server" }>;
+export type ServerPlatform = Readonly<{
+  Name: "server";
+  Program: ServerProgramDefinitionKind;
+}>;
 
 type ServerDependency<Operations extends Readonly<Record<string, (input: never) => unknown>>> =
   Dependency<{ Operations: Operations }>;
@@ -28,6 +70,7 @@ export type ServerProviderConfiguration = Readonly<{
     | Readonly<{ kind: "process-location" }>
     | Readonly<{
         kind: "assets";
+        artifact?: "interface" | "program";
         platform?: string;
         format: "single" | "interfaces";
       }>;
@@ -35,6 +78,8 @@ export type ServerProviderConfiguration = Readonly<{
 
 export type ServerProviderProduction = Readonly<{
   requires?: readonly string[];
+  /** Adapter-owned registration operations supported in addition to the semantic Dependency API. */
+  bindings?: readonly string[];
   configuration: readonly ServerProviderConfiguration[];
   crate: Readonly<{ package: string; directory: string }>;
   rust: Readonly<{ type: string; constructor: string }>;
@@ -44,7 +89,7 @@ export type ServerProviderContext = Readonly<{
   appName: string;
   configuration: Readonly<Record<string, string>>;
   origin: string;
-  webOrigins: readonly string[];
+  allowedOrigins: readonly string[];
   sqlite(path: string): object & Disposable;
 }>;
 

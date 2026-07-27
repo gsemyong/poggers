@@ -13,25 +13,75 @@ import {
   type DependencyProviderInvocation,
 } from "@/core/dependency";
 import type { Feature } from "@/core/feature";
-import type { System } from "@/core/system";
+import type { System, SystemContract } from "@/core/system";
 import {
   bindDependenciesToScope,
   conformExternalDependencies,
   createDeferredDependencyBinding,
-  createProgramContributionInstance,
-  createUIContributionInstance,
+  createProgramContributionInstance as createContribution,
   planProgram,
   ResourceScope,
-  startProcess,
+  startProcess as startProgram,
   validateDependencyBindings,
 } from "@/execution/process";
+import type { ServerPlatform } from "@/platforms/server";
 import type { BrowserMainThread } from "@/platforms/web";
+import {
+  createWebUIContributionInstance as createUIContributionInstance,
+  type WebProgramDefinition,
+  webContributionRuntime,
+  webProgramLanguageRuntime,
+} from "@/platforms/web/adapter/ui/process";
 
-type ServerPlatform = { readonly Name: "server" };
 type Server = { readonly Name: "server"; readonly Platform: ServerPlatform };
 type Program<Environment, Contract extends object = object> = Readonly<
   Contract & { Environment: Environment }
 >;
+
+function createProgramContributionInstance(
+  definition: WebProgramDefinition,
+  options: Omit<Parameters<typeof createContribution>[1], "language">,
+) {
+  const instance = createContribution(definition, {
+    ...options,
+    language: webProgramLanguageRuntime,
+  });
+  const runtime = webContributionRuntime(instance.runtime);
+  return Object.defineProperty(instance, "ui", {
+    enumerable: true,
+    value: {
+      ...runtime,
+      api: runtime.exposed,
+    },
+  }) as typeof instance & {
+    readonly ui: typeof runtime & { readonly api: typeof runtime.exposed };
+  };
+}
+
+async function startProcess<Contract extends SystemContract>(
+  system: System<Contract>,
+  name: string,
+  dependencies: Readonly<Record<string, unknown>>,
+  manifest: ProgramManifest,
+  logicalName = name,
+) {
+  const process = await startProgram(
+    system,
+    name,
+    dependencies,
+    manifest,
+    webProgramLanguageRuntime,
+    logicalName,
+  );
+  return {
+    ...process,
+    ui: process.exposed,
+    contributions: process.contributions.map((instance) => {
+      const runtime = webContributionRuntime(instance.runtime);
+      return { ...instance, ui: { ...runtime, api: runtime.exposed } };
+    }),
+  };
+}
 
 describe("Program runtime", () => {
   test("enforces one compiler-derived contract across synchronous, asynchronous, and stream calls", async () => {

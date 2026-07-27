@@ -26,7 +26,6 @@ test("serializes arbitrary valid System IR deterministically", () => {
           .map((path) => ({
             id: `feature/${path}`,
             path,
-            kind: "feature" as const,
             children: [],
             programs: [],
           }))
@@ -39,7 +38,6 @@ test("serializes arbitrary valid System IR deterministically", () => {
           interfaces: [],
           features,
           programs: [],
-          presentations: [],
         };
 
         const first = serializeSystemIR(ir);
@@ -79,7 +77,6 @@ test("selects visible Feature providers once and rejects conflicting ownership",
       {
         id: "feature/owner",
         path: "owner",
-        kind: "feature",
         children: ["feature/owner.consumer"],
         programs: [],
         providers: [provider],
@@ -87,7 +84,6 @@ test("selects visible Feature providers once and rejects conflicting ownership",
       {
         id: "feature/owner.consumer",
         path: "owner.consumer",
-        kind: "feature",
         children: [],
         programs: ["program/api"],
         providers: [provider, { ...provider, platform: "web" }],
@@ -95,14 +91,12 @@ test("selects visible Feature providers once and rejects conflicting ownership",
       {
         id: "feature/unrelated",
         path: "unrelated",
-        kind: "feature",
         children: [],
         programs: [],
         providers: [{ ...provider, span: { file: "unrelated.ts", line: 1, column: 1 } }],
       },
     ],
     programs: [program],
-    presentations: [],
   };
 
   expect(selectDependencyProviders(ir, program, ["repository"])).toEqual([
@@ -352,7 +346,6 @@ function contribution(
     feature,
     requires,
     provides,
-    implementation: { kind: "none" },
     span: { file: `${feature}.ts`, line: 1, column: 1 },
   };
 }

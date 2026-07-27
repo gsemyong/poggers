@@ -40,7 +40,6 @@ describe("web Platform Adapter", () => {
       interfaces: [],
       features: [],
       programs: [program],
-      presentations: [],
     } as const;
 
     await expect(
@@ -52,25 +51,21 @@ describe("web Platform Adapter", () => {
           current: {
             revision: 0,
             ir,
-            presentationSources: new Set(),
             outputSources: {},
             sourceFiles: [],
             cache: "miss",
             work: {
               features: { compiled: 0, reused: 0 },
-              presentations: { compiled: 0, reused: 0 },
             },
           },
           compile: () => ({
             revision: 0,
             ir,
-            presentationSources: new Set(),
             outputSources: {},
             sourceFiles: [],
             cache: "miss",
             work: {
               features: { compiled: 0, reused: 0 },
-              presentations: { compiled: 0, reused: 0 },
             },
           }),
         },
@@ -164,12 +159,21 @@ type HttpClient = { request(input: { path: string }): Promise<Response> };
 type DataStore = { query(input: { collection: string }): Promise<string> };
 type Program<Environment, Contract extends object = {}> = Contract & { Environment: Environment };
 declare const featureContract: unique symbol;
+declare const applicationContract: unique symbol;
 type Feature<Contract> = Readonly<{ readonly [featureContract]?: Contract }>;
+type Application<Contract> = Readonly<{
+  readonly interfaces: object;
+  readonly [applicationContract]?: {
+    Application: Contract;
+    Features: Contract extends { Features: infer Features } ? Features : {};
+    Interfaces: Contract extends { Interfaces: infer Interfaces } ? Interfaces : {};
+  };
+}>;
 function createFeature<Contract>(definition: object): Feature<Contract> {
   return definition as Feature<Contract>;
 }
-function createApplication<Contract>(definition: object): Feature<Contract> {
-  return definition as Feature<Contract>;
+function createApplication<Contract>(definition: object): Application<Contract> {
+  return definition as Application<Contract>;
 }
 function createInterface<Contract>(definition: object): Contract {
   return definition as Contract;
@@ -189,13 +193,18 @@ type Runtime = {
     offline: Program<ServiceWorker>;
   };
 };
-type Web = { Interface: { Platform: Platform } };
+type Web = {
+  Interface: {
+    Platform: {
+      Name: "web";
+      Specification: { Mounts: { runtime: { Path: "" } } };
+    };
+  };
+};
 type Product = {
-  App: true;
   Features: { runtime: Runtime };
   Interfaces: { web: Web };
 };
-type Root = { Features: { product: Product } };
 const runtime = createFeature<Runtime>({
   providers: {
     web: {
@@ -227,12 +236,12 @@ const web = createInterface<Web>({
   },
 });
 const product = createApplication<Product>({
-  features: { runtime },
   interfaces: { web },
 });
 export default createSystem({
   metadata: { name: "web-programs" },
-  features: { product },
+  features: { runtime },
+  applications: { product },
 });
 `;
 }
@@ -249,20 +258,6 @@ function programIR(environment: string): ProgramIR {
         feature: "test",
         requires: [],
         provides: [],
-        implementation: {
-          kind: "portable",
-          start: {
-            id: "start",
-            name: "start",
-            asynchronous: false,
-            captures: [],
-            parameters: [],
-            result: { kind: "primitive", name: "void" },
-            body: [],
-            span: { file: "system.ts", line: 1, column: 1 },
-          },
-          functions: [],
-        },
         span: { file: "system.ts", line: 1, column: 1 },
       },
     ],

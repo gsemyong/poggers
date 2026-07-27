@@ -30,7 +30,7 @@ authenticationConformance.test(
       appName: "Identity conformance",
       configuration: { database: ":memory:", secret: "identity-conformance-secret" },
       origin: "http://localhost",
-      webOrigins: ["http://localhost"],
+      allowedOrigins: ["http://localhost"],
       sqlite: (path) => new DatabaseSync(path),
     }),
   ),

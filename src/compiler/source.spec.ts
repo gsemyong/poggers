@@ -17,19 +17,49 @@ import {
 } from "@/compiler/ir";
 import { collectProgramManifest, linkProgram } from "@/compiler/linker";
 import { generateRustProgram } from "@/compiler/rust/lowering";
-import { SystemDiagnostic, compileSystem, createSystemCompiler } from "@/compiler/source";
 import {
-  executeLinkedProgramIR,
-  executeProgramFixtureIR,
-  executeProgramIR,
-} from "@/execution/interpreter";
+  SystemDiagnostic,
+  compileSystem as compileSystemSource,
+  createSystemCompiler as createSystemCompilerSource,
+} from "@/compiler/source";
+import { serverCompilerExtension, serverProgramExecution } from "@/platforms/server/adapter";
 import {
   buildRustProgram,
   createRustProgramSession,
   runRustProgram,
 } from "@/platforms/server/adapter/rust/fixtures/conformance";
+import {
+  executeServerLinkedProgramIR as executeLinkedProgramIR,
+  executeServerProgramFixtureIR as executeProgramFixtureIR,
+  executeServerProgramIR as executeProgramIR,
+} from "@/platforms/server/adapter/typescript/runtime";
+import { webCompilerExtension } from "@/platforms/web/adapter/compiler";
+import { webInterfaceCompilerIR, webProgramUI } from "@/platforms/web/adapter/lowering";
 
 const temporaryDirectories: string[] = [];
+const deviceCompilerExtension: SourceCompilerExtension = Object.freeze({
+  name: "device",
+  program: () => ({ ir: { version: 1 } }),
+});
+const compilerExtensions = Object.freeze([
+  serverCompilerExtension,
+  webCompilerExtension,
+  deviceCompilerExtension,
+]);
+
+function compileSystem(
+  entry: string,
+  extensions: readonly SourceCompilerExtension[] = compilerExtensions,
+): SystemIR {
+  return compileSystemSource(entry, extensions);
+}
+
+function createSystemCompiler(
+  entry: string,
+  extensions: readonly SourceCompilerExtension[] = compilerExtensions,
+) {
+  return createSystemCompilerSource(entry, extensions);
+}
 
 afterEach(async () => {
   await Promise.all(
@@ -63,20 +93,22 @@ describe("System compiler", { tags: ["compiler"] }, () => {
     ]);
     const program = first.programs[0];
     const contribution = programContribution(first, "feature/worker/program/cloud");
+    const implementation = serverExecution(contribution);
     expect(program).toMatchObject({
       environment: { name: "server", platform: "server" },
     });
     expect(contribution).toMatchObject({
       requires: [{ name: "numbers" }, { name: "output" }],
-      implementation: { kind: "portable", start: { asynchronous: true } },
+    });
+    expect(implementation).toMatchObject({
+      kind: "portable",
+      entry: { asynchronous: true },
     });
     expect(
-      contribution?.implementation.kind === "portable"
-        ? contribution.implementation.start.body.map(({ kind }) => kind)
-        : [],
+      implementation?.kind === "portable" ? implementation.entry.body.map(({ kind }) => kind) : [],
     ).toEqual(["let", "let", "for-of", "if"]);
-    if (contribution?.implementation.kind !== "portable") throw new Error("Expected portable IR.");
-    const expressions = collectExpressions(contribution.implementation.start.body);
+    if (implementation?.kind !== "portable") throw new Error("Expected portable IR.");
+    const expressions = collectExpressions(implementation.entry.body);
     expect(expressions.length).toBeGreaterThan(10);
     expect(
       expressions.every(({ span, type }) => span.file === "system.ts" && Boolean(type.kind)),
@@ -114,14 +146,15 @@ describe("System compiler", { tags: ["compiler"] }, () => {
     if (!originalProgram || !changedProgram) throw new Error("Fixture has no server Program.");
     const identities = (ir: SystemIR) =>
       ir.programs.flatMap(({ contributions }) =>
-        contributions.flatMap(({ implementation }) =>
-          implementation.kind === "portable"
-            ? [implementation.start.id, ...implementation.functions.map(({ id }) => id)]
-            : [],
-        ),
+        contributions.flatMap((contribution) => {
+          const implementation = serverProgramExecution(contribution);
+          return implementation.kind === "portable"
+            ? [implementation.entry.id, ...implementation.functions.map(({ id }) => id)]
+            : [];
+        }),
       );
     const generatedMeaning = (program: typeof originalProgram) =>
-      generateRustProgram(linkProgram(program)).replace(
+      generateRustProgram(linkProgram(program), serverProgramExecution).replace(
         /^\/\/ TypeScript: .*$/gm,
         "// TypeScript source",
       );
@@ -136,12 +169,14 @@ describe("System compiler", { tags: ["compiler"] }, () => {
     expect(ir.apps).toEqual([
       {
         id: "app/customer",
-        feature: "customer",
+        path: "customer",
+        name: "Customer",
         interfaces: ["interface/customer.web"],
       },
       {
         id: "app/operations",
-        feature: "operations",
+        path: "operations",
+        name: "Operations",
         interfaces: ["interface/operations.web"],
       },
     ]);
@@ -151,16 +186,18 @@ describe("System compiler", { tags: ["compiler"] }, () => {
         path: "customer.web",
         app: "customer",
         platform: "web",
+        features: { service: "customerService" },
         programs: ["program/customer.web.browser"],
-        presentationSources: ["system.ts"],
+        extensions: { web: { version: 11 } },
       },
       {
         id: "interface/operations.web",
         path: "operations.web",
         app: "operations",
         platform: "web",
+        features: { service: "operationsService" },
         programs: ["program/operations.web.browser"],
-        presentationSources: ["system.ts"],
+        extensions: { web: { version: 11 } },
       },
     ]);
     expect(ir.programs.map(({ id }) => id)).toEqual([
@@ -172,10 +209,8 @@ describe("System compiler", { tags: ["compiler"] }, () => {
       ir.programs
         .find(({ id }) => id === "program/api")
         ?.contributions.map(({ feature }) => feature),
-    ).toEqual(["customer.service", "operations.service", "shared"]);
-    expect(ir.features.find(({ path }) => path === "operations.service")).toMatchObject({
-      kind: "feature",
-      app: "operations",
+    ).toEqual(["customerService", "operationsService", "shared"]);
+    expect(ir.features.find(({ path }) => path === "operationsService")).toMatchObject({
       programs: ["program/api", "program/operations.web.browser"],
     });
 
@@ -189,7 +224,7 @@ describe("System compiler", { tags: ["compiler"] }, () => {
       focused.programs
         .find(({ id }) => id === "program/api")
         ?.contributions.map(({ feature }) => feature),
-    ).toEqual(["operations.service", "shared"]);
+    ).toEqual(["operationsService", "shared"]);
     expect(focused.platforms).toEqual(["server", "web"]);
     expect(() => selectSystemOutputs(ir, "missing")).toThrow('Unknown Application "missing".');
   });
@@ -200,7 +235,7 @@ describe("System compiler", { tags: ["compiler"] }, () => {
 
     expect(program?.contributions).toEqual([
       expect.objectContaining({
-        feature: "customer.shared",
+        feature: "shared",
         apps: ["customer", "operations"],
       }),
     ]);
@@ -216,14 +251,14 @@ describe("System compiler", { tags: ["compiler"] }, () => {
 
     expect(program?.contributions).toEqual([
       expect.objectContaining({
-        feature: "customer.shared",
+        feature: "shared",
         apps: ["customer", "operations"],
       }),
     ]);
   });
 
   test("emits byte-identical System IR for Feature and Application placement permutations", async () => {
-    const top = ["shared", "operations", "customer"] as const;
+    const top = ["shared", "operationsService", "customerService"] as const;
     const app = ["service", "web"] as const;
     const expected = serializeSystemIR(
       compileSystem(await fixture(multiAppSystemSource(top, app, app))),
@@ -305,16 +340,12 @@ describe("System compiler", { tags: ["compiler"] }, () => {
 
   test("extracts deterministic Component state, actions, Elements, and lifecycle", async () => {
     const ir = compileSystem(await fixture(componentSystemSource()));
-    const component = ir.programs[0]?.contributions[0]?.ui?.components[0];
+    const contribution = ir.programs[0]?.contributions[0];
+    const component = contribution ? webProgramUI(contribution)?.components[0] : undefined;
 
     expect(ir.programs[0]?.environment).toEqual({
       name: "browser-main",
       platform: "web",
-      ui: "web",
-    });
-    expect(ir.programs[0]?.contributions[0]?.implementation).toMatchObject({
-      kind: "source",
-      reason: "platform-ui",
     });
 
     expect(component).toEqual({
@@ -345,17 +376,17 @@ describe("System compiler", { tags: ["compiler"] }, () => {
       system({ implementation, source }) {
         return source.member(implementation, "metadata") ? { renderer: "gpu" } : undefined;
       },
+      interface() {
+        return { ir: { version: 1, surface: "canvas" } };
+      },
       program({ contract, location, source }) {
-        const environment = source.property(contract, "Environment", location);
-        const platform = environment
-          ? source.property(environment, "Platform", location)
-          : undefined;
-        if (!platform || source.literal(platform, "Name", location) !== "canvas") return undefined;
         return {
-          version: 1,
-          scene: source
-            .properties(source.property(contract, "Components", location))
-            .map((component) => component.getName()),
+          ir: {
+            version: 1,
+            scene: source
+              .properties(source.property(contract, "Components", location))
+              .map((component) => component.getName()),
+          },
         };
       },
     };
@@ -363,17 +394,18 @@ describe("System compiler", { tags: ["compiler"] }, () => {
       componentSystemSource().replaceAll('Name: "web"', 'Name: "canvas"'),
     );
 
-    const generic = compileSystem(entry);
+    expect(() => compileSystemSource(entry)).toThrow(
+      'Platform "canvas" has no registered compiler dialect.',
+    );
     const extended = compileSystem(entry, [extension]);
 
-    expect(generic.programs[0]?.contributions[0]?.extensions).toBeUndefined();
     expect(extended.system.extensions).toEqual({ canvas: { renderer: "gpu" } });
     expect(extended.programs[0]?.contributions[0]?.extensions).toEqual({
       canvas: { version: 1, scene: ["Drawer"] },
     });
   });
 
-  test("retains an incremental Program and identifies Presentation implementation sources", async () => {
+  test("lets a Platform extension own transitive Presentation sources", async () => {
     const entry = await fixture(
       `import { clean } from "./presentation";\n${componentSystemSource().replace(
         "presentation,",
@@ -388,17 +420,15 @@ describe("System compiler", { tags: ["compiler"] }, () => {
     await writeFile(presentation, 'export const clean = () => ({ tone: "second" });\n');
     const second = compiler.compile(presentation);
 
-    expect(first.presentationSources).toEqual(new Set([presentation]));
-    expect(second.presentationSources).toEqual(new Set([presentation]));
     expect(second.work.features).toEqual({
       compiled: 0,
       reused: first.semanticGraph.features.length,
     });
-    expect(second.work.presentations).toEqual({ compiled: 1, reused: 0 });
     expect(serializeSystemIR(second.ir)).toBe(serializeSystemIR(first.ir));
+    expect(serializeSystemIR(second.ir)).toBe(serializeSystemIR(compileSystem(entry)));
   });
 
-  test("reuses compiled meaning for a UI runtime body edit", async () => {
+  test("recompiles Platform meaning when a UI body can affect SSR", async () => {
     const source = `import { clean } from "./presentation";\n${componentSystemSource().replace(
       "presentation,",
       "presentation: clean,",
@@ -415,14 +445,26 @@ describe("System compiler", { tags: ["compiler"] }, () => {
     const second = compiler.compile(entry);
 
     expect(second.work.features).toEqual({
-      compiled: 0,
-      reused: first.semanticGraph.features.length,
+      compiled: 1,
+      reused: 0,
     });
-    expect(second.work.presentations).toEqual({
-      compiled: 0,
-      reused: first.semanticGraph.presentations.length,
-    });
-    expect(serializeSystemIR(second.ir)).toBe(serializeSystemIR(first.ir));
+    expect(serializeSystemIR(second.ir)).not.toBe(serializeSystemIR(first.ir));
+    expect(serializeSystemIR(second.ir)).toBe(serializeSystemIR(compileSystem(entry)));
+  });
+
+  test("does not classify a co-located behavior edit as Presentation-only", async () => {
+    const source = componentSystemSource();
+    const entry = await fixture(source);
+    const compiler = createSystemCompiler(entry);
+
+    compiler.compile();
+    await writeFile(
+      entry,
+      source.replace("view() { return null; }", 'view() { return "updated"; }'),
+    );
+    const second = compiler.compile(entry);
+
+    expect(second.work.features.compiled).toBeGreaterThan(0);
     expect(serializeSystemIR(second.ir)).toBe(serializeSystemIR(compileSystem(entry)));
   });
 
@@ -464,9 +506,8 @@ export const clean = ({ parameters }: { parameters: { sheet: unknown } }) => ({
 
     const ir = compileSystem(entry);
 
-    expect(ir.presentations).toEqual([
+    expect(webInterfaceCompilerIR(ir.interfaces[0]?.extensions?.web).presentations).toEqual([
       expect.objectContaining({
-        interface: "product.web",
         file: "presentation.ts",
         animations: [expect.objectContaining({ binding: "openness" })],
       }),
@@ -507,15 +548,9 @@ export const clean = ({ parameters }: { parameters: { sheet: unknown } }) => ({
       ),
     );
 
-    expect(
-      programContribution(compileSystem(entry), "feature/worker/program/cloud")?.implementation,
-    ).toMatchObject({
-      kind: "source",
-      reason: "host-source",
-      diagnostic: {
-        message: expect.stringMatching(/Unsupported portable statement SwitchStatement/),
-      },
-    });
+    expect(() => compileSystem(entry)).toThrow(
+      /must lower completely to portable meaning.*Unsupported portable statement SwitchStatement/,
+    );
   });
 
   test("distinguishes synchronous and asynchronous Dependency operations", async () => {
@@ -700,14 +735,13 @@ type Numbers = Dependency<{
           "dependencies.numbers.subscribe({ receive: () => undefined });\n        const values = await dependencies.numbers.read({ count: 4 });",
         ),
     );
-    const implementation = programContribution(
-      compileSystem(entry),
-      "feature/worker/program/cloud",
-    )?.implementation;
+    const implementation = serverExecution(
+      programContribution(compileSystem(entry), "feature/worker/program/cloud"),
+    );
     expect(implementation?.kind).toBe("portable");
     if (implementation?.kind !== "portable") throw new Error("Expected portable IR.");
     expect(
-      collectExpressions(implementation.start.body).some(({ kind }) => kind === "closure"),
+      collectExpressions(implementation.entry.body).some(({ kind }) => kind === "closure"),
     ).toBe(true);
   });
 
@@ -729,12 +763,13 @@ type Numbers = Dependency<{
     );
     const ir = compileSystem(entry);
     const contribution = programContribution(ir, "feature/worker/program/cloud");
-    if (contribution?.implementation.kind !== "portable") {
+    const implementation = serverExecution(contribution);
+    if (implementation?.kind !== "portable") {
       throw new Error("Expected portable static-function fixture.");
     }
     const stable = [
-      ...collectExpressions(contribution.implementation.start.body),
-      ...contribution.implementation.functions.flatMap(({ body }) => collectExpressions(body)),
+      ...collectExpressions(implementation.entry.body),
+      ...implementation.functions.flatMap(({ body }) => collectExpressions(body)),
     ].filter(
       (expression): expression is Extract<ExpressionIR, Readonly<{ kind: "closure" }>> =>
         expression.kind === "closure" && expression.stable === true,
@@ -743,7 +778,7 @@ type Numbers = Dependency<{
     expect(new Set(stable.map(({ function: function_ }) => function_)).size).toBe(1);
 
     const writes: unknown[] = [];
-    await executeProgramIR(ir, contribution.id, {
+    await executeProgramIR(ir, "feature/worker/program/cloud", {
       numbers: { read: async () => [1, 2, 3] },
       output: { write: async (input) => void writes.push(input) },
     });
@@ -769,10 +804,11 @@ const child = createFeature<Child>`,
     );
     const ir = compileSystem(entry);
     const contribution = programContribution(ir, "feature/worker/program/cloud");
-    if (contribution?.implementation.kind !== "portable") {
+    const implementation = serverExecution(contribution);
+    if (implementation?.kind !== "portable") {
       throw new Error("Expected portable recursive-function fixture.");
     }
-    const recursiveReferences = contribution.implementation.functions
+    const recursiveReferences = implementation.functions
       .flatMap(({ body }) => collectExpressions(body))
       .filter(
         (expression): expression is Extract<ExpressionIR, Readonly<{ kind: "closure" }>> =>
@@ -782,7 +818,7 @@ const child = createFeature<Child>`,
     expect(new Set(recursiveReferences.map(({ function: function_ }) => function_)).size).toBe(1);
 
     const writes: unknown[] = [];
-    await executeProgramIR(ir, contribution.id, {
+    await executeProgramIR(ir, "feature/worker/program/cloud", {
       numbers: { read: async () => [1, 2, 3] },
       output: { write: async (input) => void writes.push(input) },
     });
@@ -834,10 +870,11 @@ const child = createFeature<Child>`,
     const entry = await fixture(streamSystemSource());
     const ir = compileSystem(entry);
     const contribution = programContribution(ir, "feature/worker/program/cloud");
-    if (contribution?.implementation.kind !== "portable") {
+    const implementation = serverExecution(contribution);
+    if (implementation?.kind !== "portable") {
       throw new Error("Expected portable IR.");
     }
-    expect(contribution.implementation.start.body).toEqual(
+    expect(implementation.entry.body).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ kind: "for-of", asynchronous: true, item: "change" }),
       ]),
@@ -884,10 +921,11 @@ const child = createFeature<Child>`,
     );
     const ir = compileSystem(entry);
     const contribution = programContribution(ir, "feature/worker/program/cloud");
-    if (contribution?.implementation.kind !== "portable") {
+    const implementation = serverExecution(contribution);
+    if (implementation?.kind !== "portable") {
       throw new Error("Expected portable IR.");
     }
-    expect(contribution.implementation.start.body).toEqual(
+    expect(implementation.entry.body).toEqual(
       expect.arrayContaining([expect.objectContaining({ kind: "while" })]),
     );
 
@@ -933,11 +971,12 @@ const child = createFeature<Child>`,
     );
     const ir = compileSystem(entry);
     const contribution = programContribution(ir, "feature/worker/program/cloud");
-    if (contribution?.implementation.kind !== "portable") {
+    const implementation = serverExecution(contribution);
+    if (implementation?.kind !== "portable") {
       throw new Error("Expected portable IR.");
     }
     expect(
-      collectExpressions(contribution.implementation.start.body)
+      collectExpressions(implementation.entry.body)
         .filter((expression) => expression.kind === "concurrent")
         .map(({ operation }) => operation),
     ).toEqual(["all", "race", "all-settled"]);
@@ -948,7 +987,7 @@ const child = createFeature<Child>`,
     });
     const calls: number[] = [];
     const writes: unknown[] = [];
-    await executeProgramIR(ir, contribution.id, {
+    await executeProgramIR(ir, "feature/worker/program/cloud", {
       numbers: {
         async read({ count }: { count: number }) {
           calls.push(count);
@@ -987,17 +1026,18 @@ const child = createFeature<Child>`,
     );
     const ir = compileSystem(entry);
     const contribution = programContribution(ir, "feature/worker/program/cloud");
-    if (contribution?.implementation.kind !== "portable") {
+    const implementation = serverExecution(contribution);
+    if (implementation?.kind !== "portable") {
       throw new Error("Expected portable IR.");
     }
     expect(
-      collectExpressions(contribution.implementation.start.body).some(
+      collectExpressions(implementation.entry.body).some(
         (expression) => expression.kind === "concurrent",
       ),
     ).toBe(true);
 
     const writes: unknown[] = [];
-    await executeProgramIR(ir, contribution.id, {
+    await executeProgramIR(ir, "feature/worker/program/cloud", {
       numbers: { read: async () => [] },
       output: { write: async (input) => writes.push(input) },
     });
@@ -1158,7 +1198,6 @@ const child = createFeature<Child>`,
       {
         id: "feature/tasks",
         path: "tasks",
-        kind: "feature",
         children: [],
         programs: ["program/server"],
       },
@@ -1172,9 +1211,9 @@ const child = createFeature<Child>`,
       requires: [{ name: "repository" }],
       provides: [],
     });
-    expect(ir.programs[0]?.contributions[0]?.implementation).toMatchObject({
+    expect(serverExecution(ir.programs[0]?.contributions[0])).toMatchObject({
       kind: "portable",
-      start: { asynchronous: true },
+      entry: { asynchronous: true },
     });
   });
 
@@ -1182,9 +1221,9 @@ const child = createFeature<Child>`,
     const ir = compileSystem(await fixture(nestedFactorySystemSource()));
     const contribution = programContribution(ir, "feature/parent.child/program/api");
 
-    expect(contribution?.implementation).toMatchObject({
+    expect(serverExecution(contribution)).toMatchObject({
       kind: "portable",
-      start: { asynchronous: true },
+      entry: { asynchronous: true },
     });
   });
 
@@ -1193,9 +1232,9 @@ const child = createFeature<Child>`,
     const entry = await fixture(source);
     const ir = compileSystem(entry);
 
-    expect(programContribution(ir, "feature/tasks/program/server")?.implementation).toMatchObject({
+    expect(serverExecution(programContribution(ir, "feature/tasks/program/server"))).toMatchObject({
       kind: "portable",
-      start: { asynchronous: true },
+      entry: { asynchronous: true },
     });
     await writeFile(
       entry,
@@ -1203,20 +1242,21 @@ const child = createFeature<Child>`,
     );
     const changed = compileSystem(entry);
     expect(serializeSystemIR(changed)).not.toBe(serializeSystemIR(ir));
-    expect(programContribution(changed, "feature/tasks/program/server")?.implementation.kind).toBe(
-      "portable",
-    );
+    expect(
+      serverExecution(programContribution(changed, "feature/tasks/program/server"))?.kind,
+    ).toBe("portable");
   });
 
   test("uses a contextually typed callback's own Dependency binding", async () => {
     const ir = compileSystem(await fixture(contextualCallbackFactorySystemSource()));
     const contribution = programContribution(ir, "feature/worker/program/server");
-    if (contribution?.implementation.kind !== "portable") {
+    const implementation = serverExecution(contribution);
+    if (implementation?.kind !== "portable") {
       throw new Error("Expected portable contextual callback fixture.");
     }
     const expressions = [
-      ...collectExpressions(contribution.implementation.start.body),
-      ...contribution.implementation.functions.flatMap(({ body }) => collectExpressions(body)),
+      ...collectExpressions(implementation.entry.body),
+      ...implementation.functions.flatMap(({ body }) => collectExpressions(body)),
     ];
     expect(
       expressions
@@ -1225,7 +1265,7 @@ const child = createFeature<Child>`,
     ).toEqual(["output.write"]);
 
     const writes: unknown[] = [];
-    await executeProgramIR(ir, contribution.id, {
+    await executeProgramIR(ir, "feature/worker/program/server", {
       output: {
         async write({ input }) {
           writes.push(input);
@@ -1238,12 +1278,13 @@ const child = createFeature<Child>`,
   test("lowers a generic local Dependency reference to serializable operations", async () => {
     const ir = compileSystem(await projectFixture(dependencyReferenceSystemSource()));
     const contribution = programContribution(ir, "feature/worker/program/server");
-    if (contribution?.implementation.kind !== "portable") {
+    const implementation = serverExecution(contribution);
+    if (implementation?.kind !== "portable") {
       throw new Error("Expected portable Dependency reference fixture.");
     }
     const expressions = [
-      ...collectExpressions(contribution.implementation.start.body),
-      ...contribution.implementation.functions.flatMap(({ body }) => collectExpressions(body)),
+      ...collectExpressions(implementation.entry.body),
+      ...implementation.functions.flatMap(({ body }) => collectExpressions(body)),
     ];
 
     expect(
@@ -1258,7 +1299,7 @@ const child = createFeature<Child>`,
     ).toEqual(["add", "read"]);
 
     const requests: unknown[] = [];
-    await executeProgramIR(ir, contribution.id, {
+    await executeProgramIR(ir, "feature/worker/program/server", {
       counter: {
         async add({ input }) {
           requests.push(input);
@@ -1279,12 +1320,13 @@ const child = createFeature<Child>`,
   test("respects lexical shadowing of the Program Dependency binding in closures", async () => {
     const ir = compileSystem(await fixture(shadowedDependencySystemSource()));
     const contribution = programContribution(ir, "feature/worker/program/server");
-    if (contribution?.implementation.kind !== "portable") {
+    const implementation = serverExecution(contribution);
+    if (implementation?.kind !== "portable") {
       throw new Error("Expected portable shadowing fixture.");
     }
     const expressions = [
-      ...collectExpressions(contribution.implementation.start.body),
-      ...contribution.implementation.functions.flatMap(({ body }) => collectExpressions(body)),
+      ...collectExpressions(implementation.entry.body),
+      ...implementation.functions.flatMap(({ body }) => collectExpressions(body)),
     ];
     expect(
       expressions
@@ -1298,7 +1340,7 @@ const child = createFeature<Child>`,
     ).toContain("write");
 
     const writes: unknown[] = [];
-    await executeProgramIR(ir, contribution.id, {
+    await executeProgramIR(ir, "feature/worker/program/server", {
       output: {
         async write({ input }) {
           writes.push(input);
@@ -1311,15 +1353,16 @@ const child = createFeature<Child>`,
   test("materializes generic literal meaning without a Feature-specific compiler path", async () => {
     const ir = compileSystem(await projectFixture(typeLiteralFactorySystemSource()));
     const contribution = programContribution(ir, "feature/catalog/program/server");
-    if (contribution?.implementation.kind !== "portable") {
+    const implementation = serverExecution(contribution);
+    if (implementation?.kind !== "portable") {
       throw new Error("Expected portable named-provider factory.");
     }
     const literals = [
-      ...collectExpressions(contribution.implementation.start.body),
-      ...contribution.implementation.functions.flatMap(({ body }) => collectExpressions(body)),
+      ...collectExpressions(implementation.entry.body),
+      ...implementation.functions.flatMap(({ body }) => collectExpressions(body)),
     ].filter((expression) => expression.kind === "literal");
 
-    expect(contribution.provides.map(({ name }) => name)).toEqual(["catalog"]);
+    expect(contribution?.provides.map(({ name }) => name)).toEqual(["catalog"]);
     expect(literals).toContainEqual(
       expect.objectContaining({
         kind: "literal",
@@ -1332,12 +1375,13 @@ const child = createFeature<Child>`,
   test("materializes resolved structural types without a Feature-specific compiler path", async () => {
     const ir = compileSystem(await projectFixture(typeSchemaFactorySystemSource()));
     const contribution = programContribution(ir, "feature/catalog/program/server");
-    if (contribution?.implementation.kind !== "portable") {
+    const implementation = serverExecution(contribution);
+    if (implementation?.kind !== "portable") {
       throw new Error("Expected portable schema-provider factory.");
     }
     const records = [
-      ...collectExpressions(contribution.implementation.start.body),
-      ...contribution.implementation.functions.flatMap(({ body }) => collectExpressions(body)),
+      ...collectExpressions(implementation.entry.body),
+      ...implementation.functions.flatMap(({ body }) => collectExpressions(body)),
     ].filter((expression) => expression.kind === "record");
     const schema = records
       .map(expressionData)
@@ -1427,14 +1471,15 @@ const child = createFeature<Child>`,
 
     expect(program).toMatchObject({
       id: "program/browser",
-      environment: { name: "browser", platform: "web", ui: "web" },
+      environment: { name: "browser", platform: "web" },
     });
     expect(contribution).toMatchObject({
       id: "feature/data/program/browser",
-      implementation: { kind: "source" },
-      ui: { actions: ["create", "synchronize"] },
     });
-    expect(contribution?.ui?.state).toMatchObject({ kind: "record" });
+    expect(contribution && webProgramUI(contribution)).toMatchObject({
+      actions: ["create", "synchronize"],
+      state: { kind: "record" },
+    });
   });
 
   test("executes the extracted process through injected Dependencies", async () => {
@@ -1481,7 +1526,7 @@ const child = createFeature<Child>`,
     const ir = compileSystem(entry);
     const contribution = programContribution(ir, "feature/worker/program/cloud");
 
-    expect(contribution?.implementation).toMatchObject({
+    expect(serverExecution(contribution)).toMatchObject({
       kind: "portable",
       functions: [{ name: "sum" }],
     });
@@ -1536,10 +1581,11 @@ const child = createFeature<Child>`,
     );
     const ir = compileSystem(entry);
     const contribution = programContribution(ir, "feature/worker/program/cloud");
-    if (contribution?.implementation.kind !== "portable") {
+    const implementation = serverExecution(contribution);
+    if (implementation?.kind !== "portable") {
       throw new Error("Expected portable IR.");
     }
-    expect(contribution.implementation.start.body).toContainEqual(
+    expect(implementation.entry.body).toContainEqual(
       expect.objectContaining({
         kind: "try",
         catch: { body: [] },
@@ -1547,7 +1593,7 @@ const child = createFeature<Child>`,
     );
 
     const writes: unknown[] = [];
-    await executeProgramIR(ir, contribution.id, {
+    await executeProgramIR(ir, "feature/worker/program/cloud", {
       numbers: {
         async read() {
           throw new Error("handled");
@@ -1585,18 +1631,19 @@ const child = createFeature<Child>`,
     );
     const ir = compileSystem(entry);
     const contribution = programContribution(ir, "feature/worker/program/cloud");
-    if (contribution?.implementation.kind !== "portable") {
+    const implementation = serverExecution(contribution);
+    if (implementation?.kind !== "portable") {
       throw new Error("Expected portable IR.");
     }
-    expect(contribution.implementation.start.body).toContainEqual(
+    expect(implementation.entry.body).toContainEqual(
       expect.objectContaining({ kind: "index-assign", operator: "=" }),
     );
-    expect(contribution.implementation.start.body).toContainEqual(
+    expect(implementation.entry.body).toContainEqual(
       expect.objectContaining({ kind: "index-assign", operator: "+=" }),
     );
 
     const writes: unknown[] = [];
-    await executeProgramIR(ir, contribution.id, {
+    await executeProgramIR(ir, "feature/worker/program/cloud", {
       numbers: {
         async read() {
           return [];
@@ -1763,12 +1810,21 @@ async function temporaryDirectory(prefix: string): Promise<string> {
 function compositionTypes(): string {
   return `
 declare const featureContract: unique symbol;
+declare const applicationContract: unique symbol;
 type Feature<C> = Readonly<{ readonly [featureContract]?: C }>;
+type Application<C> = Readonly<{
+  readonly interfaces: object;
+  readonly [applicationContract]?: {
+    Application: C;
+    Features: C extends { Features: infer Features } ? Features : {};
+    Interfaces: C extends { Interfaces: infer Interfaces } ? Interfaces : {};
+  };
+}>;
 function createFeature<C>(definition: object): Feature<C> {
   return definition as Feature<C>;
 }
-function createApplication<C>(definition: object): Feature<C> {
-  return definition as Feature<C>;
+function createApplication<C>(definition: object): Application<C> {
+  return definition as Application<C>;
 }
 function createInterface<C>(definition: object): C {
   return definition as C;
@@ -1783,8 +1839,9 @@ function typeLiteralFactorySystemSource(): string {
   return `
 import { createSystem, type Feature } from "@/index";
 import { typeLiteral } from "@/factory";
+import type { ServerPlatform } from "@/platforms/server";
 
-type Server = { Name: "server"; Platform: { Name: "server" } };
+type Server = { Name: "server"; Platform: ServerPlatform };
 type Reader = { read(input: {}): Promise<string> };
 type Model = { Name: string };
 type NamedFeature<Definition extends Model> = {
@@ -1838,8 +1895,9 @@ import {
   type Feature,
 } from "@/index";
 import { typeLiteral, typeSchema } from "@/factory";
+import type { ServerPlatform } from "@/platforms/server";
 
-type Server = { Name: "server"; Platform: { Name: "server" } };
+type Server = { Name: "server"; Platform: ServerPlatform };
 type Reader = { describe(input: {}): Promise<object> };
 type Model = { Name: string; Data: object };
 type SchemaFeature<Definition extends Model> = {
@@ -1888,8 +1946,9 @@ import {
   type Dependency,
   type Feature,
 } from "@/index";
+import type { ServerPlatform } from "@/platforms/server";
 
-type Server = { Name: "server"; Platform: { Name: "server" } };
+type Server = { Name: "server"; Platform: ServerPlatform };
 type Math = Dependency<{
   Operations: {
     double(input: { value: number }): Promise<number>;
@@ -1964,8 +2023,9 @@ export default createSystem({
 function sharedHostDependencySystemSource(): string {
   return `
 import { createSystem, type Feature } from "@/index";
+import type { ServerPlatform } from "@/platforms/server";
 
-type Server = { Name: "server"; Platform: { Name: "server" } };
+type Server = { Name: "server"; Platform: ServerPlatform };
 type EventStore<Event = object> = {
   append(input: { events: readonly Event[] }): Promise<void>;
 };
@@ -2055,8 +2115,9 @@ export default createSystem({ features: { worker } });
 function throwingSystemSource(): string {
   return `
 import { createFeature, createSystem } from "@/index";
+import type { ServerPlatform } from "@/platforms/server";
 
-type Server = { Name: "server"; Platform: { Name: "server" } };
+type Server = { Name: "server"; Platform: ServerPlatform };
 type Output = { write(input: { value: string }): Promise<void> };
 type Worker = {
   Programs: {
@@ -2206,7 +2267,6 @@ type Shell = {
 };
 type Web = { Interface: { Platform: { Name: "web" } } };
 type Product = {
-  App: true;
   Features: { shell: Shell };
   Interfaces: { web: Web };
 };
@@ -2235,13 +2295,13 @@ const web = createInterface<Web>({
   presentation,
 });
 const product = createApplication<Product>({
-  features: { shell },
   interfaces: { web },
 });
 
 export default createSystem({
   metadata: { name: "Component fixture" },
-  features: { product },
+  features: { shell },
+  applications: { product },
 });
 `;
 }
@@ -2286,23 +2346,17 @@ export default createSystem({ features: { orders, jobs } });
 }
 
 function multiAppSystemSource(
-  topOrder: readonly ("shared" | "operations" | "customer")[] = [
+  topOrder: readonly ("shared" | "operationsService" | "customerService")[] = [
     "shared",
-    "operations",
-    "customer",
+    "operationsService",
+    "customerService",
   ],
   operationsOrder: readonly ("service" | "web")[] = ["service", "web"],
   customerOrder: readonly ("service" | "web")[] = ["service", "web"],
 ): string {
-  const values = (
-    order: readonly ("service" | "web")[],
-    service: "operationsService" | "customerService",
-    web: "operationsWeb" | "customerWeb",
-  ) =>
+  const values = (order: readonly ("service" | "web")[], web: "operationsWeb" | "customerWeb") =>
     order
-      .map((name) =>
-        name === "service" ? `features: { service: ${service} }` : `interfaces: { web: ${web} }`,
-      )
+      .flatMap((name) => (name === "web" ? [`interfaces: { web: ${web} }`] : []))
       .join(",\n    ");
   return `
 type Platform = { readonly Name: string };
@@ -2313,33 +2367,40 @@ ${compositionTypes()}
 type Server = { Name: "server"; Platform: { Name: "server" } };
 type Browser = { Name: "browser-main"; Platform: { Name: "web" } };
 type Shared = { Programs: { api: Program<Server> } };
-type Service = { Programs: { api: Program<Server>; browser: Program<Browser> } };
+  type Service<Name extends string> = {
+    Instance: Name;
+    Programs: { api: Program<Server>; browser: Program<Browser> };
+  };
 type Web = { Interface: { Platform: { Name: "web" } } };
 type Operations = {
-  App: true;
-  Features: { service: Service };
+    Name: "Operations";
+    Features: { service: Service<"operations"> };
   Interfaces: { web: Web };
 };
 type Customer = {
-  App: true;
-  Features: { service: Service };
+    Name: "Customer";
+    Features: { service: Service<"customer"> };
   Interfaces: { web: Web };
 };
 
 const shared = createFeature<Shared>({ programs: { api: {} } });
-const operationsService = createFeature<Service>({ programs: { api: {}, browser: {} } });
+  const operationsService = createFeature<Service<"operations">>({
+    programs: { api: {}, browser: {} },
+  });
 const operationsWeb = createInterface<Web>({
   presentation: { parameters: {}, create() { return {}; } },
 });
-const operations = createApplication<Operations>({
-    ${values(operationsOrder, "operationsService", "operationsWeb")}
+  const operations = createApplication<Operations>({
+    ${values(operationsOrder, "operationsWeb")}
 });
-const customerService = createFeature<Service>({ programs: { api: {}, browser: {} } });
+  const customerService = createFeature<Service<"customer">>({
+    programs: { api: {}, browser: {} },
+  });
 const customerWeb = createInterface<Web>({
   presentation: { parameters: {}, create() { return {}; } },
 });
-const customer = createApplication<Customer>({
-    ${values(customerOrder, "customerService", "customerWeb")}
+  const customer = createApplication<Customer>({
+    ${values(customerOrder, "customerWeb")}
 });
 
 export default createSystem({
@@ -2347,6 +2408,7 @@ export default createSystem({
   features: {
     ${topOrder.join(", ")}
   },
+  applications: { operations, customer },
 });
 `;
 }
@@ -2354,12 +2416,21 @@ export default createSystem({
 function sharedApplicationFeatureSystemSource(): string {
   return `
 declare const featureContract: unique symbol;
+declare const applicationContract: unique symbol;
 type Feature<Contract> = Readonly<{ readonly [featureContract]?: Contract }>;
+type Application<Contract> = Readonly<{
+  readonly interfaces: object;
+  readonly [applicationContract]?: {
+    Application: Contract;
+    Features: Contract extends { Features: infer Features } ? Features : {};
+    Interfaces: {};
+  };
+}>;
 function createFeature<Contract>(definition: object): Feature<Contract> {
   return definition as Feature<Contract>;
 }
-function createApplication<Contract>(definition: object): Feature<Contract & { App: true }> {
-  return definition as Feature<Contract & { App: true }>;
+function createApplication<Contract>(definition: object): Application<Contract> {
+  return definition as Application<Contract>;
 }
 function createSystem(definition: object): object {
   return definition;
@@ -2370,10 +2441,11 @@ type Shared = { Programs: { api: { Environment: Server } } };
 type Product = { Features: { shared: Shared }; Interfaces: {} };
 
 const shared = createFeature<Shared>({ programs: { api: {} } });
-const customer = createApplication<Product>({ features: { shared }, interfaces: {} });
-const operations = createApplication<Product>({ features: { shared }, interfaces: {} });
+const customer = createApplication<Product>({ interfaces: {} });
+const operations = createApplication<Product>({ interfaces: {} });
 
 export default createSystem({
+  features: { shared },
   applications: { customer, operations },
 });
 `;
@@ -2382,12 +2454,21 @@ export default createSystem({
 function sharedFactoryApplicationFeatureSystemSource(): string {
   return `
 declare const featureContract: unique symbol;
+declare const applicationContract: unique symbol;
 type Feature<Contract> = Readonly<{ readonly [featureContract]?: Contract }>;
+type Application<Contract> = Readonly<{
+  readonly interfaces: object;
+  readonly [applicationContract]?: {
+    Application: Contract;
+    Features: Contract extends { Features: infer Features } ? Features : {};
+    Interfaces: {};
+  };
+}>;
 function createFeature<Contract>(definition: object): Feature<Contract> {
   return definition as Feature<Contract>;
 }
-function createApplication<Contract>(definition: object): Feature<Contract & { App: true }> {
-  return definition as Feature<Contract & { App: true }>;
+function createApplication<Contract>(definition: object): Application<Contract> {
+  return definition as Application<Contract>;
 }
 function createSystem(definition: object): object {
   return definition;
@@ -2399,12 +2480,13 @@ type Product = { Features: { shared: Shared }; Interfaces: {} };
 
 const shared = createFeature<Shared>({ programs: { api: {} } });
 function createProduct(_name: string) {
-  return createApplication<Product>({ features: { shared }, interfaces: {} });
+  return createApplication<Product>({ interfaces: {} });
 }
 const customer = createProduct("customer");
 const operations = createProduct("operations");
 
 export default createSystem({
+  features: { shared },
   applications: { customer, operations },
 });
 `;
@@ -2616,8 +2698,9 @@ import {
   type Dependency,
   type DependencyReference,
 } from "@/index";
+import type { ServerPlatform } from "@/platforms/server";
 
-type Server = { Name: "server"; Platform: { Name: "server" } };
+type Server = { Name: "server"; Platform: ServerPlatform };
 type CounterReference = {
   Name: "get";
   Binding: { key: string };
@@ -2680,6 +2763,10 @@ function numberType(): TypeIR {
 
 function programContribution(ir: SystemIR, id: string): ProgramContributionIR | undefined {
   return ir.programs.flatMap(({ contributions }) => contributions).find((item) => item.id === id);
+}
+
+function serverExecution(contribution: ProgramContributionIR | undefined) {
+  return contribution ? serverProgramExecution(contribution) : undefined;
 }
 
 function collectExpressions(statements: readonly StatementIR[]): ExpressionIR[] {

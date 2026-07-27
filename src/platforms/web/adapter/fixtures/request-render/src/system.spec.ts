@@ -36,7 +36,7 @@ testSystem({
     const adminManifest = await fetch(`${adminLocation}/manifest.webmanifest`);
     expect(adminManifest.status).toBe(200);
     expect(await adminManifest.json()).toMatchObject({
-      name: "Web request conformance",
+      name: "Administration",
       short_name: "Admin",
       start_url: "/",
       scope: "/",
@@ -51,6 +51,33 @@ testSystem({
     expect(productWorker).toContain("kit-assets-");
     expect(adminWorker).toContain("kit-assets-");
     expect(adminWorker).not.toBe(productWorker);
+
+    const robots = await fetch(new URL("/robots.txt", productLocation));
+    expect(robots.status).toBe(200);
+    expect(robots.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+    expect(await robots.text()).toContain(
+      `Sitemap: ${new URL("/sitemap.xml", productLocation).href}`,
+    );
+    const sitemap = await fetch(new URL("/sitemap.xml", productLocation));
+    const sitemapBody = await sitemap.text();
+    expect(sitemap.status).toBe(200);
+    expect(sitemap.headers.get("content-type")).toBe("application/xml; charset=utf-8");
+    expect(sitemapBody).toContain(`<loc>${new URL("/", productLocation).href}</loc>`);
+    expect(sitemapBody).not.toContain("/client");
+    expect(sitemapBody).not.toContain("/private");
+
+    const staticRoot = await request("/");
+    const staticRootHtml = await staticRoot.text();
+    expect(staticRoot.status).toBe(200);
+    expect(staticRootHtml).toContain('data-kit-rendering="static"');
+    expect(staticRootHtml).not.toContain('id="kit-hydration"');
+    expect(staticRootHtml).not.toContain("/browser.generated.ts");
+    expect(staticRootHtml).not.toMatch(/\/assets\/app-[A-Za-z0-9_-]+\.js/);
+    expect(staticRootHtml).toContain(
+      realization === "production"
+        ? "/assets/service-worker-bootstrap-"
+        : "/service-worker-bootstrap.generated.ts",
+    );
 
     const defaultGreeting = await request("/hello/Ada");
     const defaultHtml = await defaultGreeting.text();
@@ -69,7 +96,21 @@ testSystem({
     expect(defaultHtml).toContain('type="application/ld+json"');
     expect(defaultHtml).toContain("Hello, Ada!");
     expect(defaultHtml).toContain('data-kit-rendering="hydrate"');
-    expect(hydration(defaultHtml)).toEqual({
+    expect(hydration(defaultHtml)).toMatchObject({
+      branch: [
+        {
+          loader: false,
+          params: {},
+          route: { feature: "greeting", name: "root" },
+          search: {},
+        },
+        {
+          loader: false,
+          params: { name: "Ada" },
+          route: { feature: "greeting", name: "greeting" },
+          search: { punctuation: "!" },
+        },
+      ],
       loader: false,
       location: "/hello/Ada",
       metadata: {
@@ -96,11 +137,25 @@ testSystem({
         title: "Greeting",
       },
       params: { name: "Ada" },
-      route: { feature: "product.greeting", name: "greeting" },
+      route: { feature: "greeting", name: "greeting" },
       search: { punctuation: "!" },
       version: 1,
     });
     expectDocumentParity(realization, "default", defaultHtml);
+
+    const routeState = await request("/hello/Ada", {
+      headers: { accept: "application/vnd.kit.route+json" },
+    });
+    expect(routeState.status).toBe(200);
+    expect(routeState.headers.get("content-type")?.split(";", 1)[0]).toBe(
+      "application/vnd.kit.route+json",
+    );
+    expect(await routeState.json()).toMatchObject({
+      route: { feature: "greeting", name: "greeting" },
+      location: "/hello/Ada",
+      params: { name: "Ada" },
+      search: { punctuation: "!" },
+    });
 
     const markdownResponse = await request("/hello/Ada", {
       headers: { accept: "text/markdown" },
@@ -116,8 +171,21 @@ testSystem({
     expect(manifestResponse.status).toBe(200);
     expect(manifestResponse.headers.get("content-type")).toContain("application/manifest+json");
     expect(await manifestResponse.json()).toMatchObject({
-      name: "Web request conformance",
+      name: "Product",
       short_name: "Conformance",
+      description: "Web delivery conformance application",
+      orientation: "any",
+      theme_color: "#111111",
+      background_color: "#ffffff",
+      categories: ["productivity"],
+      screenshots: [
+        {
+          sizes: "1280x720",
+          type: "image/svg+xml",
+          form_factor: "wide",
+          label: "Conformance application",
+        },
+      ],
       start_url: "/client",
       scope: "/",
     });
@@ -140,15 +208,44 @@ testSystem({
 
     const loaded = await request("/loaded/Ada");
     const loadedHtml = await loaded.text();
-    expect(loaded.status).toBe(200);
+    expect(loaded.status).toBe(203);
     expect(loadedHtml).toContain("<title>Loaded Ada</title>");
     expect(loadedHtml).toContain("Loaded for Ada");
     expect(hydration(loadedHtml)).toMatchObject({
       loader: { data: { message: "Loaded for Ada" } },
       params: { name: "Ada" },
-      route: { feature: "product.greeting", name: "loaded" },
+      route: { feature: "greeting", name: "loaded" },
+      status: 203,
     });
     expectDocumentParity(realization, "loader", loadedHtml);
+
+    const nested = await request("/nested/Alpha/One");
+    const nestedHtml = await nested.text();
+    expect(nested.status).toBe(200);
+    expect(nestedHtml).toContain("Loaded for Workspace Alpha");
+    expect(nestedHtml).toContain("Loaded for Item One");
+    expect(nestedHtml).toContain("<title>Alpha/One</title>");
+    expect(hydration(nestedHtml)).toMatchObject({
+      route: { feature: "greeting", name: "nestedDetail" },
+      params: { workspace: "Alpha", item: "One" },
+      branch: [
+        {
+          route: { feature: "greeting", name: "root" },
+          loader: false,
+        },
+        {
+          route: { feature: "greeting", name: "nested" },
+          params: { workspace: "Alpha" },
+          loader: { data: { message: "Loaded for Workspace Alpha" } },
+        },
+        {
+          route: { feature: "greeting", name: "nestedDetail" },
+          params: { workspace: "Alpha", item: "One" },
+          loader: { data: { message: "Loaded for Item One" } },
+        },
+      ],
+    });
+    expectDocumentParity(realization, "nested-branch", nestedHtml);
 
     const deferred = await request("/deferred/Ada");
     const deferredHtml = await deferred.text();
@@ -170,7 +267,7 @@ testSystem({
           },
         },
       },
-      route: { feature: "product.greeting", name: "deferred" },
+      route: { feature: "greeting", name: "deferred" },
     });
 
     const streamStarted = performance.now();
@@ -200,7 +297,7 @@ testSystem({
     expect(streamCompleteMs).toBeGreaterThanOrEqual(streamShellMs);
 
     const redirected = await request("/go", { redirect: "manual" });
-    expect(redirected.status).toBe(302);
+    expect(redirected.status).toBe(308);
     expect(redirected.headers.get("location")).toBe("/client");
     expect(await redirected.text()).toBe("");
 
@@ -277,7 +374,7 @@ testSystem({
     expect(typedRedirect.headers.get("location")).toBe("/typed/2/true?tag=one&tag=two#details");
 
     const literal = await request("/files/new");
-    expect(literal.status).toBe(200);
+    expect(literal.status).toBe(410);
     expect(await literal.text()).toContain("Literal file");
     const parameter = await request("/files/report%20one");
     expect(parameter.status).toBe(200);
@@ -338,6 +435,10 @@ testSystem({
         : '<script type="module" async src="/browser.generated.ts">',
     );
     expectDocumentParity(realization, "client", clientHtml);
+    const unavailableClientState = await request("/client", {
+      headers: { accept: "application/vnd.kit.route+json" },
+    });
+    expect(unavailableClientState.status).toBe(406);
 
     const serverMetrics =
       realization === "production"
@@ -411,16 +512,15 @@ async function verifyProductionPerformance(
   expect(preloads).toContain(entry);
   const routePreloads = preloads.filter((path) => path.includes("/route-"));
   expect(routePreloads).toHaveLength(1);
-  expect(routePreloads[0]).toContain("route-product-greeting-greeting-");
-  const javascriptBytes = (
-    await Promise.all(
-      preloads.map(async (path) => {
-        const asset = await fetch(new URL(path, location));
-        expect(asset.status).toBe(200);
-        return (await asset.arrayBuffer()).byteLength;
-      }),
-    )
-  ).reduce((total, size) => total + size, 0);
+  expect(routePreloads[0]).toContain("route-greeting-greeting-");
+  const javascriptResources = await Promise.all(
+    preloads.map(async (path) => {
+      const asset = await fetch(new URL(path, location));
+      expect(asset.status).toBe(200);
+      return Object.freeze({ path, bytes: (await asset.arrayBuffer()).byteLength });
+    }),
+  );
+  const javascriptBytes = javascriptResources.reduce((total, { bytes }) => total + bytes, 0);
   const htmlBytes = new TextEncoder().encode(html).byteLength;
   const cssBytes = new TextEncoder().encode(
     html.match(/<style data-kit-ssr>([\s\S]*?)<\/style>/)?.[1] ?? "",
@@ -432,7 +532,7 @@ async function verifyProductionPerformance(
   expect(realization.artifactBytes).toBeLessThan(100 * 1024 * 1024);
   expect(htmlBytes).toBeLessThan(32 * 1024);
   expect(cssBytes).toBeLessThan(16 * 1024);
-  expect(javascriptBytes).toBeLessThan(200 * 1024);
+  expect(javascriptBytes, JSON.stringify(javascriptResources)).toBeLessThan(200 * 1024);
   expect(requests.p95Ms).toBeLessThan(500);
   expect(requests.requestsPerSecond).toBeGreaterThan(20);
 

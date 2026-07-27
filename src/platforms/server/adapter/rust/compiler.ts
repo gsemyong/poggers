@@ -17,17 +17,28 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 
 import {
+  validateProgramAttachmentIR,
+  type ProgramAttachmentBinding,
+  type ProgramAttachmentIR,
+} from "@/adapter";
+import {
   collectDependencyOperations,
   dependencyOperationIdentity,
   selectDependencyProviders,
   type DependencyOperationIR,
   type LinkedProgramIR,
+  type ProgramContributionIR,
   type ProgramIR,
   type SystemIR,
   type TypeIR,
 } from "@/compiler/ir";
 import { linkProgram } from "@/compiler/linker";
-import { generateRustProgram, type RustProgramFunctionExport } from "@/compiler/rust/lowering";
+import {
+  generateRustProgram,
+  type PortableProgramProjection,
+  type RustProgramFunctionExport,
+} from "@/compiler/rust/lowering";
+import { serverProgramExecution } from "@/platforms/server/adapter";
 import {
   defineServerProductionDependency,
   resolveServerProductionDependencies,
@@ -36,7 +47,6 @@ import {
   type ServerProductionConfiguration,
   type ServerProductionDependency,
 } from "@/platforms/server/adapter/rust/providers";
-import { planWebRouteLoaders, type WebRouteLoaderPlan } from "@/platforms/web/adapter/server";
 
 const SERVER_PRODUCTION_VERSION = 12;
 const DEFAULT_CACHE_ENTRIES = 8;
@@ -74,6 +84,7 @@ export async function buildServerProgram(input: {
   /** Runs strict Clippy verification in addition to compilation. */
   lint?: boolean;
   output: string;
+  attachments?: readonly ProgramAttachmentIR[];
   /** Debug is the conformance default. Production adapters must request release explicitly. */
   profile?: ServerProductionProfile;
   program: ProgramIR;
@@ -81,12 +92,12 @@ export async function buildServerProgram(input: {
   const started = performance.now();
   const profile = input.profile ?? "debug";
   const nativeRoot = await packageNativeSourceRoot();
-  const web = rustWebLoaders(planWebRouteLoaders(input.program, input.ir));
+  const attachments = rustProgramAttachments(input.attachments ?? []);
   const linked = linkProgram({
     ...input.program,
-    contributions: [...input.program.contributions, ...web.contributions],
+    contributions: [...input.program.contributions, ...attachments.contributions],
   });
-  assertPortableProgram(linked);
+  assertPortableProgram(linked, attachments.project);
   const featureDependencies = input.ir
     ? featureProductionDependencies(
         input.ir,
@@ -108,6 +119,7 @@ export async function buildServerProgram(input: {
       ...(input.dependencies ?? []),
     ].map((implementation) => canonicalProductionDependency(implementation, nativeRoot)),
   });
+  validateProgramAttachmentBindings(dependencies, attachments.bindings);
   const requirements = dependencies.map(({ dependency, implementation }) => ({
     dependency: dependency.name,
     implementation: implementation.name,
@@ -116,7 +128,7 @@ export async function buildServerProgram(input: {
   const seed = await generateRustWorkspace(
     linked,
     dependencies,
-    web,
+    attachments,
     packageName(input.program.name),
     nativeRoot,
   );
@@ -124,7 +136,7 @@ export async function buildServerProgram(input: {
   const generated = await generateRustWorkspace(
     linked,
     dependencies,
-    web,
+    attachments,
     packageName(`${input.program.name}_${project}`),
     nativeRoot,
   );
@@ -293,14 +305,15 @@ function featureProviderName(feature: string, dependency: string): string {
     .replaceAll(/-+/g, "-");
 }
 
-function assertPortableProgram(linked: LinkedProgramIR): void {
+function assertPortableProgram(linked: LinkedProgramIR, project: PortableProgramProjection): void {
   for (const { contribution } of linked.contributions) {
-    if (contribution.implementation.kind !== "source") continue;
-    const { span } = contribution.implementation;
+    const implementation = project(contribution);
+    if (implementation.kind !== "source") continue;
+    const { span } = implementation;
     throw new Error(
       `${span.file}:${span.line}:${span.column}: Program contribution ` +
         `${JSON.stringify(contribution.id)} is source, not production-realizable product meaning: ` +
-        (contribution.implementation.diagnostic?.message ?? "target source has no diagnostic"),
+        (implementation.diagnostic?.message ?? "target source has no diagnostic"),
     );
   }
 }
@@ -323,10 +336,12 @@ type RustWorkspace = Readonly<{
   packages: readonly string[];
 }>;
 
-type RustWebLoaders = Readonly<{
-  contributions: WebRouteLoaderPlan["contributions"];
+type RustProgramAttachments = Readonly<{
+  contributions: readonly ProgramContributionIR[];
+  project: PortableProgramProjection;
   exports: readonly RustProgramFunctionExport[];
-  routes: readonly Readonly<{ id: string; function: string }>[];
+  dispatch: readonly Readonly<{ name: string; function: string }>[];
+  bindings: readonly ProgramAttachmentBinding[];
 }>;
 
 type RustDistributionContract = Readonly<{
@@ -335,23 +350,47 @@ type RustDistributionContract = Readonly<{
   operations: readonly DependencyOperationIR[];
 }>;
 
-function rustWebLoaders(plan: WebRouteLoaderPlan): RustWebLoaders {
+function rustProgramAttachments(plans: readonly ProgramAttachmentIR[]): RustProgramAttachments {
+  plans = plans.map((plan) => validateProgramAttachmentIR(plan));
+  const contributions = plans.flatMap((plan) =>
+    plan.contributions.map(({ contribution }) => contribution),
+  );
+  const executions = new Map(
+    plans.flatMap((plan) =>
+      plan.contributions.map(
+        ({ contribution, execution }) => [contribution.id, execution] as const,
+      ),
+    ),
+  );
+  duplicate(
+    contributions.map(({ id }) => id),
+    "portable Program attachment contribution",
+  );
+  const exported = plans.flatMap((plan) => plan.exports);
+  duplicate(
+    exported.map(({ name }) => name),
+    "portable Program attachment export",
+  );
+  const exports = exported.map((definition, index) => ({
+    name: `program_export_${index}`,
+    contribution: definition.contribution,
+    function: definition.function,
+    dependencies: definition.dependencies,
+  }));
   return {
-    contributions: plan.contributions,
-    exports: plan.loaders.map((loader) => ({
-      name: loader.export,
-      contribution: loader.contribution,
-      function: loader.implementation.entry.id,
-      dependencies: loader.dependencies,
-    })),
-    routes: plan.loaders.map((loader) => ({ id: loader.route, function: loader.export })),
+    contributions,
+    project: (contribution) =>
+      executions.get(contribution.id) ?? serverProgramExecution(contribution),
+    exports,
+    dispatch: exported.map(({ name }, index) => ({ name, function: exports[index]!.name })),
+    bindings: plans.flatMap(({ bindings }) => bindings),
   };
 }
 
 async function generateRustWorkspace(
   linked: LinkedProgramIR,
   dependencies: readonly ResolvedServerProductionDependency[],
-  web: RustWebLoaders,
+  attachments: RustProgramAttachments,
   binary: string,
   nativeRoot: string,
 ): Promise<RustWorkspace> {
@@ -388,11 +427,11 @@ async function generateRustWorkspace(
     },
     {
       path: "src/main.rs",
-      source: rustMain(linked.program.name, dependencies, distribution, web.routes.length > 0),
+      source: rustMain(linked.program.name, dependencies, distribution, attachments.bindings),
     },
     {
       path: "src/program.rs",
-      source: `${generateRustProgram(linked, web.exports)}\n${rustWebLoaderDispatch(web.routes)}`,
+      source: `${generateRustProgram(linked, attachments.project, attachments.exports)}\n${rustProgramAttachmentDispatch(attachments.dispatch)}`,
     },
   ];
   return {
@@ -508,7 +547,7 @@ function rustMain(
   program: string,
   dependencies: readonly ResolvedServerProductionDependency[],
   distribution: readonly RustDistributionContract[],
-  webLoaders: boolean,
+  bindings: readonly ProgramAttachmentBinding[],
 ): string {
   const providerAdapters = dependencies
     .map(({ dependency, implementation, operations }, index) =>
@@ -581,9 +620,9 @@ use kit_server_runtime::{
       dependencies.length ? ", ContractDependency, OperationContract" : ""
     }${dependencies.length ? ", DependencyInvocation, NativeFuture" : ""}${
       dependencies.length || distribution.length ? ", FieldContract, TypeContract" : ""
-    }${
-      webLoaders ? ", NativeFunction, Value" : ""
-    }${dependencies.length && !webLoaders ? ", Value" : ""}
+    }${bindings.length ? ", NativeFunction, Value" : ""}${
+      dependencies.length && !bindings.length ? ", Value" : ""
+    }
 };
 
 ${providerAdapters}
@@ -619,20 +658,7 @@ async fn run() -> NativeResult<()> {
     let mut bindings: BTreeMap<String, Arc<dyn Dependency>> = BTreeMap::new();
     ${wiring}
 
-    ${
-      webLoaders
-        ? `let loader = NativeFunction::new(|engine, arguments| {
-        let input = arguments.into_iter().next().unwrap_or(Value::Undefined);
-        program::load_web_route(engine, input)
-    });
-    let registration = engine.call_dependency(
-        "http",
-        "@web-loader",
-        Value::record(BTreeMap::from([("handle".to_owned(), Value::Function(loader))])),
-    ).await?;
-    engine.retain(registration);`
-        : ""
-    }
+    ${bindings.map((binding, index) => rustProgramAttachmentBinding(binding, index)).join("\n\n    ")}
 
     if let Err(error) = engine.start_dependencies().await {
         let _ = engine.shutdown().await;
@@ -768,22 +794,76 @@ function rustFailureContracts(type: TypeIR | undefined): string {
     .join(", ")}])`;
 }
 
-function rustWebLoaderDispatch(
-  routes: readonly Readonly<{ id: string; function: string }>[],
+function rustProgramAttachmentDispatch(
+  exports: readonly Readonly<{ name: string; function: string }>[],
 ): string {
-  if (!routes.length) return "";
-  return `pub fn load_web_route(engine: Engine, input: Value) -> NativeFuture<Value> {
+  if (!exports.length) return "";
+  return `pub fn invoke_program_export(
+    engine: Engine,
+    selector: &'static str,
+    input: Value,
+) -> NativeFuture<Value> {
     Box::pin(async move {
-        let route = input.property("route", false)?.string()?;
-        match route.as_str() {
-${routes
-  .map(({ id, function: name }) => `            ${rustString(id)} => ${name}(engine, input).await,`)
+        let export = input.property(selector, false)?.string()?;
+        match export.as_str() {
+${exports
+  .map(
+    ({ name, function: functionName }) =>
+      `            ${rustString(name)} => ${functionName}(engine, input).await,`,
+  )
   .join("\n")}
-            _ => Err(NativeError::new("UnknownWebRoute", format!("Unknown web Route {route:?}."))),
+            _ => Err(NativeError::new(
+                "UnknownProgramExport",
+                format!("Unknown Program export {export:?}."),
+            )),
         }
     })
 }
 `;
+}
+
+function rustProgramAttachmentBinding(binding: ProgramAttachmentBinding, index: number): string {
+  for (const [name, value] of Object.entries(binding)) {
+    if (!value.trim()) {
+      throw new Error(`Portable Program attachment binding ${JSON.stringify(name)} is empty.`);
+    }
+  }
+  return `let attachment_${index} = NativeFunction::new(|engine, arguments| {
+        let input = arguments.into_iter().next().unwrap_or(Value::Undefined);
+        program::invoke_program_export(engine, ${rustString(binding.selector)}, input)
+    });
+    let registration_${index} = engine.call_dependency(
+        ${rustString(binding.dependency)},
+        ${rustString(binding.operation)},
+        Value::record(BTreeMap::from([(
+            ${rustString(binding.field)}.to_owned(),
+            Value::Function(attachment_${index}),
+        )])),
+    ).await?;
+    engine.retain(registration_${index});`;
+}
+
+function validateProgramAttachmentBindings(
+  dependencies: readonly ResolvedServerProductionDependency[],
+  bindings: readonly ProgramAttachmentBinding[],
+): void {
+  for (const binding of bindings) {
+    const dependency = dependencies.find(
+      ({ dependency }) => dependency.name === binding.dependency,
+    );
+    if (!dependency) {
+      throw new Error(
+        `Portable Program attachment requires missing production Dependency ` +
+          `${JSON.stringify(binding.dependency)}.`,
+      );
+    }
+    if (!dependency.implementation.bindings?.includes(binding.operation)) {
+      throw new Error(
+        `Production Dependency ${JSON.stringify(dependency.implementation.name)} does not ` +
+          `support Program attachment binding ${JSON.stringify(binding.operation)}.`,
+      );
+    }
+  }
 }
 
 function rustString(value: string): string {

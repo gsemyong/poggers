@@ -97,6 +97,26 @@
       "types": "./dist/src/factory.d.ts",
       "default": "./dist/src/factory.js"
     },
+    "./features/actor": {
+      "source": "./dist/source/features/actor/index.ts",
+      "types": "./dist/src/features/actor/index.d.ts",
+      "default": "./dist/src/features/actor/index.js"
+    },
+    "./features/data": {
+      "source": "./dist/source/features/data/index.ts",
+      "types": "./dist/src/features/data/index.d.ts",
+      "default": "./dist/src/features/data/index.js"
+    },
+    "./features/entity": {
+      "source": "./dist/source/features/entity/index.ts",
+      "types": "./dist/src/features/entity/index.d.ts",
+      "default": "./dist/src/features/entity/index.js"
+    },
+    "./features/identity": {
+      "source": "./dist/source/features/identity/index.ts",
+      "types": "./dist/src/features/identity/index.d.ts",
+      "default": "./dist/src/features/identity/index.js"
+    },
     "./tsconfig": "./config/tsconfig.json"
   },
   "scripts": {
@@ -105,7 +125,7 @@
     "check:examples": "tsc --noEmit -p examples/basic && tsc --noEmit -p examples/authenticated-crud && tsc --noEmit -p examples/presentation && vitest run --tagsFilter='!production' examples && vitest run --tagsFilter=package src/cli.spec.ts",
     "check:compiler": "vitest run --tagsFilter='compiler && !package' src/compiler src/realization.spec.ts src/platforms/server/adapter/rust",
     "check:providers": "vitest run --tagsFilter=provider src/features src/platforms/server && cargo test --workspace",
-    "check:presentation": "vitest run src/core/ui/presentation.spec.ts src/compiler/presentation.spec.ts src/platforms/web/presentation src/platforms/web/adapter/presentation src/platforms/web/adapter/ui/component/adapter.spec.ts",
+    "check:presentation": "vitest run src/platforms/web/presentation src/platforms/web/adapter/presentation src/platforms/web/adapter/ui/component/adapter.spec.ts",
     "check:production": "KIT_NATIVE_PROFILE=release vitest run --tagsFilter=production src examples",
     "check:source": "nub run typecheck && nub run lint && nub run fmt:check && nub run test",
     "dev": "nub src/cli.ts dev --dir examples/basic",

@@ -6,7 +6,7 @@ import {
   type Animation,
   type Event,
   type Presentation,
-} from "@/core/ui/presentation";
+} from "@/platforms/web/presentation/language";
 
 type Child = {
   State: { visible: boolean };

@@ -9,7 +9,7 @@ import type {
   ComponentOwner,
   ComponentProps,
   ComponentState,
-} from "@/core/ui/component";
+} from "@/platforms/web/ui/component";
 
 type Empty = Record<never, never>;
 type AnyFunction = (...arguments_: never[]) => unknown;

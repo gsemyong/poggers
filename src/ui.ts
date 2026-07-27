@@ -23,7 +23,7 @@ export type {
   ComponentUI,
   ComponentViewContext,
   RootComponentName,
-} from "@/core/ui/component";
+} from "@/platforms/web/ui/component";
 export type {
   UIChild,
   UIContract,
@@ -33,7 +33,7 @@ export type {
   UIElementProps,
   UIElementTarget,
   UITarget,
-} from "@/core/ui/language";
+} from "@/platforms/web/ui/language";
 export type {
   ActionCompleted,
   ActionEvent,
@@ -54,5 +54,5 @@ export type {
   PresentationFactory,
   PresentationLanguage,
   PresentationRecipe,
-} from "@/core/ui/presentation";
-export { animate, settled, velocity } from "@/core/ui/presentation";
+} from "@/platforms/web/presentation/language";
+export { animate, settled, velocity } from "@/platforms/web/presentation/language";

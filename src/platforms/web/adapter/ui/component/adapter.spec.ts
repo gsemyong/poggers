@@ -1,18 +1,19 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 
-import type { PresentationAdapterInstance } from "@/adapter";
 import type { Feature } from "@/core/feature";
 import type { System } from "@/core/system";
 import type { BrowserMainThread } from "@/platforms/web";
 import type { WebRouteIR } from "@/platforms/web/adapter/lowering";
 import { createWebPresentationAdapter } from "@/platforms/web/adapter/presentation/adapter";
+import type { PresentationAdapterInstance } from "@/platforms/web/adapter/presentation/contract";
 import { createWebUIAdapter } from "@/platforms/web/adapter/ui/adapter";
 import {
   createPresentationGraph,
   ownedPresentationTargets,
 } from "@/platforms/web/adapter/ui/component/adapter";
-import { readScoped } from "@/platforms/web/adapter/ui/component/runtime";
+import { readScoped, type Child } from "@/platforms/web/adapter/ui/component/runtime";
 import type { WebPresentationLanguage } from "@/platforms/web/presentation";
+import type { WebNavigationType } from "@/platforms/web/routing";
 
 type Program<Environment, Contract extends object = object> = Readonly<
   Contract & { Environment: Environment }
@@ -107,8 +108,8 @@ describe("Program UI composition", () => {
     let location = new URL("https://example.test/start");
     const navigation = {
       current: () => location,
-      navigate(destination: Readonly<{ to: PropertyKey }>) {
-        location = new URL(destination.to === "finish" ? "/finish" : "/slow", location);
+      navigate(destination: Readonly<{ route: PropertyKey }>) {
+        location = new URL(destination.route === "finish" ? "/finish" : "/slow", location);
         for (const receive of subscribers) receive(location);
       },
       subscribe(receive: (location: URL) => void): Disposable {
@@ -125,7 +126,7 @@ describe("Program UI composition", () => {
           browser: {
             routes: {
               start: {
-                load: () => ({ redirect: { to: "finish" } }),
+                load: () => ({ redirect: { route: "finish" } }),
                 view: () => "start",
               },
               finish: {
@@ -175,22 +176,113 @@ describe("Program UI composition", () => {
     expect(finishViews).toBe(1);
     expect(document.title).toBe("Finish");
 
-    navigation.navigate({ to: "slow" });
+    navigation.navigate({ route: "slow" });
     await vi.waitFor(() => expect(slowSignals).toHaveLength(1));
     expect(readScoped(ui.renderRoot())).toBe("finish");
     expect(document.title).toBe("Finish");
     expect(slowSignals[0]?.aborted).toBe(false);
-    navigation.navigate({ to: "finish" });
+    navigation.navigate({ route: "finish" });
     expect(slowSignals[0]?.aborted).toBe(true);
     resolveSlow?.();
     await Promise.resolve();
     expect(readScoped(ui.renderRoot())).toBe("finish");
 
-    navigation.navigate({ to: "slow" });
+    navigation.navigate({ route: "slow" });
     await vi.waitFor(() => expect(slowSignals).toHaveLength(2));
     await ui.dispose();
     expect(slowSignals[1]?.aborted).toBe(true);
     expect(subscribers.size).toBe(0);
+  });
+
+  test("retains an unchanged parent Route while replacing its child branch", async () => {
+    vi.stubGlobal("Element", class {});
+    vi.stubGlobal("document", {
+      title: "",
+      documentElement: { dataset: {}, lang: "" },
+      head: { querySelectorAll: () => [], append() {} },
+      createElement: () => ({ setAttribute() {}, textContent: "" }),
+      getElementById: () => null,
+    });
+    const subscribers = new Set<(location: URL, type: WebNavigationType) => void>();
+    let location = new URL("https://example.test/first");
+    const navigation = {
+      current: () => location,
+      navigate(destination: Readonly<{ route: PropertyKey }>) {
+        location = new URL(destination.route === "second" ? "/second" : "/first", location);
+        for (const receive of subscribers) receive(location, "push");
+      },
+      reload() {
+        for (const receive of subscribers) receive(location, "reload");
+      },
+      subscribe(receive: (location: URL, type: WebNavigationType) => void): Disposable {
+        subscribers.add(receive);
+        return { [Symbol.dispose]: () => subscribers.delete(receive) };
+      },
+    };
+    let parentViews = 0;
+    let parentLoads = 0;
+    const system = testSystem({
+      routes: {
+        programs: {
+          browser: {
+            routes: {
+              root: {
+                load() {
+                  parentLoads += 1;
+                  return { data: { stable: true } };
+                },
+                view({ children }: { children: Child }) {
+                  parentViews += 1;
+                  return children;
+                },
+              },
+              first: { view: () => "first" },
+              second: { view: () => "second" },
+            },
+          },
+        },
+      },
+    });
+    const root = route("root", "/", "Root");
+    const routes: WebRouteIR[] = [
+      root,
+      { ...route("first", "/first", "First"), parent: "web.routes.root" },
+      { ...route("second", "/second", "Second"), parent: "web.routes.root" },
+    ];
+    const ui = await createInterfaceUI({
+      system,
+      interface: "web.main",
+      program: "web.browser",
+      logicalProgram: "browser",
+      presentation: emptyPresentation,
+      dependencies: { navigation },
+      programManifest: {
+        name: "web.browser",
+        bindings: [],
+        contributions: [{ feature: "web.routes", requires: ["navigation"], provides: [] }],
+      },
+      routes,
+      boundary,
+    });
+
+    const initialRoot = ui.renderRoot();
+    const initialChild = readScoped(initialRoot) as () => Child;
+    expect(readScoped(initialChild())).toBe("first");
+    expect(parentViews).toBe(1);
+    expect(parentLoads).toBe(1);
+
+    navigation.navigate({ route: "second" });
+    await vi.waitFor(() => expect(document.title).toBe("Second"));
+    expect(ui.renderRoot()).toBe(initialRoot);
+    expect(readScoped(initialChild())).toBe("second");
+    expect(parentViews).toBe(1);
+    expect(parentLoads).toBe(1);
+
+    navigation.reload();
+    await vi.waitFor(() => expect(parentLoads).toBe(2));
+    expect(ui.renderRoot()).not.toBe(initialRoot);
+
+    await ui.dispose();
   });
 
   test("gives a Route its owning Feature component scope", async () => {
@@ -292,8 +384,8 @@ describe("Program UI composition", () => {
     let location = new URL("https://example.test/start");
     const navigation = {
       current: () => location,
-      navigate(destination: Readonly<{ to: PropertyKey }>) {
-        location = new URL(destination.to === "finish" ? "/finish" : "/start", location);
+      navigate(destination: Readonly<{ route: PropertyKey }>) {
+        location = new URL(destination.route === "finish" ? "/finish" : "/start", location);
         for (const receive of subscribers) receive(location);
       },
       subscribe(receive: (location: URL) => void): Disposable {
@@ -343,7 +435,7 @@ describe("Program UI composition", () => {
       boundary: routeBoundary,
     });
     await vi.waitFor(() => expect(resolveStart).toBeTypeOf("function"));
-    navigation.navigate({ to: "finish" });
+    navigation.navigate({ route: "finish" });
     await vi.waitFor(() => expect(resolveFinish).toBeTypeOf("function"));
     let created = false;
     void creating.then(() => {
@@ -686,6 +778,7 @@ function route(name: string, path: string, title?: string): WebRouteIR {
     feature: "web.routes",
     name,
     path,
+    status: 200,
     document: "shell",
     cache: false,
     metadata: title ? { title } : {},

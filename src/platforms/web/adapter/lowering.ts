@@ -3,11 +3,15 @@ import type {
   DependencyIR,
   ExtensionIR,
   FunctionIR,
+  ProgramContributionIR,
+  ProgramIR,
   SourceSpan,
   TypeIR,
 } from "@/compiler/ir";
+import type { PresentationSourceIR } from "@/platforms/web/adapter/presentation/source";
 import {
   WEB_MANIFEST_PATH,
+  isWebRouteStatus,
   type WebJSON,
   type WebRouteMetadataResult,
 } from "@/platforms/web/routing";
@@ -31,9 +35,15 @@ export type WebParameterIR = Readonly<{
 }>;
 
 export type WebRouteIR = Readonly<{
+  /** Interface-relative Feature role used by typed destinations. */
+  address?: string;
+  /** Canonical System Feature path used to resolve executable behavior. */
   feature: string;
   name: string;
+  /** Local parent Route name, or a qualified cross-Feature mount parent after composition. */
+  parent?: string;
   path: string;
+  status: number;
   document: "content" | "shell";
   cache:
     | false
@@ -48,7 +58,10 @@ export type WebRouteIR = Readonly<{
   deferred: readonly string[];
 }>;
 
-export const WEB_COMPILER_IR_VERSION = 8 as const;
+/** Route meaning required by browser navigation and rendering after delivery is planned. */
+export type WebClientRouteIR = Omit<WebRouteIR, "cache" | "status">;
+
+export const WEB_COMPILER_IR_VERSION = 11 as const;
 
 export type WebDestinationIR = Readonly<{
   to: string;
@@ -64,14 +77,42 @@ export type WebInstallationIconIR = Readonly<{
   purpose?: readonly ("any" | "maskable" | "monochrome")[];
 }>;
 
+export type WebRouteMountIR = Readonly<{
+  feature: string;
+  path: string;
+  route?: string;
+  parent?: string;
+}>;
+
 export type WebInterfaceCompilerIR = Readonly<{
   version: typeof WEB_COMPILER_IR_VERSION;
-  routes?: Readonly<Record<string, string>>;
+  mounts?: readonly WebRouteMountIR[];
+  presentations?: readonly PresentationSourceIR[];
   installation?: Readonly<{
     shortName?: string;
+    description?: string;
     start: WebDestinationIR;
     display: "browser" | "fullscreen" | "minimal-ui" | "standalone";
+    orientation?:
+      | "any"
+      | "natural"
+      | "landscape"
+      | "landscape-primary"
+      | "landscape-secondary"
+      | "portrait"
+      | "portrait-primary"
+      | "portrait-secondary";
+    themeColor?: string;
+    backgroundColor?: string;
+    categories?: readonly string[];
     icons: readonly WebInstallationIconIR[];
+    screenshots?: readonly Readonly<{
+      src: string;
+      sizes: string;
+      type?: string;
+      formFactor?: "narrow" | "wide";
+      label?: string;
+    }>[];
     shortcuts: readonly Readonly<{
       name: string;
       destination: WebDestinationIR;
@@ -115,6 +156,7 @@ export type WebRenderValueIR =
 
 export type WebRenderNodeIR =
   | Readonly<{ kind: "none" }>
+  | Readonly<{ kind: "children" }>
   | Readonly<{ kind: "text"; value: WebRenderValueIR }>
   | Readonly<{ kind: "fragment"; children: readonly WebRenderNodeIR[] }>
   | Readonly<{
@@ -162,6 +204,21 @@ export type CompiledWebComponentIR = Readonly<{
   view: WebRenderNodeIR | false;
   diagnostic?: Readonly<{ message: string; span: SourceSpan }>;
   span: SourceSpan;
+}>;
+
+/** Web-owned structural Component meaning used by browser realization and HMR. */
+export type WebComponentContractIR = Readonly<{
+  name: string;
+  propCallbacks: readonly string[];
+  state: TypeIR;
+  actions: readonly string[];
+  elements: readonly Readonly<{ name: string; element: string }>[];
+  implementation: Readonly<{
+    state: boolean;
+    actions: boolean;
+    mount: boolean;
+    view: boolean;
+  }>;
 }>;
 
 export type CompiledWebComponentResolver = (target: string) => CompiledWebComponentIR | undefined;
@@ -212,6 +269,13 @@ export type CompiledWebRouteIR = WebRouteIR &
 
 export type WebProgramCompilerIR = Readonly<{
   version: typeof WEB_COMPILER_IR_VERSION;
+  ui?: Readonly<{
+    start?: true;
+    state: TypeIR;
+    actions: readonly string[];
+    components: readonly WebComponentContractIR[];
+    root?: string;
+  }>;
   components: readonly CompiledWebComponentIR[];
   routes: readonly CompiledWebRouteIR[];
 }>;
@@ -221,20 +285,42 @@ export function webInterfaceCompilerIR(value: ExtensionIR | undefined): WebInter
   assertExtensionKeys(
     record,
     ["version"],
-    ["installation", "routes"],
+    ["installation", "mounts", "presentations"],
     "web interface compiler meaning",
   );
-  if (
-    record.version !== WEB_COMPILER_IR_VERSION ||
-    (record.routes !== undefined &&
-      (!record.routes ||
-        typeof record.routes !== "object" ||
-        Array.isArray(record.routes) ||
-        Object.values(record.routes).some((path) => typeof path !== "string")))
-  ) {
+  if (record.version !== WEB_COMPILER_IR_VERSION) {
     throw new Error("Unsupported web interface compiler meaning.");
   }
+  if (
+    record.mounts !== undefined &&
+    (!Array.isArray(record.mounts) ||
+      record.mounts.some(
+        (value) =>
+          !value ||
+          typeof value !== "object" ||
+          Array.isArray(value) ||
+          typeof (value as WebRouteMountIR).feature !== "string" ||
+          typeof (value as WebRouteMountIR).path !== "string",
+      ))
+  ) {
+    throw new Error("Unsupported web Route mount meaning.");
+  }
   if (record.installation !== undefined) validateInstallationIR(record.installation);
+  if (
+    record.presentations !== undefined &&
+    (!Array.isArray(record.presentations) ||
+      record.presentations.some(
+        (value) =>
+          !value ||
+          typeof value !== "object" ||
+          Array.isArray(value) ||
+          typeof (value as PresentationSourceIR).file !== "string" ||
+          !Array.isArray((value as PresentationSourceIR).animations) ||
+          !Array.isArray((value as PresentationSourceIR).declarations),
+      ))
+  ) {
+    throw new Error("Unsupported web Presentation compiler meaning.");
+  }
   return record as WebInterfaceCompilerIR;
 }
 
@@ -250,16 +336,163 @@ export function webProgramCompilerIR(value: ExtensionIR | undefined): WebProgram
   assertExtensionKeys(
     record,
     ["components", "routes", "version"],
-    [],
+    ["ui"],
     "web Program compiler meaning",
   );
+  if (record.ui !== undefined) validateWebUICompilerIR(record.ui);
   record.components.forEach((component, index) => validateCompiledComponentIR(component, index));
   record.routes.forEach((route, index) => validateCompiledRouteIR(route, index));
   return record as WebProgramCompilerIR;
 }
 
-export type WebRouteMatch = Readonly<{
-  route: WebRouteIR;
+export function webProgramUI(
+  contribution: Pick<ProgramContributionIR, "extensions">,
+): WebProgramCompilerIR["ui"] | undefined {
+  return contribution.extensions?.web
+    ? webProgramCompilerIR(contribution.extensions.web).ui
+    : undefined;
+}
+
+/** Selects the sole structural root according to web-owned Program meaning. */
+export function webProgramRoot(
+  program: Pick<ProgramIR, "contributions" | "name">,
+): Readonly<{ feature: string; component: string }> | undefined {
+  const roots = program.contributions.flatMap((contribution) => {
+    const root = webProgramUI(contribution)?.root;
+    return root ? [{ feature: contribution.feature, component: root }] : [];
+  });
+  if (roots.length > 1) {
+    throw new Error(
+      `Web Program ${JSON.stringify(program.name)} declares multiple UI roots: ${roots
+        .map(({ feature, component }) => `${feature}.${component}`)
+        .join(", ")}.`,
+    );
+  }
+  return roots[0];
+}
+
+export type WebHotReplacementManifest = Readonly<{
+  revision: string;
+  programs: readonly Readonly<{
+    id: string;
+    environment: ProgramIR["environment"];
+    state?: TypeIR;
+    components: readonly WebComponentContractIR[];
+  }>[];
+}>;
+
+/** Captures the web-owned structural meaning that may retain live UI state across replacement. */
+export function createWebHotReplacementManifest(ir: SystemIR): WebHotReplacementManifest {
+  const programs = ir.programs.flatMap((program) =>
+    program.contributions.map((contribution) => {
+      const ui = webProgramUI(contribution);
+      return {
+        id: contribution.id,
+        environment: program.environment,
+        ...(ui ? { state: ui.state } : {}),
+        components: ui?.components ?? [],
+      };
+    }),
+  );
+  return { revision: stableWebHash(JSON.stringify(programs)), programs };
+}
+
+/** Applies web Component/state compatibility rules to an otherwise opaque hot update. */
+export function isWebHotReplacementCompatible(
+  previous: WebHotReplacementManifest,
+  next: WebHotReplacementManifest,
+): boolean {
+  const previousPrograms = new Map(previous.programs.map((program) => [program.id, program]));
+  for (const program of next.programs) {
+    const before = previousPrograms.get(program.id);
+    if (!before) continue;
+    if (JSON.stringify(before.environment) !== JSON.stringify(program.environment)) return false;
+    if (before.state && program.state && !compatibleWebType(before.state, program.state)) {
+      return false;
+    }
+    if (Boolean(before.state) !== Boolean(program.state)) return false;
+    const beforeComponents = new Map(
+      before.components.map((component) => [component.name, component]),
+    );
+    for (const component of program.components) {
+      const previousComponent = beforeComponents.get(component.name);
+      if (previousComponent && !compatibleWebComponent(previousComponent, component)) return false;
+    }
+  }
+  return true;
+}
+
+function compatibleWebComponent(
+  previous: WebComponentContractIR,
+  next: WebComponentContractIR,
+): boolean {
+  return (
+    JSON.stringify(previous.propCallbacks) === JSON.stringify(next.propCallbacks) &&
+    compatibleWebType(previous.state, next.state) &&
+    JSON.stringify(previous.elements) === JSON.stringify(next.elements)
+  );
+}
+
+function compatibleWebType(previous: TypeIR, next: TypeIR): boolean {
+  if (previous.kind !== next.kind) return false;
+  if (previous.kind === "record" && next.kind === "record") {
+    const fields = new Map(next.fields.map((field) => [field.name, field]));
+    return previous.fields.every((field) => {
+      const candidate = fields.get(field.name);
+      return candidate
+        ? field.optional === candidate.optional && compatibleWebType(field.type, candidate.type)
+        : true;
+    });
+  }
+  if (previous.kind === "array" && next.kind === "array") {
+    return compatibleWebType(previous.element, next.element);
+  }
+  if (previous.kind === "option" && next.kind === "option") {
+    return compatibleWebType(previous.value, next.value);
+  }
+  if (previous.kind === "promise" && next.kind === "promise") {
+    return compatibleWebType(previous.value, next.value);
+  }
+  if (previous.kind === "stream" && next.kind === "stream") {
+    return compatibleWebType(previous.element, next.element);
+  }
+  return JSON.stringify(previous) === JSON.stringify(next);
+}
+
+function stableWebHash(value: string): string {
+  let hash = 2_166_136_261;
+  for (let index = 0; index < value.length; index++) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16_777_619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function validateWebUICompilerIR(value: unknown): void {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Unsupported web UI compiler meaning.");
+  }
+  const record = value as Readonly<Record<string, unknown>>;
+  assertExtensionKeys(
+    record,
+    ["actions", "components", "state"],
+    ["root", "start"],
+    "web UI compiler meaning",
+  );
+  if (
+    !record.state ||
+    typeof record.state !== "object" ||
+    !Array.isArray(record.actions) ||
+    !Array.isArray(record.components) ||
+    (record.root !== undefined && typeof record.root !== "string") ||
+    (record.start !== undefined && record.start !== true)
+  ) {
+    throw new Error("Unsupported web UI compiler meaning.");
+  }
+}
+
+export type WebRouteMatch<Route extends WebClientRouteIR = WebRouteIR> = Readonly<{
+  route: Route;
   params: Readonly<Record<string, Scalar>>;
   search: Readonly<Record<string, SearchValue>>;
 }>;
@@ -276,28 +509,137 @@ export function collectWebRoutes(ir: SystemIR, program: string): readonly WebRou
     ? webInterfaceCompilerIR(interface_.extensions.web)
     : undefined;
   const manifest = Boolean(interfaceMeaning?.installation);
-  const routePaths = interfaceMeaning?.routes ?? {};
-  const routes = (selected ? [selected] : []).flatMap(({ contributions }) =>
+  const mounts: readonly WebRouteMountIR[] = [...(interfaceMeaning?.mounts ?? [])].map((mount) => ({
+    ...mount,
+    feature:
+      interface_?.features[mount.feature] ??
+      `${interface_?.app ?? ""}.${mount.feature}`.replace(/^\./, ""),
+  }));
+  const mountByFeature = new Map(mounts.map((mount) => [mount.feature, mount]));
+  const routeAddress = (feature: string): string => {
+    const binding = Object.entries(interface_?.features ?? {})
+      .sort(([, left], [, right]) => right.length - left.length)
+      .find(([, path]) => feature === path || feature.startsWith(`${path}.`));
+    if (!binding) return feature;
+    const [role, path] = binding;
+    return `${role}${feature.slice(path.length)}`;
+  };
+  const routePaths = Object.fromEntries(mounts.map(({ feature, path }) => [feature, path]));
+  const compiled = (selected ? [selected] : []).flatMap(({ contributions }) =>
     contributions.flatMap((contribution) =>
       (contribution.extensions?.web
         ? webProgramCompilerIR(contribution.extensions.web).routes
         : []
-      ).map((route): WebRouteIR => {
-        return {
-          feature: contribution.feature,
-          name: route.name,
-          path: composeWebRoutePath(featureRouteBase(contribution.feature, routePaths), route.path),
-          document: route.document,
-          cache: route.cache,
-          metadata: manifest
-            ? Object.freeze({ ...route.metadata, manifest: WEB_MANIFEST_PATH })
-            : route.metadata,
-          params: route.params,
-          search: route.search,
-          deferred: route.deferred,
-        };
-      }),
+      ).map((route) => ({ contribution, route })),
     ),
+  );
+  if (!compiled.length) return Object.freeze([]);
+  const byIdentity = new Map(
+    compiled.map(({ contribution, route }) => [
+      `${contribution.feature}.${route.name}`,
+      { contribution, route },
+    ]),
+  );
+  const mountRoots = new Map<string, string>();
+  for (const mount of mounts) {
+    const roots = compiled.filter(
+      ({ contribution, route }) =>
+        contribution.feature === mount.feature && route.parent === undefined,
+    );
+    const root = mount.route
+      ? roots.find(({ route }) => route.name === mount.route)
+      : roots.length === 1
+        ? roots[0]
+        : undefined;
+    if (mount.route && !root) {
+      throw new Error(
+        `Web Route mount ${JSON.stringify(routeAddress(mount.feature))} names unknown root ` +
+          `${JSON.stringify(mount.route)}.`,
+      );
+    }
+    if (root) mountRoots.set(mount.feature, root.route.name);
+  }
+  const localPaths = new Map<string, string>();
+  const localPath = (feature: string, name: string, stack = new Set<string>()): string => {
+    const identity = `${feature}.${name}`;
+    const cached = localPaths.get(identity);
+    if (cached !== undefined) return cached;
+    if (stack.has(identity))
+      throw new Error(`Web Route parent cycle at ${JSON.stringify(identity)}.`);
+    const current = byIdentity.get(identity);
+    if (!current) throw new Error(`Unknown web Route ${JSON.stringify(identity)}.`);
+    stack.add(identity);
+    const parent = current.route.parent ? localPath(feature, current.route.parent, stack) : "";
+    stack.delete(identity);
+    const path = composeWebRoutePath(parent ? `/${parent}` : "/", current.route.path).slice(1);
+    localPaths.set(identity, path);
+    return path;
+  };
+  const ownRoutes = compiled.map(({ contribution, route }): WebRouteIR => {
+    const mount = mountByFeature.get(contribution.feature);
+    const localParent = route.parent ? `${contribution.feature}.${route.parent}` : undefined;
+    const mountParent =
+      !localParent && mount?.parent && mountRoots.get(contribution.feature) === route.name
+        ? mountByFeature.get(interface_?.features[mount.parent] ?? mount.parent)
+        : undefined;
+    const parentRoot = mountParent ? mountRoots.get(mountParent.feature) : undefined;
+    const parent =
+      localParent ?? (parentRoot ? `${mountParent!.feature}.${parentRoot}` : undefined);
+    return {
+      address: routeAddress(contribution.feature),
+      feature: contribution.feature,
+      name: route.name,
+      ...(parent ? { parent } : {}),
+      path: composeWebRoutePath(
+        featureRouteBase(contribution.feature, routePaths),
+        localPath(contribution.feature, route.name),
+      ),
+      status: route.status,
+      document: route.document,
+      cache: route.cache,
+      metadata: manifest
+        ? Object.freeze({ ...route.metadata, manifest: WEB_MANIFEST_PATH })
+        : route.metadata,
+      params: route.params,
+      search: route.search,
+      deferred: route.deferred,
+    };
+  });
+  const ownRoutesByIdentity = new Map<string, WebRouteIR>(
+    ownRoutes.map((route) => [`${route.feature}.${route.name}`, route] as const),
+  );
+  const inheritedFields = (
+    route: WebRouteIR,
+    field: "params" | "search",
+    pending = new Set<string>(),
+  ): readonly WebParameterIR[] => {
+    const identity = `${route.feature}.${route.name}`;
+    if (pending.has(identity)) {
+      throw new Error(`Web Route parent cycle at ${JSON.stringify(identity)}.`);
+    }
+    pending.add(identity);
+    const parent = route.parent ? ownRoutesByIdentity.get(route.parent) : undefined;
+    const fields = parent ? inheritedFields(parent, field, pending) : [];
+    pending.delete(identity);
+    const merged = new Map(fields.map((value) => [value.name, value] as const));
+    for (const value of route[field]) {
+      const inherited = merged.get(value.name);
+      if (inherited && JSON.stringify(inherited) !== JSON.stringify(value)) {
+        throw new Error(
+          `Web Route ${JSON.stringify(identity)} conflicts with inherited ${field.slice(0, -1)} ` +
+            `${JSON.stringify(value.name)}.`,
+        );
+      }
+      merged.set(value.name, value);
+    }
+    return Object.freeze([...merged.values()]);
+  };
+  const routes = ownRoutes.map((route) =>
+    Object.freeze({
+      ...route,
+      params: inheritedFields(route, "params"),
+      search: inheritedFields(route, "search"),
+    }),
   );
   validateWebRoutes(routes);
   return Object.freeze(routes);
@@ -317,21 +659,36 @@ export function compiledWebRoute(
   );
 }
 
-export function resolveWebDestination(
-  routes: readonly WebRouteIR[],
+export function resolveWebDestination<Route extends WebClientRouteIR>(
+  routes: readonly Route[],
   destination: Readonly<{
-    to: PropertyKey;
+    feature?: string;
+    route?: PropertyKey;
+    /** Canonical adapter IR accepted after public route references are lowered. */
+    to?: PropertyKey;
     params?: Readonly<Record<string, Scalar>>;
     search?: Readonly<Record<string, SearchValue>>;
     hash?: string;
   }>,
   feature = "",
 ): string {
-  const name = String(destination.to);
+  const referenced =
+    destination.to ??
+    (destination.feature
+      ? `${destination.feature}.${String(destination.route)}`
+      : destination.route);
+  if (referenced === undefined) throw new Error("A web destination must name a Route.");
+  const name = String(referenced);
   const qualified = name.includes(".") ? name : feature ? `${feature}.${name}` : name;
   const matches = routes.filter((candidate) => {
     const identity = `${candidate.feature ? `${candidate.feature}.` : ""}${candidate.name}`;
-    return identity === qualified || identity.endsWith(`.${qualified}`);
+    const address = `${candidate.address ? `${candidate.address}.` : ""}${candidate.name}`;
+    return (
+      identity === qualified ||
+      identity.endsWith(`.${qualified}`) ||
+      address === qualified ||
+      address.endsWith(`.${qualified}`)
+    );
   });
   if (matches.length > 1) {
     throw new Error(
@@ -364,10 +721,10 @@ export function composeWebRoutePath(base: string, path: string): string {
   return composed.length > 1 ? composed.replace(/\/$/, "") : composed;
 }
 
-export function matchWebRoute(
-  routes: readonly WebRouteIR[],
+export function matchWebRoute<Route extends WebClientRouteIR>(
+  routes: readonly Route[],
   location: URL,
-): WebRouteMatch | undefined {
+): WebRouteMatch<Route> | undefined {
   for (const route of orderWebRoutes(routes)) {
     const params = matchPath(route, location.pathname);
     if (!params) continue;
@@ -376,8 +733,59 @@ export function matchWebRoute(
   return undefined;
 }
 
+/** Returns the deterministic root-to-leaf Route branch for one matched Route. */
+export function webRouteBranch<Route extends WebClientRouteIR>(
+  routes: readonly Route[],
+  leaf: Route,
+): readonly Route[] {
+  const byIdentity = new Map<string, Route>(
+    routes.map((route) => [`${route.feature}.${route.name}`, route] as const),
+  );
+  const branch: Route[] = [];
+  const visited = new Set<string>();
+  let current: Route | undefined = leaf;
+  while (current) {
+    const identity = `${current.feature}.${current.name}`;
+    if (visited.has(identity)) {
+      throw new Error(`Web Route parent cycle at ${JSON.stringify(identity)}.`);
+    }
+    visited.add(identity);
+    branch.push(current);
+    if (!current.parent) break;
+    current = byIdentity.get(current.parent);
+    if (!current) {
+      throw new Error(`Unknown web Route parent ${JSON.stringify(branch.at(-1)!.parent)}.`);
+    }
+  }
+  return Object.freeze(branch.reverse());
+}
+
+/** Decodes the params and search visible to every Route in a matched branch. */
+export function matchWebRouteBranch<Route extends WebClientRouteIR>(
+  routes: readonly Route[],
+  leaf: WebRouteMatch<Route>,
+  location: URL,
+): readonly WebRouteMatch<Route>[] {
+  return Object.freeze(
+    webRouteBranch(routes, leaf.route).map((route) => {
+      if (route.feature === leaf.route.feature && route.name === leaf.route.name) return leaf;
+      const params = matchPath(route, location.pathname, false);
+      if (!params) {
+        throw new Error(
+          `Web Route branch ${JSON.stringify(`${route.feature}.${route.name}`)} did not match.`,
+        );
+      }
+      return {
+        route,
+        params,
+        search: decodeFields(route.search, location.searchParams, "search"),
+      };
+    }),
+  );
+}
+
 export function formatWebRoute(
-  route: WebRouteIR,
+  route: WebClientRouteIR,
   input: Readonly<{
     params?: Readonly<Record<string, Scalar>>;
     search?: Readonly<Record<string, SearchValue | undefined>>;
@@ -444,17 +852,31 @@ export function formatWebRoute(
 
 export function validateWebRoutes(routes: readonly WebRouteIR[]): void {
   const identities = new Set<string>();
+  const byIdentity = new Map<string, WebRouteIR>();
+  for (const route of routes) {
+    const identity = route.feature ? `${route.feature}.${route.name}` : route.name;
+    if (identities.has(identity)) {
+      throw new Error(`Duplicate web Route ${JSON.stringify(identity)}.`);
+    }
+    identities.add(identity);
+    byIdentity.set(identity, route);
+  }
   const patterns = new Map<string, string>();
   for (const route of routes) {
     const identity = route.feature ? `${route.feature}.${route.name}` : route.name;
-    if (identities.has(identity))
-      throw new Error(`Duplicate web Route ${JSON.stringify(identity)}.`);
-    identities.add(identity);
+    if (route.parent && !identities.has(route.parent)) {
+      throw new Error(
+        `Web Route ${JSON.stringify(identity)} has unknown parent ${JSON.stringify(route.parent)}.`,
+      );
+    }
     if (!route.path.startsWith("/")) {
       throw new Error(`Composed web Route ${JSON.stringify(identity)} must be absolute.`);
     }
     if (route.document !== "content" && route.document !== "shell") {
       throw new Error(`Web Route ${JSON.stringify(identity)} has an unsupported document plan.`);
+    }
+    if (!isWebRouteStatus(route.status)) {
+      throw new Error(`Web Route ${JSON.stringify(identity)} has an unsupported status.`);
     }
     validateCache(route.cache, identity);
     validateWebRouteMetadata(route.metadata, identity);
@@ -492,11 +914,32 @@ export function validateWebRoutes(routes: readonly WebRouteIR[]): void {
       .join("/");
     const previous = patterns.get(pattern);
     if (previous) {
-      throw new Error(
-        `Web Routes ${JSON.stringify(previous)} and ${JSON.stringify(identity)} are ambiguous.`,
-      );
+      const ancestor = (candidate: string, descendant: string): boolean => {
+        let current = byIdentity.get(descendant)?.parent;
+        while (current) {
+          if (current === candidate) return true;
+          current = byIdentity.get(current)?.parent;
+        }
+        return false;
+      };
+      if (!ancestor(previous, identity) && !ancestor(identity, previous)) {
+        throw new Error(
+          `Web Routes ${JSON.stringify(previous)} and ${JSON.stringify(identity)} are ambiguous.`,
+        );
+      }
     }
     patterns.set(pattern, identity);
+  }
+  for (const identity of identities) {
+    const visited = new Set<string>();
+    let current: string | undefined = identity;
+    while (current) {
+      if (visited.has(current)) {
+        throw new Error(`Web Route parent cycle at ${JSON.stringify(current)}.`);
+      }
+      visited.add(current);
+      current = byIdentity.get(current)?.parent;
+    }
   }
 }
 
@@ -737,11 +1180,27 @@ const identifier = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
 const decimal = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/;
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-function orderWebRoutes(routes: readonly WebRouteIR[]): readonly WebRouteIR[] {
+function orderWebRoutes<Route extends WebClientRouteIR>(
+  routes: readonly Route[],
+): readonly Route[] {
+  const byIdentity = new Map<string, Route>(
+    routes.map((route) => [`${route.feature}.${route.name}`, route]),
+  );
+  const depth = (route: Route): number => {
+    let result = 0;
+    let parent = route.parent;
+    while (parent) {
+      result += 1;
+      parent = byIdentity.get(parent)?.parent;
+    }
+    return result;
+  };
   return [...routes].sort((left, right) => {
     const leftScore = routeScore(left.path);
     const rightScore = routeScore(right.path);
-    return rightScore - leftScore || left.path.localeCompare(right.path);
+    return (
+      rightScore - leftScore || depth(right) - depth(left) || left.path.localeCompare(right.path)
+    );
   });
 }
 
@@ -754,8 +1213,9 @@ function routeScore(path: string): number {
 }
 
 function matchPath(
-  route: WebRouteIR,
+  route: WebClientRouteIR,
   pathname: string,
+  exact = true,
 ): Readonly<Record<string, Scalar>> | undefined {
   const pattern = pathSegments(route.path);
   const source = pathSegments(pathname);
@@ -784,7 +1244,7 @@ function matchPath(
       );
     } else if (decode(raw) !== expected) return undefined;
   }
-  return index === source.length ? values : undefined;
+  return !exact || index === source.length ? values : undefined;
 }
 
 function pathSegments(path: string): readonly string[] {
@@ -1012,6 +1472,9 @@ function validateRenderNodeIR(value: ExtensionIR | undefined, owner: string): vo
     case "none":
       assertExtensionKeys(node, ["kind"], [], owner);
       return;
+    case "children":
+      assertExtensionKeys(node, ["kind"], [], owner);
+      return;
     case "text":
       assertExtensionKeys(node, ["kind", "value"], [], owner);
       validateRenderValueIR(node.value, `${owner} value`);
@@ -1231,14 +1694,17 @@ function validateCompiledRouteIR(value: ExtensionIR, index: number): void {
       "path",
       "search",
       "span",
+      "status",
     ],
-    [],
+    ["parent"],
     owner,
   );
   if (
     typeof route.feature !== "string" ||
     typeof route.name !== "string" ||
     typeof route.path !== "string" ||
+    !isWebRouteStatus(route.status) ||
+    (route.parent !== undefined && typeof route.parent !== "string") ||
     route.path.startsWith("/") ||
     (route.document !== "content" && route.document !== "shell") ||
     !Array.isArray(route.params) ||
@@ -1380,17 +1846,47 @@ function validateInstallationIR(value: ExtensionIR): void {
   assertExtensionKeys(
     installation,
     ["display", "icons", "offline", "shortcuts", "start"],
-    ["shortName"],
+    [
+      "backgroundColor",
+      "categories",
+      "description",
+      "orientation",
+      "screenshots",
+      "shortName",
+      "themeColor",
+    ],
     "web installation",
   );
   if (
     (installation.shortName !== undefined &&
       (typeof installation.shortName !== "string" || !installation.shortName.trim())) ||
+    (installation.description !== undefined &&
+      (typeof installation.description !== "string" || !installation.description.trim())) ||
     !["browser", "fullscreen", "minimal-ui", "standalone"].includes(
       installation.display as string,
     ) ||
+    (installation.orientation !== undefined &&
+      ![
+        "any",
+        "natural",
+        "landscape",
+        "landscape-primary",
+        "landscape-secondary",
+        "portrait",
+        "portrait-primary",
+        "portrait-secondary",
+      ].includes(installation.orientation as string)) ||
+    [installation.themeColor, installation.backgroundColor].some(
+      (color) => color !== undefined && (typeof color !== "string" || !color.trim()),
+    ) ||
+    (installation.categories !== undefined &&
+      (!Array.isArray(installation.categories) ||
+        installation.categories.some(
+          (category) => typeof category !== "string" || !category.trim(),
+        ))) ||
     !Array.isArray(installation.icons) ||
     !installation.icons.length ||
+    (installation.screenshots !== undefined && !Array.isArray(installation.screenshots)) ||
     !Array.isArray(installation.shortcuts)
   ) {
     throw new Error("Unsupported web installation.");
@@ -1408,6 +1904,9 @@ function validateInstallationIR(value: ExtensionIR): void {
   if (!sizes.has("192x192") || !sizes.has("512x512")) {
     throw new Error("A web installation requires 192x192 and 512x512 icons.");
   }
+  (installation.screenshots ?? []).forEach((screenshot, index) =>
+    validateInstallationScreenshotIR(screenshot, `web installation screenshot ${index}`),
+  );
   const offline = extensionRecord(installation.offline, "web installation offline policy");
   assertExtensionKeys(offline, ["fallback"], [], "web installation offline policy");
   validateDestinationIR(offline.fallback, "web installation offline fallback");
@@ -1431,6 +1930,24 @@ function validateInstallationIR(value: ExtensionIR): void {
       validateInstallationIconIR(icon, `web installation shortcut ${index} icon ${iconIndex}`),
     );
   });
+}
+
+function validateInstallationScreenshotIR(value: ExtensionIR | undefined, subject: string): void {
+  const screenshot = extensionRecord(value, subject);
+  assertExtensionKeys(screenshot, ["sizes", "src"], ["formFactor", "label", "type"], subject);
+  if (
+    typeof screenshot.src !== "string" ||
+    !screenshot.src ||
+    typeof screenshot.sizes !== "string" ||
+    !/^(?:any|\d+x\d+)(?:\s+(?:any|\d+x\d+))*$/.test(screenshot.sizes) ||
+    (screenshot.type !== undefined && typeof screenshot.type !== "string") ||
+    (screenshot.label !== undefined &&
+      (typeof screenshot.label !== "string" || !screenshot.label.trim())) ||
+    (screenshot.formFactor !== undefined &&
+      !["narrow", "wide"].includes(screenshot.formFactor as string))
+  ) {
+    throw new Error(`Unsupported ${subject}.`);
+  }
 }
 
 function validateDestinationIR(value: ExtensionIR | undefined, subject: string): void {
@@ -1520,7 +2037,7 @@ function validateCompiledParameterIR(value: ExtensionIR, owner: string): void {
 }
 
 function assertExtensionKeys(
-  value: Record<string, ExtensionIR>,
+  value: Readonly<Record<string, unknown>>,
   required: readonly string[],
   optional: readonly string[],
   owner: string,

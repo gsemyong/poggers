@@ -1,7 +1,4 @@
-/** Opaque result of one platform-native JSX expression. It has no runtime form. */
-export interface JSXElement {
-  readonly __kitJSXElement: true;
-}
+export type { JSXElement } from "@/jsx/runtime";
 
 /** One Element's platform-specific structural contract. */
 export type UIElement<Props extends object = object, Target = unknown> = Readonly<{

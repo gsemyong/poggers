@@ -3,7 +3,12 @@ import { resolve } from "node:path";
 
 import type { PlatformAdapter } from "@/adapter";
 import type { SourceCompilerExtension } from "@/compiler/extension";
-import type { ProgramIR } from "@/compiler/ir";
+import type {
+  ExtensionIR,
+  PortableProgramExecutionIR,
+  ProgramContributionIR,
+  ProgramIR,
+} from "@/compiler/ir";
 import { SystemDiagnostic } from "@/compiler/source";
 import type { ServerPlatform } from "@/platforms/server";
 import type { ServerProductionDependency } from "@/platforms/server/adapter/rust/providers";
@@ -24,9 +29,113 @@ export type ServerPlatformAdapterOptions = ServerDevelopmentOptions &
     productionDependencies?: readonly ServerProductionDependency[];
   }>;
 
-const serverCompilerExtension: SourceCompilerExtension = Object.freeze({
+export const SERVER_COMPILER_IR_VERSION = 1 as const;
+
+export type ServerProgramCompilerIR = Readonly<{
+  version: typeof SERVER_COMPILER_IR_VERSION;
+  execution: PortableProgramExecutionIR;
+}>;
+
+export function serverProgramCompilerIR(value: ExtensionIR | undefined): ServerProgramCompilerIR {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Missing server Program compiler meaning.");
+  }
+  const record = value as Readonly<Record<string, unknown>>;
+  if (
+    record.version !== SERVER_COMPILER_IR_VERSION ||
+    !record.execution ||
+    typeof record.execution !== "object" ||
+    Array.isArray(record.execution)
+  ) {
+    throw new Error("Unsupported server Program compiler meaning.");
+  }
+  const execution = record.execution as Readonly<Record<string, unknown>>;
+  if (!["none", "portable", "source"].includes(String(execution.kind))) {
+    throw new Error("Unsupported server Program execution meaning.");
+  }
+  if (
+    execution.kind === "portable" &&
+    (!execution.entry || typeof execution.entry !== "object" || !Array.isArray(execution.functions))
+  ) {
+    throw new Error("Invalid portable server Program execution meaning.");
+  }
+  return record as ServerProgramCompilerIR;
+}
+
+/** Projects one server contribution into the generic portable execution engines. */
+export function serverProgramExecution(
+  contribution: ProgramContributionIR,
+): PortableProgramExecutionIR {
+  return serverProgramCompilerIR(contribution.extensions?.server).execution;
+}
+
+export const serverCompilerExtension: SourceCompilerExtension = Object.freeze({
   name: "server",
   cacheSources: [import.meta.filename],
+  program(context) {
+    const span = context.source.span(context.implementation ?? context.location);
+    if (context.implementationOrigin === "unresolved") {
+      return {
+        ir: {
+          version: SERVER_COMPILER_IR_VERSION,
+          execution: {
+            kind: "source",
+            diagnostic: {
+              message: "Feature factory output could not be expanded by the portable frontend.",
+              span,
+            },
+            span,
+          },
+        } satisfies ServerProgramCompilerIR,
+      };
+    }
+    const start = context.implementation
+      ? context.source.callable(context.implementation, "start")
+      : undefined;
+    if (!start) {
+      return {
+        ir: {
+          version: SERVER_COMPILER_IR_VERSION,
+          execution: { kind: "none" },
+        } satisfies ServerProgramCompilerIR,
+      };
+    }
+    try {
+      const providesType = context.source.property(context.contract, "Provides", context.location);
+      const provides = providesType
+        ? context.source.dependencies(providesType, context.location)
+        : [];
+      const portable = context.source.portable(start, {
+        id: "start",
+        name: "start",
+        context: { dependencies: "dependencies", provides: "provides" },
+        provides: provides.map(({ name }) => name),
+      });
+      return {
+        ir: {
+          version: SERVER_COMPILER_IR_VERSION,
+          execution: { kind: "portable", ...portable },
+        } satisfies ServerProgramCompilerIR,
+      };
+    } catch (error) {
+      if (
+        error instanceof SystemDiagnostic &&
+        /Unsupported portable (expression|statement)/.test(error.message)
+      ) {
+        return {
+          ir: {
+            version: SERVER_COMPILER_IR_VERSION,
+            execution: {
+              kind: "source",
+              diagnostic: { message: error.message, span: error.span },
+              span,
+            },
+          } satisfies ServerProgramCompilerIR,
+        };
+      }
+      throw error;
+    }
+  },
   validate(ir) {
     assertPortableServerPrograms(ir.programs);
   },
@@ -56,6 +165,9 @@ export function createServerPlatformAdapter(
         const path = resolve(input.output, artifactName(program.name));
         const started = performance.now();
         const result = await buildServerProgram({
+          attachments: (options.attachmentSources ?? []).map((source) =>
+            source.project(program, input.ir),
+          ),
           dependencies: options.productionDependencies,
           system: input.ir.system.name,
           ir: input.ir,
@@ -116,7 +228,7 @@ function assertPortableServerPrograms(programs: readonly ProgramIR[]): void {
   for (const program of programs) {
     if (program.environment.platform !== "server") continue;
     for (const contribution of program.contributions) {
-      const implementation = contribution.implementation;
+      const implementation = serverProgramExecution(contribution);
       if (implementation.kind !== "source") continue;
       const span = implementation.diagnostic?.span ?? implementation.span;
       const reason = implementation.diagnostic

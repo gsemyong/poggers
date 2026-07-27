@@ -41,12 +41,13 @@ type LocalGatewayState = Readonly<{
 
 type PreparedLocalGateway = Omit<LocalGatewayState, "pid" | "targets"> &
   Readonly<{
+    exposure?: ReleaseArtifact["exposure"];
     pid?: number;
     root: string;
     targets: readonly string[];
   }>;
 
-const LOCAL_GATEWAY_VERSION = 2;
+const LOCAL_GATEWAY_VERSION = 3;
 
 export type LocalDeploymentState = DeploymentState &
   Readonly<{
@@ -419,11 +420,13 @@ async function processEnvironment(
   }
   const interfaces = interfaceLocations(
     release.filter(
-      ({ deployment, platform }) =>
+      ({ deployment, kind, platform }) =>
         deployment === "asset" &&
         deferred.some(
           ({ source }) =>
-            source?.kind === "assets" && (!source.platform || source.platform === platform),
+            source?.kind === "assets" &&
+            (!source.artifact || source.artifact === kind) &&
+            (!source.platform || source.platform === platform),
         ),
     ),
     locations[0],
@@ -435,8 +438,10 @@ async function processEnvironment(
       value = gateways[0]?.location ?? locations[0];
     } else {
       const selected = release.filter(
-        ({ deployment, platform }) =>
-          deployment === "asset" && (!source.platform || source.platform === platform),
+        ({ deployment, kind, platform }) =>
+          deployment === "asset" &&
+          (!source.artifact || source.artifact === kind) &&
+          (!source.platform || source.platform === platform),
       );
       if (source.format === "single" && selected.length === 1) {
         value = resolve(artifacts, selected[0]!.root);
@@ -517,6 +522,7 @@ async function prepareGateways(
           location,
           hosts,
           root: resolve(artifacts, artifact.root),
+          ...(artifact.exposure ? { exposure: artifact.exposure } : {}),
           targets: reusable?.targets ?? [],
           ...(reusable ? { pid: reusable.pid } : {}),
           logs: Object.freeze({
@@ -580,6 +586,7 @@ async function realizeGateway(
   const status = resolve(directory, "status.json");
   await mkdir(directory, { recursive: true });
   await writeJson(configuration, {
+    ...(gateway.exposure ? { exposure: gateway.exposure } : {}),
     root: gateway.root,
     targets,
   });
@@ -936,49 +943,33 @@ const status = async (value) => {
 };
 
 const configuration = async () => JSON.parse(await readFile(configurationFile, "utf8"));
-const routeManifests = new Map();
-const routeManifest = (root) => {
-  let manifest = routeManifests.get(root);
-  if (!manifest) {
-    manifest = readFile(resolve(root, "routes.ir.json"), "utf8")
-      .then(JSON.parse)
-      .catch(() => ({ routes: [] }));
-    routeManifests.set(root, manifest);
-  }
-  return manifest;
-};
-const durationSeconds = (value) => {
-  const match = /^(\\d+)(ms|s|m|h|d)$/.exec(value);
-  if (!match) return undefined;
-  const amount = Number(match[1]);
-  const factors = { ms: 0.001, s: 1, m: 60, h: 3600, d: 86400 };
-  return Math.ceil(amount * factors[match[2]]);
-};
-const routeCacheControl = async (root, pathname) => {
-  const manifest = await routeManifest(root);
-  const canonical = pathname === "/" ? "/" : pathname.replace(/\\/$/, "");
-  const entry = manifest.routes.find(({ request, route }) =>
-    request === false &&
-    route.path === canonical &&
-    route.params.length === 0 &&
-    route.search.length === 0
-  );
-  const cache = entry?.route.cache;
-  if (!cache) return "no-cache";
-  const directives = [cache.scope];
-  if (cache.maxAge === undefined) {
-    directives.push(cache.scope === "public" ? "max-age=0" : "no-store");
-  } else {
-    directives.push("max-age=" + durationSeconds(cache.maxAge));
-    if (cache.staleWhileRevalidate !== undefined) {
-      directives.push("stale-while-revalidate=" + durationSeconds(cache.staleWhileRevalidate));
-    }
-  }
-  return directives.join(", ");
+const publicOrigin = (incoming) => {
+  const value = incoming.headers.host;
+  const authority = Array.isArray(value) ? value[0] : value;
+    return new URL("http://" + (authority || host + ":" + port)).origin;
 };
 const server = createServer(async (incoming, outgoing) => {
   try {
     const current = await configuration();
+    const url = new URL(incoming.url || "/", "http://localhost");
+    const fixed = current.exposure?.responses?.find(({ path }) => path === url.pathname);
+    if (fixed) {
+      if (incoming.method !== "GET" && incoming.method !== "HEAD") {
+        outgoing.writeHead(405, { allow: "GET, HEAD" }).end();
+        return;
+      }
+      const body = fixed.substitutions?.includes("origin")
+        ? fixed.body.replaceAll("{{origin}}", publicOrigin(incoming))
+        : fixed.body;
+      outgoing.writeHead(fixed.status, {
+        ...current.exposure?.headers,
+        ...fixed.headers,
+        "content-length": Buffer.byteLength(body),
+      });
+      if (incoming.method === "HEAD") outgoing.end();
+      else outgoing.end(body);
+      return;
+    }
     if (current.targets.length) {
       const target = new URL(current.targets[cursor++ % current.targets.length]);
       const headers = { ...incoming.headers };
@@ -989,7 +980,10 @@ const server = createServer(async (incoming, outgoing) => {
         new URL(incoming.url || "/", target),
         { method: incoming.method, headers },
         (response) => {
-          outgoing.writeHead(response.statusCode || 502, response.headers);
+          outgoing.writeHead(response.statusCode || 502, {
+            ...response.headers,
+            ...current.exposure?.headers,
+          });
           response.pipe(outgoing);
         },
       );
@@ -1000,7 +994,6 @@ const server = createServer(async (incoming, outgoing) => {
       incoming.pipe(upstream);
       return;
     }
-    const url = new URL(incoming.url || "/", "http://localhost");
     let file = resolve(current.root, "." + decodeURIComponent(url.pathname));
     const boundary = relative(resolve(current.root), file);
     if (boundary === ".." || boundary.startsWith(".." + sep)) {
@@ -1009,8 +1002,12 @@ const server = createServer(async (incoming, outgoing) => {
     }
     const metadata = await stat(file).catch(() => undefined);
     if (metadata?.isDirectory()) file = resolve(file, "index.html");
-    if (!metadata && (incoming.headers.accept || "").includes("text/html")) {
-      file = resolve(current.root, "index.html");
+    if (
+      !metadata &&
+      current.exposure?.fallback &&
+      (incoming.headers.accept || "").includes("text/html")
+    ) {
+      file = resolve(current.root, current.exposure.fallback);
     }
     const selected = await stat(file).catch(() => undefined);
     if (!selected?.isFile()) {
@@ -1027,12 +1024,12 @@ const server = createServer(async (incoming, outgoing) => {
       ".webmanifest": "application/manifest+json",
     };
     const immutable = /^\\/(?:assets|workers)\\/.+-[A-Za-z0-9_-]{8,}\\.[^/]+$/.test(url.pathname);
-    const cacheControl = immutable
-      ? "public, max-age=31536000, immutable"
-      : extname(file) === ".html"
-        ? await routeCacheControl(current.root, url.pathname)
-        : "no-cache";
+    const artifactPath = relative(current.root, file).split(sep).join("/");
+    const cacheControl =
+      current.exposure?.files?.find(({ path }) => path === artifactPath)?.cacheControl ??
+      (immutable ? "public, max-age=31536000, immutable" : "no-cache");
     outgoing.writeHead(200, {
+      ...current.exposure?.headers,
       "cache-control": cacheControl,
       "content-length": selected.size,
       "content-type": types[extname(file)] || "application/octet-stream",

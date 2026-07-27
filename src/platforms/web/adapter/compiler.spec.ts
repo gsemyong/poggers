@@ -17,16 +17,16 @@ afterEach(async () => {
 describe("web compiler extension", () => {
   test("owns mounted paths, rendering, cache, metadata, and validation meaning", async () => {
     const entry = await fixture(routeSystemSource());
-    const generic = compileSystem(entry);
-    expect(generic.features[0]?.extensions).toBeUndefined();
-    expect(generic.programs[0]?.contributions[0]?.extensions).toBeUndefined();
+    expect(() => compileSystem(entry)).toThrow(
+      'Platform "web" has no registered compiler dialect.',
+    );
 
     const ir = compileSystem(entry, [webCompilerExtension]);
     const webInterface = ir.interfaces.find(({ path }) => path === "product.web");
     const tasks = ir.features.find(({ path }) => path === "product.tasks");
     expect(webInterfaceCompilerIR(webInterface?.extensions?.web)).toEqual({
-      version: 8,
-      routes: { "product.tasks": "admin" },
+      version: 11,
+      mounts: [{ feature: "tasks", path: "admin" }],
       installation: {
         display: "standalone",
         icons: [
@@ -42,9 +42,10 @@ describe("web compiler extension", () => {
     const web = webProgramCompilerIR(ir.programs[0]?.contributions[0]?.extensions?.web);
     expect(web.routes).toEqual([
       expect.objectContaining({
-        feature: "product.tasks",
+        feature: "tasks",
         name: "edit",
         path: ":id",
+        status: 200,
         document: "content",
         cache: { scope: "private", maxAge: "5m" },
         metadata: {
@@ -100,7 +101,9 @@ describe("web compiler extension", () => {
         "",
       ),
     );
-    expect(() => compileSystem(entry)).not.toThrow();
+    expect(() => compileSystem(entry)).toThrow(
+      'Platform "web" has no registered compiler dialect.',
+    );
     expect(() => compileSystem(entry, [webCompilerExtension])).toThrow(/must implement view/);
   });
 
@@ -177,12 +180,21 @@ async function fixture(source: string, name = "system.ts"): Promise<string> {
 function compositionSource(): string {
   return `
 declare const featureContract: unique symbol;
+declare const applicationContract: unique symbol;
 type Feature<Contract> = Readonly<{ readonly [featureContract]?: Contract }>;
+type Application<Contract> = Readonly<{
+  readonly interfaces: object;
+  readonly [applicationContract]?: {
+    Application: Contract;
+    Features: Contract extends { Features: infer Features } ? Features : {};
+    Interfaces: Contract extends { Interfaces: infer Interfaces } ? Interfaces : {};
+  };
+}>;
 function createFeature<Contract>(definition: object): Feature<Contract> {
   return definition as Feature<Contract>;
 }
-function createApplication<Contract>(definition: object): Feature<Contract> {
-  return definition as Feature<Contract>;
+function createApplication<Contract>(definition: object): Application<Contract> {
+  return definition as Application<Contract>;
 }
 function createInterface<Contract>(definition: object): Contract {
   return definition as Contract;
@@ -222,14 +234,20 @@ type Route = {
   ParamSchema: {};
   SearchSchema: {};
   Data: { title: string; activity: Deferred<string> };
-  Dependencies: { feed: { read(input: {}): Promise<string> } };
 };
 type Activity = {
-  Programs: { browser: Program<Environment, { Routes: { activity: Route } }> };
+  Programs: {
+    browser: Program<
+      Environment,
+      {
+        Requires: { feed: { read(input: {}): Promise<string> } };
+        Routes: { activity: Route };
+      }
+    >;
+  };
 };
 type Web = { Interface: { Platform: { Name: "web" } } };
 type Product = {
-  App: true;
   Features: { activity: Activity };
   Interfaces: { web: Web };
 };
@@ -263,10 +281,12 @@ const web = createInterface<Web>({
   presentation: { parameters: {}, create() { return {}; } },
 });
 const product = createApplication<Product>({
-  features: { activity },
   interfaces: { web },
 });
-export default createSystem({ features: { product } });
+export default createSystem({
+  features: { activity },
+  applications: { product },
+});
 `;
 }
 
@@ -303,21 +323,27 @@ type Route = {
     tab?: Validate<"activity" | "details">;
   };
   Data: { title: string };
-  Dependencies: { tasks: { get(input: { id: string }): Promise<{ title: string }> } };
 };
 type Tasks = {
   Programs: {
     browser: Program<
       Environment,
       {
+        Requires: { tasks: { get(input: { id: string }): Promise<{ title: string }> } };
         Routes: { edit: Route };
       }
     >;
   };
 };
-type Web = { Interface: { Platform: { Name: "web" } } };
+type Web = {
+  Interface: {
+    Platform: {
+      Name: "web";
+      Specification: { Mounts: { tasks: { Path: "admin" } } };
+    };
+  };
+};
 type Product = {
-  App: true;
   Features: { tasks: Tasks };
   Interfaces: { web: Web };
 };
@@ -346,20 +372,18 @@ const icons = [
 ];
 const web = createInterface<Web>({
   presentation: { parameters: {}, create() { return {}; } },
-  routes: { tasks: "admin" },
   installation: {
-    start: { to: "tasks.edit", params: { id: "start" } },
+    start: { feature: "tasks", route: "edit", params: { id: "start" } },
     icons,
-    offline: { fallback: { to: "tasks.edit", params: { id: "offline" } } },
+    offline: {
+      fallback: { feature: "tasks", route: "edit", params: { id: "offline" } },
+    },
   },
 });
 const product = createApplication<Product>({
-  features: { tasks },
   interfaces: { web },
 });
-export default createSystem({
-  features: { product },
-});
+export default createSystem({ features: { tasks }, applications: { product } });
 `;
 }
 
@@ -367,30 +391,30 @@ function parameterizedInterfaceSource(): string {
   return `
 ${compositionSource()}
 type Web = { Interface: { Platform: { Name: "web" } } };
-type Operations = { App: true; Features: {}; Interfaces: { web: Web } };
+type Operations = { Features: {}; Interfaces: { web: Web } };
 function createWeb(input: { shortName: string }): Web {
   return createInterface<Web>({
     presentation: { parameters: {}, create() { return {}; } },
     installation: {
       shortName: input.shortName,
-      start: { to: "home" },
+      start: { route: "home" },
       icons: [
         { src: "/icon-192.svg", sizes: "192x192" },
         { src: "/icon-512.svg", sizes: "512x512" },
       ],
-      offline: { fallback: { to: "home" } },
+      offline: { fallback: { route: "home" } },
     },
   });
 }
 const web = createWeb({ shortName: "Operations" });
-const operations = createApplication<Operations>({ features: {}, interfaces: { web } });
-export default createSystem({ features: { operations } });
+const operations = createApplication<Operations>({ interfaces: { web } });
+export default createSystem({ applications: { operations } });
 `;
 }
 
 function multiInterfaceRouteSource(collide: boolean): string {
-  const extraContract = collide ? "; duplicate: Area" : "";
-  const extraValue = collide ? ", duplicate" : "";
+  const extraContract = collide ? '; duplicate: Area<"duplicate">' : "";
+  const extraMount = collide ? '; duplicate: { Path: "" }' : "";
   return `
 type UI = { readonly Name: "web" };
 type Environment = {
@@ -409,25 +433,38 @@ type Route = {
   Data: {};
   Dependencies: {};
 };
-type Area = {
+type Area<Name extends string> = {
+  Instance: Name;
   Programs: { browser: Program<Environment, { Routes: { home: Route } }> };
 };
-type OperationsWeb = { Interface: { Platform: { Name: "web" } } };
-type CustomerWeb = { Interface: { Platform: { Name: "web" } } };
+type OperationsWeb = {
+  Interface: {
+    Platform: {
+      Name: "web";
+      Specification: { Mounts: { primary: { Path: "" }${extraMount} } };
+    };
+  };
+};
+type CustomerWeb = {
+  Interface: {
+    Platform: {
+      Name: "web";
+      Specification: { Mounts: { primary: { Path: "" } } };
+    };
+  };
+};
 type Operations = {
-  App: true;
-  Features: { primary: Area${extraContract} };
+  Features: { primary: Area<"primary">${extraContract} };
   Interfaces: { web: OperationsWeb };
 };
 type Customer = {
-  App: true;
-  Features: { primary: Area };
+  Features: { primary: Area<"primary"> };
   Interfaces: { web: CustomerWeb };
 };
-const primary = createFeature<Area>({
+const primary = createFeature<Area<"primary">>({
   programs: { browser: { routes: { home: { view() { return "Home"; } } } } },
 });
-const duplicate = createFeature<Area>({
+const duplicate = createFeature<Area<"duplicate">>({
   programs: { browser: { routes: { home: { view() { return "Duplicate"; } } } } },
 });
 const operationsWeb = createInterface<OperationsWeb>({
@@ -437,13 +474,14 @@ const customerWeb = createInterface<CustomerWeb>({
   presentation: { parameters: {}, create() { return {}; } },
 });
 const operations = createApplication<Operations>({
-  features: { primary${extraValue} },
   interfaces: { web: operationsWeb },
 });
 const customer = createApplication<Customer>({
-  features: { primary },
   interfaces: { web: customerWeb },
 });
-export default createSystem({ features: { operations, customer } });
+export default createSystem({
+  features: { primary, duplicate },
+  applications: { operations, customer },
+});
 `;
 }

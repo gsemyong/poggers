@@ -7,8 +7,12 @@ import {
   type WebServiceWorkerRuntime,
 } from "@/platforms/web";
 import type {
+  Choice,
   Deferred,
-  Validate,
+  Integer,
+  List,
+  Text,
+  UUID,
   ValidationInput,
   ValidationOutput,
   WebRoute,
@@ -22,10 +26,10 @@ type Equal<Left, Right> =
 type Expect<Value extends true> = Value;
 
 type SearchSchema = {
-  page: Validate<number, { Integer: true; Minimum: 1; Default: 1 }>;
-  query?: Validate<string, { MaximumLength: 100 }>;
-  sort: Validate<"created" | "title", { Default: "created" }>;
-  tags?: Validate<readonly string[], { MaximumLength: 20 }>;
+  page: Integer<{ Minimum: 1; Default: 1 }>;
+  query?: Text<{ MaximumLength: 100 }>;
+  sort: Choice<"created" | "title", { Default: "created" }>;
+  tags?: List<string, { MaximumLength: 20 }>;
 };
 
 type SearchInputProof = Expect<
@@ -53,10 +57,9 @@ type SearchOutputProof = Expect<
 
 type EditRoute = WebRoute<{
   Path: ":id";
-  Params: { id: Validate<string, { Format: "uuid" }> };
+  Params: { id: UUID };
   Search: SearchSchema;
   Data: Readonly<{ title: string }>;
-  Dependencies: { tasks: { get(input: { id: string }): Promise<{ title: string }> } };
 }>;
 
 type RouteParamsProof = Expect<Equal<EditRoute["Params"], Readonly<{ id: string }>>>;
@@ -84,7 +87,7 @@ type InvalidParamsProof = Expect<
   Equal<
     WebRoute<{
       Path: ":id";
-      Params: { slug: Validate<string> };
+      Params: { slug: Text };
     }>,
     never
   >
@@ -147,15 +150,15 @@ type RoutedFeature = {
   Programs: {
     browser: {
       Environment: BrowserMainThread;
+      Requires: {
+        tasks: { get(input: { id: string }): Promise<{ title: string }> };
+      };
       Routes: {
         edit: {
           Path: ":id";
-          Params: { id: Validate<string, { Format: "uuid" }> };
+          Params: { id: UUID };
           Search: SearchSchema;
           Data: Readonly<{ title: string }>;
-          Dependencies: {
-            tasks: { get(input: { id: string }): Promise<{ title: string }> };
-          };
         };
       };
     };
@@ -169,7 +172,7 @@ type IdentityFeature = {
       Routes: {
         signIn: {
           Path: "sign-in";
-          Search: { returnTo?: Validate<string> };
+          Search: { returnTo?: Text };
         };
       };
     };
@@ -181,14 +184,68 @@ type GlobalRouteNamesProof = Expect<
   Equal<keyof WebRoutes<RoutedApplication>, "identity.signIn" | "tasks.edit">
 >;
 
+type NestedFeature = {
+  Programs: {
+    browser: {
+      Environment: BrowserMainThread;
+      Routes: {
+        root: { Path: ""; Search: { locale?: Choice<"en" | "sk", { Default: "en" }> } };
+        workspace: {
+          Parent: "root";
+          Path: ":workspace";
+          Params: { workspace: Text };
+        };
+        detail: {
+          Parent: "workspace";
+          Path: ":id";
+          Params: { id: UUID };
+          Data: { label: string };
+        };
+      };
+    };
+  };
+};
+type NestedApplication = { Features: { nested: NestedFeature } };
+type NestedRouteNamesProof = Expect<
+  Equal<keyof WebRoutes<NestedApplication>, "nested.root" | "nested.workspace" | "nested.detail">
+>;
+
+const nested = createFeature<NestedFeature>({
+  programs: {
+    browser: {
+      routes: {
+        root: {
+          view({ children }) {
+            return children;
+          },
+        },
+        workspace: {
+          view({ children, params, search }) {
+            return `${params.workspace}:${search.locale}:${String(children)}`;
+          },
+        },
+        detail: {
+          load({ params, search }) {
+            return { data: { label: `${params.workspace}:${params.id}:${search.locale}` } };
+          },
+          view({ data }) {
+            return data.label;
+          },
+        },
+      },
+    },
+  },
+});
+
 declare const navigation: Navigation<
   RoutedFeature["Programs"]["browser"]["Routes"],
   RoutedApplication
 >;
-navigation.navigate({ to: "edit", params: { id: "8da942a4-835f-4d4e-bc08-89545d523963" } });
-navigation.navigate({ to: "identity.signIn", search: { returnTo: "/tasks" } });
+navigation.navigate({ route: "edit", params: { id: "8da942a4-835f-4d4e-bc08-89545d523963" } });
+navigation.navigate({ feature: "identity", route: "signIn", search: { returnTo: "/tasks" } });
+navigation.reload();
 // @ts-expect-error Unknown cross-Feature destinations are rejected.
-navigation.navigate({ to: "identity.missing" });
+navigation.navigate({ feature: "identity", route: "missing" });
 
 const routed = createFeature<RoutedFeature>({
   programs: {
@@ -240,6 +297,7 @@ const offline = createFeature<OfflineFeature>({
 });
 
 void routed;
+void nested;
 void deferred;
 void offline;
 void (false as SearchInputProof);
@@ -252,3 +310,4 @@ void (false as PublicRequestAuthorityProof);
 void (false as InvalidParamsProof);
 void (false as GlobalRouteNamesProof);
 void (false as DeferredKeysProof);
+void (false as NestedRouteNamesProof);

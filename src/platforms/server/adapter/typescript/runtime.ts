@@ -1,9 +1,29 @@
-import { collectDependencyOperations, type ProgramIR, type ProgramManifest } from "@/compiler/ir";
+import {
+  collectDependencyOperations,
+  type LinkedProgramIR,
+  type ProgramIR,
+  type ProgramManifest,
+  type SystemIR,
+} from "@/compiler/ir";
 import { collectProgramManifest, linkProgram } from "@/compiler/linker";
 import { invokeDependency } from "@/core/dependency";
 import type { System, SystemContract } from "@/core/system";
-import { executeLinkedProgramIR, type DependencyImplementations } from "@/execution/interpreter";
-import { assembleProgram, type ProgramDistributionFactory } from "@/execution/process";
+import {
+  executeLinkedProgramIR,
+  executeProgramFixtureIR,
+  executeProgramIR,
+  type DependencyCallTrace,
+  type DependencyImplementations,
+  type ExecutionScenario,
+  type ExecutionTrace,
+  type LinkedProgramExecution,
+} from "@/execution/interpreter";
+import {
+  assembleProgram,
+  type ProgramDistributionFactory,
+  type ProgramLanguageRuntime,
+} from "@/execution/process";
+import { serverProgramExecution } from "@/platforms/server/adapter";
 import { bindNodeAlarmDispatcher } from "@/platforms/server/adapter/typescript/host";
 
 type ProgramHostFactory = (input: {
@@ -12,12 +32,61 @@ type ProgramHostFactory = (input: {
   readonly manifest: ProgramManifest;
 }) => Readonly<Record<string, unknown>> | PromiseLike<Readonly<Record<string, unknown>>>;
 
+type ServerProgramDefinition = Readonly<{
+  start?: (
+    context: Readonly<{
+      dependencies: Readonly<Record<string, unknown>>;
+      provides?: readonly string[];
+    }>,
+  ) => unknown;
+}>;
+
+/** Interprets the server Platform's headless startup Program language. */
+export const serverProgramLanguageRuntime: ProgramLanguageRuntime = Object.freeze({
+  instantiate(input) {
+    const definition = input.definition as ServerProgramDefinition;
+    return {
+      exposed: Object.freeze({}),
+      run: () =>
+        definition.start?.({
+          dependencies: input.dependencies,
+          ...(input.provides.length ? { provides: input.provides } : {}),
+        }),
+      async dispose() {},
+    };
+  },
+});
+
 export type RunningServerProgram = AsyncDisposable &
   Readonly<{
     name: string;
     locations: readonly string[];
     dependencies: Readonly<Record<string, unknown>>;
   }>;
+
+export function executeServerProgramIR(
+  ir: SystemIR,
+  programId: string,
+  dependencies: DependencyImplementations,
+): Promise<ExecutionTrace> {
+  return executeProgramIR(ir, programId, dependencies, serverProgramExecution);
+}
+
+export function executeServerLinkedProgramIR(
+  linked: LinkedProgramIR,
+  external: DependencyImplementations,
+  options: Readonly<{ distribute?: ProgramDistributionFactory }> = {},
+): Promise<LinkedProgramExecution> {
+  return executeLinkedProgramIR(linked, external, serverProgramExecution, options);
+}
+
+export function executeServerProgramFixtureIR(
+  ir: SystemIR,
+  programId: string,
+  scenario: ExecutionScenario,
+): Promise<Readonly<{ calls: readonly DependencyCallTrace[]; result: unknown }>> {
+  return executeProgramFixtureIR(ir, programId, scenario, serverProgramExecution);
+}
 
 /** Starts one Program against an already-owned host Dependency scope. */
 export async function startServerProgramInstance<Contract extends SystemContract>(
@@ -27,7 +96,7 @@ export async function startServerProgramInstance<Contract extends SystemContract
   distribute?: ProgramDistributionFactory,
 ): Promise<RunningServerProgram> {
   if (canInterpretPortableProgram(program)) {
-    const execution = await executeLinkedProgramIR(
+    const execution = await executeServerLinkedProgramIR(
       linkProgram(program),
       dependencies as DependencyImplementations,
       { distribute },
@@ -63,6 +132,7 @@ export async function startServerProgramInstance<Contract extends SystemContract
   const process = await assembleProgram({
     system,
     name: program.name,
+    language: serverProgramLanguageRuntime,
     dependencies,
     manifest,
     ownDependencies: false,
@@ -147,9 +217,7 @@ export async function startServerProgram<Contract extends SystemContract>(
 function canInterpretPortableProgram(program: ProgramIR): boolean {
   return program.contributions.every(
     (contribution) =>
-      !contribution.ui &&
-      (contribution.implementation.kind === "none" ||
-        contribution.implementation.kind === "portable") &&
+      ["none", "portable"].includes(serverProgramExecution(contribution).kind) &&
       contribution.provides.every((dependency) =>
         collectDependencyOperations(dependency).every(
           (operation) => operation.mode !== "synchronous",

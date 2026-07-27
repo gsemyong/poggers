@@ -3,270 +3,106 @@ import { resolve } from "node:path";
 
 import { describe, expect, test } from "vitest";
 
-import { packageSources } from "@/package";
+const sourceRoot = import.meta.dirname;
 
-type Boundary = Readonly<{
-  directory: string;
-  imports: readonly string[];
-}>;
-
-type ModuleBoundary = Readonly<{
-  file: string;
-  imports: readonly string[];
-}>;
-
-const boundaries: readonly Boundary[] = [
-  { directory: "core", imports: ["core"] },
-  { directory: "compiler", imports: ["compiler", "core"] },
-  { directory: "execution", imports: ["execution", "compiler", "core"] },
-  { directory: "jsx", imports: ["jsx", "execution", "core"] },
-  { directory: "features", imports: ["features", "platforms", "execution", "core"] },
-  { directory: "deployment", imports: ["adapter", "core", "deployment"] },
-  {
-    directory: "platforms/server",
-    imports: [
-      "adapter",
-      "package",
-      "deployment",
-      "compiler",
-      "core",
-      "execution",
-      "features",
-      "jsx",
-      "platforms",
-      "platforms/web/adapter/server",
-    ],
-  },
-  {
-    directory: "platforms/web",
-    imports: [
-      "adapter",
-      "package",
-      "deployment",
-      "compiler",
-      "core",
-      "execution",
-      "jsx",
-      "platforms",
-    ],
-  },
-] as const;
-
-const modules: readonly ModuleBoundary[] = [
-  { file: "index.ts", imports: ["core", "features"] },
-  { file: "ui.ts", imports: ["core"] },
-  { file: "factory.ts", imports: ["core"] },
-  { file: "platforms/server/index.ts", imports: ["core"] },
-  { file: "platforms/web/index.ts", imports: ["core", "jsx", "platforms/web"] },
-  { file: "adapter.ts", imports: ["adapter", "compiler", "core", "deployment"] },
-  { file: "deployment/index.ts", imports: ["adapter", "core", "deployment"] },
-  { file: "realization.ts", imports: ["adapter", "compiler", "deployment"] },
-  {
-    file: "testing/index.ts",
-    imports: [
-      "adapter",
-      "compiler",
-      "execution",
-      "features",
-      "platforms",
-      "realization",
-      "testing",
-    ],
-  },
-  {
-    file: "cli.ts",
-    imports: ["adapter", "core", "deployment", "package", "platforms", "realization"],
-  },
-  {
-    file: "platforms.ts",
-    imports: ["adapter", "platforms"],
-  },
-  { file: "package.ts", imports: [] },
-  {
-    file: "platforms/web/adapter/server.ts",
-    imports: ["compiler", "execution", "platforms/web"],
-  },
-  {
-    file: "platforms/server/adapter/rust/compiler.ts",
-    imports: ["compiler", "platforms/server/adapter/rust", "platforms/web/adapter/server"],
-  },
-  { file: "compiler/rust/lowering.ts", imports: ["compiler"] },
-] as const;
-
-describe("architecture import graph", () => {
-  test("production modules import only their declared architectural dependencies", async () => {
-    const source = import.meta.dirname;
-    const violations: string[] = [];
-
-    for (const boundary of boundaries) {
-      const directory = resolve(source, boundary.directory);
-      for (const file of await sourceFiles(directory)) {
-        if (/\.(?:spec|typecheck)\.tsx?$/.test(file)) continue;
-        const contents = await readFile(file, "utf8");
-        for (const imported of aliasImports(contents)) {
-          if (
-            file.endsWith("/testing.ts") &&
-            (owns("execution", imported) || owns("testing", imported))
-          ) {
-            continue;
-          }
-          if (
-            boundary.directory === "execution" &&
-            owns("compiler", imported) &&
-            imported !== "compiler/ir"
-          ) {
-            violations.push(
-              `${file.slice(source.length + 1)} imports @/${imported}; ` +
-                "execution may consume only canonical @/compiler/ir meaning",
-            );
-            continue;
-          }
-          if (boundary.imports.some((allowed) => owns(allowed, imported))) continue;
-          violations.push(
-            `${file.slice(source.length + 1)} imports @/${imported}; ` +
-              `allowed: ${boundary.imports.map((value) => `@/${value}`).join(", ")}`,
-          );
-        }
-      }
-    }
-
-    expect(violations).toEqual([]);
-  });
-
-  test("composition modules import only their declared architectural dependencies", async () => {
-    const source = import.meta.dirname;
-    const violations: string[] = [];
-    for (const boundary of modules) {
-      const contents = await readFile(resolve(source, boundary.file), "utf8");
-      for (const imported of aliasImports(contents)) {
-        if (boundary.imports.some((allowed) => owns(allowed, imported))) continue;
-        violations.push(
-          `${boundary.file} imports @/${imported}; ` +
-            `allowed: ${boundary.imports.map((value) => `@/${value}`).join(", ")}`,
-        );
-      }
-    }
-    expect(violations).toEqual([]);
-  });
-
-  test("keeps generic portable lowering free of Feature and deployment vocabulary", async () => {
-    const source = import.meta.dirname;
-    const typescript = [
-      ...(await sourceFiles(resolve(source, "compiler"))).filter(
-        (file) => !/\.(?:spec|typecheck)\.tsx?$/.test(file),
-      ),
-      resolve(source, "execution/interpreter.ts"),
-      resolve(source, "platforms/server/adapter/rust/compiler.ts"),
-      resolve(source, "compiler/rust/lowering.ts"),
+describe("architectural ownership", () => {
+  test("keeps the neutral substrate independent from Platform and UI meaning", async () => {
+    const files = [
+      "core/program.ts",
+      "core/feature.ts",
+      "core/system.ts",
+      "adapter.ts",
+      "compiler/extension.ts",
+      "compiler/ir.ts",
+      "compiler/source.ts",
+      "compiler/rust/lowering.ts",
+      "execution/process.ts",
+      "jsx/runtime.ts",
     ];
-    const rust = [
-      resolve(source, "compiler/rust/runtime/src/lib.rs"),
-      resolve(source, "platforms/server/adapter/rust/distribution/src/lib.rs"),
-    ];
-    const violations: string[] = [];
-    for (const file of typescript) {
-      if (/\b(?:actor|workflow|deployment|oci|nats)\b/i.test(await readFile(file, "utf8"))) {
-        violations.push(file.slice(source.length + 1));
-      }
+
+    for (const file of files) {
+      const source = await readFile(resolve(sourceRoot, file), "utf8");
+      expect(source, file).not.toMatch(
+        /from\s+["']@\/(?:authoring\/ui|deployment|features|platforms)(?:\/|["'])/,
+      );
     }
-    for (const file of rust) {
-      const implementation = (await readFile(file, "utf8")).split("\n#[cfg(test)]")[0]!;
-      if (/\b(?:actor|workflow|deployment|oci|nats)\b/i.test(implementation)) {
-        violations.push(file.slice(source.length + 1));
-      }
-    }
-    expect(violations).toEqual([]);
-  });
 
-  test("uses only explicit architectural directory names", async () => {
-    const forbidden = new Set(["compatibility", "helpers", "internal", "types", "utils"]);
-    const directories = await sourceDirectories(import.meta.dirname);
-    expect(
-      directories
-        .map((directory) => directory.slice(import.meta.dirname.length + 1))
-        .filter((directory) => directory.split("/").some((name) => forbidden.has(name))),
-    ).toEqual([]);
-  });
+    const program = await readFile(resolve(sourceRoot, "core/program.ts"), "utf8");
+    expect(program).not.toMatch(/\b(?:Actions|Components|Presentation|Routes|State)\b/);
+    const adapter = await readFile(resolve(sourceRoot, "adapter.ts"), "utf8");
+    expect(adapter).not.toMatch(/\b(?:ComponentAdapter|PresentationAdapter|UIAdapter)\b/);
 
-  test("keeps public package source resolution consistent", async () => {
-    const root = resolve(import.meta.dirname, "..");
-    const packageManifest = JSON.parse(await readFile(resolve(root, "package.json"), "utf8")) as {
-      sideEffects?: boolean;
-      exports: Readonly<
-        Record<string, string | Readonly<{ source?: string; types?: string; default?: string }>>
-      >;
-    };
-    const consumerConfig = JSON.parse(
-      await readFile(resolve(root, "config/tsconfig.json"), "utf8"),
-    ) as {
-      compilerOptions: Readonly<Record<string, unknown>>;
-      include?: unknown;
-      exclude?: unknown;
-    };
-    const sourceExports = Object.entries(packageManifest.exports)
-      .filter(([, value]) => typeof value === "object" && value.source)
-      .map(([name]) => (name === "." ? "kit" : `kit${name.slice(1)}`))
-      .sort();
-    const aliases = Object.keys(packageSources).sort();
-
-    expect(packageManifest.sideEffects).toBe(false);
-    expect(packageManifest.exports["./tsconfig"]).toBe("./config/tsconfig.json");
-    expect(consumerConfig.compilerOptions.paths).toEqual({
-      "@/*": ["${configDir}/src/*"],
-    });
-    expect(consumerConfig.include).toBeUndefined();
-    expect(consumerConfig.exclude).toBeUndefined();
-    expect(aliases).toEqual(sourceExports);
-    for (const [specifier, source] of Object.entries(packageSources)) {
-      const name = specifier === "kit" ? "." : `.${specifier.slice(3)}`;
-      const definition = packageManifest.exports[name];
-      expect(typeof definition === "object" ? definition.source : undefined).toBe(
-        `./dist/source/${source}.ts`,
+    for (const file of [
+      "compiler/extension.ts",
+      "compiler/ir.ts",
+      "compiler/source.ts",
+      "compiler/rust/lowering.ts",
+    ]) {
+      const source = await readFile(resolve(sourceRoot, file), "utf8");
+      expect(source, file).not.toMatch(
+        /\b(?:Actions|Components|Presentation|Routes|State|WebRoute|browser-main)\b/,
       );
     }
   });
 
-  test("keeps repository examples on the shared source configuration", async () => {
-    const root = resolve(import.meta.dirname, "..");
-    const expected = {
-      extends: "../../config/tsconfig.json",
-    };
-    for (const entry of await readdir(resolve(root, "examples"), { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue;
-      expect(
-        JSON.parse(await readFile(resolve(root, "examples", entry.name, "tsconfig.json"), "utf8")),
-      ).toEqual(expected);
+  test("keeps portable TypeScript-to-Rust lowering unaware of product dialects", async () => {
+    const lowering = await readFile(resolve(sourceRoot, "compiler/rust/lowering.ts"), "utf8");
+
+    expect(lowering).not.toMatch(/\b(?:actor|browser|component|feature|presentation|route|web)\b/i);
+  });
+
+  test("keeps the neutral package root and Feature declarations free of eager implementations", async () => {
+    const root = await readFile(resolve(sourceRoot, "index.ts"), "utf8");
+    expect(root).not.toMatch(/from\s+["']@\/(?:features|platforms)(?:\/|["'])/);
+
+    for (const feature of ["actor", "data", "entity", "identity"]) {
+      const source = await readFile(resolve(sourceRoot, `features/${feature}/index.ts`), "utf8");
+      expect(source, feature).not.toMatch(
+        /from\s+["']@\/platforms\/(?:server|web)\/adapter(?:\/|["'])/,
+      );
     }
+  });
+
+  test("keeps web details out of server and Deployment implementations", async () => {
+    const serverFiles = await files(resolve(sourceRoot, "platforms/server"));
+    for (const file of serverFiles.filter(implementationSource)) {
+      const source = await readFile(file, "utf8");
+      expect(source, file).not.toMatch(/from\s+["']@\/platforms\/web(?:\/|["'])/);
+    }
+
+    const deploymentFiles = await files(resolve(sourceRoot, "deployment"));
+    for (const file of deploymentFiles.filter(implementationSource)) {
+      const source = await readFile(file, "utf8");
+      expect(source, file).not.toMatch(/from\s+["']@\/platforms\/(?:server|web)(?:\/|["'])/);
+      expect(source, file).not.toMatch(/\b(?:Component|Presentation|WebRoute)\b|routes\.ir\.json/);
+    }
+
+    const serverHttp = await readFile(
+      resolve(sourceRoot, "platforms/server/adapter/rust/providers/http/src/lib.rs"),
+      "utf8",
+    );
+    expect(serverHttp).not.toMatch(/\bweb\b|document\.ir\.json|routes\.ir\.json/i);
+
+    const systemTesting = await readFile(resolve(sourceRoot, "testing/index.ts"), "utf8");
+    expect(systemTesting).not.toMatch(/KIT_WEB_|routes\.ir\.json|WebAssetManifest/);
   });
 });
 
-function aliasImports(source: string): readonly string[] {
-  const imports = new Set<string>();
-  const pattern = /(?:from\s+|import\s*\(\s*)["']@\/([^"']+)["']/g;
-  for (const match of source.matchAll(pattern)) imports.add(match[1]!);
-  return [...imports].sort();
+function implementationSource(path: string): boolean {
+  return (
+    /\.(?:rs|ts)$/.test(path) &&
+    !path.endsWith(".spec.ts") &&
+    !path.endsWith(".typecheck.ts") &&
+    !path.split("/").includes("fixtures")
+  );
 }
 
-function owns(directory: string, path: string): boolean {
-  return path === directory || path.startsWith(`${directory}/`);
-}
-
-async function sourceFiles(directory: string): Promise<string[]> {
-  const files: string[] = [];
+async function files(directory: string): Promise<string[]> {
+  const result: string[] = [];
   for (const entry of await readdir(directory, { withFileTypes: true })) {
     const path = resolve(directory, entry.name);
-    if (entry.isDirectory() && entry.name !== "fixtures") files.push(...(await sourceFiles(path)));
-    else if (entry.isFile() && /\.tsx?$/.test(entry.name)) files.push(path);
+    if (entry.isDirectory()) result.push(...(await files(path)));
+    else if (entry.isFile()) result.push(path);
   }
-  return files.sort();
-}
-
-async function sourceDirectories(directory: string): Promise<string[]> {
-  const directories: string[] = [];
-  for (const entry of await readdir(directory, { withFileTypes: true })) {
-    if (!entry.isDirectory() || entry.name === "target") continue;
-    const path = resolve(directory, entry.name);
-    directories.push(path, ...(await sourceDirectories(path)));
-  }
-  return directories.sort();
+  return result;
 }

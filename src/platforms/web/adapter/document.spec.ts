@@ -159,6 +159,96 @@ describe("web document IR", () => {
     expect((await iterator.next()).done).toBe(true);
   });
 
+  test("composes a nested Route branch with isolated data and deferred identities", async () => {
+    const shell = controlledPromise<string>();
+    const detail = controlledPromise<string>();
+    const child: WebRenderNodeIR = {
+      kind: "element",
+      element: "Detail",
+      tag: "article",
+      attributes: [],
+      children: [awaitNode("detail")],
+    };
+    const prepared = prepareCompiledWebDocumentStream({
+      document: prepareClientWebDocument({ title: "Task" }),
+      route: { feature: "tasks", name: "detail" },
+      location: "/workspace/tasks/42",
+      view: child,
+      components: [],
+      params: { id: "42" },
+      search: {},
+      loader: { data: { detail: () => detail.promise } },
+      deferred: ["detail"],
+      metadata: { title: "Task" },
+      branch: [
+        {
+          route: { feature: "shell", name: "workspace" },
+          view: {
+            kind: "element",
+            element: "Shell",
+            tag: "main",
+            attributes: [],
+            children: [awaitNode("shell"), { kind: "children" }],
+          },
+          params: {},
+          search: {},
+          loader: { data: { shell: () => shell.promise } },
+          deferred: ["shell"],
+          metadata: { title: "Workspace" },
+        },
+        {
+          route: { feature: "tasks", name: "detail" },
+          view: child,
+          params: { id: "42" },
+          search: {},
+          loader: { data: { detail: () => detail.promise } },
+          deferred: ["detail"],
+          metadata: { title: "Task" },
+        },
+      ],
+    });
+
+    expect(prepared.document.root).toMatchObject([
+      {
+        kind: "element",
+        tag: "main",
+        children: [
+          { kind: "boundary", boundary: "d0", field: "shell" },
+          {
+            kind: "element",
+            tag: "article",
+            children: [{ kind: "boundary", boundary: "d1", field: "detail" }],
+          },
+        ],
+      },
+    ]);
+    expect(prepared.document.hydration).toMatchObject({
+      branch: [
+        {
+          route: { feature: "shell", name: "workspace" },
+          loader: { data: { shell: { boundary: "d0" } } },
+        },
+        {
+          route: { feature: "tasks", name: "detail" },
+          loader: { data: { detail: { boundary: "d1" } } },
+        },
+      ],
+    });
+
+    const iterator = prepared.frames[Symbol.asyncIterator]();
+    detail.resolve("Detail ready");
+    expect((await iterator.next()).value).toMatchObject({
+      boundary: "d1",
+      field: "detail",
+    });
+    shell.resolve("Shell ready");
+    expect((await iterator.next()).value).toMatchObject({
+      boundary: "d0",
+      field: "shell",
+    });
+    expect((await iterator.next()).done).toBe(true);
+  });
+
   test("retains nested boundary identity when the child settles before its parent", async () => {
     const parent = controlledPromise<string>();
     const child = controlledPromise<string>();
@@ -491,9 +581,11 @@ Read [the reference](/reference).
     const click = vi.fn();
     const system = {
       metadata: { name: "A <safe> title" },
+      applications: {
+        app: { interfaces: { web: { presentation: emptyPresentation } } },
+      },
       features: {
         shell: {
-          interfaces: { web: { presentation: emptyPresentation } },
           features: {
             items: {
               programs: {
@@ -548,7 +640,8 @@ Read [the reference](/reference).
 
     const first = await prepareWebDocument({
       system,
-      interface: "shell.web",
+      interface: "app.web",
+      features: { shell: "shell" },
       program: "browser",
       presentation: emptyPresentation,
       manifest,
@@ -556,7 +649,8 @@ Read [the reference](/reference).
     });
     const second = await prepareWebDocument({
       system,
-      interface: "shell.web",
+      interface: "app.web",
+      features: { shell: "shell" },
       program: "browser",
       presentation: emptyPresentation,
       manifest,
@@ -581,9 +675,11 @@ Read [the reference](/reference).
   test("uses route metadata while preparing route documents", async () => {
     const system = {
       metadata: { name: "Fallback" },
+      applications: {
+        app: { interfaces: { web: { presentation: emptyPresentation } } },
+      },
       features: {
         shell: {
-          interfaces: { web: { presentation: emptyPresentation } },
           programs: {
             browser: {
               state: {},
@@ -608,7 +704,8 @@ Read [the reference](/reference).
     };
     const document = await prepareWebDocument({
       system,
-      interface: "shell.web",
+      interface: "app.web",
+      features: { shell: "shell" },
       program: "browser",
       presentation: emptyPresentation,
       manifest: {
@@ -677,9 +774,11 @@ Read [the reference](/reference).
 
   test("serializes only request-invariant initial Presentation", async () => {
     const system = {
+      applications: {
+        app: { interfaces: { web: { presentation: emptyPresentation } } },
+      },
       features: {
         shell: {
-          interfaces: { web: { presentation: emptyPresentation } },
           programs: {
             browser: {
               state: {},
@@ -712,14 +811,17 @@ Read [the reference](/reference).
     const target = "@feature/shell/component/Root";
     const prepared = await prepareInitialWebPresentation({
       system,
-      interface: "shell.web",
+      interface: "app.web",
+      features: { shell: "shell" },
       program: "browser",
       presentation: {
         parameters: {},
         create() {
           return {
-            Root: ({ state }: { state: { open: boolean } }) => ({
-              Root: { paint: { opacity: state.open ? 1 : 0 } },
+            Shell: () => ({
+              Root: ({ state }: { state: { open: boolean } }) => ({
+                Root: { paint: { opacity: state.open ? 1 : 0 } },
+              }),
             }),
           };
         },
@@ -737,14 +839,17 @@ Read [the reference](/reference).
 
     const dependent = prepareInitialWebPresentation({
       system,
-      interface: "shell.web",
+      interface: "app.web",
+      features: { shell: "shell" },
       program: "browser",
       presentation: {
         parameters: {},
         create() {
           return {
-            Root: ({ props }: { props: { visible: boolean } }) => ({
-              Root: { paint: { opacity: props.visible ? 1 : 0 } },
+            Shell: () => ({
+              Root: ({ props }: { props: { visible: boolean } }) => ({
+                Root: { paint: { opacity: props.visible ? 1 : 0 } },
+              }),
             }),
           };
         },
@@ -796,9 +901,11 @@ Read [the reference](/reference).
 
   test("rejects Dependency access and malformed canonical artifacts", async () => {
     const system = {
+      applications: {
+        app: { interfaces: { web: { presentation: emptyPresentation } } },
+      },
       features: {
         shell: {
-          interfaces: { web: { presentation: emptyPresentation } },
           programs: {
             browser: {
               state: {},
@@ -822,7 +929,8 @@ Read [the reference](/reference).
     };
     const document = await prepareWebDocument({
       system,
-      interface: "shell.web",
+      interface: "app.web",
+      features: { shell: "shell" },
       program: "browser",
       presentation: emptyPresentation,
       manifest: shellManifest,
@@ -847,13 +955,14 @@ Read [the reference](/reference).
     fc.assert(
       fc.property(fc.string(), fc.string(), fc.string(), (title, text, attribute) => {
         const document = {
-          version: 5 as const,
+          version: 6 as const,
           rendering: "hydrate" as const,
           language: "en",
           title,
           metadata: {},
           entry: "/app.js",
           preloads: ["/shared.js"],
+          scripts: ["/installation.js"],
           styles: [".root{color:red}"],
           hydration: false as const,
           root: [
@@ -879,13 +988,14 @@ Read [the reference](/reference).
 
   test("rejects ambiguous or executable document data", () => {
     const document = {
-      version: 5 as const,
+      version: 6 as const,
       rendering: "hydrate" as const,
       language: "en",
       title: "Safe",
       metadata: {},
       entry: "/app.js",
       preloads: [] as const,
+      scripts: [] as const,
       styles: [".root{}"],
       hydration: false as const,
       root: [

@@ -1,5 +1,6 @@
 import { createFeature, type Feature } from "@/core/feature";
 import { createSystem } from "@/core/system";
+import type { ServerPlatform, ServerProgramDefinitionKind } from "@/platforms/server";
 import type { BrowserMainThread, BrowserServiceWorker } from "@/platforms/web";
 
 type Program<Environment, Contract extends object = object> = Readonly<
@@ -7,7 +8,6 @@ type Program<Environment, Contract extends object = object> = Readonly<
 >;
 
 type Message = Readonly<{ id: string; text: string }>;
-type ServerPlatform = { readonly Name: "server" };
 type Server = { readonly Name: "server"; readonly Platform: ServerPlatform };
 type Messages = Readonly<{
   list(): Promise<readonly Message[]>;
@@ -22,7 +22,11 @@ type DesktopUI = {
   readonly Child: unknown;
   readonly Elements: {};
 };
-type DesktopPlatform = { readonly Name: "desktop"; readonly UI: DesktopUI };
+type DesktopPlatform = {
+  readonly Name: "desktop";
+  readonly UI: DesktopUI;
+  readonly Program: ServerProgramDefinitionKind;
+};
 type DesktopMain = {
   readonly Name: "desktop-main";
   readonly Platform: DesktopPlatform;
@@ -254,12 +258,18 @@ type SameNamedEnvironmentConflict = {
   Features: {
     first: {
       Programs: {
-        shared: Program<{ Name: "worker"; Platform: { Name: "server" } }>;
+        shared: Program<{
+          Name: "worker";
+          Platform: { Name: "server"; Program: ServerProgramDefinitionKind };
+        }>;
       };
     };
     second: {
       Programs: {
-        shared: Program<{ Name: "worker"; Platform: { Name: "device" } }>;
+        shared: Program<{
+          Name: "worker";
+          Platform: { Name: "device"; Program: ServerProgramDefinitionKind };
+        }>;
       };
     };
   };

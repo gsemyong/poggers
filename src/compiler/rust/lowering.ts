@@ -1,4 +1,11 @@
-import type { ExpressionIR, FunctionIR, LinkedProgramIR, StatementIR } from "@/compiler/ir";
+import type {
+  ExpressionIR,
+  FunctionIR,
+  LinkedProgramIR,
+  PortableProgramExecutionIR,
+  ProgramContributionIR,
+  StatementIR,
+} from "@/compiler/ir";
 
 export type RustProgramFunctionExport = Readonly<{
   name: string;
@@ -7,33 +14,42 @@ export type RustProgramFunctionExport = Readonly<{
   dependencies: readonly string[];
 }>;
 
+export type PortableProgramProjection = (
+  contribution: ProgramContributionIR,
+) => PortableProgramExecutionIR;
+
 /** Lowers linked portable Program meaning into direct Rust control flow. */
 export function generateRustProgram(
   linked: LinkedProgramIR,
+  project: PortableProgramProjection,
   exports: readonly RustProgramFunctionExport[] = [],
 ): string {
-  return new RustProgramGenerator(linked, exports).generate();
+  return new RustProgramGenerator(linked, project, exports).generate();
 }
 
 type ReturnTarget = "completion" | "function";
 
 class RustProgramGenerator {
   readonly #linked: LinkedProgramIR;
+  readonly #project: PortableProgramProjection;
   readonly #exports: readonly RustProgramFunctionExport[];
   readonly #functions = new Map<FunctionIR, string>();
   readonly #functionIds = new Map<string, string>();
   #temporary = 0;
 
-  constructor(linked: LinkedProgramIR, exports: readonly RustProgramFunctionExport[]) {
+  constructor(
+    linked: LinkedProgramIR,
+    project: PortableProgramProjection,
+    exports: readonly RustProgramFunctionExport[],
+  ) {
     this.#linked = linked;
+    this.#project = project;
     this.#exports = exports;
     let index = 0;
     for (const { contribution } of linked.contributions) {
-      if (contribution.implementation.kind !== "portable") continue;
-      for (const function_ of [
-        contribution.implementation.start,
-        ...contribution.implementation.functions,
-      ]) {
+      const implementation = project(contribution);
+      if (implementation.kind !== "portable") continue;
+      for (const function_ of [implementation.entry, ...implementation.functions]) {
         const name = `function_${index++}_${rustName(function_.name || function_.id)}`;
         this.#functions.set(function_, name);
         this.#functionIds.set(`${contribution.id}\0${function_.id}`, name);
@@ -43,23 +59,25 @@ class RustProgramGenerator {
 
   generate(): string {
     const functions = this.#linked.contributions.flatMap(({ contribution }) => {
-      if (contribution.implementation.kind !== "portable") return [];
+      const implementation = this.#project(contribution);
+      if (implementation.kind !== "portable") return [];
       return [
-        this.#function(contribution.id, contribution.implementation.start, true),
-        ...contribution.implementation.functions.map((function_) =>
+        this.#function(contribution.id, implementation.entry, true),
+        ...implementation.functions.map((function_) =>
           this.#function(contribution.id, function_, false),
         ),
       ];
     });
     const starts = this.#linked.contributions.flatMap(({ contribution }) => {
-      if (contribution.implementation.kind === "none") return [];
-      if (contribution.implementation.kind !== "portable") {
+      const implementation = this.#project(contribution);
+      if (implementation.kind === "none") return [];
+      if (implementation.kind !== "portable") {
         throw new Error(
           `${contribution.span.file}:${contribution.span.line}:${contribution.span.column}: ` +
             `Program contribution ${JSON.stringify(contribution.id)} is not portable.`,
         );
       }
-      const functionName = this.#functions.get(contribution.implementation.start)!;
+      const functionName = this.#functions.get(implementation.entry)!;
       const requirements = contribution.requires
         .map(
           ({ name }) =>

@@ -9,21 +9,33 @@ import { describe, expect, it } from "vitest";
 
 import { SYSTEM_IR_VERSION, type SystemIR } from "@/compiler/ir";
 import { compileSystem, resolveSystem } from "@/compiler/source";
+import { serverCompilerExtension } from "@/platforms/server/adapter";
 import { webCompilerExtension } from "@/platforms/web/adapter/compiler";
-import type { WebRouteIR } from "@/platforms/web/adapter/lowering";
+import type { WebDocumentIR } from "@/platforms/web/adapter/document";
+import {
+  collectWebRoutes,
+  WEB_COMPILER_IR_VERSION,
+  webInterfaceCompilerIR,
+  webProgramCompilerIR,
+  type WebRouteIR,
+} from "@/platforms/web/adapter/lowering";
 import {
   buildWebInterface,
   collectPresentationDependencies,
   createWebAssetManifest,
   inspectClientManifest,
   negotiateWebRepresentation,
+  planWebRouteDelivery,
   productionPresentationAssetPlugin,
+  renderWebDiscoveryResources,
   routeSourcePlugin,
   validateProductionWebRoute,
   webInterfaceRequiresClientRuntime,
+  webRouteRequiresClientRuntime,
   webDevelopmentWorkspace,
   writeDevelopmentWebStream,
 } from "@/platforms/web/adapter/pipeline";
+import type { PresentationSourceIR } from "@/platforms/web/adapter/presentation/source";
 
 describe("web representation negotiation", () => {
   it("keeps HTML canonical and selects alternates only when named", () => {
@@ -50,7 +62,7 @@ describe("web development workspace", () => {
     async () => {
       const workspace = resolve(import.meta.dirname, "../../../..", "examples/authenticated-crud");
       const paths = resolveSystem(workspace);
-      const ir = compileSystem(paths.system, [webCompilerExtension]);
+      const ir = compileSystem(paths.system, [serverCompilerExtension, webCompilerExtension]);
       const source = resolve(paths.source, "features/shell.tsx");
       const hook = routeSourcePlugin(paths, ir).transform;
       const handler = (typeof hook === "function" ? hook : hook?.handler) as unknown as (
@@ -60,16 +72,16 @@ describe("web development workspace", () => {
       expect(handler).toBeTypeOf("function");
 
       const authored = await readFile(source, "utf8");
-      const result = await handler(authored, `${source}?kit-route=customer.shell.auth&lang.tsx`);
+      const result = await handler(authored, `${source}?kit-route=customerShell.auth&lang.tsx`);
       const code = (typeof result === "string" ? result : result?.code) ?? authored;
 
-      expect(code).toContain("view({ components: { Layout } })");
+      expect(code).toContain("view({ children, components: { Layout } })");
       expect(code).not.toMatch(/routes:\s*{\s*auth:\s*{}\s*}/);
 
       const base = await handler(authored, `${source}?kit-route=base&lang.tsx`);
       const baseCode = (typeof base === "string" ? base : base?.code) ?? authored;
       expect(baseCode).toContain('phase: "loading"');
-      expect(baseCode).toMatch(/routes:\s*{\s*auth:\s*{},?\s*}/);
+      expect(baseCode).toMatch(/routes:\s*{\s*workspace:\s*{},\s*auth:\s*{},?\s*}/);
     },
   );
 });
@@ -79,7 +91,7 @@ describe("web Presentation dependency manifest", () => {
     const manifest = collectPresentationDependencies(systemIR(), "browser");
 
     expect(manifest).toEqual({
-      "@feature/product.dashboard/component/Animated": [
+      "@feature/dashboard/component/Animated": [
         {
           destination: "Dashboard/Animated/Root/paint/opacity",
           animations: [
@@ -91,30 +103,25 @@ describe("web Presentation dependency manifest", () => {
         },
       ],
     });
-    expect(manifest["@feature/product.dashboard/component/Static"]).toBeUndefined();
+    expect(manifest["@feature/dashboard/component/Static"]).toBeUndefined();
     expect(Object.isFrozen(manifest)).toBe(true);
   });
 
   it("keeps unresolved temporal use conservative instead of guessing static", () => {
     const source = systemIR();
     const manifest = collectPresentationDependencies(
-      {
-        ...source,
-        presentations: [
-          {
-            ...source.presentations[0]!,
-            declarations: [],
-          },
-        ],
-      },
+      mapPresentations(source, (presentation) => ({
+        ...presentation,
+        declarations: [],
+      })),
       "browser",
     );
 
     expect(Object.keys(manifest)).toEqual([
-      "@feature/product.dashboard/component/Animated",
-      "@feature/product.dashboard/component/Static",
+      "@feature/dashboard/component/Animated",
+      "@feature/dashboard/component/Static",
     ]);
-    expect(manifest["@feature/product.dashboard/component/Static"]?.[0]?.destination).toBe("*");
+    expect(manifest["@feature/dashboard/component/Static"]?.[0]?.destination).toBe("*");
   });
 });
 
@@ -123,14 +130,11 @@ describe("web client runtime classification", () => {
     const animated = systemIR();
     expect(webInterfaceRequiresClientRuntime(animated, "interface/product.web")).toBe(true);
 
-    const inert = {
-      ...animated,
-      presentations: animated.presentations.map((presentation) => ({
-        ...presentation,
-        animations: [],
-        declarations: [],
-      })),
-    };
+    const inert = mapPresentations(animated, (presentation) => ({
+      ...presentation,
+      animations: [],
+      declarations: [],
+    }));
     expect(webInterfaceRequiresClientRuntime(inert, "interface/product.web")).toBe(false);
 
     expect(
@@ -141,7 +145,16 @@ describe("web client runtime classification", () => {
             ...program,
             contributions: program.contributions.map((contribution) => ({
               ...contribution,
-              ui: contribution.ui ? { ...contribution.ui, actions: ["open"] } : undefined,
+              extensions: {
+                ...contribution.extensions,
+                web: {
+                  ...webProgramCompilerIR(contribution.extensions?.web),
+                  ui: {
+                    ...webProgramCompilerIR(contribution.extensions?.web).ui!,
+                    actions: ["open"],
+                  },
+                },
+              },
             })),
           })),
         },
@@ -149,6 +162,33 @@ describe("web client runtime classification", () => {
       ),
     ).toBe(true);
   });
+
+  it(
+    "classifies the exact Route branch instead of every action in its Feature",
+    { tags: ["package"] },
+    () => {
+      const workspace = resolve(import.meta.dirname, "fixtures/request-render");
+      const ir = compileSystem(resolveSystem(workspace).system, [
+        serverCompilerExtension,
+        webCompilerExtension,
+      ]);
+      const interfaceId = "interface/product.web";
+      const program = ir.programs.find(
+        ({ interface: owner, environment }) =>
+          owner === "product.web" && environment.name === "browser-main",
+      )?.name;
+      expect(program).toBeTruthy();
+      const routes = collectWebRoutes(ir, program!);
+      const root = routes.find(({ feature, name }) => feature === "greeting" && name === "root");
+      const greeting = routes.find(
+        ({ feature, name }) => feature === "greeting" && name === "greeting",
+      );
+      expect(root).toBeTruthy();
+      expect(greeting).toBeTruthy();
+      expect(webRouteRequiresClientRuntime(ir, interfaceId, root!)).toBe(false);
+      expect(webRouteRequiresClientRuntime(ir, interfaceId, greeting!)).toBe(true);
+    },
+  );
 });
 
 describe("web client build manifest", () => {
@@ -394,7 +434,10 @@ export const audio = web.createAudioAsset(new URL("./assets/control.wav", import
       const directory = await mkdtemp(resolve(tmpdir(), "kit-web-determinism-"));
       try {
         const workspace = resolve(import.meta.dirname, "fixtures/request-render");
-        const ir = compileSystem(resolve(workspace, "src/system.ts"), [webCompilerExtension]);
+        const ir = compileSystem(resolve(workspace, "src/system.ts"), [
+          serverCompilerExtension,
+          webCompilerExtension,
+        ]);
         const interfaceId = ir.interfaces.find(({ id }) => id === "interface/product.web")?.id;
         if (!interfaceId)
           throw new Error("The request-render fixture has no product web interface.");
@@ -429,7 +472,7 @@ export const audio = web.createAudioAsset(new URL("./assets/control.wav", import
           javascript
             .filter(([, source]) => source.includes("Rendered in the browser"))
             .map(([name]) => name),
-        ).toEqual([expect.stringContaining("route-product-greeting-client-")]);
+        ).toEqual([expect.stringContaining("route-greeting-client-")]);
         expect(
           javascript.every(([, source]) => !source.includes("sensitive fixture failure")),
         ).toBe(true);
@@ -476,7 +519,10 @@ export const audio = web.createAudioAsset(new URL("./assets/control.wav", import
             include: ["src/**/*.ts", "src/**/*.tsx"],
           })}\n`,
         );
-        const variantIR = compileSystem(resolve(variant, "src/system.ts"), [webCompilerExtension]);
+        const variantIR = compileSystem(resolve(variant, "src/system.ts"), [
+          serverCompilerExtension,
+          webCompilerExtension,
+        ]);
         const variantInterfaceId = variantIR.interfaces.find(
           ({ id }) => id === "interface/product.web",
         )?.id;
@@ -493,30 +539,28 @@ export const audio = web.createAudioAsset(new URL("./assets/control.wav", import
         const variantJavascript = Object.entries(variantFiles)
           .filter(([name]) => name.endsWith(".js"))
           .map(([name, value]) => [name, Buffer.from(value, "base64").toString("utf8")] as const);
-        const baselineClient = javascript.find(([name]) =>
-          name.includes("route-product-greeting-client-"),
-        );
+        const baselineClient = javascript.find(([name]) => name.includes("route-greeting-client-"));
         const variantClient = variantJavascript.find(([name]) =>
-          name.includes("route-product-greeting-client-"),
+          name.includes("route-greeting-client-"),
         );
-        expect(baselineClient?.[0]).toContain("route-product-greeting-client-");
-        expect(variantClient?.[0]).toContain("route-product-greeting-client-");
+        expect(baselineClient?.[0]).toContain("route-greeting-client-");
+        expect(variantClient?.[0]).toContain("route-greeting-client-");
         const baselineClientBytes = await initialRouteClosureBytes(
           first.directory,
-          "product.greeting.client",
+          "greeting.client",
         );
         const variantClientBytes = await initialRouteClosureBytes(
           variantBuild.directory,
-          "product.greeting.client",
+          "greeting.client",
         );
         expect(variantClientBytes).toBeGreaterThan(baselineClientBytes + 150_000);
         const baselineInitialBytes = await initialRouteClosureBytes(
           first.directory,
-          "product.greeting.greeting",
+          "greeting.greeting",
         );
         const variantInitialBytes = await initialRouteClosureBytes(
           variantBuild.directory,
-          "product.greeting.greeting",
+          "greeting.greeting",
         );
         expect(Math.abs(variantInitialBytes - baselineInitialBytes)).toBeLessThan(1_024);
       } finally {
@@ -537,7 +581,9 @@ describe("production web Route realization", () => {
     expect(() =>
       validateProductionWebRoute(route(), {
         hasLoader: true,
-        request: { loader: true, view: { kind: "none" } },
+        request: {
+          branch: [{ route: route(), loader: true, view: { kind: "none" } }],
+        },
       }),
     ).not.toThrow();
   });
@@ -555,7 +601,12 @@ describe("production web Route realization", () => {
             },
           ],
         }),
-        { hasLoader: false, request: { loader: false, view: { kind: "none" } } },
+        {
+          hasLoader: false,
+          request: {
+            branch: [{ route: route(), loader: false, view: { kind: "none" } }],
+          },
+        },
       ),
     ).not.toThrow();
   });
@@ -564,7 +615,15 @@ describe("production web Route realization", () => {
     expect(() =>
       validateProductionWebRoute(route({ cache: { scope: "public", maxAge: "5m" } }), {
         hasLoader: true,
-        request: { loader: true, view: { kind: "none" } },
+        request: {
+          branch: [
+            {
+              route: route({ cache: { scope: "public", maxAge: "5m" } }),
+              loader: true,
+              view: { kind: "none" },
+            },
+          ],
+        },
       }),
     ).not.toThrow();
   });
@@ -588,6 +647,128 @@ describe("production web Route realization", () => {
   });
 });
 
+describe("web Route delivery planning", () => {
+  it("precomputes an inert public content Route and exposes every safe representation", () => {
+    expect(
+      planWebRouteDelivery({
+        route: route({ cache: { scope: "public", maxAge: "1h" } }),
+        document: deliveryDocument(),
+        request: false,
+      }),
+    ).toEqual({
+      production: "precomputed",
+      reasons: ["document:request-invariant", "client:proven-inert", "cache:public"],
+      stream: false,
+      representations: ["document", "markdown"],
+      client: { runtime: false, hydration: false },
+      worker: { cacheDocument: true },
+      discovery: { index: true, sitemap: true },
+    });
+  });
+
+  it("keeps request-dependent private Routes out of Markdown and document caches", () => {
+    const privateRoute = route({
+      params: [{ name: "id", kind: "string", optional: false }],
+      deferred: ["details"],
+    });
+    expect(
+      planWebRouteDelivery({
+        route: privateRoute,
+        document: deliveryDocument({
+          entry: "/assets/app.js",
+          hydration: {
+            version: 1,
+            route: { feature: "tasks", name: "list" },
+            location: "/tasks/42",
+            params: { id: "42" },
+            search: {},
+            loader: false,
+            metadata: {},
+          },
+        }),
+        request: {
+          branch: [{ route: privateRoute, loader: true, view: { kind: "none" } }],
+        },
+      }),
+    ).toEqual({
+      production: "request",
+      reasons: [
+        "document:request-dependent",
+        "request:path-parameters",
+        "request:loader",
+        "response:deferred-stream",
+        "client:runtime",
+        "cache:no-store",
+      ],
+      stream: true,
+      representations: ["document", "route-data"],
+      client: { runtime: true, hydration: true },
+      worker: { cacheDocument: false },
+      discovery: { index: false, sitemap: false },
+    });
+  });
+
+  it("identifies a client shell without treating it as server content", () => {
+    expect(
+      planWebRouteDelivery({
+        route: route({ document: "shell" }),
+        document: deliveryDocument({ entry: "/assets/app.js" }),
+        request: false,
+      }),
+    ).toEqual({
+      production: "client",
+      reasons: ["document:client-shell", "client:runtime", "cache:no-store"],
+      stream: false,
+      representations: ["document"],
+      client: { runtime: true, hydration: false },
+      worker: { cacheDocument: true },
+      discovery: { index: false, sitemap: false },
+    });
+  });
+
+  it("renders deterministic same-origin discovery resources", () => {
+    const resources = renderWebDiscoveryResources("https://example.test:443/base", [
+      {
+        route: route({
+          path: "/tasks",
+          metadata: { canonical: "/work?kind=open&owner=me" },
+        }),
+        discovery: { index: true, sitemap: true },
+      },
+      {
+        route: route({
+          name: "duplicate",
+          path: "/duplicate",
+          metadata: { canonical: "/work?kind=open&owner=me" },
+        }),
+        discovery: { index: true, sitemap: true },
+      },
+      {
+        route: route({
+          name: "external",
+          path: "/external",
+          metadata: { canonical: "https://elsewhere.test/page" },
+        }),
+        discovery: { index: true, sitemap: true },
+      },
+      {
+        route: route({ name: "private", path: "/private" }),
+        discovery: { index: false, sitemap: false },
+      },
+    ]);
+
+    expect(resources.robots).toBe(
+      "User-agent: *\nAllow: /\nSitemap: https://example.test/sitemap.xml\n",
+    );
+    expect(resources.sitemap).toBe(
+      '<?xml version="1.0" encoding="UTF-8"?>' +
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">' +
+        "<url><loc>https://example.test/work?kind=open&amp;owner=me</loc></url>" +
+        "</urlset>\n",
+    );
+  });
+});
+
 function route(overrides: Partial<WebRouteIR> = {}): WebRouteIR {
   return {
     feature: "tasks",
@@ -599,6 +780,24 @@ function route(overrides: Partial<WebRouteIR> = {}): WebRouteIR {
     params: [],
     search: [],
     deferred: [],
+    ...overrides,
+    status: overrides.status ?? 200,
+  };
+}
+
+function deliveryDocument(overrides: Partial<WebDocumentIR> = {}): WebDocumentIR {
+  return {
+    version: 6,
+    rendering: "static",
+    language: "en",
+    title: "Tasks",
+    metadata: {},
+    entry: false,
+    preloads: [],
+    scripts: [],
+    root: [],
+    styles: [],
+    hydration: false,
     ...overrides,
   };
 }
@@ -648,31 +847,50 @@ function systemIR(): SystemIR {
     version: SYSTEM_IR_VERSION,
     system: { id: "system", name: "test" },
     platforms: ["web"],
-    apps: [{ id: "app/product", feature: "product", interfaces: ["interface/product.web"] }],
+    apps: [{ id: "app/product", path: "product", interfaces: ["interface/product.web"] }],
     interfaces: [
       {
         id: "interface/product.web",
         path: "product.web",
         app: "product",
         platform: "web",
+        features: { dashboard: "dashboard" },
         programs: ["program/browser"],
-        presentationSources: ["src/presentation.ts"],
+        extensions: {
+          web: {
+            version: WEB_COMPILER_IR_VERSION,
+            presentations: [
+              {
+                file: "src/presentation.ts",
+                animations: [
+                  {
+                    id: "Presentation/Dashboard/Animated::opacity",
+                    scope: "Presentation/Dashboard/Animated",
+                    binding: "opacity",
+                    source: "state.visible ? 1 : 0",
+                    animation: "spring()",
+                    events: [],
+                    span,
+                  },
+                ],
+                declarations: [
+                  {
+                    destination: "Dashboard/Animated/Root/paint/opacity",
+                    expression: "opacity",
+                    animations: ["Presentation/Dashboard/Animated::opacity"],
+                    span,
+                  },
+                ],
+              },
+            ],
+          },
+        },
       },
     ],
     features: [
       {
-        id: "feature/product",
-        path: "product",
-        kind: "app",
-        app: "product",
-        children: ["feature/product.dashboard"],
-        programs: [],
-      },
-      {
-        id: "feature/product.dashboard",
-        path: "product.dashboard",
-        kind: "feature",
-        app: "product",
+        id: "feature/dashboard",
+        path: "dashboard",
         children: [],
         programs: ["program/browser"],
       },
@@ -683,67 +901,80 @@ function systemIR(): SystemIR {
         name: "browser",
         logicalName: "browser",
         interface: "product.web",
-        environment: { name: "browser-main", platform: "web", ui: "web" },
-        ui: { root: { feature: "product.dashboard", component: "Animated" } },
+        environment: { name: "browser-main", platform: "web" },
         contributions: [
           {
-            id: "feature/product.dashboard/program/browser",
-            feature: "product.dashboard",
+            id: "feature/dashboard/program/browser",
+            feature: "dashboard",
             requires: [],
             provides: [],
-            ui: {
-              state: { kind: "record", fields: [] },
-              actions: [],
-              components: [
-                {
-                  name: "Animated",
-                  propCallbacks: [],
+            extensions: {
+              web: {
+                version: WEB_COMPILER_IR_VERSION,
+                ui: {
                   state: { kind: "record", fields: [] },
                   actions: [],
-                  elements: [{ name: "Root", element: "div" }],
-                  implementation: { state: false, actions: false, mount: false, view: true },
+                  components: [
+                    {
+                      name: "Animated",
+                      propCallbacks: [],
+                      state: { kind: "record", fields: [] },
+                      actions: [],
+                      elements: [{ name: "Root", element: "div" }],
+                      implementation: {
+                        state: false,
+                        actions: false,
+                        mount: false,
+                        view: true,
+                      },
+                    },
+                    {
+                      name: "Static",
+                      propCallbacks: [],
+                      state: { kind: "record", fields: [] },
+                      actions: [],
+                      elements: [{ name: "Root", element: "div" }],
+                      implementation: {
+                        state: false,
+                        actions: false,
+                        mount: false,
+                        view: true,
+                      },
+                    },
+                  ],
+                  root: "Animated",
                 },
-                {
-                  name: "Static",
-                  propCallbacks: [],
-                  state: { kind: "record", fields: [] },
-                  actions: [],
-                  elements: [{ name: "Root", element: "div" }],
-                  implementation: { state: false, actions: false, mount: false, view: true },
-                },
-              ],
-              root: "Animated",
+                components: [],
+                routes: [],
+              },
             },
-            implementation: { kind: "source", reason: "platform-ui", span },
             span,
           },
         ],
       },
     ],
-    presentations: [
-      {
-        interface: "product.web",
-        file: "src/presentation.ts",
-        animations: [
-          {
-            id: "Presentation/Dashboard/Animated::opacity",
-            scope: "Presentation/Dashboard/Animated",
-            binding: "opacity",
-            source: "state.visible ? 1 : 0",
-            animation: "spring()",
-            events: [],
-            span,
+  };
+}
+
+function mapPresentations(
+  ir: SystemIR,
+  map: (presentation: PresentationSourceIR) => PresentationSourceIR,
+): SystemIR {
+  return {
+    ...ir,
+    interfaces: ir.interfaces.map((interface_) => {
+      if (!interface_.extensions?.web) return interface_;
+      const web = webInterfaceCompilerIR(interface_.extensions.web);
+      return {
+        ...interface_,
+        extensions: {
+          ...interface_.extensions,
+          web: {
+            ...web,
+            presentations: (web.presentations ?? []).map(map),
           },
-        ],
-        declarations: [
-          {
-            destination: "Dashboard/Animated/Root/paint/opacity",
-            expression: "opacity",
-            animations: ["Presentation/Dashboard/Animated::opacity"],
-            span,
-          },
-        ],
-      },
-    ],
+        },
+      };
+    }),
   };
 }

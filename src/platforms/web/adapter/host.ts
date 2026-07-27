@@ -1,5 +1,9 @@
 import type { DependencyContractIR, SelectedDependencyProviderIR } from "@/compiler/ir";
-import type { DependencyContract, DependencyImplementation } from "@/core/dependency";
+import {
+  dependencyInvocation,
+  type DependencyContract,
+  type DependencyImplementation,
+} from "@/core/dependency";
 import { resolveFeatureProvider } from "@/core/feature";
 import { conformExternalDependencies, dependencyScope } from "@/execution/process";
 import type {
@@ -10,15 +14,17 @@ import type {
   WebDependencyProvider,
   WebServiceWorkerRuntime,
 } from "@/platforms/web";
-import { resolveWebDestination, type WebRouteIR } from "@/platforms/web/adapter/lowering";
-import type { WebDestination } from "@/platforms/web/routing";
+import { resolveWebDestination, type WebClientRouteIR } from "@/platforms/web/adapter/lowering";
+import type { WebDestination, WebNavigationType } from "@/platforms/web/routing";
 
 export type WebHostOptions<Dependencies extends readonly DependencyContractIR[]> = Readonly<{
   serverOrigin?: string;
   dependencies: Dependencies;
   context?: "service-worker" | "window" | "worker";
   providers?: readonly SelectedDependencyProviderIR[];
-  routes?: readonly WebRouteIR[];
+  /** Dependencies whose execution is projected exclusively into server Route loaders. */
+  routeDependencies?: readonly string[];
+  routes?: readonly WebClientRouteIR[];
   system?: Readonly<{ features?: Readonly<Record<string, object>> }>;
 }>;
 
@@ -48,9 +54,14 @@ export async function createWebHost(
   const providerSelections = new Map(
     (input.providers ?? []).map((provider) => [provider.dependency, provider]),
   );
+  const routeDependencies = new Set(input.routeDependencies ?? []);
   const requested = new Set<WebAdapterHostDependency>();
   for (const dependency of input.dependencies) {
-    if (!isWebHostDependency(dependency.name) && !providerSelections.has(dependency.name)) {
+    if (
+      !isWebHostDependency(dependency.name) &&
+      !providerSelections.has(dependency.name) &&
+      !routeDependencies.has(dependency.name)
+    ) {
       throw new Error(`The web adapter cannot implement Dependency ${dependency.name}.`);
     }
     requested.add(dependency.name as WebAdapterHostDependency);
@@ -74,6 +85,23 @@ export async function createWebHost(
     host[dependency] = await provider.development({
       context: input.context ?? "window",
       serverOrigin: input.serverOrigin ?? location.origin,
+    });
+  }
+  for (const dependency of input.dependencies) {
+    if (
+      isWebHostDependency(dependency.name) ||
+      providerSelections.has(dependency.name) ||
+      !routeDependencies.has(dependency.name)
+    ) {
+      continue;
+    }
+    host[dependency.name] = Object.freeze({
+      [dependencyInvocation](operation: string): never {
+        throw new Error(
+          `Dependency ${JSON.stringify(dependency.name)}.${operation} is available to server ` +
+            "Route loaders but has no browser provider.",
+        );
+      },
     });
   }
 
@@ -116,13 +144,14 @@ export async function createWebHost(
     throw new Error('The "navigation" Dependency is unavailable in a web worker.');
   }
 
-  const listeners = new Set<(location: URL) => void>();
+  const listeners = new Set<(location: URL, type: WebNavigationType) => void>();
   const current = () => new URL(location.href);
-  const publish = () => {
+  const publish = (type: WebNavigationType) => {
     const value = current();
-    for (const receive of listeners) receive(value);
+    for (const receive of listeners) receive(value, type);
   };
-  addEventListener("popstate", publish);
+  const traverse = () => publish("traverse");
+  addEventListener("popstate", traverse);
 
   const createNavigation = (feature: string): Navigation => ({
     current,
@@ -133,7 +162,7 @@ export async function createWebHost(
       const path = this.href(destination);
       if (replace) history.replaceState(null, "", path);
       else history.pushState(null, "", path);
-      publish();
+      publish(replace ? "replace" : "push");
     },
     back() {
       history.back();
@@ -141,7 +170,10 @@ export async function createWebHost(
     forward() {
       history.forward();
     },
-    subscribe(receive: (location: URL) => void) {
+    reload() {
+      publish("reload");
+    },
+    subscribe(receive: (location: URL, type: WebNavigationType) => void) {
       listeners.add(receive);
       return { [Symbol.dispose]: () => listeners.delete(receive) };
     },
@@ -155,13 +187,14 @@ export async function createWebHost(
       navigationClient.navigate(input),
     back: () => navigationClient.back(),
     forward: () => navigationClient.forward(),
+    reload: () => navigationClient.reload(),
     subscribe: ({ input }: Readonly<{ input: Parameters<Navigation["subscribe"]>[0] }>) =>
       navigationClient.subscribe(input),
     [dependencyScope](scope: Readonly<{ feature: string }>) {
       return createNavigation(scope.feature);
     },
     [Symbol.dispose]() {
-      removeEventListener("popstate", publish);
+      removeEventListener("popstate", traverse);
       listeners.clear();
     },
   });
@@ -192,6 +225,7 @@ type WebServiceWorkerScope = Readonly<{
   }>;
   addEventListener(name: string, listener: (event: never) => void): void;
   removeEventListener(name: string, listener: (event: never) => void): void;
+  __kitServiceWorkerSubscriptions?: Set<object>;
 }>;
 
 /** @internal Creates the semantic service-worker Dependency from platform primitives. */
@@ -200,6 +234,16 @@ export function createWebServiceWorkerRuntime<Message = string, NotificationData
 ): WebServiceWorkerRuntime<Message, NotificationData> {
   return Object.freeze({
     subscribe(handlers) {
+      const routed = scope.__kitServiceWorkerSubscriptions;
+      if (routed) {
+        const subscription = handlers as object;
+        routed.add(subscription);
+        return {
+          [Symbol.dispose]() {
+            routed.delete(subscription);
+          },
+        };
+      }
       const listeners: Array<readonly [string, (event: never) => void]> = [];
       const listen = <Event extends ExtendableEventLike, Value>(
         name: string,

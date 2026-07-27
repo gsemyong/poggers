@@ -1,5 +1,3 @@
-import { endBatch, signal as createSignal, startBatch } from "alien-signals";
-
 import {
   orderDependencyGraph,
   type DependencyContractIR,
@@ -21,9 +19,6 @@ import {
 } from "@/core/dependency";
 import type { Feature, FeatureContract } from "@/core/feature";
 import type { System, SystemContract } from "@/core/system";
-import type { ActionEvent } from "@/core/ui/presentation";
-import { createActionEventLedger } from "@/execution/presentation";
-import { createReactiveState } from "@/execution/state";
 
 /** Internal protocol for a host Dependency whose API is scoped to one Feature contribution. */
 export const dependencyScope: unique symbol = Symbol("kit.dependency.scope");
@@ -610,19 +605,7 @@ function isObject(value: unknown): value is object {
 type ResourceCleanup = () => void | Promise<void>;
 type ResourceIterator = AsyncIterator<unknown>;
 
-type RuntimeUI = Readonly<{
-  state?: Readonly<Record<string, unknown>>;
-  actions?: Readonly<
-    Record<string, (context: RuntimeActionContext, ...args: readonly unknown[]) => unknown>
-  >;
-  components?: Readonly<Record<string, unknown>>;
-  root?: string;
-}>;
-
-type RuntimeProgramDefinition = Readonly<{
-  start?: (context: RuntimeStartContext) => unknown;
-}> &
-  RuntimeUI;
+type RuntimeProgramDefinition = object;
 
 type RuntimeFeature = Readonly<{
   programs?: Readonly<Record<string, RuntimeProgramDefinition>>;
@@ -634,31 +617,33 @@ type RuntimeSystem = Readonly<{
   applications?: Readonly<Record<string, RuntimeFeature>>;
 }>;
 
-type RuntimeActionContext = Readonly<{
-  dependencies: Readonly<Record<string, unknown>>;
-  features: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
-  state: Record<string, unknown>;
-}>;
-
-type RuntimeStartContext = Readonly<{
-  dependencies: Readonly<Record<string, unknown>>;
-  provides?: readonly string[];
-  actions?: Readonly<Record<string, (...args: readonly unknown[]) => unknown>>;
-  features?: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
-}>;
-
-export type UIContributionInstance = Readonly<{
-  api: Readonly<Record<string, unknown>>;
-  state: Readonly<Record<string, unknown>>;
-  actions: Readonly<Record<string, (...args: readonly unknown[]) => unknown>>;
-  events: Readonly<Record<string, ActionEvent<(...args: never[]) => unknown>>>;
-  snapshot(): Record<string, unknown>;
+/** Adapter-owned live interpretation of one authored Program contribution. */
+export type ProgramContributionRuntime = Readonly<{
+  exposed: Readonly<Record<string, unknown>>;
+  run(): unknown;
   dispose(): Promise<void>;
+  events?: Readonly<Record<string, unknown>>;
+  snapshot?(): Record<string, unknown>;
+}>;
+
+/** The sole runtime extension point required by the neutral Program assembler. */
+export type ProgramLanguageRuntime = Readonly<{
+  instantiate(
+    input: Readonly<{
+      address: ProgramContributionAddress;
+      definition: object;
+      dependencies: Readonly<Record<string, unknown>>;
+      exposedFeatures: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
+      initialState?: Readonly<Record<string, unknown>>;
+      provides: readonly string[];
+      scope: ResourceScope;
+    }>,
+  ): ProgramContributionRuntime;
 }>;
 
 export type ProgramContributionInstance = Readonly<{
   address: ProgramContributionAddress;
-  ui?: UIContributionInstance;
+  runtime: ProgramContributionRuntime;
   dependencies: Readonly<Record<string, unknown>>;
   provided: Readonly<Record<string, unknown>>;
   start(): Promise<Readonly<Record<string, unknown>>>;
@@ -669,92 +654,18 @@ export type Process = Readonly<{
   name: string;
   contributions: readonly ProgramContributionInstance[];
   dependencies: Readonly<Record<string, unknown>>;
-  ui: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
+  exposed: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
   dispose(): Promise<void>;
 }>;
 
-type UIContributionOptions = Readonly<{
-  dependencies?: Readonly<Record<string, unknown>>;
-  features?: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
-  name?: string;
-  initialState?: Readonly<Record<string, unknown>>;
-  scope?: ResourceScope;
-  onActionEvent?: () => void;
-}>;
-
-/** Creates one live Feature-local UI API inside a Process. */
-export function createUIContributionInstance(
-  definition: RuntimeUI,
-  options: UIContributionOptions = {},
-): UIContributionInstance {
-  const name = options.name ?? "ui";
-  let disposed = false;
-  const initialState = Object.fromEntries(
-    Object.entries(definition.state ?? {}).map(([key, value]) => [
-      key,
-      Object.hasOwn(options.initialState ?? {}, key) ? options.initialState![key] : value,
-    ]),
-  );
-  const state = createReactiveState(initialState, createSignal, () => !disposed);
-  const dependencies = options.dependencies ?? {};
-  const features = options.features ?? {};
-  const ownsScope = !options.scope;
-  const scope = options.scope ?? new ResourceScope();
-  let disposal: Promise<void> | undefined;
-  const actions: Record<string, (...args: readonly unknown[]) => unknown> = Object.create(null);
-  const eventLedger = createActionEventLedger(
-    Object.keys(definition.actions ?? {}),
-    options.onActionEvent,
-  );
-
-  for (const [actionName, implementation] of Object.entries(definition.actions ?? {})) {
-    actions[actionName] = (...args: readonly unknown[]) => {
-      if (disposed) throw new Error(`UI contribution "${name}" is disposed.`);
-      return scope.action(() =>
-        eventLedger.invoke(actionName, args, () =>
-          implementation({ dependencies, features, state: state.mutable }, ...args),
-        ),
-      );
-    };
-  }
-
-  const api = Object.create(null) as Record<string, unknown>;
-  for (const stateName of Object.keys(definition.state ?? {})) {
-    if (stateName in actions) {
-      throw new Error(`UI contribution "${name}" declares state and action "${stateName}".`);
-    }
-    Object.defineProperty(api, stateName, {
-      enumerable: true,
-      get: state.cells[stateName],
-    });
-  }
-  Object.assign(api, actions);
-
-  return {
-    api,
-    state: state.read,
-    actions,
-    events: eventLedger.events,
-    snapshot() {
-      return state.snapshot();
-    },
-    async dispose() {
-      disposed = true;
-      if (!ownsScope) return;
-      disposal ??= scope.dispose();
-      await disposal;
-    },
-  };
-}
-
 type ProgramContributionOptions = Readonly<{
   address: ProgramContributionAddress;
+  language: ProgramLanguageRuntime;
   provides: readonly string[];
   providerContracts?: readonly DependencyContractIR[];
   dependencies?: Record<string, unknown>;
   features?: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
   initialState?: Readonly<Record<string, unknown>>;
-  onActionEvent?: () => void;
 }>;
 
 export class ResourceScope {
@@ -854,14 +765,9 @@ export class ResourceScope {
 
   action<Value>(run: () => Value): Value {
     if (!this.#active) throw new Error("Resource scope is disposed.");
-    startBatch();
-    try {
-      const value = run();
-      this.adoptResult(value);
-      return value;
-    } finally {
-      endBatch();
-    }
+    const value = run();
+    this.adoptResult(value);
+    return value;
   }
 
   run(value: PromiseLike<unknown>): void {
@@ -926,20 +832,19 @@ export function createProgramContributionInstance(
   let provided: Readonly<Record<string, unknown>> = Object.freeze({});
   const availableDependencies = options.dependencies ?? Object.create(null);
   const dependencies = bindDependenciesToScope(availableDependencies, scope);
-  const ui = hasRuntimeUI(definition)
-    ? createUIContributionInstance(definition, {
-        name: `${options.address.program}:${options.address.feature}`,
-        dependencies,
-        features: options.features,
-        initialState: options.initialState,
-        scope,
-        onActionEvent: options.onActionEvent,
-      })
-    : undefined;
+  const runtime = options.language.instantiate({
+    address: options.address,
+    definition,
+    dependencies,
+    exposedFeatures: options.features ?? {},
+    ...(options.initialState ? { initialState: options.initialState } : {}),
+    provides: options.provides,
+    scope,
+  });
 
   const instance: ProgramContributionInstance = {
     address: options.address,
-    ui,
+    runtime,
     dependencies: availableDependencies,
     get provided() {
       return provided;
@@ -950,16 +855,7 @@ export function createProgramContributionInstance(
         return Promise.reject(new Error(`${formatAddress(options.address)} is disposed.`));
       }
       starting = (async () => {
-        const result = definition.start?.({
-          dependencies,
-          ...(options.provides.length ? { provides: options.provides } : {}),
-          ...(ui
-            ? {
-                actions: ui.actions,
-                features: options.features ?? {},
-              }
-            : {}),
-        });
+        const result = runtime.run();
 
         if (options.provides.length) {
           const implementations = await result;
@@ -985,7 +881,7 @@ export function createProgramContributionInstance(
     async dispose() {
       if (disposed) return;
       disposed = true;
-      await ui?.dispose();
+      await runtime.dispose();
       try {
         await scope.dispose();
       } catch (error) {
@@ -1022,12 +918,12 @@ export type ProgramAssemblyOptions = Readonly<{
   system: RuntimeSystem;
   name: string;
   logicalName?: string;
+  language: ProgramLanguageRuntime;
   dependencies: Readonly<Record<string, unknown>>;
   manifest: ProgramManifest;
   ownDependencies?: boolean;
   distribute?: ProgramDistributionFactory;
   initialState?: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
-  onActionEvent?: () => void;
   /** @internal Feature fixtures project type-checked providers without compiler IR. */
   uncheckedProviders?: boolean;
 }>;
@@ -1074,7 +970,7 @@ export type ProgramAssembly = Readonly<{
   name: string;
   contributions: readonly ProgramContributionInstance[];
   dependencies: Readonly<Record<string, unknown>>;
-  ui: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
+  exposed: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
   dispose(): Promise<void>;
 }>;
 
@@ -1219,7 +1115,7 @@ export async function assembleProgram(options: ProgramAssemblyOptions): Promise<
     options.manifest,
     options.logicalName ?? options.name,
   );
-  const ui: Record<string, Readonly<Record<string, unknown>>> = Object.create(null);
+  const exposed: Record<string, Readonly<Record<string, unknown>>> = Object.create(null);
   const externalScope = new ResourceScope();
   const providedDependencies: Record<string, unknown> = Object.create(null);
   const deferredDependencies = new Map<string, DeferredDependencyBinding>();
@@ -1240,7 +1136,7 @@ export async function assembleProgram(options: ProgramAssemblyOptions): Promise<
   const definitions = new Map(plan.contributions.map((value) => [value.feature, value]));
   const instantiate = (path: string): Readonly<Record<string, unknown>> => {
     const existing = instances.get(path);
-    if (existing) return existing.ui?.api ?? Object.freeze({});
+    if (existing) return existing.runtime.exposed;
     const planned = definitions.get(path);
     if (!planned) return Object.freeze({});
     const children: Record<string, Readonly<Record<string, unknown>>> = Object.create(null);
@@ -1260,6 +1156,7 @@ export async function assembleProgram(options: ProgramAssemblyOptions): Promise<
     }
     const instance = createProgramContributionInstance(planned.definition, {
       address: { program: options.name, feature: path },
+      language: options.language,
       provides: planned.manifest.provides,
       providerContracts: planned.manifest.provides.flatMap((name) => {
         const contract = plan.bindings.find((binding) => binding.name === name);
@@ -1268,12 +1165,11 @@ export async function assembleProgram(options: ProgramAssemblyOptions): Promise<
       dependencies: registry,
       features: children,
       initialState: options.initialState?.[path],
-      onActionEvent: options.onActionEvent,
     });
     instances.set(path, instance);
     registries.set(path, registry);
-    ui[path] = instance.ui?.api ?? Object.freeze({});
-    return ui[path]!;
+    exposed[path] = instance.runtime.exposed;
+    return exposed[path]!;
   };
 
   let distribution: ProgramDistribution | undefined;
@@ -1326,7 +1222,7 @@ export async function assembleProgram(options: ProgramAssemblyOptions): Promise<
     name: options.name,
     contributions,
     dependencies: Object.freeze({ ...options.dependencies, ...providedDependencies }),
-    ui,
+    exposed,
     async dispose() {
       if (disposed) return;
       disposed = true;
@@ -1355,12 +1251,14 @@ export async function startProcess<Contract extends SystemContract>(
   name: string,
   dependencies: Readonly<Record<string, unknown>>,
   manifest: ProgramManifest,
+  language: ProgramLanguageRuntime,
   logicalName = name,
 ): Promise<Process> {
   return assembleProgram({
     system: system as RuntimeSystem,
     name,
     logicalName,
+    language,
     dependencies,
     manifest,
   });
@@ -1382,6 +1280,7 @@ export type FeatureFixtureContribution = Readonly<{
 export async function startFeatureFixture<Contract extends FeatureContract>(input: {
   feature: Feature<Contract>;
   program: Extract<keyof NonNullable<Contract["Programs"]>, string>;
+  language: ProgramLanguageRuntime;
   dependencies: Readonly<Record<string, unknown>>;
   contributions: readonly FeatureFixtureContribution[];
   bindings?: readonly DependencyContractIR[];
@@ -1401,6 +1300,7 @@ export async function startFeatureFixture<Contract extends FeatureContract>(inpu
     system: { features: { [root]: input.feature as unknown as RuntimeFeature } },
     name,
     logicalName: input.program,
+    language: input.language,
     dependencies: input.dependencies,
     manifest,
     initialState: input.initialState,
@@ -1425,12 +1325,6 @@ async function disposeProgram(
   }
   if (errors.length === 1) throw errors[0];
   if (errors.length > 1) throw new AggregateError(errors, "Process disposal failed.");
-}
-
-function hasRuntimeUI(definition: RuntimeProgramDefinition): boolean {
-  return Boolean(
-    definition.state || definition.actions || definition.components || definition.root,
-  );
 }
 
 export function bindDependenciesToScope(

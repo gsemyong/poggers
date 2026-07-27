@@ -7,7 +7,7 @@ import {
   renderWebManifest,
   renderWebServiceWorker,
 } from "@/platforms/web/adapter/installation";
-import type { WebRouteIR } from "@/platforms/web/adapter/lowering";
+import { WEB_COMPILER_IR_VERSION, type WebRouteIR } from "@/platforms/web/adapter/lowering";
 
 const routes: readonly WebRouteIR[] = [
   route("tasks.list", "/tasks", { scope: "public", maxAge: "1h" }),
@@ -19,18 +19,33 @@ describe("web installation planning", () => {
   it("resolves one typed installation declaration into a conventional manifest", () => {
     const plan = planWebInstallation(system(), interfaceId, routes);
     expect(plan).toMatchObject({
-      name: "Tasks",
+      name: "Task Manager",
       shortName: "Tasks",
+      description: "Manage tasks",
       start: "/tasks",
       offline: { fallback: "/auth" },
     });
     expect(JSON.parse(renderWebManifest(plan!))).toMatchObject({
-      name: "Tasks",
+      name: "Task Manager",
       short_name: "Tasks",
+      description: "Manage tasks",
       id: "/tasks",
       start_url: "/tasks",
       scope: "/",
       display: "standalone",
+      orientation: "portrait",
+      theme_color: "#111111",
+      background_color: "#ffffff",
+      categories: ["productivity"],
+      screenshots: [
+        {
+          src: "/tasks.webp",
+          sizes: "1280x720",
+          type: "image/webp",
+          form_factor: "wide",
+          label: "Task list",
+        },
+      ],
       shortcuts: [{ name: "New task", url: "/tasks" }],
     });
   });
@@ -56,6 +71,11 @@ describe("web installation planning", () => {
     expect(source.match(/^import /gm)).toHaveLength(2);
     expect(source).toContain('event.data === "kit:activate"');
     expect(source).toContain('event.data === "kit:warm"');
+    expect(source).toContain('dispatch(event, "message"');
+    expect(source).toContain('dispatch(event, "push"');
+    expect(source).toContain('dispatch(event, "synchronize"');
+    expect(source).toContain('dispatch(event, "notificationClick"');
+    expect(source).toContain("Promise.all(PROGRAMS)");
     expect(source).toContain("navigationPreload?.enable()");
     expect(source).toContain("clients.claim()");
     expect(source).not.toContain('"install", (event) => event.waitUntil(self.skipWaiting())');
@@ -117,25 +137,39 @@ function system(): SystemIR {
     version: SYSTEM_IR_VERSION,
     system: { id: "system", name: "Tasks" },
     platforms: ["web"],
-    apps: [{ id: "app/app", feature: "app", interfaces: [interfaceId] }],
+    apps: [{ id: "app/app", path: "app", name: "Task Manager", interfaces: [interfaceId] }],
     interfaces: [
       {
         id: interfaceId,
         path: "app.web",
         app: "app",
         platform: "web",
+        features: {},
         programs: [],
-        presentationSources: [],
         extensions: {
           web: {
-            version: 8,
+            version: WEB_COMPILER_IR_VERSION,
             installation: {
               shortName: "Tasks",
+              description: "Manage tasks",
               start: { to: "tasks.list" },
               display: "standalone",
+              orientation: "portrait",
+              themeColor: "#111111",
+              backgroundColor: "#ffffff",
+              categories: ["productivity"],
               icons: [
                 { src: "/icon-192.png", sizes: "192x192", type: "image/png" },
                 { src: "/icon-512.png", sizes: "512x512", type: "image/png" },
+              ],
+              screenshots: [
+                {
+                  src: "/tasks.webp",
+                  sizes: "1280x720",
+                  type: "image/webp",
+                  formFactor: "wide",
+                  label: "Task list",
+                },
               ],
               shortcuts: [{ name: "New task", destination: { to: "tasks.list" }, icons: [] }],
               offline: { fallback: { to: "shell.auth" } },
@@ -148,14 +182,11 @@ function system(): SystemIR {
       {
         id: "feature/app",
         path: "app",
-        kind: "app",
-        app: "app",
         children: [],
         programs: [],
       },
     ],
     programs: [],
-    presentations: [],
   };
 }
 
@@ -170,6 +201,7 @@ function route(
     feature: identity.slice(0, separator),
     name: identity.slice(separator + 1),
     path,
+    status: 200,
     document,
     cache,
     metadata: {},

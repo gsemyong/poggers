@@ -150,6 +150,18 @@ describe("server production Dependency binding", () => {
         configuration: [{ name: "port", environment: "PORT", required: true, default: "3000" }],
       }),
     ).toThrow("cannot be required and defaulted");
+    expect(() =>
+      defineServerProductionDependency({
+        ...implementation(clock),
+        bindings: ["attach", "attach"],
+      }),
+    ).toThrow("attachment binding");
+    expect(() =>
+      defineServerProductionDependency({
+        ...implementation(clock),
+        bindings: [" "],
+      }),
+    ).toThrow("attachment binding is empty");
   });
 });
 

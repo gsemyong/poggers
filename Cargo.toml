@@ -17,4 +17,5 @@ members = [
   "src/platforms/server/adapter/rust/providers/identifiers",
   "src/platforms/server/adapter/rust/providers/timer",
   "src/platforms/server/adapter/rust/fixtures/recorder",
+  "src/platforms/web/adapter/server/rust/http",
 ]

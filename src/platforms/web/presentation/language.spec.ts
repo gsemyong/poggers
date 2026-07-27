@@ -7,13 +7,13 @@ import {
   isPresentationTemporalValue,
   type Animation,
   type PresentationAnimationHost,
-} from "@/core/ui/presentation";
+} from "@/platforms/web/presentation/language";
 import {
   createActionEventLedger,
   createPresentationFrame,
   eventCursor,
   readEventOccurrences,
-} from "@/execution/presentation";
+} from "@/platforms/web/presentation/runtime";
 
 describe("Presentation kernel", () => {
   it("normalizes one logical frame into deterministic immutable data", () => {

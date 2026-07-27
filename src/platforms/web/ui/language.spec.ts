@@ -1,6 +1,11 @@
 import { expect, it } from "vitest";
 
-import type { UIDefinition, UIElement, UIElementProps, UITarget } from "@/core/ui/language";
+import type {
+  UIDefinition,
+  UIElement,
+  UIElementProps,
+  UITarget,
+} from "@/platforms/web/ui/language";
 
 type TestUI = {
   Name: "test";

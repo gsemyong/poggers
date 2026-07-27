@@ -321,8 +321,9 @@ class CommandOutput {
       return;
     }
     const outputs = event.outputs.length ? ` ${event.outputs.join(", ")}` : "";
+    const mode = event.mode ? `:${event.mode}` : "";
     this.#writeLine(
-      `${this.#paint(36, "[hmr ]")} ${event.platform} ${event.scope}${outputs} ${this.#paint(
+      `${this.#paint(36, "[hmr ]")} ${event.platform} ${event.scope}${mode}${outputs} ${this.#paint(
         2,
         formatDuration(event.durationMs),
       )}`,
@@ -536,12 +537,8 @@ function compilationDetail(event: DevelopmentPhaseEvent): string | undefined {
   const work = event.work;
   const units = work
     ? [
-        work.features.compiled + work.presentations.compiled
-          ? `${work.features.compiled + work.presentations.compiled} compiled`
-          : "",
-        work.features.reused + work.presentations.reused
-          ? `${work.features.reused + work.presentations.reused} reused`
-          : "",
+        work.features.compiled ? `${work.features.compiled} compiled` : "",
+        work.features.reused ? `${work.features.reused} reused` : "",
       ]
         .filter(Boolean)
         .join(", ")

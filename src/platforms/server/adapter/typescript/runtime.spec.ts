@@ -3,9 +3,11 @@ import { describe, expect, test } from "vitest";
 import type { ProgramIR } from "@/compiler/ir";
 import type { Feature } from "@/core/feature";
 import type { System } from "@/core/system";
+import type { ServerPlatform } from "@/platforms/server";
+import { SERVER_COMPILER_IR_VERSION } from "@/platforms/server/adapter";
 import { startServerPrograms } from "@/platforms/server/adapter/typescript/runtime";
 
-type Server = Readonly<{ Name: "server"; Platform: { Name: "server" } }>;
+type Server = Readonly<{ Name: "server"; Platform: ServerPlatform }>;
 type Program<Environment, Contract extends object = object> = Readonly<
   Contract & { Environment: Environment }
 >;
@@ -166,7 +168,12 @@ function programs(): readonly ProgramIR[] {
           feature: "provider",
           requires: [],
           provides: [dependency("reader")],
-          implementation: { kind: "source", reason: "host-source", span },
+          extensions: {
+            server: {
+              version: SERVER_COMPILER_IR_VERSION,
+              execution: { kind: "source", span },
+            },
+          },
           span,
         },
         {
@@ -174,7 +181,12 @@ function programs(): readonly ProgramIR[] {
           feature: "consumer",
           requires: [dependency("clock"), dependency("reader")],
           provides: [],
-          implementation: { kind: "source", reason: "host-source", span },
+          extensions: {
+            server: {
+              version: SERVER_COMPILER_IR_VERSION,
+              execution: { kind: "source", span },
+            },
+          },
           span,
         },
       ],
@@ -218,44 +230,49 @@ function portableProgram(): ProgramIR {
           },
         ],
         provides: [],
-        implementation: {
-          kind: "portable",
-          functions: [],
-          start: {
-            id: "start",
-            name: "start",
-            asynchronous: true,
-            captures: [],
-            parameters: [],
-            result: { kind: "primitive", name: "void" },
-            body: [
-              {
-                kind: "expression",
-                expression: {
-                  kind: "dependency-call",
-                  dependency: "clock",
-                  operation: "tick",
-                  arguments: [
-                    {
-                      kind: "record",
-                      fields: [
+        extensions: {
+          server: {
+            version: SERVER_COMPILER_IR_VERSION,
+            execution: {
+              kind: "portable",
+              functions: [],
+              entry: {
+                id: "start",
+                name: "start",
+                asynchronous: true,
+                captures: [],
+                parameters: [],
+                result: { kind: "primitive", name: "void" },
+                body: [
+                  {
+                    kind: "expression",
+                    expression: {
+                      kind: "dependency-call",
+                      dependency: "clock",
+                      operation: "tick",
+                      arguments: [
                         {
-                          name: "value",
-                          value: { kind: "literal", value: 41, type: number, span },
+                          kind: "record",
+                          fields: [
+                            {
+                              name: "value",
+                              value: { kind: "literal", value: 41, type: number, span },
+                            },
+                          ],
+                          type: input,
+                          span,
                         },
                       ],
-                      type: input,
+                      awaited: true,
+                      type: number,
                       span,
                     },
-                  ],
-                  awaited: true,
-                  type: number,
-                  span,
-                },
+                    span,
+                  },
+                ],
                 span,
               },
-            ],
-            span,
+            },
           },
         },
         span,

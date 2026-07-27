@@ -1,24 +1,33 @@
 import type { JSXElement, JSXPlatformRegistration } from "kit/jsx-runtime";
 
 import { createFeature } from "@/core/feature";
-import type { UIElement } from "@/core/ui/language";
+import type { ProgramDefinitionKind } from "@/core/program";
 import type { BrowserMainThread } from "@/platforms/web";
 
-type NativeNode = Readonly<{ id: number }>;
 type NativeStackProps = Readonly<{
   axis: "horizontal" | "vertical";
   children?: JSXElement;
 }>;
 
-type NativeUI = Readonly<{
-  Name: "native-test";
-  Child: JSXElement;
-  Elements: {
-    stack: UIElement<NativeStackProps, NativeNode>;
-  };
-}>;
+type NativeProgramDefinition<Contract> = Contract extends {
+  Screens: infer Screens extends Readonly<Record<string, object>>;
+}
+  ? Readonly<{
+      screens: {
+        readonly [Name in keyof Screens]: Readonly<{ render(): JSXElement }>;
+      };
+      initial: Extract<keyof Screens, string>;
+    }>
+  : never;
 
-type NativePlatform = Readonly<{ Name: "native"; UI: NativeUI }>;
+interface NativeProgramDefinitionKind extends ProgramDefinitionKind {
+  readonly Definition: NativeProgramDefinition<this["Contract"]>;
+}
+
+type NativePlatform = Readonly<{
+  Name: "native";
+  Program: NativeProgramDefinitionKind;
+}>;
 type NativeMain = Readonly<{
   Name: "native-main";
   Platform: NativePlatform;
@@ -68,9 +77,9 @@ type NativeFeature = {
     native: Program<
       NativeMain,
       {
-        Components: {
-          Badge: { Elements: { Root: "stack" } };
-          Page: { Elements: { Root: "stack" } };
+        Screens: {
+          Badge: {};
+          Page: {};
         };
       }
     >;
@@ -80,23 +89,19 @@ type NativeFeature = {
 const nativeFeature = createFeature<NativeFeature>({
   programs: {
     native: {
-      components: {
+      screens: {
         Badge: {
-          view({ elements: { Root } }) {
-            return <Root axis="horizontal" />;
+          render() {
+            return <stack axis="horizontal" />;
           },
         },
         Page: {
-          view({ components: { Badge }, elements: { Root } }) {
-            return (
-              <Root axis="vertical">
-                <Badge />
-              </Root>
-            );
+          render() {
+            return <stack axis="vertical" />;
           },
         },
       },
-      root: "Page",
+      initial: "Page",
     },
   },
 });

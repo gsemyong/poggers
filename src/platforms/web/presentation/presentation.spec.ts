@@ -1,6 +1,5 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
 
-import type { Animation } from "@/core/ui/presentation";
 import {
   createAudioAsset,
   createContainer,
@@ -8,6 +7,7 @@ import {
   type WebContainer,
 } from "@/platforms/web/presentation";
 import { decay, follow, spring, track, tween } from "@/platforms/web/presentation/dynamics";
+import type { Animation } from "@/platforms/web/presentation/language";
 
 describe("web Presentation language", () => {
   it("constructs immutable typed Animation descriptions without resources", () => {

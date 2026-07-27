@@ -3,8 +3,8 @@ import { resolve } from "node:path";
 import { defineConfig } from "vitest/config";
 
 import { productionTestTag, testDefaults } from "./config/vitest";
-import { transformPresentationSource } from "./src/compiler/presentation";
 import { packageSources } from "./src/package";
+import { transformPresentationSource } from "./src/platforms/web/adapter/presentation/source";
 
 export default defineConfig({
   plugins: [

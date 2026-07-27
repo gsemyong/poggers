@@ -1,4 +1,4 @@
-import type { Animation, Event } from "@/core/ui/presentation";
+import type { Animation, Event } from "@/platforms/web/presentation/language";
 
 const millisecondsPerSecond = 1_000;
 const maximumSpringDuration = 60;

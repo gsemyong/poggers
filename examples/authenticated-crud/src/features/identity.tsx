@@ -1,11 +1,11 @@
+import type { FeatureContractOf } from "kit";
 import {
   createIdentity,
-  type FeatureContractOf,
   type AuthenticatedUser,
   type IdentityClient as FeatureIdentityClient,
   type IdentityModel,
   type IdentitySession,
-} from "kit";
+} from "kit/features/identity";
 
 export type User = Readonly<{ id: string; name: string; email: string }>;
 

@@ -1,15 +1,13 @@
 import {
   assertSystemIRVersion,
   projectDependencyContracts,
-  type ComponentIR,
   type ExpressionIR,
   type FunctionIR,
   type SystemIR,
   type LinkedProgramIR,
+  type PortableProgramExecutionIR,
   type ProgramContributionIR,
-  type ProgramIR,
   type StatementIR,
-  type TypeIR,
 } from "@/compiler/ir";
 import { dependencyInvocation, invokeDependency } from "@/core/dependency";
 import {
@@ -42,6 +40,11 @@ export type PortableFunctionExecution = Readonly<{
   dependencies?: DependencyImplementations;
 }>;
 
+/** Procedural meaning selected by a Program-language extension for portable execution. */
+export type PortableProgramProjection = (
+  contribution: ProgramContributionIR,
+) => PortableProgramExecutionIR;
+
 export type DependencyCallTrace = Readonly<{
   dependency: string;
   operation: string;
@@ -70,17 +73,19 @@ export async function executeProgramIR(
   ir: SystemIR,
   programId: string,
   dependencies: DependencyImplementations,
+  project: PortableProgramProjection,
 ): Promise<ExecutionTrace> {
   assertSystemIRVersion(ir);
   const program = ir.programs
     .flatMap(({ contributions }) => contributions)
     .find(({ id }) => id === programId);
   if (!program) throw new Error(`Unknown Program ${JSON.stringify(programId)}.`);
-  return executeProgramContributionIR(program, dependencies);
+  return executeProgramContributionIR(program, project(program), dependencies);
 }
 
 export async function executeProgramContributionIR(
   program: ProgramContributionIR,
+  execution: PortableProgramExecutionIR,
   dependencies: DependencyImplementations,
 ): Promise<ExecutionTrace> {
   const envelopeContracts = projectDependencyContracts(
@@ -91,20 +96,16 @@ export async function executeProgramContributionIR(
     ...conformExternalDependencies(envelopeContracts, dependencies),
   }) as DependencyImplementations;
   validateDependencies(program, mounted);
-  if (program.implementation.kind !== "portable") {
-    throw new Error(
-      `Program ${JSON.stringify(program.id)} is ${program.implementation.kind}, not portable IR.`,
-    );
+  if (execution.kind !== "portable") {
+    throw new Error(`Program ${JSON.stringify(program.id)} is ${execution.kind}, not portable IR.`);
   }
 
   const calls: DependencyCallTrace[] = [];
   const locals: PortableLocals = new Map([["dependencies", { value: mounted }]]);
-  const functions = new Map(
-    program.implementation.functions.map((function_) => [function_.id, function_]),
-  );
+  const functions = new Map(execution.functions.map((function_) => [function_.id, function_]));
   try {
     const completion = await executeStatements(
-      program.implementation.start.body,
+      execution.entry.body,
       locals,
       mounted,
       calls,
@@ -160,6 +161,7 @@ export async function executePortableFunctionIR(
 export async function executeLinkedProgramIR(
   linked: LinkedProgramIR,
   external: DependencyImplementations,
+  project: PortableProgramProjection,
   options: Readonly<{ distribute?: ProgramDistributionFactory }> = {},
 ): Promise<LinkedProgramExecution> {
   const expected = linked.external.map(({ name }) => name).sort();
@@ -187,8 +189,9 @@ export async function executeLinkedProgramIR(
   let distribution: ProgramDistribution | undefined;
   try {
     for (const { contribution } of linked.contributions) {
-      if (contribution.implementation.kind === "none") continue;
-      if (contribution.implementation.kind !== "portable") {
+      const implementation = project(contribution);
+      if (implementation.kind === "none") continue;
+      if (implementation.kind !== "portable") {
         throw new Error(
           `${contribution.span.file}:${contribution.span.line}:${contribution.span.column}: ` +
             `Program contribution ${JSON.stringify(contribution.id)} is source, not portable IR.`,
@@ -197,7 +200,7 @@ export async function executeLinkedProgramIR(
       const required = Object.fromEntries(
         contribution.requires.map(({ name }) => [name, dependencies[name]]),
       ) as DependencyImplementations;
-      const execution = await executeProgramContributionIR(contribution, required);
+      const execution = await executeProgramContributionIR(contribution, implementation, required);
       if (!contribution.provides.length) {
         if (execution.result !== undefined) resources.push(execution.result);
         continue;
@@ -282,6 +285,7 @@ export async function executeProgramFixtureIR(
   ir: SystemIR,
   programId: string,
   scenario: ExecutionScenario,
+  project: PortableProgramProjection,
 ): Promise<Readonly<{ calls: readonly DependencyCallTrace[]; result: unknown }>> {
   const program = ir.programs
     .flatMap(({ contributions }) => contributions)
@@ -318,7 +322,7 @@ export async function executeProgramFixtureIR(
     dependencies[dependency.name] = implementation;
   }
   try {
-    const trace = await executeProgramIR(ir, programId, dependencies);
+    const trace = await executeProgramIR(ir, programId, dependencies, project);
     return {
       calls: canonicalPortableValue(trace.calls) as readonly DependencyCallTrace[],
       result: { ok: canonicalPortableValue(trace.result ?? null) },
@@ -1321,16 +1325,6 @@ function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
   );
 }
 
-export type HotReplacementManifest = Readonly<{
-  revision: string;
-  programs: readonly Readonly<{
-    id: string;
-    environment: ProgramIR["environment"];
-    state?: TypeIR;
-    components: readonly ComponentIR[];
-  }>[];
-}>;
-
 export type HotActivation<Value, Snapshot> = Readonly<{
   value: Value;
   snapshot: Snapshot;
@@ -1338,8 +1332,8 @@ export type HotActivation<Value, Snapshot> = Readonly<{
   dispose(): void | Promise<void>;
 }>;
 
-export type HotCandidate<Value, Snapshot> = Readonly<{
-  manifest: HotReplacementManifest;
+export type HotCandidate<Value, Snapshot, Manifest = unknown> = Readonly<{
+  manifest: Manifest;
   prepare(previous: Snapshot | undefined): Promise<
     Readonly<{
       activate(): Promise<HotActivation<Value, Snapshot>>;
@@ -1352,58 +1346,21 @@ export type HotUpdateResult<Value> =
   | Readonly<{ status: "activated"; value: Value }>
   | Readonly<{ status: "rejected"; reason: string; cause?: unknown }>;
 
-export function createHotReplacementManifest(ir: SystemIR): HotReplacementManifest {
-  const programs = ir.programs.flatMap((program) =>
-    program.contributions.map((contribution) => ({
-      id: contribution.id,
-      environment: program.environment,
-      ...(contribution.ui ? { state: contribution.ui.state } : {}),
-      components: contribution.ui?.components ?? [],
-    })),
-  );
-  return { revision: stableHash(JSON.stringify(programs)), programs };
-}
-
-export function isHotReplacementCompatible(
-  previous: HotReplacementManifest,
-  next: HotReplacementManifest,
-): boolean {
-  const previousPrograms = new Map(previous.programs.map((program) => [program.id, program]));
-  for (const program of next.programs) {
-    const before = previousPrograms.get(program.id);
-    if (!before) continue;
-    if (JSON.stringify(before.environment) !== JSON.stringify(program.environment)) return false;
-    if (before.state && program.state && !compatibleType(before.state, program.state)) return false;
-    if (Boolean(before.state) !== Boolean(program.state)) return false;
-    const beforeComponents = new Map(
-      before.components.map((component) => [component.name, component]),
-    );
-    for (const component of program.components) {
-      const previousComponent = beforeComponents.get(component.name);
-      if (previousComponent && !compatibleComponent(previousComponent, component)) return false;
-    }
-  }
-  return true;
-}
-
-function compatibleComponent(previous: ComponentIR, next: ComponentIR): boolean {
-  if (JSON.stringify(previous.propCallbacks) !== JSON.stringify(next.propCallbacks)) return false;
-  if (!compatibleType(previous.state, next.state)) return false;
-  if (JSON.stringify(previous.elements) !== JSON.stringify(next.elements)) return false;
-  return true;
-}
-
 /** Serializes candidate activation and preserves the last live revision on failure. */
-export class HotUpdateCoordinator<Value, Snapshot> {
+export class HotUpdateCoordinator<Value, Snapshot, Manifest = unknown> {
   #active: HotActivation<Value, Snapshot> | undefined;
-  #manifest: HotReplacementManifest | undefined;
+  #manifest: Manifest | undefined;
   #transaction = Promise.resolve();
+
+  constructor(
+    private readonly compatible: (previous: Manifest, next: Manifest) => boolean = () => true,
+  ) {}
 
   get value(): Value | undefined {
     return this.#active?.value;
   }
 
-  replace(candidate: HotCandidate<Value, Snapshot>): Promise<HotUpdateResult<Value>> {
+  replace(candidate: HotCandidate<Value, Snapshot, Manifest>): Promise<HotUpdateResult<Value>> {
     const transaction = this.#transaction.then(() => this.#replace(candidate));
     this.#transaction = transaction.then(
       () => undefined,
@@ -1420,8 +1377,10 @@ export class HotUpdateCoordinator<Value, Snapshot> {
     await active?.dispose();
   }
 
-  async #replace(candidate: HotCandidate<Value, Snapshot>): Promise<HotUpdateResult<Value>> {
-    if (this.#manifest && !isHotReplacementCompatible(this.#manifest, candidate.manifest)) {
+  async #replace(
+    candidate: HotCandidate<Value, Snapshot, Manifest>,
+  ): Promise<HotUpdateResult<Value>> {
+    if (this.#manifest && !this.compatible(this.#manifest, candidate.manifest)) {
       return { status: "rejected", reason: "incompatible-manifest" };
     }
 
@@ -1447,39 +1406,4 @@ export class HotUpdateCoordinator<Value, Snapshot> {
     activated.resume?.();
     return { status: "activated", value: activated.value };
   }
-}
-
-function compatibleType(previous: TypeIR, next: TypeIR): boolean {
-  if (previous.kind !== next.kind) return false;
-  if (previous.kind === "record" && next.kind === "record") {
-    const fields = new Map(next.fields.map((field) => [field.name, field]));
-    return previous.fields.every((field) => {
-      const candidate = fields.get(field.name);
-      return candidate
-        ? field.optional === candidate.optional && compatibleType(field.type, candidate.type)
-        : true;
-    });
-  }
-  if (previous.kind === "array" && next.kind === "array") {
-    return compatibleType(previous.element, next.element);
-  }
-  if (previous.kind === "option" && next.kind === "option") {
-    return compatibleType(previous.value, next.value);
-  }
-  if (previous.kind === "promise" && next.kind === "promise") {
-    return compatibleType(previous.value, next.value);
-  }
-  if (previous.kind === "stream" && next.kind === "stream") {
-    return compatibleType(previous.element, next.element);
-  }
-  return JSON.stringify(previous) === JSON.stringify(next);
-}
-
-function stableHash(value: string): string {
-  let hash = 2_166_136_261;
-  for (let index = 0; index < value.length; index++) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 16_777_619);
-  }
-  return (hash >>> 0).toString(16).padStart(8, "0");
 }

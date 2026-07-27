@@ -15,6 +15,7 @@ import type { SourceCompilerExtension } from "@/compiler/extension";
 import { serializeSystemIR } from "@/compiler/ir";
 import { linkProgram } from "@/compiler/linker";
 import { compileSystem } from "@/compiler/source";
+import { serverCompilerExtension } from "@/platforms/server/adapter";
 import { webCompilerExtension } from "@/platforms/web/adapter/compiler";
 import {
   buildSystem,
@@ -24,6 +25,10 @@ import {
 } from "@/realization";
 
 const directories: string[] = [];
+const mockCompilerExtensions = Object.freeze([
+  mockCompilerExtension("server"),
+  mockCompilerExtension("web"),
+]);
 
 afterEach(async () => {
   await Promise.all(
@@ -49,7 +54,7 @@ describe("System realization", { tags: ["compiler"] }, () => {
       complete.programs
         .find(({ id }) => id === "program/api")
         ?.contributions.map(({ feature }) => feature),
-    ).toEqual(["customer.service", "operations.service", "shared"]);
+    ).toEqual(["customerService", "operationsService", "shared"]);
     expect(complete.interfaces.map(({ id }) => id)).toEqual([
       "interface/customer.web",
       "interface/operations.web",
@@ -66,7 +71,7 @@ describe("System realization", { tags: ["compiler"] }, () => {
       focused.programs
         .find(({ id }) => id === "program/api")
         ?.contributions.map(({ feature }) => feature),
-    ).toEqual(["operations.service", "shared"]);
+    ).toEqual(["operationsService", "shared"]);
     expect(focused.interfaces.map(({ id }) => id)).toEqual(["interface/operations.web"]);
   });
 
@@ -170,7 +175,7 @@ describe("System realization", { tags: ["compiler"] }, () => {
 
   test("identifies exact shared and Application-private outputs from one retained graph", async () => {
     const fixture = await incrementalFixture();
-    const revisions = createSystemRevisionSource(fixture.system, []);
+    const revisions = createSystemRevisionSource(fixture.system, mockCompilerExtensions);
     expect(revisions.current.revision).toBe(0);
 
     expect(
@@ -200,14 +205,13 @@ describe("System realization", { tags: ["compiler"] }, () => {
     );
     const operationsRevision = revisions.compile(fixture.operations);
     expect(operationsRevision.revision).toBe(1);
-    expect(operationsRevision.work.features).toEqual({ compiled: 2, reused: 3 });
-    expect(operationsRevision.work.presentations).toEqual({ compiled: 1, reused: 5 });
+    expect(operationsRevision.work.features).toEqual({ compiled: 1, reused: 2 });
     expect(operationsRevision.change?.outputs).toEqual([
       "interface/operations.web",
       "program/operations.web.browser",
     ]);
     expect(serializeSystemIR(operationsRevision.ir)).toBe(
-      serializeSystemIR(compileSystem(fixture.system)),
+      serializeSystemIR(compileSystem(fixture.system, mockCompilerExtensions)),
     );
     expect(revisions.compile(fixture.operations)).toBe(operationsRevision);
 
@@ -216,21 +220,19 @@ describe("System realization", { tags: ["compiler"] }, () => {
       fixture.operationsTypeSource.replace('"operations"', '"operations-typed"'),
     );
     const typeRevision = revisions.compile(fixture.operationsType);
-    expect(typeRevision.work.features).toEqual({ compiled: 2, reused: 3 });
-    expect(typeRevision.work.presentations).toEqual({ compiled: 0, reused: 6 });
+    expect(typeRevision.work.features).toEqual({ compiled: 1, reused: 2 });
     expect(typeRevision.change?.outputs).toEqual([
       "interface/operations.web",
       "program/operations.web.browser",
     ]);
     expect(serializeSystemIR(typeRevision.ir)).toBe(
-      serializeSystemIR(compileSystem(fixture.system)),
+      serializeSystemIR(compileSystem(fixture.system, mockCompilerExtensions)),
     );
     expect(revisions.compile(fixture.operationsType)).toBe(typeRevision);
 
     await writeFile(fixture.sharedUI, 'export const marker = "shared-2";\n');
     const sharedUIRevision = revisions.compile(fixture.sharedUI);
-    expect(sharedUIRevision.work.features).toEqual({ compiled: 4, reused: 1 });
-    expect(sharedUIRevision.work.presentations).toEqual({ compiled: 2, reused: 4 });
+    expect(sharedUIRevision.work.features).toEqual({ compiled: 2, reused: 1 });
     expect(sharedUIRevision.change?.outputs).toEqual([
       "interface/customer.web",
       "interface/operations.web",
@@ -238,7 +240,7 @@ describe("System realization", { tags: ["compiler"] }, () => {
       "program/operations.web.browser",
     ]);
     expect(serializeSystemIR(sharedUIRevision.ir)).toBe(
-      serializeSystemIR(compileSystem(fixture.system)),
+      serializeSystemIR(compileSystem(fixture.system, mockCompilerExtensions)),
     );
 
     await writeFile(
@@ -246,24 +248,22 @@ describe("System realization", { tags: ["compiler"] }, () => {
       fixture.sharedSource.replace('label: "shared"', 'label: "shared-2"'),
     );
     const sharedRevision = revisions.compile(fixture.shared);
-    expect(sharedRevision.work.features).toEqual({ compiled: 1, reused: 4 });
-    expect(sharedRevision.work.presentations).toEqual({ compiled: 0, reused: 6 });
+    expect(sharedRevision.work.features).toEqual({ compiled: 1, reused: 2 });
     expect(sharedRevision.change?.outputs).toEqual(["program/api"]);
     expect(serializeSystemIR(sharedRevision.ir)).toBe(
-      serializeSystemIR(compileSystem(fixture.system)),
+      serializeSystemIR(compileSystem(fixture.system, mockCompilerExtensions)),
     );
   });
 
   test("reuses exact cached System meaning and invalidates it from resolved source changes", async () => {
     const fixture = await incrementalFixture();
 
-    const first = createSystemRevisionSource(fixture.system, [], true);
+    const first = createSystemRevisionSource(fixture.system, mockCompilerExtensions, true);
     expect(first.current.cache).toBe("miss");
 
-    const second = createSystemRevisionSource(fixture.system, [], true);
+    const second = createSystemRevisionSource(fixture.system, mockCompilerExtensions, true);
     expect(second.current.cache).toBe("hit");
-    expect(second.current.work.features).toEqual({ compiled: 0, reused: 5 });
-    expect(second.current.work.presentations).toEqual({ compiled: 0, reused: 6 });
+    expect(second.current.work.features).toEqual({ compiled: 0, reused: 3 });
     expect(serializeSystemIR(second.current.ir)).toBe(serializeSystemIR(first.current.ir));
 
     const extensionSource = resolve(fixture.system, "../../cache-extension.ts");
@@ -275,50 +275,57 @@ describe("System realization", { tags: ["compiler"] }, () => {
         return { revision: 1 };
       },
     };
-    const extended = createSystemRevisionSource(fixture.system, [extension], true);
+    const extended = createSystemRevisionSource(
+      fixture.system,
+      [...mockCompilerExtensions, extension],
+      true,
+    );
     expect(extended.current.cache).toBe("miss");
     expect(extended.current.ir.system.extensions).toEqual({
       "cache-probe": { revision: 1 },
     });
-    expect(createSystemRevisionSource(fixture.system, [extension], true).current.cache).toBe("hit");
+    expect(
+      createSystemRevisionSource(fixture.system, [...mockCompilerExtensions, extension], true)
+        .current.cache,
+    ).toBe("hit");
     await writeFile(extensionSource, "export const revision = 2;\n");
-    expect(createSystemRevisionSource(fixture.system, [extension], true).current.cache).toBe(
-      "miss",
-    );
+    expect(
+      createSystemRevisionSource(fixture.system, [...mockCompilerExtensions, extension], true)
+        .current.cache,
+    ).toBe("miss");
 
     await writeFile(
       fixture.operations,
-      fixture.operationsSource.replace('label: "operations"', 'label: "cached-operations"'),
+      fixture.operationsSource.replaceAll("browser", "browserNext"),
     );
-    const changed = createSystemRevisionSource(fixture.system, [], true);
+    const changed = createSystemRevisionSource(fixture.system, mockCompilerExtensions, true);
     expect(changed.current.cache).toBe("miss");
     expect(serializeSystemIR(changed.current.ir)).not.toBe(serializeSystemIR(first.current.ir));
   });
 
   test("restores unaffected semantic units from a stale development cache", async () => {
     const fixture = await incrementalFixture();
-    const first = createSystemRevisionSource(fixture.system, [], true);
+    const first = createSystemRevisionSource(fixture.system, mockCompilerExtensions, true);
     expect(first.current.cache).toBe("miss");
 
     await writeFile(
       fixture.operations,
       fixture.operationsSource.replace('label: "operations"', 'label: "operations-restored"'),
     );
-    const restored = createSystemRevisionSource(fixture.system, [], true);
+    const restored = createSystemRevisionSource(fixture.system, mockCompilerExtensions, true);
 
     expect(restored.current.cache).toBe("miss");
-    expect(restored.current.work.features).toEqual({ compiled: 2, reused: 3 });
-    expect(restored.current.work.presentations).toEqual({ compiled: 1, reused: 5 });
+    expect(restored.current.work.features).toEqual({ compiled: 1, reused: 2 });
     expect(serializeSystemIR(restored.current.ir)).toBe(
-      serializeSystemIR(compileSystem(fixture.system)),
+      serializeSystemIR(compileSystem(fixture.system, mockCompilerExtensions)),
     );
 
     await writeFile(resolve(fixture.system, "../../.kit/cache/compiler/system.json"), "{broken");
-    const recovered = createSystemRevisionSource(fixture.system, [], true);
+    const recovered = createSystemRevisionSource(fixture.system, mockCompilerExtensions, true);
     expect(recovered.current.cache).toBe("miss");
-    expect(recovered.current.work.features).toEqual({ compiled: 5, reused: 0 });
+    expect(recovered.current.work.features).toEqual({ compiled: 3, reused: 0 });
     expect(serializeSystemIR(recovered.current.ir)).toBe(
-      serializeSystemIR(compileSystem(fixture.system)),
+      serializeSystemIR(compileSystem(fixture.system, mockCompilerExtensions)),
     );
   });
 
@@ -327,7 +334,10 @@ describe("System realization", { tags: ["compiler"] }, () => {
     { tags: ["package"], timeout: 30_000 },
     () => {
       const system = resolve(import.meta.dirname, "../examples/authenticated-crud/src/system.ts");
-      const revisions = createSystemRevisionSource(system, [webCompilerExtension]);
+      const revisions = createSystemRevisionSource(system, [
+        serverCompilerExtension,
+        webCompilerExtension,
+      ]);
       const initial = serializeSystemIR(revisions.current.ir);
 
       const revision = revisions.compile(
@@ -345,6 +355,7 @@ describe("System realization", { tags: ["compiler"] }, () => {
     () => {
       const root = resolve(import.meta.dirname, "../examples/authenticated-crud/src");
       const revisions = createSystemRevisionSource(resolve(root, "system.ts"), [
+        serverCompilerExtension,
         webCompilerExtension,
       ]);
       const customer = resolve(root, "apps/customer.tsx");
@@ -508,6 +519,10 @@ function adapter(
   name: string,
   overrides: Partial<PlatformAdapterImplementation> = {},
 ): PlatformAdapterImplementation {
+  const compiler = [
+    mockCompilerExtension(name),
+    ...(overrides.compiler ?? []),
+  ] satisfies readonly SourceCompilerExtension[];
   return {
     name,
     async develop() {
@@ -517,7 +532,16 @@ function adapter(
       return { directory: input.output, entries: [] };
     },
     ...overrides,
+    compiler,
   };
+}
+
+function mockCompilerExtension(name: string): SourceCompilerExtension {
+  return Object.freeze({
+    name,
+    program: () => ({ ir: { version: 1 } }),
+    interface: () => ({ ir: { version: 1 } }),
+  });
 }
 
 function session(
@@ -540,12 +564,21 @@ async function fixture(): Promise<string> {
     resolve(directory, "src/system.ts"),
     `
 declare const featureContract: unique symbol;
+declare const applicationContract: unique symbol;
 type Feature<Contract> = Readonly<{ readonly [featureContract]?: Contract }>;
+type Application<Contract> = Readonly<{
+  readonly interfaces: object;
+  readonly [applicationContract]?: {
+    Application: Contract;
+    Features: Contract extends { Features: infer Features } ? Features : {};
+    Interfaces: Contract extends { Interfaces: infer Interfaces } ? Interfaces : {};
+  };
+}>;
 function createFeature<Contract>(definition: object): Feature<Contract> {
   return definition as Feature<Contract>;
 }
-function createApplication<Contract>(definition: object): Feature<Contract> {
-  return definition as Feature<Contract>;
+function createApplication<Contract>(definition: object): Application<Contract> {
+  return definition as Application<Contract>;
 }
 function createInterface<Contract>(definition: object): Contract {
   return definition as Contract;
@@ -558,33 +591,38 @@ type Program<Environment, Contract extends object = {}> =
 type Server = { Name: "server"; Platform: { Name: "server" } };
 type Browser = { Name: "browser-main"; Platform: { Name: "web" } };
 type Shared = { Programs: { api: Program<Server> } };
-type Service = { Programs: { api: Program<Server>; browser: Program<Browser> } };
+type Service<Name extends string> = {
+  Instance: Name;
+  Programs: { api: Program<Server>; browser: Program<Browser> };
+};
 type Web = { Interface: { Platform: { Name: "web" } } };
-type Product = {
-  App: true;
-  Features: { service: Service };
+type Product<Name extends string> = {
+  Features: { service: Service<Name> };
   Interfaces: { web: Web };
 };
 const shared = createFeature<Shared>({ programs: { api: {} } });
-const operationsService = createFeature<Service>({ programs: { api: {}, browser: {} } });
+const operationsService = createFeature<Service<"operations">>({
+  programs: { api: {}, browser: {} },
+});
 const operationsWeb = createInterface<Web>({
   presentation: { parameters: {}, create() { return {}; } },
 });
-const operations = createApplication<Product>({
-  features: { service: operationsService },
+const operations = createApplication<Product<"operations">>({
   interfaces: { web: operationsWeb },
 });
-const customerService = createFeature<Service>({ programs: { api: {}, browser: {} } });
+const customerService = createFeature<Service<"customer">>({
+  programs: { api: {}, browser: {} },
+});
 const customerWeb = createInterface<Web>({
   presentation: { parameters: {}, create() { return {}; } },
 });
-const customer = createApplication<Product>({
-  features: { service: customerService },
+const customer = createApplication<Product<"customer">>({
   interfaces: { web: customerWeb },
 });
 export default createSystem({
   metadata: { name: "Company" },
-  features: { shared, operations, customer },
+  features: { shared, operationsService, customerService },
+  applications: { operations, customer },
 });
 `,
   );
@@ -608,12 +646,21 @@ async function incrementalFixture(): Promise<{
   await mkdir(source, { recursive: true });
   const contracts = `
 export declare const featureContract: unique symbol;
+export declare const applicationContract: unique symbol;
 export type Feature<Contract> = Readonly<{ readonly [featureContract]?: Contract }>;
+export type Application<Contract> = Readonly<{
+  readonly interfaces: object;
+  readonly [applicationContract]?: {
+    Application: Contract;
+    Features: Contract extends { Features: infer Features } ? Features : {};
+    Interfaces: Contract extends { Interfaces: infer Interfaces } ? Interfaces : {};
+  };
+}>;
 export function createFeature<Contract>(definition: object): Feature<Contract> {
   return definition as Feature<Contract>;
 }
-export function createApplication<Contract>(definition: object): Feature<Contract> {
-  return definition as Feature<Contract>;
+export function createApplication<Contract>(definition: object): Application<Contract> {
+  return definition as Application<Contract>;
 }
 export function createInterface<Contract>(definition: object): Contract {
   return definition as Contract;
@@ -638,6 +685,7 @@ import { marker } from "./shared-ui";
 ${name === "operations" ? 'import type { OperationsLabel } from "./operations-label";' : ""}
 void marker;
 type Service = {
+  Instance: "${name}";
   Programs: {
     browser: Program<Browser, { State: {
       label: "${name}";
@@ -647,18 +695,16 @@ type Service = {
 };
 type Web = { Interface: { Platform: { Name: "web" } } };
 type App = {
-  App: true;
   Features: { service: Service };
   Interfaces: { web: Web };
 };
-const service = createFeature<Service>({
+export const ${name}Service = createFeature<Service>({
   programs: { browser: {} },
 });
 const web = createInterface<Web>({
   presentation: { parameters: {}, create() { return {}; } },
 });
 export const ${name} = createApplication<App>({
-  features: { service },
   interfaces: { web },
 });
 `;
@@ -684,11 +730,14 @@ export const ${name} = createApplication<App>({
       `
 import { createSystem } from "./contracts";
 import { customer } from "./customer";
+import { customerService } from "./customer";
 import { operations } from "./operations";
+import { operationsService } from "./operations";
 import { shared } from "./shared";
 export default createSystem({
   metadata: { name: "Company" },
-  features: { shared, operations, customer },
+  features: { shared, operationsService, customerService },
+  applications: { operations, customer },
 });
 `,
     ),

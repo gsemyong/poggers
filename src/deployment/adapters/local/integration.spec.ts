@@ -17,6 +17,8 @@ import {
   type DependencyBinding,
 } from "@/deployment";
 import { createLocalDeploymentAdapter } from "@/deployment/adapters/local";
+import type { ServerPlatform } from "@/platforms/server";
+import { serverCompilerExtension } from "@/platforms/server/adapter";
 import { buildServerProgram } from "@/platforms/server/adapter/rust/compiler";
 import {
   defineServerProductionDependency,
@@ -58,13 +60,16 @@ test.skipIf(spawnSync("nats-server", ["--version"], { stdio: "ignore" }).status 
           paths: {
             "@/*": [resolve(import.meta.dirname, "../../../*")],
             kit: [resolve(import.meta.dirname, "../../../index.ts")],
+            "kit/features/actor": [
+              resolve(import.meta.dirname, "../../../features/actor/index.ts"),
+            ],
             "kit/server": [resolve(import.meta.dirname, "../../../platforms/server/index.ts")],
           },
         },
       }),
     );
     await writeFile(source, actorSystemSource());
-    const ir = compileSystem(source);
+    const ir = compileSystem(source, [serverCompilerExtension]);
     const program = ir.programs.find(({ name }) => name === "server");
     if (!program) throw new Error("Local Deployment fixture has no server Program.");
 
@@ -122,7 +127,7 @@ test.skipIf(spawnSync("nats-server", ["--version"], { stdio: "ignore" }).status 
     const system = {} as System<{
       Programs: {
         server: {
-          Environment: { Name: "server"; Platform: { Name: "server" } };
+          Environment: { Name: "server"; Platform: ServerPlatform };
           Requires: { alarm: object; events: object; recorder: object };
           Provides: {};
         };
@@ -280,12 +285,11 @@ function startNats(directory: string, port: number): Promise<ChildProcess> {
 function actorSystemSource(): string {
   return `
 import {
-  createActor,
   createFeature,
   createSystem,
-  type Actor,
   type Dependency,
 } from "kit";
+import { createActor, type Actor } from "kit/features/actor";
 import type { ServerProcess } from "kit/server";
 
 type Counter = Actor<{

@@ -8,7 +8,8 @@ import { afterEach, describe, expect, test } from "vitest";
 
 import type { DevelopmentEvent } from "@/adapter";
 import { compileSystem } from "@/compiler/source";
-import { createServerPlatformAdapter } from "@/platforms/server/adapter";
+import { createServerPlatformAdapter, serverCompilerExtension } from "@/platforms/server/adapter";
+import { webCompilerExtension } from "@/platforms/web/adapter/compiler";
 import { createSystemRevisionSource } from "@/realization";
 
 const temporaryDirectories: string[] = [];
@@ -31,7 +32,9 @@ describe("server Platform adapter", () => {
     );
     const adapter = createServerPlatformAdapter();
 
-    expect(() => compileSystem(fixture.system)).not.toThrow();
+    expect(() => compileSystem(fixture.system)).toThrow(
+      /Platform "server" has no registered compiler dialect/,
+    );
     expect(() => compileSystem(fixture.system, adapter.compiler ?? [])).toThrow(
       /Server Program contribution .* must lower completely to portable meaning.*SwitchStatement/,
     );
@@ -39,7 +42,7 @@ describe("server Platform adapter", () => {
 
   test("emits and launches one independent artifact per named Program", async () => {
     const fixture = await createFixture(twoProgramSource());
-    const ir = compileSystem(fixture.system);
+    const ir = compileSystem(fixture.system, [serverCompilerExtension]);
     const output = resolve(fixture.directory, "dist");
     const result = await createServerPlatformAdapter().build({
       directory: fixture.directory,
@@ -84,6 +87,68 @@ describe("server Platform adapter", () => {
       await expect(run(artifact.path)).resolves.toBe(0);
     }
   }, 120_000);
+
+  test(
+    "serves a headless HTTP Program without web Platform meaning",
+    { tags: ["production"], timeout: 120_000 },
+    async () => {
+      const fixture = await createFixture(httpProgramSource("production"));
+      const ir = compileSystem(fixture.system, [serverCompilerExtension]);
+      const output = resolve(fixture.directory, "dist");
+      const result = await createServerPlatformAdapter().build({
+        directory: fixture.directory,
+        system: fixture.system,
+        ir,
+        programs: ir.programs,
+        interfaces: [],
+        platform: "server",
+        output,
+      });
+      const artifact = result.entries[0]!;
+      const port = await availablePort();
+      const child = spawn(artifact.path, [], {
+        env: { ...process.env, HOST: "127.0.0.1", PORT: String(port) },
+        stdio: "pipe",
+      });
+      let diagnostics = "";
+      child.stderr.setEncoding("utf8").on("data", (value: string) => (diagnostics += value));
+      const exited = new Promise<Readonly<{ code: number | null; signal: NodeJS.Signals | null }>>(
+        (resolvePromise, reject) => {
+          child.once("error", reject);
+          child.once("exit", (code, signal) => resolvePromise({ code, signal }));
+        },
+      );
+      let shutdownFailure: Error | undefined;
+      try {
+        await expect
+          .poll(() => fetchText(`http://127.0.0.1:${port}/probe`), { timeout: 10_000 })
+          .toBe("production");
+      } finally {
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGINT");
+        const stopped = await Promise.race([
+          exited,
+          new Promise<never>((_, reject) => {
+            const timeout = setTimeout(() => {
+              child.kill("SIGKILL");
+              reject(new Error(`Headless HTTP Program did not stop: ${diagnostics}`));
+            }, 10_000);
+            exited.finally(() => clearTimeout(timeout)).catch(() => undefined);
+          }),
+        ]);
+        if (stopped.signal && stopped.signal !== "SIGINT") {
+          shutdownFailure = new Error(
+            `Headless HTTP Program exited from ${stopped.signal}: ${diagnostics}`,
+          );
+        }
+        if (stopped.code !== 0 && stopped.code !== null) {
+          shutdownFailure = new Error(
+            `Headless HTTP Program exited with ${stopped.code}: ${diagnostics}`,
+          );
+        }
+      }
+      if (shutdownFailure) throw shutdownFailure;
+    },
+  );
 
   test("restarts development Processes after a source update", async () => {
     const fixture = await createFixture(httpProgramSource("first"));
@@ -267,7 +332,7 @@ async function createProviderFixture(value: string) {
 }
 
 function revisionSource(system: string) {
-  return createSystemRevisionSource(system, []);
+  return createSystemRevisionSource(system, [serverCompilerExtension, webCompilerExtension]);
 }
 
 function twoProgramSource(): string {

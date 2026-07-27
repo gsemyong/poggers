@@ -2,7 +2,7 @@ import { Buffer } from "node:buffer";
 import { createHash, randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
-import type { ServerResponse } from "node:http";
+import type { IncomingHttpHeaders, ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { basename, dirname, extname, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -23,6 +23,8 @@ import {
 
 import type {
   DevelopmentReporter,
+  DevelopmentProgramAttachments,
+  HttpAssetExposure,
   ProductionArtifact,
   ProductionReporter,
   SystemCompilationRevision,
@@ -32,15 +34,13 @@ import {
   projectDependencyContracts,
   selectDependencyProviders,
   type SystemIR,
-  type ComponentIR,
   type DependencyContractIR,
+  type PlatformInterfaceIR,
   type ProgramIR,
   type SelectedDependencyProviderIR,
 } from "@/compiler/ir";
 import { collectProgramManifest, linkProgram } from "@/compiler/linker";
-import { compilePresentationSource } from "@/compiler/presentation";
 import { resolveSystem, type SystemPaths } from "@/compiler/source";
-import { createHotReplacementManifest } from "@/execution/interpreter";
 import { packageSourceAliases } from "@/package";
 import { createWebResponseCache } from "@/platforms/web/adapter/cache";
 import {
@@ -54,6 +54,7 @@ import {
   webRouteHydrationMetadata,
   type prepareInitialWebPresentation,
   type WebDocumentIR,
+  type WebRouteHydrationIR,
 } from "@/platforms/web/adapter/document";
 import {
   createWebServiceWorkerPlan,
@@ -66,26 +67,41 @@ import {
 } from "@/platforms/web/adapter/installation";
 import {
   collectWebRoutes,
+  createWebHotReplacementManifest,
   compiledWebComponentIdentity,
   compiledWebRoute,
   createCompiledWebComponentResolver,
+  matchWebRouteBranch,
   matchWebRoute,
   resolveWebDestination,
   validateWebRouteMetadata,
+  webInterfaceCompilerIR,
+  webRouteBranch,
   webRouteCacheControl,
   webProgramCompilerIR,
+  webProgramRoot,
+  webProgramUI,
   type CompiledWebComponentIR,
   type CompiledWebRouteIR,
+  type WebComponentContractIR,
   type WebRenderNodeIR,
+  type WebRouteIR,
+  type WebRouteMatch,
   WebRouteValidationError,
 } from "@/platforms/web/adapter/lowering";
 import {
   validateWebPresentationSource,
   webResetCss,
 } from "@/platforms/web/adapter/presentation/compiler";
-import type { DevelopmentWebLoaderRegistry } from "@/platforms/web/adapter/server";
+import { compilePresentationSource } from "@/platforms/web/adapter/presentation/source";
 import { transformComponentSource } from "@/platforms/web/adapter/ui/component/compiler";
-import type { WebRouteMetadataResult } from "@/platforms/web/routing";
+import {
+  isWebRedirectStatus,
+  isWebRouteStatus,
+  type WebRedirectStatus,
+  type WebRouteMetadataResult,
+  type WebRouteStatus,
+} from "@/platforms/web/routing";
 
 export type DevelopmentServer = Readonly<{
   port: number;
@@ -104,6 +120,7 @@ type PreparedInterface = Readonly<{
   updateKind: "full" | "presentation";
   routeEntries: readonly WebRouteEntry[];
   workers: readonly WebWorkerEntry[];
+  serviceWorkerBootstrap?: string;
   serviceWorker?: string;
 }>;
 
@@ -134,7 +151,7 @@ export type WebBuild = Readonly<{
   entries: readonly ProductionArtifact[];
 }>;
 
-export const WEB_ROUTE_ARTIFACT_VERSION = 3 as const;
+export const WEB_ROUTE_ARTIFACT_VERSION = 7 as const;
 const DEVELOPMENT_WEB_CACHE_BYTES = 16 * 1024 * 1024;
 const DEVELOPMENT_WEB_CACHE_ENTRIES = 256;
 const DEVELOPMENT_WEB_CACHE_REFRESHES = 8;
@@ -143,8 +160,167 @@ const DEVELOPMENT_WEB_REQUEST_TIMEOUT_MS = 30_000;
 type PreparedRouteDocument = Readonly<{
   route: ReturnType<typeof collectWebRoutes>[number];
   document: WebDocumentIR;
-  request: false | Readonly<{ loader: boolean; view: WebRenderNodeIR }>;
+  request:
+    | false
+    | Readonly<{
+        branch: readonly Readonly<{
+          route: ReturnType<typeof collectWebRoutes>[number];
+          loader: boolean;
+          view: WebRenderNodeIR;
+        }>[];
+      }>;
 }>;
+
+export type WebRouteDeliveryIR = Readonly<{
+  production: "client" | "precomputed" | "request";
+  reasons: readonly string[];
+  stream: boolean;
+  representations: readonly ("document" | "markdown" | "route-data")[];
+  client: Readonly<{
+    runtime: boolean;
+    hydration: boolean;
+  }>;
+  worker: Readonly<{
+    cacheDocument: boolean;
+  }>;
+  discovery: Readonly<{
+    index: boolean;
+    sitemap: boolean;
+  }>;
+}>;
+
+type DeliveryRouteInput = Readonly<{
+  route: WebRouteIR;
+  document: WebDocumentIR;
+  request: PreparedRouteDocument["request"];
+}>;
+
+type DeliveryBranch = readonly Readonly<{ route: WebRouteIR; loader: boolean }>[];
+
+/** Derives one inspectable delivery decision from normalized Route and artifact meaning. */
+export function planWebRouteDelivery(input: DeliveryRouteInput): WebRouteDeliveryIR {
+  const branch = input.request === false ? [] : input.request.branch;
+  const hasLoader = branch.some(({ loader }) => loader);
+  const stream =
+    input.route.deferred.length > 0 || branch.some(({ route }) => route.deferred.length > 0);
+  const production =
+    input.route.document === "shell"
+      ? "client"
+      : input.request === false
+        ? "precomputed"
+        : "request";
+  const reasons = [
+    production === "client"
+      ? "document:client-shell"
+      : production === "precomputed"
+        ? "document:request-invariant"
+        : "document:request-dependent",
+    ...(input.route.params.length ? ["request:path-parameters"] : []),
+    ...(input.route.search.length ? ["request:search-parameters"] : []),
+    ...(hasLoader ? ["request:loader"] : []),
+    ...(stream ? ["response:deferred-stream"] : []),
+    input.document.entry === false ? "client:proven-inert" : "client:runtime",
+    input.route.cache === false ? "cache:no-store" : `cache:${input.route.cache.scope}`,
+  ];
+  const markdown =
+    input.route.document === "content" &&
+    !input.route.metadata.robots
+      ?.split(",")
+      .some((value) => value.trim().toLowerCase() === "noindex") &&
+    branch
+      .filter(({ loader }) => loader)
+      .every(({ route }) => route.cache !== false && route.cache.scope === "public") &&
+    !stream;
+  const cacheDocument =
+    input.route.params.length === 0 &&
+    input.route.search.length === 0 &&
+    (input.route.document === "shell" ||
+      (input.route.cache !== false && input.route.cache.scope === "public"));
+  const discovery = planWebRouteDiscovery(input.route, branch);
+  return Object.freeze({
+    production,
+    reasons: Object.freeze(reasons),
+    stream,
+    representations: Object.freeze([
+      "document" as const,
+      ...(markdown ? (["markdown"] as const) : []),
+      ...(input.request === false ? [] : (["route-data"] as const)),
+    ]),
+    client: Object.freeze({
+      runtime: input.document.entry !== false,
+      hydration: input.document.hydration !== false,
+    }),
+    worker: Object.freeze({ cacheDocument }),
+    discovery,
+  });
+}
+
+function planWebRouteDiscovery(
+  route: WebRouteIR,
+  branch: DeliveryBranch,
+): WebRouteDeliveryIR["discovery"] {
+  const publiclyReadable = branch
+    .filter(({ loader }) => loader)
+    .every(({ route }) => route.cache !== false && route.cache.scope === "public");
+  const index =
+    route.document === "content" &&
+    route.status === 200 &&
+    publiclyReadable &&
+    !route.metadata.robots?.split(",").some((value) => value.trim().toLowerCase() === "noindex");
+  return Object.freeze({
+    index,
+    sitemap: index && route.params.length === 0 && route.search.length === 0,
+  });
+}
+
+type WebDiscoveryRoute = Readonly<{
+  route: Pick<WebRouteIR, "metadata" | "path">;
+  discovery: WebRouteDeliveryIR["discovery"];
+}>;
+
+export type WebDiscoveryResources = Readonly<{
+  robots: string;
+  sitemap: string;
+}>;
+
+/** @internal Renders origin-owned discovery resources from relative Route meaning. */
+export function renderWebDiscoveryResources(
+  origin: string,
+  routes: readonly WebDiscoveryRoute[],
+): WebDiscoveryResources {
+  const publicOrigin = new URL(origin);
+  if (!["http:", "https:"].includes(publicOrigin.protocol)) {
+    throw new TypeError(`Web discovery origin ${JSON.stringify(origin)} must use HTTP or HTTPS.`);
+  }
+  const normalizedOrigin = publicOrigin.origin;
+  const locations = new Set<string>();
+  for (const { route, discovery } of routes) {
+    if (!discovery.sitemap) continue;
+    const location = new URL(route.metadata.canonical ?? route.path, normalizedOrigin);
+    if (location.origin !== normalizedOrigin) continue;
+    locations.add(location.href);
+  }
+  const sitemap = [...locations]
+    .sort()
+    .map((location) => `<url><loc>${escapeWebDiscoveryXml(location)}</loc></url>`)
+    .join("");
+  return Object.freeze({
+    robots:
+      `User-agent: *\nAllow: /\n` + `Sitemap: ${new URL("/sitemap.xml", normalizedOrigin).href}\n`,
+    sitemap:
+      `<?xml version="1.0" encoding="UTF-8"?>` +
+      `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${sitemap}</urlset>\n`,
+  });
+}
+
+function escapeWebDiscoveryXml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&apos;");
+}
 
 type PreparedProductionDocuments = Readonly<{
   routes: readonly PreparedRouteDocument[];
@@ -175,6 +351,7 @@ function webInterfaceContract(
   interfaceId: string,
 ): Readonly<{
   interface: SystemIR["interfaces"][number];
+  applicationName: string;
   uiProgram: string;
   components: Readonly<Record<string, WebComponentEnvironmentContract>>;
   headless: readonly ProgramIR[];
@@ -191,7 +368,7 @@ function webInterfaceContract(
     programs
       .filter(
         ({ environment, contributions }) =>
-          environment.name === "browser-main" && contributions.some(({ ui }) => ui),
+          environment.name === "browser-main" && contributions.some(webProgramUI),
       )
       .map(({ name }) => name),
   );
@@ -207,11 +384,11 @@ function webInterfaceContract(
     if (
       program.name !== uiProgram ||
       program.environment.name !== "browser-main" ||
-      !program.contributions.some(({ ui }) => ui)
+      !program.contributions.some(webProgramUI)
     )
       continue;
     for (const contribution of program.contributions) {
-      for (const component of contribution.ui?.components ?? []) {
+      for (const component of webProgramUI(contribution)?.components ?? []) {
         const name = runtimeComponentName(contribution.feature, component.name);
         if (components[name]) {
           throw new Error(`Duplicate runtime Component ${JSON.stringify(name)}.`);
@@ -230,6 +407,7 @@ function webInterfaceContract(
   const installation = planWebInstallation(ir, interface_.id, routes);
   return {
     interface: interface_,
+    applicationName: ir.apps.find(({ path }) => path === interface_.app)?.name ?? ir.system.name,
     uiProgram,
     components,
     headless,
@@ -295,7 +473,9 @@ function runtimeComponentName(feature: string, component: string): string {
   return feature ? `@feature/${feature}/component/${component}` : component;
 }
 
-function componentEnvironmentContract(component: ComponentIR): WebComponentEnvironmentContract {
+function componentEnvironmentContract(
+  component: WebComponentContractIR,
+): WebComponentEnvironmentContract {
   return {
     elements: Object.fromEntries(component.elements.map(({ name, element }) => [name, element])),
     state:
@@ -304,13 +484,7 @@ function componentEnvironmentContract(component: ComponentIR): WebComponentEnvir
   };
 }
 
-/**
- * Proves whether one web Interface needs a browser runtime.
- *
- * This is intentionally conservative: an unknown view or any authored lifecycle,
- * dependency, state, action, worker, installation, shell, deferred boundary, or
- * temporal Presentation keeps the client runtime.
- */
+/** Proves whether any Route in one web Interface requires the browser runtime. */
 export function webInterfaceRequiresClientRuntime(
   ir: SystemIR,
   interfaceId: string,
@@ -320,57 +494,146 @@ export function webInterfaceRequiresClientRuntime(
   ),
 ): boolean {
   const contract = webInterfaceContract(ir, interfaceId);
-  if (
-    contract.installation ||
-    contract.headless.length ||
-    contract.workers.length ||
-    contract.routes.some(({ deferred, document }) => document === "shell" || deferred.length) ||
-    compiledComponents.some(({ view }) => view === false)
-  ) {
+  if (!contract.routes.length) {
+    return interfaceRuntimeBaseline(ir, contract, compiledComponents);
+  }
+  return contract.routes.some((route) =>
+    routeRequiresClientRuntime(ir, contract, route, compiledComponents),
+  );
+}
+
+/** Proves whether one composed Route branch requires the browser runtime. */
+export function webRouteRequiresClientRuntime(
+  ir: SystemIR,
+  interfaceId: string,
+  route: WebRouteIR,
+  compiledComponents = collectCompiledWebComponents(
+    ir,
+    webInterfaceContract(ir, interfaceId).uiProgram,
+  ),
+): boolean {
+  return routeRequiresClientRuntime(
+    ir,
+    webInterfaceContract(ir, interfaceId),
+    route,
+    compiledComponents,
+  );
+}
+
+function routeRequiresClientRuntime(
+  ir: SystemIR,
+  contract: ReturnType<typeof webInterfaceContract>,
+  route: WebRouteIR,
+  compiledComponents: readonly CompiledWebComponentIR[],
+): boolean {
+  if (interfaceRuntimeLifecycle(ir, contract)) return true;
+  const program = ir.programs.find(
+    ({ name, environment }) =>
+      name === contract.uiProgram &&
+      environment.name === "browser-main" &&
+      environment.platform === "web",
+  );
+  if (!program || route.document === "shell") return true;
+  const branch = webRouteBranch(contract.routes, route);
+  if (branch.some(({ deferred }) => deferred.length)) return true;
+  const compiledRoutes = branch.map((entry) => compiledWebRoute(ir, contract.uiProgram, entry));
+  if (compiledRoutes.some((entry) => !entry)) return true;
+  let components: readonly CompiledWebComponentIR[];
+  try {
+    components = compiledRoutes.flatMap((entry) =>
+      compiledComponentClosure(
+        routeIdentity(route),
+        entry!.implementation.view,
+        compiledComponents,
+      ),
+    );
+  } catch {
     return true;
   }
+  const animated = collectPresentationDependencies(ir, contract.uiProgram);
+  for (const component of components) {
+    const contribution = program.contributions.find(({ feature }) => feature === component.feature);
+    const meaning = contribution
+      ? webProgramUI(contribution)?.components.find(({ name }) => name === component.name)
+      : undefined;
+    if (
+      !meaning ||
+      typeCarriesRuntimeState(meaning.state) ||
+      meaning.actions.length ||
+      meaning.propCallbacks.length ||
+      meaning.implementation.state ||
+      meaning.implementation.actions ||
+      meaning.implementation.mount ||
+      (animated[runtimeComponentName(component.feature, component.name)] ?? []).some(
+        ({ animations }) => animations.length,
+      )
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function interfaceRuntimeBaseline(
+  ir: SystemIR,
+  contract: ReturnType<typeof webInterfaceContract>,
+  fallbackComponents: readonly CompiledWebComponentIR[],
+): boolean {
+  if (interfaceRuntimeLifecycle(ir, contract)) return true;
+  if (fallbackComponents.some(({ view }) => view === false)) return true;
   const programs = ir.programs.filter(
     ({ name, environment }) =>
       name === contract.uiProgram &&
       environment.name === "browser-main" &&
       environment.platform === "web",
   );
-  for (const { contributions } of programs) {
-    for (const contribution of contributions) {
-      const ui = contribution.ui;
-      if (!ui) continue;
-      if (
-        contribution.requires.length ||
-        contribution.provides.length ||
-        typeCarriesRuntimeState(ui.state) ||
-        ui.actions.length
-      ) {
-        return true;
-      }
-      if (
-        ui.components.some(
-          (component) =>
-            typeCarriesRuntimeState(component.state) ||
-            component.actions.length > 0 ||
-            component.propCallbacks.length > 0 ||
-            component.implementation.state ||
-            component.implementation.actions ||
-            component.implementation.mount,
-        )
-      ) {
-        return true;
-      }
-    }
-  }
-  return ir.presentations
-    .filter(
-      ({ interface: owner }) =>
-        owner === contract.interface.path || owner === contract.interface.id,
+  if (contract.routes.length && fallbackComponents.length === 0) return false;
+  return (
+    programs.some(({ contributions }) =>
+      contributions.some((contribution) => {
+        const ui = webProgramUI(contribution);
+        return Boolean(
+          ui &&
+          (typeCarriesRuntimeState(ui.state) ||
+            ui.actions.length ||
+            ui.components.some(
+              (component) =>
+                typeCarriesRuntimeState(component.state) ||
+                component.actions.length ||
+                component.propCallbacks.length ||
+                component.implementation.state ||
+                component.implementation.actions ||
+                component.implementation.mount,
+            )),
+        );
+      }),
+    ) ||
+    (webInterfaceCompilerIR(contract.interface.extensions?.web).presentations ?? []).some(
+      ({ animations }) => animations.length > 0,
     )
-    .some(({ animations }) => animations.length > 0);
+  );
 }
 
-function typeCarriesRuntimeState(type: ComponentIR["state"]): boolean {
+function interfaceRuntimeLifecycle(
+  ir: SystemIR,
+  contract: ReturnType<typeof webInterfaceContract>,
+): boolean {
+  const programs = ir.programs.filter(
+    ({ name, environment }) =>
+      name === contract.uiProgram &&
+      environment.name === "browser-main" &&
+      environment.platform === "web",
+  );
+  return Boolean(
+    contract.headless.length ||
+    contract.workers.some(({ environment }) => environment.name === "browser-worker") ||
+    programs.some(({ contributions }) =>
+      contributions.some((contribution) => webProgramUI(contribution)?.start),
+    ),
+  );
+}
+
+function typeCarriesRuntimeState(type: WebComponentContractIR["state"]): boolean {
   return type.kind !== "record" || type.fields.length > 0;
 }
 
@@ -400,13 +663,11 @@ export async function buildWebInterface(options: {
       {
         revision: 0,
         ir: options.ir,
-        presentationSources: new Set(),
         outputSources: {},
         sourceFiles: [],
         cache: "miss",
         work: {
           features: { compiled: 0, reused: 0 },
-          presentations: { compiled: 0, reused: 0 },
         },
       },
     );
@@ -416,11 +677,17 @@ export async function buildWebInterface(options: {
       prepared.interface,
     );
     let compiledComponents = collectCompiledWebComponents(prepared.ir, contract.uiProgram);
-    const clientRequired = webInterfaceRequiresClientRuntime(
-      prepared.ir,
-      prepared.interface,
-      compiledComponents,
+    const clientRoutes = new Set(
+      contract.routes
+        .filter((route) =>
+          routeRequiresClientRuntime(prepared.ir, contract, route, compiledComponents),
+        )
+        .map(routeIdentity),
     );
+    const clientRequired =
+      contract.routes.length > 0
+        ? clientRoutes.size > 0
+        : webInterfaceRequiresClientRuntime(prepared.ir, prepared.interface, compiledComponents);
     const preparedDocuments = await prepareProductionDocuments(
       paths,
       work,
@@ -455,7 +722,13 @@ export async function buildWebInterface(options: {
         minify: options.development ? false : "oxc",
         outDir: outdir,
         rolldownOptions: {
-          input: { app: prepared.entry, ...workerInputs },
+          input: {
+            app: prepared.entry,
+            ...(prepared.serviceWorkerBootstrap
+              ? { "service-worker-bootstrap": prepared.serviceWorkerBootstrap }
+              : {}),
+            ...workerInputs,
+          },
           output: {
             assetFileNames: (asset) =>
               asset.names.some((name) => name.endsWith(".css"))
@@ -463,7 +736,9 @@ export async function buildWebInterface(options: {
                 : "assets/[name]-[hash][extname]",
             chunkFileNames: "assets/[name]-[hash].js",
             entryFileNames: ({ name }) =>
-              name === "app" ? "assets/[name]-[hash].js" : "workers/[name]-[hash].js",
+              name === "app" || name === "service-worker-bootstrap"
+                ? "assets/[name]-[hash].js"
+                : "workers/[name]-[hash].js",
           },
         },
         sourcemap: options.development ? "inline" : false,
@@ -472,14 +747,33 @@ export async function buildWebInterface(options: {
     });
     await writeProductionPresentationAssets(outdir, presentationAssets);
     const client = await readClientBuild(outdir);
+    const serviceWorkerBootstrapEntry = prepared.serviceWorkerBootstrap
+      ? client.entries["service-worker-bootstrap"]
+      : undefined;
+    if (prepared.serviceWorkerBootstrap && !serviceWorkerBootstrapEntry) {
+      throw new Error("Web client build did not emit its service-worker bootstrap.");
+    }
+    const serviceWorkerEntries = prepared.workers
+      .filter(({ environment }) => environment === "browser-service-worker")
+      .map(({ output }) => client.entries[output])
+      .filter((value): value is string => Boolean(value));
+    const serviceWorkerResources = prepared.workers
+      .filter(({ environment }) => environment === "browser-service-worker")
+      .flatMap(({ output }) => client.chunks[output] ?? [])
+      .filter((value, index, values) => values.indexOf(value) === index);
     await pruneUnreachableClientAssets(
       outdir,
-      new Set([...(clientRequired ? client.resources : []), ...presentationAssets.files.keys()]),
+      new Set([
+        ...(clientRequired ? client.resources : []),
+        ...(serviceWorkerBootstrapEntry ? [serviceWorkerBootstrapEntry] : []),
+        ...serviceWorkerResources,
+        ...presentationAssets.files.keys(),
+      ]),
     );
     routeDocuments = routeDocuments.map(({ route, document, request }) => ({
       route,
       request,
-      document: clientRequired
+      document: (contract.routes.length ? clientRoutes.has(routeIdentity(route)) : clientRequired)
         ? Object.freeze({
             ...document,
             entry: client.entry,
@@ -487,26 +781,34 @@ export async function buildWebInterface(options: {
               ...client.preloads,
               ...(client.chunks[`${routeModuleName(routeIdentity(route))}.generated`] ?? []),
             ]),
+            scripts: Object.freeze(
+              serviceWorkerBootstrapEntry ? [serviceWorkerBootstrapEntry] : [],
+            ),
           })
         : Object.freeze({
             ...document,
             rendering: "static" as const,
             entry: false as const,
             preloads: Object.freeze([]),
+            scripts: Object.freeze(
+              serviceWorkerBootstrapEntry ? [serviceWorkerBootstrapEntry] : [],
+            ),
             hydration: false as const,
           }),
     }));
-    const serviceWorkerModules = prepared.workers
-      .filter(({ environment }) => environment === "browser-service-worker")
-      .map(({ output }) => client.entries[output])
-      .filter((value): value is string => Boolean(value));
+    const deliveredRoutes = routeDocuments.map((entry) =>
+      Object.freeze({
+        ...entry,
+        delivery: planWebRouteDelivery(entry),
+      }),
+    );
     if (contract.installation) {
       await writeFile(
         resolve(outdir, WEB_MANIFEST_PATH.slice(1)),
         renderWebManifest(contract.installation),
       );
     }
-    if (contract.installation || serviceWorkerModules.length) {
+    if (contract.installation || serviceWorkerEntries.length) {
       const assets = await createWebAssetManifest(outdir, crossOriginIsolated);
       const cacheable = assets.assets.filter(({ immutable }) => immutable).map(({ path }) => path);
       const criticalScripts = new Set([client.entry, ...client.preloads]);
@@ -525,8 +827,10 @@ export async function buildWebInterface(options: {
             !criticalScripts.has(path) &&
             (Boolean(contract.installation) || routeScripts.has(path)),
         ),
-        routes: contract.routes,
-        modules: serviceWorkerModules,
+        routes: deliveredRoutes
+          .filter(({ delivery }) => delivery.worker.cacheDocument)
+          .map(({ route }) => route),
+        modules: serviceWorkerEntries,
       });
       await writeFile(
         resolve(outdir, WEB_SERVICE_WORKER_PATH.slice(1)),
@@ -537,15 +841,18 @@ export async function buildWebInterface(options: {
     await writeFile(resolve(outdir, "document.ir.json"), `${JSON.stringify(document)}\n`);
     await writeFile(
       resolve(outdir, "routes.ir.json"),
-      `${JSON.stringify({ version: WEB_ROUTE_ARTIFACT_VERSION, components: compiledComponents, routes: routeDocuments })}\n`,
+      `${JSON.stringify({
+        version: WEB_ROUTE_ARTIFACT_VERSION,
+        interface: contract.interface.path,
+        components: compiledComponents,
+        routes: deliveredRoutes,
+      })}\n`,
     );
     await writeFile(resolve(outdir, "index.html"), renderWebDocument(document));
     await writePrebuiltWebDocuments(outdir, routeDocuments);
     await rm(resolve(outdir, "manifest.json"), { force: true });
-    await writeFile(
-      resolve(outdir, "assets.ir.json"),
-      `${JSON.stringify(await createWebAssetManifest(outdir, crossOriginIsolated))}\n`,
-    );
+    const assets = await createWebAssetManifest(outdir, crossOriginIsolated);
+    await writeFile(resolve(outdir, "assets.ir.json"), `${JSON.stringify(assets)}\n`);
     return {
       directory: outdir,
       entries: [
@@ -556,6 +863,7 @@ export async function buildWebInterface(options: {
           environment: "browser-main",
           path: outdir,
           entrypoint: resolve(outdir, "index.html"),
+          exposure: webHttpAssetExposure(deliveredRoutes, assets),
         },
         ...prepared.workers.map(({ identity, environment, output }) => ({
           identity,
@@ -570,6 +878,90 @@ export async function buildWebInterface(options: {
   } finally {
     await removeWorkDirectory(work);
   }
+}
+
+function webHttpAssetExposure(
+  routes: readonly (PreparedRouteDocument & Readonly<{ delivery: WebRouteDeliveryIR }>)[],
+  assets: WebAssetManifest,
+): HttpAssetExposure {
+  const staticDocuments = routes.flatMap(
+    ({
+      request,
+      route,
+    }): Readonly<{
+      path: string;
+      cacheControl: string;
+    }>[] => {
+      if (request !== false || route.params.length || route.search.length) return [];
+      const path =
+        route.path === "/"
+          ? "index.html"
+          : `${route.path
+              .split("/")
+              .filter(Boolean)
+              .map((segment) => decodeURIComponent(segment))
+              .join("/")}/index.html`;
+      return [{ path, cacheControl: webRouteCacheControl(route.cache) }];
+    },
+  );
+  const files = new Map<string, string>(
+    assets.assets.map(({ path, immutable }) => [
+      path.slice(1),
+      immutable ? "public, max-age=31536000, immutable" : "no-cache",
+    ]),
+  );
+  files.set(
+    "index.html",
+    staticDocuments.find(({ path }) => path === "index.html")?.cacheControl ?? "no-cache",
+  );
+  for (const { path, cacheControl } of staticDocuments) files.set(path, cacheControl);
+
+  const placeholderOrigin = "https://kit.invalid";
+  const discovery = renderWebDiscoveryResources(
+    placeholderOrigin,
+    routes.map(({ delivery, route }) => ({ route, discovery: delivery.discovery })),
+  );
+  return Object.freeze({
+    kind: "http-assets",
+    fallback: "index.html",
+    ...(assets.crossOriginIsolated
+      ? {
+          headers: Object.freeze({
+            "cross-origin-embedder-policy": "require-corp",
+            "cross-origin-opener-policy": "same-origin",
+          }),
+        }
+      : {}),
+    files: Object.freeze(
+      [...files]
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([path, cacheControl]) => Object.freeze({ path, cacheControl })),
+    ),
+    responses: Object.freeze([
+      Object.freeze({
+        path: "/robots.txt",
+        status: 200,
+        headers: Object.freeze({
+          "cache-control": "public, max-age=300",
+          "content-type": "text/plain; charset=utf-8",
+          "x-content-type-options": "nosniff",
+        }),
+        body: discovery.robots.replaceAll(placeholderOrigin, "{{origin}}"),
+        substitutions: Object.freeze(["origin" as const]),
+      }),
+      Object.freeze({
+        path: "/sitemap.xml",
+        status: 200,
+        headers: Object.freeze({
+          "cache-control": "public, max-age=300",
+          "content-type": "application/xml; charset=utf-8",
+          "x-content-type-options": "nosniff",
+        }),
+        body: discovery.sitemap.replaceAll(placeholderOrigin, "{{origin}}"),
+        substitutions: Object.freeze(["origin" as const]),
+      }),
+    ]),
+  });
 }
 
 /** Materializes request-independent Routes for direct static delivery. */
@@ -796,7 +1188,7 @@ export async function runWebInterface(options: {
   revisions: SystemRevisionSource;
   port?: number;
   serverOrigin?: string;
-  webLoaders?: DevelopmentWebLoaderRegistry;
+  programAttachments?: DevelopmentProgramAttachments;
   strictPort?: boolean;
   report?: DevelopmentReporter;
 }): Promise<DevelopmentServer> {
@@ -829,7 +1221,7 @@ export async function runWebInterface(options: {
         options.revisions,
         interfaceState,
         options.serverOrigin,
-        options.webLoaders,
+        options.programAttachments,
         options.report,
       ),
       ...vitePlugins(paths, () => interfaceState.current.ir),
@@ -847,6 +1239,7 @@ export async function runWebInterface(options: {
     prepared.candidate,
     ...(prepared.documentEvaluator ? [prepared.documentEvaluator] : []),
     prepared.entry,
+    ...(prepared.serviceWorkerBootstrap ? [prepared.serviceWorkerBootstrap] : []),
     ...prepared.routeEntries.map(({ source }) => source),
     ...prepared.workers.map(({ source }) => source),
     ...(prepared.serviceWorker ? [prepared.serviceWorker] : []),
@@ -887,6 +1280,7 @@ async function pruneGeneratedSources(work: string, prepared: PreparedInterface):
       prepared.candidate,
       prepared.documentEvaluator,
       prepared.entry,
+      prepared.serviceWorkerBootstrap,
       prepared.serviceWorker,
       ...prepared.routeEntries.map(({ source }) => source),
       ...prepared.workers.map(({ source }) => source),
@@ -932,12 +1326,26 @@ async function prepareInterface(
     : undefined;
   const ui = ir.programs.find(({ name }) => name === contract.uiProgram)!;
   const programManifest = collectProgramManifest(ui);
+  const routeDependencies = Object.freeze(
+    [
+      ...new Set(
+        contract.routes.flatMap(
+          (route) =>
+            compiledWebRoute(ir, contract.uiProgram, route)?.dependencies.map(({ name }) => name) ??
+            [],
+        ),
+      ),
+    ].sort(),
+  );
   if (documentEvaluator) {
     await writeIfChanged(
       documentEvaluator,
       developmentDocumentEvaluatorSource({
         system: paths.system,
         interface: contract.interface.path,
+        applicationName: contract.applicationName,
+        features: contract.interface.features,
+        routes: contract.routes,
         document: resolve(import.meta.dirname, `document${moduleExtension()}`),
         revision,
       }),
@@ -955,6 +1363,7 @@ async function prepareInterface(
           development,
           serverOrigin,
           host: resolve(import.meta.dirname, `host${moduleExtension()}`),
+          runtime: resolve(import.meta.dirname, `./ui/adapter${moduleExtension()}`),
           processRuntime: resolve(
             import.meta.dirname,
             `../../../execution/process${moduleExtension()}`,
@@ -996,6 +1405,19 @@ async function prepareInterface(
       ),
     );
   }
+  const serviceWorkerBootstrapSource = serviceWorkerSource
+    ? resolve(work, "service-worker-bootstrap.generated.ts")
+    : undefined;
+  if (serviceWorkerBootstrapSource && serviceWorkerSource) {
+    await writeIfChanged(
+      serviceWorkerBootstrapSource,
+      renderServiceWorkerBootstrap(
+        development ? `./${basename(serviceWorkerSource)}` : WEB_SERVICE_WORKER_PATH,
+        development,
+        serviceWorkers.length > 0,
+      ),
+    );
+  }
   const routeEntries = await Promise.all(
     contract.routes.map(async (route): Promise<WebRouteEntry> => {
       const identity = routeIdentity(route);
@@ -1032,13 +1454,15 @@ async function prepareInterface(
         `../../../execution/process${moduleExtension()}`,
       ),
       interface: contract.interface.path,
+      features: contract.interface.features,
       program: ui,
       programManifest,
       dependencies: projectDependencyContracts(linkProgram(ui).external),
+      routeDependencies,
       providers: featureProviders(ir, ui),
       components: contract.components,
       presentationDependencies: collectPresentationDependencies(ir, contract.uiProgram),
-      hotManifest: createHotReplacementManifest(ir),
+      hotManifest: createWebHotReplacementManifest(ir),
       routes: contract.routes,
       routeEntries,
       headless: contract.headless.map((program) => {
@@ -1056,14 +1480,6 @@ async function prepareInterface(
         .map(({ output, source }) => ({
           source: development ? `./${basename(source)}` : `/workers/${output}.js`,
         })),
-      ...(serviceWorkerSource
-        ? {
-            serviceWorker: {
-              source: development ? `./${basename(serviceWorkerSource)}` : WEB_SERVICE_WORKER_PATH,
-              register: !development || serviceWorkers.length > 0,
-            },
-          }
-        : {}),
     }),
   );
   const entry = resolve(work, "browser.generated.ts");
@@ -1082,12 +1498,19 @@ async function prepareInterface(
     entry,
     ir,
     interface: interfaceId,
-    presentationSources: compilation.presentationSources,
+    presentationSources: new Set(
+      (webInterfaceCompilerIR(contract.interface.extensions?.web).presentations ?? []).map(
+        ({ file }) => resolve(paths.source, file),
+      ),
+    ),
     revision,
     crossOriginIsolated,
     updateKind,
     routeEntries,
     workers,
+    ...(serviceWorkerBootstrapSource
+      ? { serviceWorkerBootstrap: serviceWorkerBootstrapSource }
+      : {}),
     ...(serviceWorkerSource ? { serviceWorker: serviceWorkerSource } : {}),
   };
 }
@@ -1388,6 +1811,7 @@ function webScriptKind(file: string): ts.ScriptKind {
 export function routeSourcePlugin(paths: SystemPaths, system: SystemIR | (() => SystemIR)): Plugin {
   type RouteLocation = Readonly<{
     identity: string;
+    parent?: string;
     program: string;
     span: CompiledWebRouteIR["implementationSpan"];
   }>;
@@ -1400,6 +1824,11 @@ export function routeSourcePlugin(paths: SystemPaths, system: SystemIR | (() => 
     const routeLocations = new Map<string, RouteLocation[]>();
     const programLocations = new Map<string, ProgramLocation[]>();
     for (const program of ir.programs) {
+      const composedRoutes =
+        program.environment.platform === "web" ? collectWebRoutes(ir, program.name) : [];
+      const routeParents = new Map(
+        composedRoutes.map((route) => [routeIdentity(route), route.parent] as const),
+      );
       for (const contribution of program.contributions) {
         const file = canonicalSourcePath(resolve(paths.directory, contribution.span.file));
         const current = programLocations.get(file) ?? [];
@@ -1414,6 +1843,9 @@ export function routeSourcePlugin(paths: SystemPaths, system: SystemIR | (() => 
           const current = routeLocations.get(file) ?? [];
           current.push({
             identity: routeIdentity(route),
+            ...(routeParents.get(routeIdentity(route))
+              ? { parent: routeParents.get(routeIdentity(route)) }
+              : {}),
             program: program.name,
             span: route.implementationSpan,
           });
@@ -1501,6 +1933,17 @@ export function routeSourcePlugin(paths: SystemPaths, system: SystemIR | (() => 
           .map(({ span }) => `${span.line}:${span.column}`),
       );
       if (projection.kind === "route") {
+        const routeParents = new Map(
+          [...routeLocations.values()]
+            .flat()
+            .map(({ identity, parent }) => [identity, parent] as const),
+        );
+        const retainedRoutes = new Set<string>();
+        let current: string | undefined = projection.name;
+        while (current && !retainedRoutes.has(current)) {
+          retainedRoutes.add(current);
+          current = routeParents.get(current);
+        }
         for (const route of routes) {
           if (!retainedPrograms.has(route.program)) continue;
           const node = objects.get(`${route.span.line}:${route.span.column}`);
@@ -1510,7 +1953,7 @@ export function routeSourcePlugin(paths: SystemPaths, system: SystemIR | (() => 
                 `Unable to isolate web Route ${JSON.stringify(route.identity)}.`,
             );
           }
-          if (projection.name !== route.identity) {
+          if (!retainedRoutes.has(route.identity)) {
             replacements.push({ start: node.getStart(source), end: node.end, value: "{}" });
           }
         }
@@ -1737,13 +2180,53 @@ function systemAliasPlugin(source: string): Plugin {
   };
 }
 
+function developmentWebDiscoveryResources(
+  prepared: PreparedInterface,
+  origin: string,
+): WebDiscoveryResources {
+  const contract = webInterfaceContract(prepared.ir, prepared.interface);
+  return renderWebDiscoveryResources(
+    origin,
+    contract.routes.map((route) => {
+      const branch = webRouteBranch(contract.routes, route).map((entry) => ({
+        route: entry,
+        loader: Boolean(
+          compiledWebRoute(prepared.ir, contract.uiProgram, entry)?.implementation.load,
+        ),
+      }));
+      return Object.freeze({
+        route,
+        discovery: planWebRouteDiscovery(route, branch),
+      });
+    }),
+  );
+}
+
+function developmentRequestOrigin(headers: IncomingHttpHeaders): string {
+  const forwardedProtocol = firstRequestHeader(headers["x-forwarded-proto"])?.split(",")[0]?.trim();
+  const protocol = forwardedProtocol === "https" ? "https" : "http";
+  const authority =
+    firstRequestHeader(headers["x-forwarded-host"])?.split(",")[0]?.trim() ??
+    firstRequestHeader(headers.host) ??
+    "localhost";
+  try {
+    return new URL(`${protocol}://${authority}`).origin;
+  } catch {
+    return "http://localhost";
+  }
+}
+
+function firstRequestHeader(value: string | readonly string[] | undefined): string | undefined {
+  return typeof value === "string" ? value : value?.[0];
+}
+
 function presentationContractPlugin(
   paths: SystemPaths,
   work: string,
   revisions: SystemRevisionSource,
   state: PreparedInterfaceState,
   serverOrigin?: string,
-  webLoaders?: DevelopmentWebLoaderRegistry,
+  programAttachments?: DevelopmentProgramAttachments,
   report?: DevelopmentReporter,
 ): Plugin {
   let prepared = state.current;
@@ -1765,10 +2248,12 @@ function presentationContractPlugin(
     updates = updates.then(async () => {
       try {
         const started = performance.now();
-        const updateKind = presentationUpdate(context, prepared.presentationSources)
-          ? "presentation"
-          : "full";
         const compilation = revisions.compile(context.file);
+        const updateKind =
+          presentationUpdate(context, prepared.presentationSources) &&
+          webPresentationOnlyChange(prepared.ir, compilation.ir, prepared.interface)
+            ? "presentation"
+            : "full";
         if (compilation.revision === observedRevision) {
           modules = [];
           return;
@@ -1793,7 +2278,8 @@ function presentationContractPlugin(
         report?.({
           kind: "update",
           platform: "web",
-          scope: updateKind === "presentation" ? "presentation" : "interface",
+          scope: "interface",
+          mode: updateKind,
           outputs: Object.freeze([prepared.interface]),
           durationMs: performance.now() - started,
         });
@@ -1843,6 +2329,29 @@ function presentationContractPlugin(
         if (location.pathname.endsWith("/service-worker.generated.ts")) {
           response.setHeader("service-worker-allowed", "/");
           next();
+          return;
+        }
+        if (location.pathname === "/robots.txt" || location.pathname === "/sitemap.xml") {
+          if (request.method !== "GET" && request.method !== "HEAD") {
+            response.statusCode = 405;
+            response.setHeader("allow", "GET, HEAD");
+            response.end();
+            return;
+          }
+          const resources = developmentWebDiscoveryResources(
+            prepared,
+            developmentRequestOrigin(request.headers),
+          );
+          const robots = location.pathname === "/robots.txt";
+          const body = robots ? resources.robots : resources.sitemap;
+          response.statusCode = 200;
+          response.setHeader("cache-control", "no-store");
+          response.setHeader(
+            "content-type",
+            robots ? "text/plain; charset=utf-8" : "application/xml; charset=utf-8",
+          );
+          response.setHeader("x-content-type-options", "nosniff");
+          response.end(request.method === "HEAD" ? undefined : body);
           return;
         }
         if (location.pathname === WEB_MANIFEST_PATH) {
@@ -1916,7 +2425,7 @@ function presentationContractPlugin(
                   headers: request.headers,
                   location,
                   match,
-                  webLoaders,
+                  programAttachments,
                   routeData,
                   markdown,
                   signal: controller.signal,
@@ -2086,8 +2595,8 @@ async function prepareDevelopmentDocument(input: {
   contract: ReturnType<typeof webInterfaceContract>;
   headers: Readonly<Record<string, string | readonly string[] | undefined>>;
   location: URL;
-  match: NonNullable<ReturnType<typeof matchWebRoute>>;
-  webLoaders?: DevelopmentWebLoaderRegistry;
+  match: WebRouteMatch<WebRouteIR>;
+  programAttachments?: DevelopmentProgramAttachments;
   routeData: boolean;
   markdown: boolean;
   signal: AbortSignal;
@@ -2101,19 +2610,38 @@ async function prepareDevelopmentDocument(input: {
   }>
 > {
   const { route } = input.match;
-  const title = route.metadata.title ?? input.prepared.ir.system.name ?? "Kit";
-  const metadata = routeDocumentMetadata(route.metadata);
+  let status: WebRouteStatus = route.status as WebRouteStatus;
+  const branchMatches = matchWebRouteBranch(input.contract.routes, input.match, input.location);
+  const staticMetadata = branchMatches.reduce<WebRouteMetadataResult>(
+    (result, entry) => Object.freeze({ ...result, ...entry.route.metadata }),
+    {},
+  );
+  const title = staticMetadata.title ?? input.contract.applicationName;
+  const metadata = routeDocumentMetadata(staticMetadata);
   let document: WebDocumentIR;
-  let markdownAllowed = !route.metadata.robots
+  let markdownAllowed = !staticMetadata.robots
     ?.split(",")
     .some((value) => value.trim() === "noindex");
+  let hydrationBranch: NonNullable<WebRouteHydrationIR["branch"]> = Object.freeze(
+    branchMatches.map((entry) =>
+      Object.freeze({
+        route: Object.freeze({ feature: entry.route.feature, name: entry.route.name }),
+        params: Object.freeze({ ...entry.params }),
+        search: Object.freeze({ ...entry.search }),
+        status: entry.route.status,
+        loader: false,
+        metadata: entry.route.metadata,
+      }),
+    ),
+  );
   let deferredFrames: AsyncIterable<ReturnType<typeof renderWebDeferredFrame>> | undefined;
   let deferredRecords: AsyncIterable<string> | undefined;
   if (route.document === "shell") {
+    if (input.routeData) return unavailableWebRepresentation("Route state");
     document = withWebStyles(
       prepareClientWebDocument({
         title,
-        language: route.metadata.language,
+        language: staticMetadata.language,
         metadata,
         entry: "/browser.generated.ts",
       }),
@@ -2136,34 +2664,92 @@ async function prepareDevelopmentDocument(input: {
     );
     if (!program)
       throw new Error(`Missing UI Program ${JSON.stringify(input.contract.uiProgram)}.`);
-    const definition = runtimeWebRoute(system, program.logicalName, route);
-    if (definition.load && (route.cache === false || route.cache.scope !== "public")) {
-      markdownAllowed = false;
-    }
-    const loaded = definition.load
-      ? await loadDevelopmentWebRoute(input, routeIdentity(route))
-      : { data: undefined };
-    if (isRecordValue(loaded) && "redirect" in loaded) {
-      const location = resolveWebDestination(
-        input.contract.routes,
-        loaded.redirect as Parameters<typeof resolveWebDestination>[1],
-        route.feature,
+    const resolvedBranch: Array<
+      Readonly<{
+        match: (typeof branchMatches)[number];
+        definition: RuntimeWebRoute;
+        data: unknown;
+        metadata: WebRouteMetadataResult;
+        status: WebRouteStatus;
+      }>
+    > = [];
+    for (const match of branchMatches) {
+      const definition = runtimeWebRoute(system, program.logicalName, match.route);
+      if (
+        definition.load &&
+        (match.route.cache === false || match.route.cache.scope !== "public")
+      ) {
+        markdownAllowed = false;
+      }
+      const loaded = definition.load
+        ? await loadDevelopmentWebRoute(input, routeIdentity(match.route), match)
+        : { data: undefined };
+      const outcome = validateDevelopmentLoaderOutcome(
+        loaded,
+        Boolean(definition.load),
+        match.route.status,
       );
-      return {
-        status: input.routeData ? 200 : 302,
-        headers: {
-          "cache-control": "no-store",
-          ...(input.routeData ? { "content-type": WEB_ROUTE_DATA_MEDIA_TYPE } : { location }),
-        },
-        body: input.routeData ? JSON.stringify({ version: 1, redirect: location }) : "",
-      };
+      if (outcome.kind === "redirect") {
+        const location = resolveWebDestination(
+          input.contract.routes,
+          outcome.redirect as Parameters<typeof resolveWebDestination>[1],
+          match.route.feature,
+        );
+        return {
+          status: input.routeData ? 200 : outcome.status,
+          headers: {
+            "cache-control": "no-store",
+            ...(input.routeData ? { "content-type": WEB_ROUTE_DATA_MEDIA_TYPE } : { location }),
+          },
+          body: input.routeData ? JSON.stringify({ version: 1, redirect: location }) : "",
+        };
+      }
+      if (outcome.explicitStatus) status = outcome.status;
+      resolvedBranch.push(
+        Object.freeze({
+          match,
+          definition,
+          data: outcome.data,
+          status: outcome.status,
+          metadata: Object.freeze({
+            ...match.route.metadata,
+            ...outcome.metadata,
+          }),
+        }),
+      );
     }
-    if (definition.load && (!isRecordValue(loaded) || !("data" in loaded))) {
-      throw new TypeError(`Web Route loader ${routeIdentity(route)} must return data or redirect.`);
+    const leaf = resolvedBranch.at(-1)!;
+    const definition = leaf.definition;
+    const data = leaf.data;
+    if (
+      input.routeData &&
+      !route.params.length &&
+      !route.search.length &&
+      !resolvedBranch.some((entry) => Boolean(entry.definition.load))
+    ) {
+      return unavailableWebRepresentation("Route state");
     }
-    const dynamicMetadata = loaderMetadata(loaded);
-    const routeMetadata = Object.freeze({ ...route.metadata, ...dynamicMetadata });
-    const data = isRecordValue(loaded) && "data" in loaded ? loaded.data : undefined;
+    const routeMetadata = Object.freeze(
+      resolvedBranch.reduce<WebRouteMetadataResult>(
+        (result, entry) => ({ ...result, ...entry.metadata }),
+        {},
+      ),
+    );
+    hydrationBranch = Object.freeze(
+      resolvedBranch.map((entry) =>
+        Object.freeze({
+          route: Object.freeze({
+            feature: entry.match.route.feature,
+            name: entry.match.route.name,
+          }),
+          params: Object.freeze({ ...entry.match.params }),
+          search: Object.freeze({ ...entry.match.search }),
+          status: entry.status,
+          loader: entry.definition.load ? Object.freeze({ data: entry.data }) : false,
+          metadata: entry.metadata,
+        }),
+      ),
+    );
     document = await evaluator.prepare({
       program: input.contract.uiProgram,
       logicalProgram: program.logicalName,
@@ -2178,8 +2764,18 @@ async function prepareDevelopmentDocument(input: {
         name: route.name,
         params: input.match.params,
         search: input.match.search,
+        status,
         data,
         metadata: routeMetadata,
+        branch: resolvedBranch.map((entry) => ({
+          feature: entry.match.route.feature,
+          name: entry.match.route.name,
+          params: entry.match.params,
+          search: entry.match.search,
+          status: entry.status,
+          data: entry.data,
+          metadata: entry.metadata,
+        })),
       },
       entry: "/browser.generated.ts",
     });
@@ -2192,19 +2788,29 @@ async function prepareDevelopmentDocument(input: {
           location: `${input.location.pathname}${input.location.search}`,
           params: Object.freeze({ ...input.match.params }),
           search: Object.freeze({ ...input.match.search }),
+          status,
           loader: definition.load ? Object.freeze({ data }) : false,
+          branch: hydrationBranch,
           metadata: webRouteHydrationMetadata(document),
         }),
       }),
     );
-    if (route.deferred.length) {
-      const compiled = compiledWebRoute(input.prepared.ir, input.contract.uiProgram, route)
-        ?.implementation.view;
-      if (!compiled) {
-        throw new TypeError(
-          `Deferred web Route ${routeIdentity(route)} has no compiler-readable view.`,
-        );
-      }
+    if (resolvedBranch.some((entry) => entry.match.route.deferred.length)) {
+      const compiledBranch = resolvedBranch.map((entry) => {
+        const view = compiledWebRoute(
+          input.prepared.ir,
+          input.contract.uiProgram,
+          entry.match.route,
+        )?.implementation.view;
+        if (!view) {
+          throw new TypeError(
+            `Deferred web Route branch ${routeIdentity(route)} has no compiler-readable view ` +
+              `for ${routeIdentity(entry.match.route)}.`,
+          );
+        }
+        return Object.freeze({ entry, view });
+      });
+      const compiled = compiledBranch.at(-1)!.view;
       const stream = prepareCompiledWebDocumentStream({
         document,
         route: { feature: route.feature, name: route.name },
@@ -2216,9 +2822,25 @@ async function prepareDevelopmentDocument(input: {
         loader: definition.load ? { data } : false,
         deferred: route.deferred,
         metadata: routeMetadata,
+        branch: compiledBranch.map(({ entry, view }) => ({
+          route: {
+            feature: entry.match.route.feature,
+            name: entry.match.route.name,
+          },
+          view,
+          params: entry.match.params,
+          search: entry.match.search,
+          status: entry.status,
+          loader: entry.definition.load ? { data: entry.data } : false,
+          deferred: entry.match.route.deferred,
+          metadata: entry.metadata,
+        })),
         signal: input.signal,
       });
       document = stream.document;
+      if (document.hydration !== false) {
+        hydrationBranch = document.hydration.branch ?? hydrationBranch;
+      }
       deferredFrames = mapAsyncIterable(stream.frames, renderWebDeferredFrame);
       deferredRecords = mapAsyncIterable(stream.frames, (frame) => `${JSON.stringify(frame)}\n`);
     }
@@ -2234,7 +2856,9 @@ async function prepareDevelopmentDocument(input: {
           location: `${input.location.pathname}${input.location.search}`,
           params: input.match.params,
           search: input.match.search,
+          status,
           loader: false as const,
+          branch: hydrationBranch,
           metadata: webRouteHydrationMetadata(document),
         }
       : document.hydration;
@@ -2254,29 +2878,13 @@ async function prepareDevelopmentDocument(input: {
   }
   if (input.markdown) {
     if (!markdownAllowed || document.root.length === 0) {
-      return {
-        status: 406,
-        headers: {
-          "cache-control": "no-store",
-          "content-type": "text/plain; charset=utf-8",
-          vary: "Accept",
-        },
-        body: "This Route does not expose a public Markdown representation.\n",
-      };
+      return unavailableWebRepresentation("Public Markdown");
     }
     if (deferredFrames) {
-      return {
-        status: 406,
-        headers: {
-          "cache-control": "no-store",
-          "content-type": "text/plain; charset=utf-8",
-          vary: "Accept",
-        },
-        body: "This Route requires its complete HTML stream.\n",
-      };
+      return unavailableWebRepresentation("Streamed Markdown");
     }
     return {
-      status: 200,
+      status,
       headers: {
         "cache-control": webRouteCacheControl(route.cache),
         "content-type": `${WEB_MARKDOWN_MEDIA_TYPE}; charset=utf-8`,
@@ -2285,6 +2893,7 @@ async function prepareDevelopmentDocument(input: {
       body: renderWebMarkdown(document),
     };
   }
+  document = applyDevelopmentWebDocumentDelivery(document, input.prepared, route);
   const html = await input.server.transformIndexHtml(
     input.location.pathname,
     renderWebDocument(document),
@@ -2293,7 +2902,7 @@ async function prepareDevelopmentDocument(input: {
     const boundary = html.lastIndexOf("</body>");
     if (boundary < 0) throw new TypeError("Streamed web document has no body terminator.");
     return {
-      status: 200,
+      status,
       headers: {
         "cache-control": webRouteCacheControl(route.cache),
         "content-type": "text/html; charset=utf-8",
@@ -2305,7 +2914,7 @@ async function prepareDevelopmentDocument(input: {
     };
   }
   return {
-    status: 200,
+    status,
     headers: {
       "cache-control": webRouteCacheControl(route.cache),
       "content-type": "text/html; charset=utf-8",
@@ -2313,6 +2922,27 @@ async function prepareDevelopmentDocument(input: {
     },
     body: html,
   };
+}
+
+function applyDevelopmentWebDocumentDelivery(
+  document: WebDocumentIR,
+  prepared: PreparedInterface,
+  route: WebRouteIR,
+): WebDocumentIR {
+  const scripts = Object.freeze(
+    prepared.serviceWorkerBootstrap ? ["/service-worker-bootstrap.generated.ts"] : [],
+  );
+  if (webRouteRequiresClientRuntime(prepared.ir, prepared.interface, route)) {
+    return Object.freeze({ ...document, scripts });
+  }
+  return Object.freeze({
+    ...document,
+    rendering: "static",
+    entry: false,
+    preloads: Object.freeze([]),
+    scripts,
+    hydration: false,
+  });
 }
 
 function mapAsyncIterable<Input, Output>(
@@ -2363,29 +2993,32 @@ function loadDevelopmentWebRoute(
     paths: SystemPaths;
     headers: Readonly<Record<string, string | readonly string[] | undefined>>;
     location: URL;
-    match: NonNullable<ReturnType<typeof matchWebRoute>>;
-    webLoaders?: DevelopmentWebLoaderRegistry;
+    programAttachments?: DevelopmentProgramAttachments;
   }>,
   route: string,
+  match: WebRouteMatch<WebRouteIR>,
 ): Promise<unknown> {
-  if (!input.webLoaders) {
+  if (!input.programAttachments) {
     throw new Error(
       `Development SSR for web Route ${JSON.stringify(route)} requires the server and web ` +
         "Platform Adapters to share a loader registry.",
     );
   }
-  return input.webLoaders.load(input.paths.directory, {
-    route,
-    ...(input.match.route.cache !== false && input.match.route.cache.scope === "public"
-      ? {}
-      : {
-          request: {
-            url: input.location.href,
-            headers: normalizeWebRequestHeaders(input.headers),
-          },
-        }),
-    params: input.match.params,
-    search: input.match.search,
+  return input.programAttachments.invoke(input.paths.directory, {
+    export: route,
+    value: {
+      route,
+      ...(match.route.cache !== false && match.route.cache.scope === "public"
+        ? {}
+        : {
+            request: {
+              url: input.location.href,
+              headers: normalizeWebRequestHeaders(input.headers),
+            },
+          }),
+      params: match.params,
+      search: match.search,
+    },
   });
 }
 
@@ -2419,8 +3052,87 @@ function loaderMetadata(value: unknown): WebRouteMetadataResult {
   return Object.freeze(result);
 }
 
+type DevelopmentLoaderOutcome =
+  | Readonly<{
+      kind: "data";
+      data: unknown;
+      metadata: WebRouteMetadataResult;
+      status: WebRouteStatus;
+      explicitStatus: boolean;
+    }>
+  | Readonly<{
+      kind: "redirect";
+      redirect: unknown;
+      status: WebRedirectStatus;
+    }>;
+
+function validateDevelopmentLoaderOutcome(
+  value: unknown,
+  loader: boolean,
+  defaultStatus: number,
+): DevelopmentLoaderOutcome {
+  if (!loader) {
+    if (!isWebRouteStatus(defaultStatus)) throw new TypeError("Web Route status is invalid.");
+    return {
+      kind: "data",
+      data: undefined,
+      metadata: {},
+      status: defaultStatus,
+      explicitStatus: false,
+    };
+  }
+  if (!isRecordValue(value)) {
+    throw new TypeError("Web Route loader outcome must be an object.");
+  }
+  const hasData = Object.hasOwn(value, "data");
+  const hasRedirect = Object.hasOwn(value, "redirect");
+  if (hasData === hasRedirect) {
+    throw new TypeError("Web Route loader must return exactly one of data or redirect.");
+  }
+  if (
+    Object.keys(value).some((name) => !["data", "metadata", "redirect", "status"].includes(name))
+  ) {
+    throw new TypeError("Web Route loader outcome has unsupported fields.");
+  }
+  const metadata = loaderMetadata(value);
+  if (hasRedirect) {
+    const status = value.status ?? 302;
+    if (!isWebRedirectStatus(status)) {
+      throw new TypeError("Web Route redirect status is invalid.");
+    }
+    return { kind: "redirect", redirect: value.redirect, status };
+  }
+  const status = value.status ?? defaultStatus;
+  if (!isWebRouteStatus(status)) {
+    throw new TypeError("Web Route document status is invalid.");
+  }
+  return {
+    kind: "data",
+    data: value.data,
+    metadata,
+    status,
+    explicitStatus: value.status !== undefined,
+  };
+}
+
 function isRecordValue(value: unknown): value is Readonly<Record<string, unknown>> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function unavailableWebRepresentation(name: string): Readonly<{
+  status: number;
+  headers: Readonly<Record<string, string>>;
+  body: string;
+}> {
+  return Object.freeze({
+    status: 406,
+    headers: Object.freeze({
+      "cache-control": "no-store",
+      "content-type": "text/plain; charset=utf-8",
+      vary: "Accept",
+    }),
+    body: `${name} is not available for this Route.\n`,
+  });
 }
 
 export type WebRepresentation = "document" | "markdown" | "route-data";
@@ -2468,6 +3180,43 @@ function presentationUpdate(
   return false;
 }
 
+function webPresentationOnlyChange(
+  previous: SystemIR,
+  current: SystemIR,
+  interfacePath: string,
+): boolean {
+  const presentationMeaning = (ir: SystemIR) => {
+    const interface_ = ir.interfaces.find(({ path }) => path === interfacePath);
+    return interface_
+      ? (webInterfaceCompilerIR(interface_.extensions?.web).presentations ?? [])
+      : [];
+  };
+  if (
+    JSON.stringify(presentationMeaning(previous)) === JSON.stringify(presentationMeaning(current))
+  ) {
+    return false;
+  }
+  const withoutPresentations = (ir: SystemIR): unknown => ({
+    ...ir,
+    interfaces: ir.interfaces.map((interface_) => {
+      if (interface_.path !== interfacePath || !interface_.extensions?.web) return interface_;
+      const { presentations: _presentations, ...web } = webInterfaceCompilerIR(
+        interface_.extensions.web,
+      );
+      return {
+        ...interface_,
+        extensions: {
+          ...interface_.extensions,
+          web,
+        },
+      };
+    }),
+  });
+  return (
+    JSON.stringify(withoutPresentations(previous)) === JSON.stringify(withoutPresentations(current))
+  );
+}
+
 async function prepareProductionDocuments(
   paths: SystemPaths,
   work: string,
@@ -2481,15 +3230,31 @@ async function prepareProductionDocuments(
   const program = ir.programs.find(({ name }) => name === contract.uiProgram);
   if (!program) throw new Error(`Missing UI Program ${JSON.stringify(contract.uiProgram)}.`);
   const entries = contract.routes.map((route) => {
-    const compiled = compiledWebRoute(ir, contract.uiProgram, route);
-    const request = requestRouteArtifact(route, compiled, components);
+    const branch = webRouteBranch(contract.routes, route);
+    const request = requestRouteArtifact(route, branch, ir, contract.uiProgram, components);
     validateProductionWebRoute(route, {
-      hasLoader: Boolean(compiled?.implementation.load),
+      hasLoader: branch.some((entry) =>
+        Boolean(compiledWebRoute(ir, contract.uiProgram, entry)?.implementation.load),
+      ),
       request,
     });
     return { route, request };
   });
-  const staticRoutes = entries.filter(({ request }) => request === false).map(({ route }) => route);
+  const staticRoutes = entries
+    .filter(({ request }) => request === false)
+    .map(({ route }) => {
+      const branch = webRouteBranch(contract.routes, route);
+      return Object.freeze({
+        route,
+        branch,
+        metadata: Object.freeze(
+          branch.reduce<WebRouteMetadataResult>(
+            (result, entry) => ({ ...result, ...entry.metadata }),
+            {},
+          ),
+        ),
+      });
+    });
   const presentationTargets = requestRenderedPresentationTargets(entries, components);
   const source = resolve(work, "document.generated.ts");
   const staticDocuments = new Map<string, WebDocumentIR>();
@@ -2514,30 +3279,42 @@ if (!interfaceFeature?.presentation) {
   throw new Error(${JSON.stringify(`Web interface ${contract.interface.path} has no Presentation.`)});
 }
 const routes = ${JSON.stringify(staticRoutes)};
-const documents = await Promise.all((routes.length ? routes : ${contract.routes.length ? "[]" : "[undefined]"}).map(async (route) => ({
-  route,
-  document: route?.document === "shell"
+const documents = await Promise.all((routes.length ? routes : ${contract.routes.length ? "[]" : "[undefined]"}).map(async (entry) => ({
+  route: entry?.route,
+  document: entry?.route.document === "shell"
     ? prepareClientWebDocument({
-        title: route.metadata?.title ?? system.metadata?.name ?? "Kit",
-        language: route.metadata?.language,
-        metadata: Object.fromEntries(Object.entries(route.metadata ?? {}).filter(([name]) => name !== "title" && name !== "language")),
+        title: entry.metadata?.title ?? ${JSON.stringify(contract.applicationName)},
+        language: entry.metadata?.language,
+        metadata: Object.fromEntries(Object.entries(entry.metadata ?? {}).filter(([name]) => name !== "title" && name !== "language")),
         entry: "/app.js",
       })
     : await prepareWebDocument({
         system,
         interface: ${JSON.stringify(contract.interface.path)},
+        applicationName: ${JSON.stringify(contract.applicationName)},
+        features: ${JSON.stringify(contract.interface.features)},
         program: ${JSON.stringify(contract.uiProgram)},
         logicalProgram: ${JSON.stringify(program.logicalName)},
         presentation: interfaceFeature.presentation,
+        routes: ${JSON.stringify(contract.routes)},
         manifest: ${JSON.stringify(collectProgramManifest(program))},
         components: ${JSON.stringify(contract.components)},
         presentationDependencies: ${JSON.stringify(collectPresentationDependencies(ir, contract.uiProgram))},
-        ...(route ? { route: {
-          feature: route.feature,
-          name: route.name,
-          metadata: route.metadata,
+        ...(entry ? { route: {
+          feature: entry.route.feature,
+          name: entry.route.name,
+          status: entry.route.status,
+          metadata: entry.metadata,
           params: {},
           search: {},
+          branch: entry.branch.map((route) => ({
+            feature: route.feature,
+            name: route.name,
+            status: route.status,
+            metadata: route.metadata,
+            params: {},
+            search: {},
+          })),
         } } : {}),
         entry: "/app.js",
       }),
@@ -2545,6 +3322,7 @@ const documents = await Promise.all((routes.length ? routes : ${contract.routes.
 const presentation = await prepareInitialWebPresentation({
   system,
   interface: ${JSON.stringify(contract.interface.path)},
+  features: ${JSON.stringify(contract.interface.features)},
   program: ${JSON.stringify(contract.uiProgram)},
   logicalProgram: ${JSON.stringify(program.logicalName)},
   presentation: interfaceFeature.presentation,
@@ -2618,7 +3396,11 @@ export default { documents, presentation };
     const document =
       request === false
         ? staticDocuments.get(routeIdentity(route))
-        : dynamicRouteDocument(ir, route, initialPresentation.styles);
+        : dynamicRouteDocument(
+            webRouteBranch(contract.routes, route),
+            initialPresentation.styles,
+            contract.applicationName,
+          );
     if (!document) {
       throw new Error(`Web Route ${JSON.stringify(routeIdentity(route))} produced no document.`);
     }
@@ -2641,12 +3423,14 @@ function requestRenderedPresentationTargets(
   const targets = new Set<string>();
   for (const { route, request } of entries) {
     if (request === false) continue;
-    for (const component of compiledComponentClosure(
-      routeIdentity(route),
-      request.view,
-      components,
-    )) {
-      targets.add(runtimeComponentName(component.feature, component.name));
+    for (const entry of request.branch) {
+      for (const component of compiledComponentClosure(
+        routeIdentity(route),
+        entry.view,
+        components,
+      )) {
+        targets.add(runtimeComponentName(component.feature, component.name));
+      }
     }
   }
   return Object.freeze([...targets].sort());
@@ -2654,24 +3438,43 @@ function requestRenderedPresentationTargets(
 
 function requestRouteArtifact(
   route: ReturnType<typeof collectWebRoutes>[number],
-  compiled: ReturnType<typeof compiledWebRoute>,
+  branch: readonly ReturnType<typeof collectWebRoutes>[number][],
+  ir: SystemIR,
+  program: string,
   components: readonly CompiledWebComponentIR[],
 ): PreparedRouteDocument["request"] {
+  const compiled = branch.map((entry) => ({
+    route: entry,
+    compiled: compiledWebRoute(ir, program, entry),
+  }));
   if (
     route.document !== "content" ||
-    (!route.params.length && !route.search.length && !compiled?.implementation.load)
+    (!route.params.length &&
+      !route.search.length &&
+      !compiled.some(({ compiled: entry }) => Boolean(entry?.implementation.load)))
   ) {
     return false;
   }
-  if (!compiled) {
-    throw new Error(
-      `Request-dependent web Route ${routeIdentity(route)} has no compiler-readable view.`,
+  const entries = compiled.map(({ route: entry, compiled: implementation }) => {
+    if (!implementation) {
+      throw new Error(
+        `Request-dependent web Route ${routeIdentity(route)} has no compiler-readable ` +
+          `view for branch Route ${routeIdentity(entry)}.`,
+      );
+    }
+    validateRequestRenderClosure(
+      routeIdentity(route),
+      implementation.implementation.view,
+      components,
     );
-  }
-  validateRequestRenderClosure(routeIdentity(route), compiled.implementation.view, components);
+    return Object.freeze({
+      route: entry,
+      loader: Boolean(implementation.implementation.load),
+      view: implementation.implementation.view,
+    });
+  });
   return Object.freeze({
-    loader: Boolean(compiled.implementation.load),
-    view: compiled.implementation.view,
+    branch: Object.freeze(entries),
   });
 }
 
@@ -2718,6 +3521,7 @@ function renderComponentTargets(node: WebRenderNodeIR): readonly string[] {
   switch (node.kind) {
     case "none":
     case "text":
+    case "children":
       return [];
     case "fragment":
     case "element":
@@ -2746,16 +3550,20 @@ function renderComponentTargets(node: WebRenderNodeIR): readonly string[] {
 }
 
 function dynamicRouteDocument(
-  ir: SystemIR,
-  route: ReturnType<typeof collectWebRoutes>[number],
+  branch: readonly ReturnType<typeof collectWebRoutes>[number][],
   presentationStyles: readonly string[],
+  applicationName: string,
 ): WebDocumentIR {
+  const metadata = branch.reduce<WebRouteMetadataResult>(
+    (result, entry) => ({ ...result, ...entry.metadata }),
+    {},
+  );
   return withWebStyles(
     Object.freeze({
       ...prepareClientWebDocument({
-        title: route.metadata.title ?? ir.system.name ?? "Kit",
-        language: route.metadata.language,
-        metadata: routeDocumentMetadata(route.metadata),
+        title: metadata.title ?? applicationName,
+        language: metadata.language,
+        metadata: routeDocumentMetadata(metadata),
         entry: "/app.js",
       }),
       styles: presentationStyles,
@@ -2769,6 +3577,7 @@ function fallbackWebRoute(): ReturnType<typeof collectWebRoutes>[number] {
     feature: "",
     name: "root",
     path: "/",
+    status: 200,
     document: "content",
     cache: false,
     metadata: {},
@@ -2847,6 +3656,7 @@ function workerSource(input: {
   development: boolean;
   serverOrigin?: string;
   host: string;
+  runtime: string;
   processRuntime: string;
   revision: number;
   program: ProgramIR;
@@ -2859,11 +3669,11 @@ function workerSource(input: {
     input.program.name,
     input.development ? input.revision : undefined,
   );
-  const lifecycle =
-    input.program.environment.name === "browser-service-worker"
-      ? `const programs = globalThis.__kitServiceWorkerPrograms ??= [];
+  const serviceWorker = input.program.environment.name === "browser-service-worker";
+  const lifecycle = serviceWorker
+    ? `const programs = globalThis.__kitServiceWorkerPrograms ??= [];
 programs.push(ready);`
-      : `let disposed = false;
+    : `let disposed = false;
 addEventListener("message", (event) => {
   if (event.data !== "kit:dispose" || disposed) return;
   disposed = true;
@@ -2875,26 +3685,43 @@ addEventListener("message", (event) => {
       close();
     });
 });`;
-  return `import system from ${JSON.stringify(system)};
-import { createWebHost } from ${JSON.stringify(input.host)};
-import { startProcess } from ${JSON.stringify(input.processRuntime)};
-
-const dependencies = await createWebHost({
+  const start = serviceWorker
+    ? `globalThis.__kitServiceWorkerSubscriptions ??= new Set();
+const ready = createWebHost({
   dependencies: ${JSON.stringify(input.dependencies)},
   providers: ${JSON.stringify(input.providers)},
   system,
-  context: ${JSON.stringify(
-    input.program.environment.name === "browser-service-worker" ? "service-worker" : "worker",
-  )},
+  context: "service-worker",
+  ${input.development ? `serverOrigin: ${JSON.stringify(input.serverOrigin ?? "http://localhost:3010")},` : ""}
+}).then((dependencies) => startProcess(
+  system,
+  ${JSON.stringify(input.program.name)},
+	  dependencies,
+	  ${JSON.stringify(input.manifest)},
+	  webProgramLanguageRuntime,
+	  ${JSON.stringify(input.program.logicalName)},
+	));`
+    : `const dependencies = await createWebHost({
+  dependencies: ${JSON.stringify(input.dependencies)},
+  providers: ${JSON.stringify(input.providers)},
+  system,
+  context: "worker",
   ${input.development ? `serverOrigin: ${JSON.stringify(input.serverOrigin ?? "http://localhost:3010")},` : ""}
 });
 const ready = startProcess(
   system,
   ${JSON.stringify(input.program.name)},
-  dependencies,
-  ${JSON.stringify(input.manifest)},
-  ${JSON.stringify(input.program.logicalName)},
-);
+	  dependencies,
+	  ${JSON.stringify(input.manifest)},
+	  webProgramLanguageRuntime,
+	  ${JSON.stringify(input.program.logicalName)},
+	);`;
+  return `import system from ${JSON.stringify(system)};
+	import { createWebHost } from ${JSON.stringify(input.host)};
+	import { webProgramLanguageRuntime } from ${JSON.stringify(input.runtime)};
+	import { startProcess } from ${JSON.stringify(input.processRuntime)};
+
+${start}
 ${lifecycle}
 `;
 }
@@ -2907,9 +3734,79 @@ function workerName(program: string, index: number): string {
   return `${String(index + 1).padStart(2, "0")}-${readable || "worker"}`;
 }
 
+/** @internal Emits the minimal non-UI bootstrap used by installable static documents. */
+export function renderServiceWorkerBootstrap(
+  worker: string,
+  development: boolean,
+  registerInDevelopment: boolean,
+): string {
+  return `const development = ${JSON.stringify(development)};
+const preview = development && new URL(location.href).searchParams.get("pwa") === "preview";
+const requested = !development || ${JSON.stringify(registerInDevelopment)} || preview;
+const supported = typeof navigator.serviceWorker?.register === "function";
+const worker = ${JSON.stringify(worker)};
+const source = requested ? new URL(worker, import.meta.url) : undefined;
+if (preview) source?.searchParams.set("pwa", "preview");
+const resetDevelopmentWorker = async () => {
+  if (!development || !supported) return;
+  const scope = new URL("/", location.href).href;
+  const target = source?.href;
+  const controlled = navigator.serviceWorker.controller;
+  const registrations = await navigator.serviceWorker.getRegistrations();
+  const owned = registrations.filter((registration) => registration.scope === scope);
+  const stale = owned.filter((registration) =>
+    [registration.active, registration.waiting, registration.installing]
+      .filter(Boolean)
+      .every((worker) => worker.scriptURL !== target),
+  );
+  await Promise.all(stale.map((registration) => registration.unregister()));
+  if ("caches" in globalThis) {
+    const names = await caches.keys();
+    await Promise.all(
+      names.filter((name) => name.startsWith("kit-")).map((name) => caches.delete(name)),
+    );
+  }
+  const marker = "kit:development-worker-reset";
+  if (controlled && controlled.scriptURL !== target && sessionStorage.getItem(marker) !== "complete") {
+    sessionStorage.setItem(marker, "complete");
+    location.reload();
+    await new Promise(() => {});
+  }
+  sessionStorage.removeItem(marker);
+};
+const activate = async () => {
+  try {
+    await resetDevelopmentWorker();
+    if (!requested || !supported || !source) return;
+    await navigator.serviceWorker.register(source, { type: "module", scope: "/" });
+    const connection = navigator.connection;
+    if (!connection?.saveData && connection?.effectiveType !== "slow-2g" && connection?.effectiveType !== "2g") {
+      (await navigator.serviceWorker.ready).active?.postMessage("kit:warm");
+    }
+  } catch (error) {
+    console.error("[kit] Service worker lifecycle failed.", error);
+  }
+};
+if (development) {
+  void activate();
+} else {
+  const schedule = () => {
+    if (typeof requestIdleCallback === "function") {
+      requestIdleCallback(() => void activate(), { timeout: 4000 });
+    } else {
+      setTimeout(() => void activate(), 1000);
+    }
+  };
+  if (document.readyState === "complete") schedule();
+  else addEventListener("load", schedule, { once: true });
+}
+`;
+}
+
 function candidateSource(input: {
   system: string;
   interface: string;
+  features: Readonly<Record<string, string>>;
   development: boolean;
   serverOrigin?: string;
   host: string;
@@ -2923,9 +3820,10 @@ function candidateSource(input: {
   components: unknown;
   presentationDependencies: unknown;
   hotManifest: unknown;
-  routes: unknown;
+  routes: readonly WebRouteIR[];
   routeEntries: readonly WebRouteEntry[];
   dependencies: readonly DependencyContractIR[];
+  routeDependencies: readonly string[];
   headless: readonly Readonly<{
     program: string;
     logicalProgram: string;
@@ -2936,7 +3834,6 @@ function candidateSource(input: {
   workers: readonly Readonly<{
     source: string;
   }>[];
-  serviceWorker?: Readonly<{ source: string; register: boolean }>;
 }): string {
   const system = routeSystemSpecifier(
     input.system,
@@ -2955,9 +3852,55 @@ function candidateSource(input: {
   const routesWithLoaders = input.routeEntries
     .filter(({ loader }) => loader)
     .map(({ identity }) => identity);
+  const hotState = input.development
+    ? `const hotState = {
+    ...previous,
+    keyed: { ...previous.keyed },
+    programs: Object.fromEntries(
+      Object.entries(previous.programs ?? {}).map(([name, state]) => [name, { ...state }]),
+    ),
+    presentation: previous.presentation,
+    scroll: { ...previous.scroll },
+    controls: previous.controls?.map((control) => ({
+      ...control,
+      path: control.path.slice(),
+      selected: control.selected?.slice(),
+    })),
+    values: previous.values?.slice(),
+  };`
+    : "const hotState = { keyed: {}, programs: {}, scroll: {} };";
+  const activation = input.development
+    ? `let disposed = false;
+  return {
+    value: ui,
+    get snapshot() {
+      disposeRender.capture();
+      ui.captureHotState();
+      return hotState;
+    },
+    resume() {
+      disposeRender.resume();
+    },
+    async dispose() {
+      if (disposed) return;
+      disposed = true;
+      disposeRender();
+      await disposeAll([() => ui.dispose(), ...cleanups]);
+    },
+  };`
+    : `let disposed = false;
+  return {
+    value: ui,
+    async dispose() {
+      if (disposed) return;
+      disposed = true;
+      disposeRender();
+      await disposeAll([() => ui.dispose(), ...cleanups]);
+    },
+  };`;
   return `import system from ${JSON.stringify(system)};
 import { createWebHost } from ${JSON.stringify(input.host)};
-import { createWebUIAdapter, render } from ${JSON.stringify(input.runtime)};
+	import { createWebUIAdapter, render, webProgramLanguageRuntime } from ${JSON.stringify(input.runtime)};
 import { startProcess } from ${JSON.stringify(input.processRuntime)};
 
 export const manifest = ${JSON.stringify(input.hotManifest)};
@@ -2972,10 +3915,8 @@ if (!interfaceFeature?.presentation) {
   throw new Error(${JSON.stringify(`Web interface ${input.interface} has no Presentation.`)});
 }
 export const presentation = interfaceFeature.presentation;
-const development = ${JSON.stringify(input.development)};
 const headlessPrograms = ${JSON.stringify(input.headless)};
 const workerPrograms = ${JSON.stringify(input.workers)};
-const serviceWorker = ${JSON.stringify(input.serviceWorker ?? false)};
 const routeModules = {
   ${routeLoaders}
 };
@@ -3002,7 +3943,7 @@ const hostOptions = (definition) => ({
   dependencies: definition.dependencies,
   providers: definition.providers,
   system,
-  routes: ${JSON.stringify(input.routes)},
+  routes: ${JSON.stringify(clientWebRoutes(input.routes))},
   ${input.development ? `serverOrigin: ${JSON.stringify(input.serverOrigin ?? "http://localhost:3010")},` : ""}
 });
 
@@ -3031,122 +3972,18 @@ const disposeWorker = (worker) => new Promise((resolve) => {
   worker.postMessage("kit:dispose", [channel.port2]);
 });
 
-const pwaPreview = () =>
-  development && new URL(location.href).searchParams.get("pwa") === "preview";
-
-const serviceWorkerUrl = () => {
-  if (!serviceWorker) return undefined;
-  const url = new URL(serviceWorker.source, import.meta.url);
-  if (pwaPreview()) url.searchParams.set("pwa", "preview");
-  return url;
-};
-
-const serviceWorkerRequested = () =>
-  Boolean(serviceWorker && (serviceWorker.register || pwaPreview()));
-
-const serviceWorkerSupported = () =>
-  typeof navigator.serviceWorker?.register === "function";
-
-const backgroundLoadingAllowed = () => {
-  const connection = navigator.connection;
-  return !connection?.saveData &&
-    connection?.effectiveType !== "slow-2g" &&
-    connection?.effectiveType !== "2g";
-};
-
-const registerServiceWorkerAfterRender = () => {
-  if (!serviceWorkerRequested() || !serviceWorkerSupported()) return () => {};
-  let cancelled = false;
-  let timer;
-  let idle;
-  const warm = (registration) => {
-    if (cancelled || !backgroundLoadingAllowed()) return;
-    const run = () => {
-      if (!cancelled) registration.active?.postMessage("kit:warm");
-    };
-    if (typeof requestIdleCallback === "function") {
-      idle = requestIdleCallback(run, { timeout: 4000 });
-    } else {
-      timer = setTimeout(run, 1000);
-    }
-  };
-  const register = async () => {
-    if (cancelled) return;
-    try {
-      await navigator.serviceWorker.register(serviceWorkerUrl(), {
-        type: "module",
-        scope: "/",
-      });
-      warm(await navigator.serviceWorker.ready);
-    } catch (error) {
-      console.error("[kit] Service worker registration failed.", error);
-    }
-  };
-  const frame = requestAnimationFrame(() => {
-    clearTimeout(fallback);
-    timer = setTimeout(() => void register(), 0);
-  });
-  const fallback = setTimeout(() => void register(), 1000);
-  return () => {
-    cancelled = true;
-    cancelAnimationFrame(frame);
-    if (idle !== undefined && typeof cancelIdleCallback === "function") cancelIdleCallback(idle);
-    clearTimeout(fallback);
-    clearTimeout(timer);
-  };
-};
-
-const resetDevelopmentWorker = async () => {
-  if (!development || !("serviceWorker" in navigator)) return;
-  const scope = new URL("/", location.href).href;
-  const target = serviceWorkerRequested() ? serviceWorkerUrl()?.href : undefined;
-  const controlled = navigator.serviceWorker.controller;
-  const registrations = await navigator.serviceWorker.getRegistrations();
-  const owned = registrations.filter((registration) => registration.scope === scope);
-  const stale = owned.filter((registration) =>
-    [registration.active, registration.waiting, registration.installing]
-      .filter(Boolean)
-      .every((worker) => worker.scriptURL !== target),
-  );
-  await Promise.all(
-    stale.map((registration) => registration.unregister()),
-  );
-  if ("caches" in globalThis) {
-    const names = await caches.keys();
-    await Promise.all(
-      names.filter((name) => name.startsWith("kit-")).map((name) => caches.delete(name)),
-    );
-  }
-  const marker = "kit:development-worker-reset";
-  if (controlled && controlled.scriptURL !== target && sessionStorage.getItem(marker) !== "complete") {
-    sessionStorage.setItem(marker, "complete");
-    location.reload();
-    await new Promise(() => {});
-  }
-  sessionStorage.removeItem(marker);
-};
-
-export async function activate(root, previous = {}) {
-  const hotState = {
-    ...previous,
-    keyed: { ...previous.keyed },
-    programs: Object.fromEntries(
-      Object.entries(previous.programs ?? {}).map(([name, state]) => [name, { ...state }]),
-    ),
-    presentation: previous.presentation,
-    scroll: { ...previous.scroll },
-    values: previous.values?.slice(),
-  };
+export async function activate(root${input.development ? ", previous = {}" : ""}) {
+  ${hotState}
   const cleanups = [];
   try {
-    await resetDevelopmentWorker();
     for (const definition of headlessPrograms) {
       const process = await startProcess(
         system,
         definition.program,
-        await createWebHost(hostOptions(definition)),
-        definition.manifest,
-        definition.logicalProgram,
+	        await createWebHost(hostOptions(definition)),
+	        definition.manifest,
+	        webProgramLanguageRuntime,
+	        definition.logicalProgram,
       );
       cleanups.push(() => process.dispose());
     }
@@ -3165,6 +4002,7 @@ export async function activate(root, previous = {}) {
   const dependencies = await createWebHost({
     ...${JSON.stringify({
       dependencies: input.dependencies,
+      routeDependencies: input.routeDependencies,
       providers: input.providers,
       routes: input.routes,
       ...(input.development ? { serverOrigin: input.serverOrigin ?? "http://localhost:3010" } : {}),
@@ -3176,6 +4014,7 @@ export async function activate(root, previous = {}) {
     ui = await platform.component.createInterfaceUI({
       system,
       interface: ${JSON.stringify(input.interface)},
+      features: ${JSON.stringify(input.features)},
       program: ${JSON.stringify(input.program.name)},
       logicalProgram: ${JSON.stringify(input.program.logicalName)},
       programManifest: ${JSON.stringify(input.programManifest)},
@@ -3196,30 +4035,12 @@ export async function activate(root, previous = {}) {
   let disposeRender;
   try {
     disposeRender = render(() => ui.renderRoot(), root, hotState);
-    cleanups.push(registerServiceWorkerAfterRender());
   } catch (error) {
     await ui.dispose();
     await disposeAll(cleanups);
     throw error;
   }
-  let disposed = false;
-  return {
-    value: ui,
-    get snapshot() {
-      disposeRender.capture();
-      ui.captureHotState();
-      return hotState;
-    },
-    resume() {
-      disposeRender.resume();
-    },
-    async dispose() {
-      if (disposed) return;
-      disposed = true;
-      disposeRender();
-      await disposeAll([() => ui.dispose(), ...cleanups]);
-    },
-  };
+  ${activation}
 }
 `;
 }
@@ -3227,6 +4048,9 @@ export async function activate(root, previous = {}) {
 function developmentDocumentEvaluatorSource(input: {
   system: string;
   interface: string;
+  applicationName: string;
+  features: Readonly<Record<string, string>>;
+  routes: readonly WebRouteIR[];
   document: string;
   revision: number;
 }): string {
@@ -3253,6 +4077,9 @@ export const prepare = (input) =>
     ...input,
     system,
     interface: ${JSON.stringify(input.interface)},
+    applicationName: ${JSON.stringify(input.applicationName)},
+    features: ${JSON.stringify(input.features)},
+    routes: ${JSON.stringify(input.routes)},
     presentation: interfaceFeature.presentation,
   });
 `;
@@ -3275,21 +4102,22 @@ export function collectPresentationDependencies(
   const interface_ = selected?.interface
     ? ir.interfaces.find(({ path }) => path === selected.interface)
     : undefined;
-  const presentationSources = selected?.interface
-    ? ir.presentations.filter(({ interface: owner }) => owner === selected.interface)
+  const presentationSources = interface_
+    ? (webInterfaceCompilerIR(interface_.extensions?.web).presentations ?? [])
     : [];
   const components = ir.programs
     .filter(
-      ({ name, environment, ui }) =>
-        name === programName && environment.name === "browser-main" && Boolean(ui),
+      (program) =>
+        program.name === programName &&
+        program.environment.name === "browser-main" &&
+        Boolean(webProgramRoot(program)),
     )
     .flatMap((program) =>
       program.contributions.flatMap((contribution) =>
-        (contribution.ui?.components ?? []).map((component) => {
-          const feature =
-            interface_ && contribution.feature.startsWith(`${interface_.app}.`)
-              ? contribution.feature.slice(interface_.app.length + 1)
-              : contribution.feature;
+        (webProgramUI(contribution)?.components ?? []).map((component) => {
+          const feature = interface_
+            ? interfaceFeatureRole(interface_, contribution.feature)
+            : contribution.feature;
           const semantic = [
             ...feature.split(".").filter(Boolean).map(capitalize),
             component.name,
@@ -3373,8 +4201,23 @@ export function collectPresentationDependencies(
   );
 }
 
+function interfaceFeatureRole(interface_: PlatformInterfaceIR, feature: string): string {
+  const binding = Object.entries(interface_.features)
+    .sort(([, left], [, right]) => right.length - left.length)
+    .find(([, path]) => feature === path || feature.startsWith(`${path}.`));
+  if (!binding) return feature;
+  const [role, path] = binding;
+  return `${role}${feature.slice(path.length)}`;
+}
+
 function capitalize(value: string): string {
   return value ? `${value[0]!.toUpperCase()}${value.slice(1)}` : value;
+}
+
+function clientWebRoutes(
+  routes: readonly WebRouteIR[],
+): readonly Omit<WebRouteIR, "cache" | "status">[] {
+  return routes.map(({ cache: _cache, status: _status, ...route }) => Object.freeze(route));
 }
 
 function browserSource(input: {
@@ -3397,13 +4240,15 @@ addEventListener("pagehide", dispose, { once: true });
 `;
   }
   return `import * as initialCandidate from ${JSON.stringify(candidate)};
-import { HotUpdateCoordinator } from ${JSON.stringify(input.runtime)};
+import { HotUpdateCoordinator, isWebHotReplacementCompatible } from ${JSON.stringify(input.runtime)};
 import { startWebDeferredStream } from ${JSON.stringify(input.stream)};
 
 startWebDeferredStream();
 const root = document.querySelector("#app");
 if (!root) throw new Error("Missing UI root.");
-const coordinator = import.meta.hot?.data.coordinator ?? new HotUpdateCoordinator();
+const coordinator =
+  import.meta.hot?.data.coordinator ??
+  new HotUpdateCoordinator(isWebHotReplacementCompatible);
 let activations = 0;
 const apply = async (candidate, updateKind) => {
   const started = performance.now();

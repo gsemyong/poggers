@@ -1,17 +1,16 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
 import { createServer as createPortServer } from "node:net";
 import { tmpdir } from "node:os";
-import { extname, resolve, sep } from "node:path";
+import { dirname, extname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { describe, test } from "vitest";
 
-import type { PlatformAdapterImplementation } from "@/adapter";
-import { linkProgram } from "@/compiler/linker";
+import type { PlatformAdapterImplementation, ProductionConfiguration } from "@/adapter";
+import type { ReleaseArtifact } from "@/deployment";
 import { createPlatformAdapters, platformAdapters } from "@/platforms";
-import type { WebAssetManifest } from "@/platforms/web/adapter/pipeline";
 import {
   buildSystem,
   developSystem,
@@ -31,9 +30,9 @@ export {
   createMemoryDataStore,
 } from "@/features/data";
 export { createIdentityFixture } from "@/features/identity";
-export { createUIContributionInstance } from "@/execution/process";
+export { createWebUIContributionInstance as createUIContributionInstance } from "@/platforms/web/adapter/ui/process";
 export { startFeatureFixture } from "@/execution/process";
-export { createPresentationFrame } from "@/execution/presentation";
+export { createPresentationFrame } from "@/platforms/web/presentation/runtime";
 export {
   defineDependencyConformance,
   dependencyImplementationTarget,
@@ -287,7 +286,6 @@ async function verifyDevelopment(definition: SystemTestDefinition): Promise<void
 async function verifyProduction(definition: SystemTestDefinition): Promise<void> {
   const directory = testDirectory(definition.directory);
   const temporary = await mkdtemp(resolve(tmpdir(), "kit-system-production-"));
-  const database = resolve(temporary, "system.sqlite");
   const output = resolve(temporary, "dist");
   let running: ProductionSystem | undefined;
 
@@ -296,11 +294,18 @@ async function verifyProduction(definition: SystemTestDefinition): Promise<void>
     const built = await buildSystem(directory, output, platformAdapters);
     const buildMs = performance.now() - buildStarted;
     const artifactBytes = await directoryBytes(output);
-    const serverCount = built.artifacts.server?.entries.length ?? 0;
-    const ports = await availablePortRange(Math.max(serverCount + 1, 1));
+    const portCount = built.release.artifacts.reduce(
+      (count, artifact) =>
+        count +
+        artifact.configuration.filter(({ allocation }) => allocation?.kind === "port").length,
+      built.release.artifacts.filter(
+        ({ deployment, kind }) => deployment === "asset" && kind === "interface",
+      ).length,
+    );
+    const ports = await availablePortRange(Math.max(portCount, 1));
     const start = async () => {
       const started = performance.now();
-      running = await startProductionSystem(built, directory, database, ports[0]!);
+      running = await startProductionSystem(built, directory, temporary, ports);
       await ready(running.location, () => running?.diagnostics?.());
       return { location: running.location, startupMs: performance.now() - started };
     };
@@ -373,8 +378,8 @@ function testAdapters(input: {
         database: input.database,
         host: "localhost",
         shutdownTimeout: 500,
+        allowedOrigins: [webOrigin],
       },
-      webOrigins: [webOrigin],
     },
     web: {
       developmentPort: input.webPort,
@@ -403,86 +408,86 @@ type ProductionSystem = Readonly<{
 async function startProductionSystem(
   built: BuiltSystem,
   directory: string,
-  database: string,
-  basePort: number,
+  stateDirectory: string,
+  ports: readonly number[],
 ): Promise<ProductionSystem> {
-  const serverArtifacts = built.artifacts.server?.entries ?? [];
-  const interfaceArtifacts =
-    built.artifacts.web?.entries.filter(({ kind }) => kind === "interface") ?? [];
-  if (!serverArtifacts.length) {
-    if (!interfaceArtifacts.length) {
-      throw new Error("The production System exposes no public artifact.");
+  const artifacts = built.release.artifacts;
+  const processArtifacts = artifacts.filter(({ deployment }) => deployment === "process");
+  const assetArtifacts = artifacts.filter(({ deployment }) => deployment === "asset");
+  const interfaceArtifacts = assetArtifacts.filter(({ kind }) => kind === "interface");
+  let portCursor = 0;
+  const prepared: PreparedProductionProcess[] = [];
+  for (const artifact of processArtifacts) {
+    prepared.push(
+      await prepareProductionProcess({
+        artifact,
+        portCursor: () => ports[portCursor++],
+        stateDirectory,
+      }),
+    );
+  }
+  const interfaceOrigins = new Map<string, string>();
+  for (const process of prepared) {
+    const origin = process.locations[0];
+    if (!origin) continue;
+    const selected = uniqueArtifacts(
+      process.deferred.flatMap(({ source }) =>
+        source?.kind === "assets"
+          ? selectAssetArtifacts(assetArtifacts, source).filter(({ kind }) => kind === "interface")
+          : [],
+      ),
+    );
+    for (const [index, artifact] of selected.entries()) {
+      if (interfaceOrigins.has(artifact.identity)) continue;
+      interfaceOrigins.set(
+        artifact.identity,
+        selected.length === 1 ? origin : interfaceOrigin(origin, index),
+      );
     }
-    return startStaticWebArtifacts(interfaceArtifacts, basePort);
+  }
+  for (const process of prepared) {
+    resolveProductionSources(process, assetArtifacts, interfaceOrigins, built.directory);
   }
 
-  const httpPrograms = new Set(
-    built.ir.programs
-      .filter(
-        (program) =>
-          program.environment.platform === "server" &&
-          linkProgram(program).external.some(({ name }) => name === "http"),
-      )
-      .map(({ id }) => id),
-  );
-  const firstHttpIndex = serverArtifacts.findIndex(({ identity }) => httpPrograms.has(identity));
-  const firstHttpPort = firstHttpIndex < 0 ? undefined : basePort + firstHttpIndex;
-  const interfaceOrigins = new Map(
-    interfaceArtifacts.map((artifact, index) => [
-      artifact.identity,
-      interfaceArtifacts.length === 1
-        ? `http://127.0.0.1:${firstHttpPort}`
-        : `http://web-${index + 1}.localhost:${firstHttpPort}`,
-    ]),
-  );
-  const webInterfaces = JSON.stringify(
-    interfaceArtifacts.map((artifact) => ({
-      identity: artifact.identity,
-      origin: interfaceOrigins.get(artifact.identity)!,
-      root: artifact.path,
-    })),
-  );
   const processes: RunningProcess[] = [];
+  const staticServers: ProductionSystem[] = [];
   const locations: Record<string, readonly string[]> = {};
   try {
-    for (const [index, artifact] of serverArtifacts.entries()) {
-      const port = basePort + index;
-      const http = httpPrograms.has(artifact.identity);
-      const origin = `http://127.0.0.1:${port}`;
-      if (http) locations[artifact.identity] = [origin];
+    for (const process of prepared) {
+      if (!process.artifact.entrypoint) {
+        throw new Error(
+          `Production Process ${JSON.stringify(process.artifact.identity)} has no entrypoint.`,
+        );
+      }
+      if (process.locations.length) locations[process.artifact.identity] = process.locations;
       processes.push(
-        startProcess(artifact.path, directory, {
-          HOST: "127.0.0.1",
-          PORT: String(port),
-          KIT_DATABASE: database,
-          KIT_HTTP_BODY_LIMIT: "1024",
-          KIT_HTTP_TIMEOUT_MS: "2000",
-          KIT_HTTP_SHUTDOWN_TIMEOUT_MS: "500",
-          KIT_WEB_ORIGIN: interfaceOrigins.values().next().value ?? origin,
-          ...(http && interfaceArtifacts.length === 1
-            ? { KIT_WEB_ROOT: interfaceArtifacts[0]!.path }
-            : {}),
-          ...(http && interfaceArtifacts.length > 1 ? { KIT_WEB_INTERFACES: webInterfaces } : {}),
-        }),
+        startProcess(
+          resolve(built.directory, process.artifact.entrypoint),
+          directory,
+          process.environment,
+        ),
       );
     }
-    if (firstHttpPort === undefined) {
-      if (!interfaceArtifacts.length) {
-        throw new Error("The production System exposes no public HTTP or web artifact.");
+
+    for (const artifact of interfaceArtifacts) {
+      if (interfaceOrigins.has(artifact.identity)) continue;
+      const port = ports[portCursor++];
+      if (port === undefined) {
+        throw new Error(`No test port was allocated for ${JSON.stringify(artifact.identity)}.`);
       }
-      const web = await startStaticWebArtifacts(
-        interfaceArtifacts,
-        basePort + serverArtifacts.length,
+      const server = await startStaticArtifact(
+        artifact,
+        resolve(built.directory, artifact.root),
+        port,
       );
-      return {
-        ...web,
-        async dispose() {
-          await Promise.all([web.dispose(), disposeProcesses(processes)]);
-        },
-      };
+      staticServers.push(server);
+      interfaceOrigins.set(artifact.identity, server.location);
     }
     for (const [identity, origin] of interfaceOrigins) locations[identity] = [origin];
-    const location = interfaceOrigins.values().next().value ?? `http://127.0.0.1:${firstHttpPort}`;
+    const location =
+      interfaceOrigins.values().next().value ??
+      prepared.flatMap(({ locations: values }) => values)[0];
+    if (!location) throw new Error("The production System exposes no public HTTP location.");
     return {
       location,
       locations: Object.freeze(locations),
@@ -493,35 +498,153 @@ async function startProductionSystem(
             return `[${status}]\n${output()}`;
           })
           .join("\n"),
-      dispose: () => disposeProcesses(processes),
+      async dispose() {
+        await Promise.all([
+          disposeProcesses(processes),
+          ...staticServers.map((server) => server.dispose()),
+        ]);
+      },
     };
   } catch (error) {
-    await disposeProcesses(processes);
+    await Promise.all([
+      disposeProcesses(processes),
+      ...staticServers.map((server) => server.dispose()),
+    ]);
     throw error;
   }
 }
 
-async function startStaticWebArtifacts(
-  artifacts: readonly Readonly<{ identity: string; path: string }>[],
-  basePort: number,
-): Promise<ProductionSystem> {
-  const servers = await Promise.all(
-    artifacts.map((artifact, index) => startStaticWebArtifact(artifact.path, basePort + index)),
+type PreparedProductionProcess = {
+  artifact: ReleaseArtifact;
+  deferred: ProductionConfiguration[];
+  environment: Record<string, string>;
+  locations: string[];
+};
+
+async function prepareProductionProcess(input: {
+  artifact: ReleaseArtifact;
+  portCursor(): number | undefined;
+  stateDirectory: string;
+}): Promise<PreparedProductionProcess> {
+  const environment: Record<string, string> = {};
+  const deferred: ProductionConfiguration[] = [];
+  const allocatedPorts: string[] = [];
+  const processState = resolve(
+    input.stateDirectory,
+    "processes",
+    readableIdentity(input.artifact.identity),
   );
-  return {
-    location: servers[0]!.location,
-    locations: Object.freeze(
-      Object.fromEntries(
-        artifacts.map((artifact, index) => [
-          artifact.identity,
-          [servers[index]!.location] as const,
-        ]),
-      ),
-    ),
-    async dispose() {
-      await Promise.all(servers.map((server) => server.dispose()));
-    },
-  };
+
+  for (const field of input.artifact.configuration) {
+    if (field.source) {
+      deferred.push(field);
+      continue;
+    }
+    let value: string | number | boolean | undefined;
+    if (field.allocation?.kind === "port") {
+      value = input.portCursor();
+      if (value === undefined) {
+        throw new Error(
+          `No test port was allocated for ${JSON.stringify(input.artifact.identity)}.`,
+        );
+      }
+      allocatedPorts.push(String(value));
+    } else if (field.allocation?.kind === "storage") {
+      const root =
+        field.allocation.scope === "deployment"
+          ? resolve(input.stateDirectory, "storage")
+          : resolve(processState, "storage");
+      value = resolve(root, field.allocation.name);
+      await mkdir(field.allocation.type === "directory" ? value : dirname(value), {
+        recursive: true,
+      });
+    } else {
+      value = field.default;
+    }
+    if (value === undefined) {
+      if (field.required) {
+        throw new Error(
+          `Production Process ${JSON.stringify(input.artifact.identity)} is missing ${JSON.stringify(field.dependency)} configuration ${JSON.stringify(field.name)}.`,
+        );
+      }
+      continue;
+    }
+    environment[field.binding.name] = String(value);
+  }
+
+  const host = environment.HOST ?? "127.0.0.1";
+  const locations = allocatedPorts.map((port) => `http://${host}:${port}`);
+  if (input.artifact.lifecycle?.status) {
+    const status = resolve(processState, "status.json");
+    await mkdir(dirname(status), { recursive: true });
+    environment[input.artifact.lifecycle.status.environment] = status;
+  }
+  return { artifact: input.artifact, deferred, environment, locations };
+}
+
+function resolveProductionSources(
+  process: PreparedProductionProcess,
+  assets: readonly ReleaseArtifact[],
+  interfaceOrigins: ReadonlyMap<string, string>,
+  output: string,
+): void {
+  for (const field of process.deferred) {
+    const source = field.source!;
+    let value: string | undefined;
+    if (source.kind === "process-location") {
+      const selected = process.deferred.flatMap(({ source: candidate }) =>
+        candidate?.kind === "assets"
+          ? selectAssetArtifacts(assets, candidate).flatMap(({ identity }) => {
+              const origin = interfaceOrigins.get(identity);
+              return origin ? [origin] : [];
+            })
+          : [],
+      );
+      value = selected[0] ?? process.locations[0];
+    } else {
+      const selected = selectAssetArtifacts(assets, source);
+      if (source.format === "single" && selected.length === 1) {
+        value = resolve(output, selected[0]!.root);
+      } else if (source.format === "interfaces" && selected.length > 1) {
+        value = JSON.stringify(
+          selected.map((artifact) => ({
+            identity: artifact.identity,
+            ...(interfaceOrigins.has(artifact.identity)
+              ? { origin: interfaceOrigins.get(artifact.identity)! }
+              : {}),
+            root: resolve(output, artifact.root),
+          })),
+        );
+      }
+    }
+    if (value !== undefined) process.environment[field.binding.name] = value;
+  }
+}
+
+function selectAssetArtifacts(
+  artifacts: readonly ReleaseArtifact[],
+  source: Extract<NonNullable<ProductionConfiguration["source"]>, { kind: "assets" }>,
+): readonly ReleaseArtifact[] {
+  return artifacts.filter(
+    ({ deployment, kind, platform }) =>
+      deployment === "asset" &&
+      (!source.artifact || source.artifact === kind) &&
+      (!source.platform || source.platform === platform),
+  );
+}
+
+function uniqueArtifacts(artifacts: readonly ReleaseArtifact[]): readonly ReleaseArtifact[] {
+  return [...new Map(artifacts.map((artifact) => [artifact.identity, artifact])).values()];
+}
+
+function interfaceOrigin(processOrigin: string, index: number): string {
+  const location = new URL(processOrigin);
+  location.hostname = `interface-${index + 1}.localhost`;
+  return location.href.replace(/\/$/, "");
+}
+
+function readableIdentity(identity: string): string {
+  return identity.replaceAll(/[^A-Za-z0-9._-]/g, "-");
 }
 
 type RunningProcess = Readonly<{
@@ -565,25 +688,72 @@ async function disposeProcesses(processes: readonly RunningProcess[]): Promise<v
   );
 }
 
-async function startStaticWebArtifact(directory: string, port: number): Promise<ProductionSystem> {
+async function startStaticArtifact(
+  artifact: ReleaseArtifact,
+  directory: string,
+  port: number,
+): Promise<ProductionSystem> {
   const root = resolve(directory);
-  const index = await readFile(resolve(root, "index.html"));
-  const manifest = JSON.parse(
-    await readFile(resolve(root, "assets.ir.json"), "utf8"),
-  ) as WebAssetManifest;
+  const exposure = artifact.exposure;
+  if (!exposure || exposure.kind !== "http-assets") {
+    throw new Error(
+      `Static interface ${JSON.stringify(artifact.identity)} has no HTTP exposure contract.`,
+    );
+  }
+  const policies = new Map(exposure.files.map(({ path, cacheControl }) => [path, cacheControl]));
   const server = createHttpServer(async (request, response) => {
     try {
-      if (manifest.crossOriginIsolated) {
-        response.setHeader("cross-origin-embedder-policy", "require-corp");
-        response.setHeader("cross-origin-opener-policy", "same-origin");
+      for (const [name, value] of Object.entries(exposure.headers ?? {})) {
+        response.setHeader(name, value);
       }
-      const pathname = decodeURIComponent(new URL(request.url ?? "/", "http://localhost").pathname);
-      const candidate = resolve(root, `.${pathname}`);
+      const url = new URL(request.url ?? "/", "http://localhost");
+      const fixed = exposure.responses.find(({ path }) => path === url.pathname);
+      if (fixed) {
+        if (request.method !== "GET" && request.method !== "HEAD") {
+          response.writeHead(405, { allow: "GET, HEAD" }).end();
+          return;
+        }
+        const origin = new URL(`http://${request.headers.host ?? `127.0.0.1:${port}`}`).origin;
+        const body = fixed.substitutions?.includes("origin")
+          ? fixed.body.replaceAll("{{origin}}", origin)
+          : fixed.body;
+        response.writeHead(fixed.status, {
+          ...exposure.headers,
+          ...fixed.headers,
+          "content-length": Buffer.byteLength(body),
+        });
+        response.end(request.method === "HEAD" ? undefined : body);
+        return;
+      }
+      const pathname = decodeURIComponent(url.pathname);
+      let candidate = resolve(root, `.${pathname}`);
       const inside = candidate === root || candidate.startsWith(`${root}${sep}`);
-      const file = inside && (await isFile(candidate)) ? candidate : resolve(root, "index.html");
-      const body = file.endsWith("index.html") ? index : await readFile(file);
+      if (!inside) {
+        response.writeHead(400).end();
+        return;
+      }
+      if (await isDirectory(candidate)) candidate = resolve(candidate, "index.html");
+      if (
+        !(await isFile(candidate)) &&
+        exposure.fallback &&
+        (request.headers.accept ?? "").includes("text/html")
+      ) {
+        candidate = resolve(root, exposure.fallback);
+      }
+      if (!(await isFile(candidate))) {
+        response.writeHead(404).end();
+        return;
+      }
+      const body = await readFile(candidate);
+      const path = candidate
+        .slice(root.length + 1)
+        .split(sep)
+        .join("/");
       response.statusCode = 200;
-      response.setHeader("content-type", contentType(file));
+      response.setHeader("cache-control", policies.get(path) ?? "no-cache");
+      response.setHeader("content-length", body.byteLength);
+      response.setHeader("content-type", contentType(candidate));
+      response.setHeader("x-content-type-options", "nosniff");
       response.end(request.method === "HEAD" ? undefined : body);
     } catch {
       response.statusCode = 500;
@@ -593,7 +763,7 @@ async function startStaticWebArtifact(directory: string, port: number): Promise<
   await listen(server, port);
   return {
     location: `http://127.0.0.1:${port}`,
-    locations: { web: [`http://127.0.0.1:${port}`] },
+    locations: { [artifact.identity]: [`http://127.0.0.1:${port}`] },
     dispose: () => close(server),
   };
 }
@@ -697,6 +867,12 @@ async function isFile(path: string): Promise<boolean> {
     .catch(() => false);
 }
 
+async function isDirectory(path: string): Promise<boolean> {
+  return stat(path)
+    .then((value) => value.isDirectory())
+    .catch(() => false);
+}
+
 function contentType(path: string): string {
   switch (extname(path)) {
     case ".css":
@@ -709,6 +885,10 @@ function contentType(path: string): string {
       return "application/json; charset=utf-8";
     case ".svg":
       return "image/svg+xml";
+    case ".wasm":
+      return "application/wasm";
+    case ".webmanifest":
+      return "application/manifest+json";
     default:
       return "application/octet-stream";
   }

@@ -15,6 +15,7 @@ import {
   type CompiledWebComponentIR,
   type CompiledWebRouteIR,
   type WebInterfaceCompilerIR,
+  type WebComponentContractIR,
   type WebProgramCompilerIR,
   type WebRenderNodeIR,
   type WebRenderValueIR,
@@ -23,6 +24,7 @@ import {
   planWebRouteDocument,
   webProgramCompilerIR,
 } from "@/platforms/web/adapter/lowering";
+import { compilePresentationSource } from "@/platforms/web/adapter/presentation/source";
 
 /** Extracts web-only address and rendering meaning without teaching generic core about Routes. */
 export const webCompilerExtension: SourceCompilerExtension = Object.freeze({
@@ -30,28 +32,40 @@ export const webCompilerExtension: SourceCompilerExtension = Object.freeze({
   cacheSources: [
     import.meta.filename,
     resolve(import.meta.dirname, `lowering${extname(import.meta.filename)}`),
+    resolve(import.meta.dirname, `presentation/source${extname(import.meta.filename)}`),
   ],
   interface(context) {
-    if (context.platform !== "web") return undefined;
     const installation = context.source.member(context.implementation, "installation");
-    const routes = context.source.member(context.implementation, "routes");
-    if (!installation && !routes) return undefined;
+    const mounts = compileWebRouteMountContracts(context);
+    const presentation = context.source.member(context.implementation, "presentation");
+    const presentationSources = presentation ? context.source.sources(presentation) : [];
+    const presentations = presentationSources
+      .map(({ path, text }) => compilePresentationSource(text, relative(context.root, path)).ir)
+      .filter(({ animations, declarations }) => animations.length || declarations.length);
     return {
-      version: WEB_COMPILER_IR_VERSION,
-      ...(installation ? { installation: compileWebInstallation(context, installation) } : {}),
-      ...(routes ? { routes: compileWebRouteMounts(context, routes) } : {}),
-    } satisfies WebInterfaceCompilerIR;
+      ir: {
+        version: WEB_COMPILER_IR_VERSION,
+        ...(installation ? { installation: compileWebInstallation(context, installation) } : {}),
+        ...(mounts ? { mounts } : {}),
+        ...(presentations.length ? { presentations } : {}),
+      } satisfies WebInterfaceCompilerIR,
+      ...(presentationSources.length
+        ? { sources: presentationSources.map(({ path }) => path) }
+        : {}),
+    };
   },
   program(context) {
-    if (platformName(context) !== "web") return undefined;
     const routes = context.source.property(context.contract, "Routes", context.location);
-    if (!routes) return undefined;
     const values = context.source.object(context.source.member(context.implementation, "routes"));
+    const ui = compileWebUI(context);
     return {
-      version: WEB_COMPILER_IR_VERSION,
-      components: componentList(context),
-      routes: routeList(context, routes, values),
-    } satisfies WebProgramCompilerIR;
+      ir: {
+        version: WEB_COMPILER_IR_VERSION,
+        ...(ui ? { ui } : {}),
+        components: componentList(context),
+        routes: routes ? routeList(context, routes, values) : [],
+      } satisfies WebProgramCompilerIR,
+    };
   },
   validate(ir) {
     for (const interface_ of ir.interfaces) {
@@ -80,31 +94,147 @@ export const webCompilerExtension: SourceCompilerExtension = Object.freeze({
   },
 });
 
-function compileWebRouteMounts(
-  context: InterfaceSourceContext,
-  expression: ts.Expression,
-): Readonly<Record<string, string>> {
-  const value = context.source.constant(expression);
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return context.source.fail(expression, "Web Route mounts must be compiler-readable data.");
+function compileWebUI(context: ProgramSourceContext): WebProgramCompilerIR["ui"] | undefined {
+  const { location, source } = context;
+  const state = source.property(context.contract, "State", location);
+  const actions = source.property(context.contract, "Actions", location);
+  const components = source.property(context.contract, "Components", location);
+  if (!state && !actions && !components) return undefined;
+  if (!context.implementation && source.properties(components).length) {
+    return source.fail(
+      location,
+      `Web Program ${JSON.stringify(context.name)} with Components must expose compiler-readable Feature metadata.`,
+    );
   }
-  const routes: Record<string, string> = {};
-  for (const [feature, path] of Object.entries(value)) {
-    if (typeof path !== "string") {
-      return context.source.fail(
-        expression,
-        `Web Route mount ${JSON.stringify(feature)} must be a relative path.`,
-      );
-    }
-    if (path.startsWith("/")) {
-      return context.source.fail(
-        expression,
-        `Web Route mount ${JSON.stringify(feature)} must not start with "/".`,
-      );
-    }
-    routes[`${context.app}.${feature}`] = path;
+  const rootValue = source.member(context.implementation, "root");
+  const root = rootValue ? source.constant(rootValue) : undefined;
+  if (root !== undefined && typeof root !== "string") {
+    return source.fail(rootValue!, "A web Program root must name one Component.");
   }
-  return routes;
+  return {
+    ...(context.implementation && source.callable(context.implementation, "start")
+      ? { start: true as const }
+      : {}),
+    state: state ? source.lower(state, location) : source.emptyRecord(),
+    actions: source.properties(actions).map((action) => action.getName()),
+    components: componentContractList(context, components),
+    ...(root ? { root } : {}),
+  };
+}
+
+function componentContractList(
+  context: ProgramSourceContext,
+  components: ts.Type | undefined,
+): WebComponentContractIR[] {
+  const { checker, location: at, source } = context;
+  const values = source.object(source.member(context.implementation, "components"));
+  return source.properties(components).map((symbol) => {
+    const name = symbol.getName();
+    const location = symbol.valueDeclaration ?? at;
+    const contract = checker.getTypeOfSymbolAtLocation(symbol, location);
+    const props = source.property(contract, "Props", location);
+    const state = source.property(contract, "State", location);
+    const actions = source.property(contract, "Actions", location);
+    const elements = source.property(contract, "Elements", location);
+    const implementation = values ? source.object(source.resolveMember(values, name)) : undefined;
+    return {
+      name,
+      propCallbacks: source
+        .properties(props)
+        .filter((field) =>
+          Boolean(
+            checker
+              .getNonNullableType(
+                checker.getTypeOfSymbolAtLocation(field, field.valueDeclaration ?? location),
+              )
+              .getCallSignatures().length,
+          ),
+        )
+        .map((field) => field.getName()),
+      state: state ? source.lower(state, location) : source.emptyRecord(),
+      actions: source.properties(actions).map((action) => action.getName()),
+      elements: source.properties(elements).map((element) => {
+        const elementLocation = element.valueDeclaration ?? location;
+        const type = checker.getTypeOfSymbolAtLocation(element, elementLocation);
+        if (!type.isStringLiteral()) {
+          return source.fail(
+            elementLocation,
+            `Component Element ${JSON.stringify(element.getName())} must name one web primitive.`,
+          );
+        }
+        return { name: element.getName(), element: type.value };
+      }),
+      implementation: {
+        state: Boolean(implementation && source.memberDeclaration(implementation, "state")),
+        actions: Boolean(implementation && source.memberDeclaration(implementation, "actions")),
+        mount: Boolean(implementation && source.memberDeclaration(implementation, "mount")),
+        view: Boolean(implementation && source.memberDeclaration(implementation, "view")),
+      },
+    };
+  });
+}
+
+function compileWebRouteMountContracts(context: InterfaceSourceContext):
+  | readonly Readonly<{
+      feature: string;
+      path: string;
+      route?: string;
+      parent?: string;
+    }>[]
+  | undefined {
+  const marker = context.source.property(context.contract, "Interface", context.location);
+  const platform = marker
+    ? context.source.property(marker, "Platform", context.location)
+    : undefined;
+  const specification = platform
+    ? context.source.property(platform, "Specification", context.location)
+    : undefined;
+  const mounts = specification
+    ? context.source.property(specification, "Mounts", context.location)
+    : undefined;
+  if (!mounts || context.source.properties(mounts).length === 0) return undefined;
+
+  const routes: Array<{
+    feature: string;
+    path: string;
+    route?: string;
+    parent?: string;
+  }> = [];
+  const mounted = new Set<string>();
+  const visit = (type: ts.Type, parentPath: string, parent?: string): void => {
+    for (const symbol of context.source.properties(type)) {
+      const role = symbol.getName();
+      const location = symbol.valueDeclaration ?? context.location;
+      const mount = context.checker.getTypeOfSymbolAtLocation(symbol, location);
+      const segment = context.source.literal(mount, "Path", location);
+      if (segment.startsWith("/")) {
+        context.source.fail(location, `Web Route mount ${JSON.stringify(role)} must be relative.`);
+      }
+      if (mounted.has(role)) {
+        context.source.fail(
+          location,
+          `Application Feature role ${JSON.stringify(role)} is mounted more than once.`,
+        );
+      }
+      const path = [parentPath, segment]
+        .filter(Boolean)
+        .join("/")
+        .replaceAll(/\/{2,}/g, "/")
+        .replace(/\/$/, "");
+      const route = context.source.optionalLiteral(mount, "Route", location);
+      routes.push({
+        feature: role,
+        path,
+        ...(route ? { route } : {}),
+        ...(parent ? { parent } : {}),
+      });
+      mounted.add(role);
+      const children = context.source.property(mount, "Children", location);
+      if (children) visit(children, path, role);
+    }
+  };
+  visit(mounts, "");
+  return Object.freeze(routes);
 }
 
 function compileWebInstallation(
@@ -117,32 +247,103 @@ function compileWebInstallation(
   }
   const installation = value as Readonly<Record<string, unknown>>;
   for (const name of Object.keys(installation)) {
-    if (!["display", "icons", "offline", "shortName", "shortcuts", "start"].includes(name)) {
+    if (
+      ![
+        "backgroundColor",
+        "categories",
+        "description",
+        "display",
+        "icons",
+        "offline",
+        "orientation",
+        "screenshots",
+        "shortName",
+        "shortcuts",
+        "start",
+        "themeColor",
+      ].includes(name)
+    ) {
       return context.source.fail(
         expression,
         `Unsupported web installation field ${JSON.stringify(name)}.`,
       );
     }
   }
+  const destination = (
+    input: unknown,
+    subject: string,
+  ): NonNullable<WebInterfaceCompilerIR["installation"]>["start"] => {
+    if (!isRecord(input) || typeof input.route !== "string") {
+      return context.source.fail(expression, `${subject} must name a Route.`);
+    }
+    if (input.feature !== undefined && typeof input.feature !== "string") {
+      return context.source.fail(expression, `${subject} Feature must be a string.`);
+    }
+    return {
+      to: input.feature ? `${input.feature}.${input.route}` : input.route,
+      ...(isRecord(input.params)
+        ? {
+            params: input.params as NonNullable<
+              NonNullable<WebInterfaceCompilerIR["installation"]>["start"]
+            >["params"],
+          }
+        : {}),
+      ...(isRecord(input.search)
+        ? {
+            search: input.search as NonNullable<
+              NonNullable<WebInterfaceCompilerIR["installation"]>["start"]
+            >["search"],
+          }
+        : {}),
+      ...(typeof input.hash === "string" ? { hash: input.hash } : {}),
+    };
+  };
   return {
     ...(installation.shortName !== undefined
       ? { shortName: installation.shortName as string }
       : {}),
-    start: installation.start as NonNullable<WebInterfaceCompilerIR["installation"]>["start"],
+    ...(installation.description !== undefined
+      ? { description: installation.description as string }
+      : {}),
+    start: destination(installation.start, "The web installation start destination"),
     display: (installation.display ?? "standalone") as NonNullable<
       WebInterfaceCompilerIR["installation"]
     >["display"],
+    ...(installation.orientation !== undefined
+      ? {
+          orientation: installation.orientation as NonNullable<
+            WebInterfaceCompilerIR["installation"]
+          >["orientation"],
+        }
+      : {}),
+    ...(installation.themeColor !== undefined
+      ? { themeColor: installation.themeColor as string }
+      : {}),
+    ...(installation.backgroundColor !== undefined
+      ? { backgroundColor: installation.backgroundColor as string }
+      : {}),
+    ...(Array.isArray(installation.categories) && installation.categories.length
+      ? { categories: installation.categories as readonly string[] }
+      : {}),
     icons: (installation.icons ?? []) as NonNullable<
       WebInterfaceCompilerIR["installation"]
     >["icons"],
+    ...(Array.isArray(installation.screenshots) && installation.screenshots.length
+      ? {
+          screenshots: installation.screenshots as NonNullable<
+            WebInterfaceCompilerIR["installation"]
+          >["screenshots"],
+        }
+      : {}),
     shortcuts: Array.isArray(installation.shortcuts)
       ? installation.shortcuts.map((value) => {
           const shortcut = value as Readonly<Record<string, unknown>>;
           return {
             name: shortcut.name as string,
-            destination: shortcut.destination as NonNullable<
-              WebInterfaceCompilerIR["installation"]
-            >["start"],
+            destination: destination(
+              shortcut.destination,
+              "A web installation shortcut destination",
+            ),
             icons: (shortcut.icons ?? []) as NonNullable<
               WebInterfaceCompilerIR["installation"]
             >["icons"],
@@ -153,16 +354,13 @@ function compileWebInstallation(
         : (installation.shortcuts as NonNullable<
             WebInterfaceCompilerIR["installation"]
           >["shortcuts"]),
-    offline: installation.offline as NonNullable<WebInterfaceCompilerIR["installation"]>["offline"],
+    offline: {
+      fallback: destination(
+        isRecord(installation.offline) ? installation.offline.fallback : undefined,
+        "The web installation offline fallback",
+      ),
+    },
   };
-}
-
-function platformName(context: ProgramSourceContext): string | undefined {
-  const environment = context.source.property(context.contract, "Environment", context.location);
-  const platform = environment
-    ? context.source.property(environment, "Platform", context.location)
-    : undefined;
-  return platform ? context.source.literal(platform, "Name", context.location) : undefined;
 }
 
 function routeList(
@@ -184,6 +382,10 @@ function routeList(
       return source.fail(values ?? at, `Route ${JSON.stringify(name)} has no implementation.`);
     }
     const path = source.literal(route, "Path", location);
+    const parent = source.optionalLiteral(route, "Parent", location);
+    const status = source.property(route, "Status", location)
+      ? source.numberLiteral(route, "Status", location)
+      : 200;
     if (path.startsWith("/")) {
       source.fail(location, `Route ${JSON.stringify(name)} path must be relative.`);
     }
@@ -211,7 +413,9 @@ function routeList(
     return {
       feature: context.feature,
       name,
+      ...(parent ? { parent } : {}),
       path,
+      status,
       document: planWebRouteDocument({ metadata, cache, load: Boolean(load) }),
       cache,
       metadata,
@@ -219,7 +423,7 @@ function routeList(
       search,
       deferred,
       data: data ? source.lower(data, location) : source.emptyRecord(),
-      dependencies: routeDependencies(context, route, location),
+      dependencies: routeDependencies(context, location),
       implementation: {
         load: load
           ? source.portable(load, {
@@ -232,8 +436,8 @@ function routeList(
           elements: {},
         }),
       },
-      implementationSpan: relativeSpan(context.root, source.span(implementation)),
-      span: relativeSpan(context.root, source.span(location)),
+      implementationSpan: source.span(implementation),
+      span: source.span(location),
     };
   });
 }
@@ -281,18 +485,15 @@ function defaultPathParameters(path: string): WebRouteIR["params"] {
   );
 }
 
-function routeDependencies(
-  context: ProgramSourceContext,
-  route: ts.Type,
-  at: ts.Node,
-): DependencyIR[] {
-  const dependencies = context.source.property(route, "Dependencies", at);
+function routeDependencies(context: ProgramSourceContext, at: ts.Node): DependencyIR[] {
+  const dependencies = context.source.property(context.contract, "Requires", at);
   if (!dependencies) return [];
   return [...context.source.dependencies(dependencies, at)];
 }
 
 type RenderBinding =
   | Readonly<{ kind: "value"; value: WebRenderValueIR }>
+  | Readonly<{ kind: "children" }>
   | Readonly<{ kind: "elements" }>
   | Readonly<{ kind: "element"; name: string; tag: string }>
   | Readonly<{ kind: "components"; feature: string; global: boolean }>
@@ -315,7 +516,7 @@ function componentList(context: ProgramSourceContext): CompiledWebComponentIR[] 
     const contract = checker.getTypeOfSymbolAtLocation(symbol, location);
     const implementation = values ? source.object(source.resolveMember(values, name)) : undefined;
     const elements = componentElementTags(context, contract, location);
-    const span = relativeSpan(context.root, source.span(location));
+    const span = source.span(location);
     const view = implementation ? source.memberDeclaration(implementation, "view") : undefined;
     if (!implementation || !view) {
       return {
@@ -536,6 +737,8 @@ function bindRenderPattern(
       feature: scope.feature,
       global: scope.global,
     });
+  } else if (sourceName === "children") {
+    scope.bindings.set(binding.text, { kind: "children" });
   }
 }
 
@@ -660,6 +863,9 @@ function compileRenderNode(
       children: expression.elements.map((item) => compileRenderNode(context, item, scope)),
     };
   }
+  if (ts.isIdentifier(expression) && scope.bindings.get(expression.text)?.kind === "children") {
+    return { kind: "children" };
+  }
   return { kind: "text", value: compileRenderValue(context, expression, scope) };
 }
 
@@ -718,7 +924,8 @@ function compileJsxOpening(
     const node =
       ts.isJsxElement(unwrapped) ||
       ts.isJsxSelfClosingElement(unwrapped) ||
-      ts.isJsxFragment(unwrapped);
+      ts.isJsxFragment(unwrapped) ||
+      (ts.isIdentifier(unwrapped) && scope.bindings.get(unwrapped.text)?.kind === "children");
     return [
       {
         name,

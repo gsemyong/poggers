@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     fmt::Write,
     path::Path,
     time::Duration,
@@ -29,14 +29,14 @@ struct RouteDocument {
     cache_control: String,
     shared: bool,
     response_cache: Option<WebResponseCachePolicy>,
+    discovery: RouteDiscoveryDelivery,
 }
 
 enum RouteContent {
     Static(DocumentContent),
     Dynamic {
         document: Value,
-        loader: bool,
-        view: Value,
+        branch: Vec<DynamicRouteBranch>,
     },
 }
 
@@ -44,6 +44,7 @@ enum RouteContent {
 #[serde(deny_unknown_fields)]
 struct RouteManifest {
     version: u64,
+    interface: String,
     components: Vec<Value>,
     routes: Vec<RouteArtifact>,
 }
@@ -54,6 +55,44 @@ struct RouteArtifact {
     route: RouteDefinition,
     document: Value,
     request: RouteRequest,
+    delivery: RouteDelivery,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RouteDelivery {
+    production: String,
+    reasons: Vec<String>,
+    stream: bool,
+    representations: Vec<String>,
+    client: RouteClientDelivery,
+    worker: RouteWorkerDelivery,
+    discovery: RouteDiscoveryDelivery,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RouteClientDelivery {
+    runtime: bool,
+    hydration: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RouteWorkerDelivery {
+    cache_document: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RouteDiscoveryDelivery {
+    index: bool,
+    sitemap: bool,
+}
+
+pub struct WebDiscovery {
+    pub robots: String,
+    pub sitemap: String,
 }
 
 #[derive(Deserialize)]
@@ -67,6 +106,13 @@ enum RouteRequest {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DynamicRouteRequest {
+    branch: Vec<DynamicRouteBranch>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DynamicRouteBranch {
+    route: RouteDefinition,
     loader: bool,
     view: Value,
 }
@@ -75,9 +121,15 @@ struct DynamicRouteRequest {
 #[serde(deny_unknown_fields)]
 #[allow(dead_code)]
 struct RouteDefinition {
+    #[serde(default)]
+    address: Option<String>,
     feature: String,
     name: String,
+    #[serde(default)]
+    parent: Option<String>,
     path: String,
+    #[serde(default = "default_route_status")]
+    status: u16,
     document: String,
     cache: RouteCache,
     metadata: Value,
@@ -123,6 +175,7 @@ struct RouteParameter {
 
 pub enum RouteLookup<'a> {
     Found {
+        status: u16,
         html: &'a str,
         etag: &'a str,
         markdown: Option<&'a str>,
@@ -138,16 +191,34 @@ pub enum RouteLookup<'a> {
 pub struct WebRenderRequest {
     pub route: String,
     pub location: String,
+    pub status: u16,
     pub params: Value,
     pub search: Value,
     pub loader: bool,
-    pub deferred: Vec<String>,
-    pub shared: bool,
     pub response_cache: Option<WebResponseCachePolicy>,
     pub markdown: bool,
     document: Value,
-    view: Value,
+    branch: Vec<WebRenderBranch>,
     cache_control: String,
+}
+
+#[derive(Clone)]
+pub struct WebRenderBranch {
+    pub route: String,
+    pub params: Value,
+    pub search: Value,
+    pub status: u16,
+    pub loader: bool,
+    pub deferred: Vec<String>,
+    pub shared: bool,
+    metadata: Value,
+    view: Value,
+}
+
+impl WebRenderRequest {
+    pub fn branch(&self) -> &[WebRenderBranch] {
+        &self.branch
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -158,6 +229,7 @@ pub struct WebResponseCachePolicy {
 
 pub enum WebLoaderOutcome {
     Document {
+        status: u16,
         html: String,
         etag: String,
         markdown: Option<String>,
@@ -167,7 +239,10 @@ pub enum WebLoaderOutcome {
         cache_control: String,
         deferred: Option<WebDeferredDocument>,
     },
-    Redirect(String),
+    Redirect {
+        location: String,
+        status: u16,
+    },
 }
 
 pub struct WebDeferredDocument {
@@ -191,8 +266,12 @@ enum LoaderResolution {
     Document {
         data: Option<Value>,
         metadata: Map<String, Value>,
+        status: Option<u16>,
     },
-    Redirect(Value),
+    Redirect {
+        destination: Value,
+        status: u16,
+    },
 }
 
 #[derive(PartialEq)]
@@ -215,8 +294,11 @@ impl WebDocument {
                 .map_err(|error| format!("read web routes: {error}"))?;
             let manifest: RouteManifest = serde_json::from_str(&source)
                 .map_err(|error| format!("decode web routes: {error}"))?;
-            if manifest.version != 3 {
+            if manifest.version != 7 {
                 return Err("unsupported web route document version".to_owned());
+            }
+            if manifest.interface.is_empty() {
+                return Err("web route document interface is required".to_owned());
             }
             let components = component_map(manifest.components)?;
             let routes = manifest
@@ -224,6 +306,12 @@ impl WebDocument {
                 .into_iter()
                 .map(|entry| {
                     validate_route(&entry.route)?;
+                    validate_delivery(
+                        &entry.route,
+                        &entry.document,
+                        &entry.request,
+                        &entry.delivery,
+                    )?;
                     let cache_control = cache_control(&entry.route.cache)?;
                     let shared = matches!(
                         &entry.route.cache,
@@ -237,12 +325,11 @@ impl WebDocument {
                         RouteRequest::Disabled(true) => {
                             return Err("web Route request artifact cannot be true".to_owned());
                         }
-                        RouteRequest::Dynamic(DynamicRouteRequest { loader, view }) => {
-                            validate_render_node(&view)?;
+                        RouteRequest::Dynamic(DynamicRouteRequest { branch }) => {
+                            validate_dynamic_branch(&entry.route, &branch)?;
                             RouteContent::Dynamic {
                                 document: entry.document,
-                                loader,
-                                view,
+                                branch,
                             }
                         }
                     };
@@ -253,6 +340,7 @@ impl WebDocument {
                         cache_control,
                         shared,
                         response_cache,
+                        discovery: entry.delivery.discovery,
                     })
                 })
                 .collect::<Result<Vec<_>, String>>()?;
@@ -274,9 +362,51 @@ impl WebDocument {
         })
     }
 
+    pub fn discovery(&self, origin: &str) -> Result<WebDiscovery, String> {
+        let base = url::Url::parse(origin)
+            .map_err(|error| format!("parse web discovery origin: {error}"))?;
+        if !matches!(base.scheme(), "http" | "https") || base.host().is_none() {
+            return Err("web discovery origin must be an HTTP origin".to_owned());
+        }
+        let mut locations = BTreeSet::new();
+        for entry in &self.routes {
+            if !entry.discovery.sitemap {
+                continue;
+            }
+            let candidate = entry
+                .route
+                .metadata
+                .get("canonical")
+                .and_then(Value::as_str)
+                .unwrap_or(&entry.route.path);
+            let mut location = base
+                .join(candidate)
+                .map_err(|error| format!("resolve web canonical URL: {error}"))?;
+            if location.origin() != base.origin() {
+                continue;
+            }
+            location.set_fragment(None);
+            locations.insert(location.to_string());
+        }
+        let mut sitemap = String::from(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">",
+        );
+        for location in locations {
+            sitemap.push_str("<url><loc>");
+            sitemap.push_str(&escape_discovery_xml(&location));
+            sitemap.push_str("</loc></url>");
+        }
+        sitemap.push_str("</urlset>\n");
+        Ok(WebDiscovery {
+            robots: format!("User-agent: *\nAllow: /\nSitemap: {origin}/sitemap.xml\n"),
+            sitemap,
+        })
+    }
+
     pub fn lookup(&self, path: &str, query: Option<&str>) -> RouteLookup<'_> {
         if self.routes.is_empty() {
             return RouteLookup::Found {
+                status: 200,
                 html: &self.fallback.html,
                 etag: &self.fallback.etag,
                 markdown: self.fallback.markdown.as_deref(),
@@ -289,6 +419,7 @@ impl WebDocument {
                 Ok(Some(values)) => match &route.content {
                     RouteContent::Static(content) => {
                         return RouteLookup::Found {
+                            status: route.route.status,
                             html: &content.html,
                             etag: &content.etag,
                             markdown: content.markdown.as_deref(),
@@ -296,29 +427,61 @@ impl WebDocument {
                             cache_control: &route.cache_control,
                         };
                     }
-                    RouteContent::Dynamic {
-                        document,
-                        loader,
-                        view,
-                    } => {
+                    RouteContent::Dynamic { document, branch } => {
+                        let branch = branch
+                            .iter()
+                            .map(|entry| {
+                                let shared = matches!(
+                                    &entry.route.cache,
+                                    RouteCache::Policy(policy) if policy.scope == "public"
+                                );
+                                WebRenderBranch {
+                                    route: route_identity(&entry.route),
+                                    params: Value::Object(select_route_values(
+                                        &values.params,
+                                        &entry.route.params,
+                                    )),
+                                    search: Value::Object(select_route_values(
+                                        &values.search,
+                                        &entry.route.search,
+                                    )),
+                                    status: entry.route.status,
+                                    loader: entry.loader,
+                                    deferred: entry.route.deferred.clone(),
+                                    shared,
+                                    metadata: entry.route.metadata.clone(),
+                                    view: entry.view.clone(),
+                                }
+                            })
+                            .collect::<Vec<_>>();
+                        let loaders_are_shared = branch
+                            .iter()
+                            .filter(|entry| entry.loader)
+                            .all(|entry| entry.shared);
+                        let response_is_shared = route.shared && loaders_are_shared;
                         return RouteLookup::Dynamic(WebRenderRequest {
                             route: route_identity(&route.route),
                             location: match query {
                                 Some(query) if !query.is_empty() => format!("{path}?{query}"),
                                 _ => path.to_owned(),
                             },
+                            status: route.route.status,
                             params: Value::Object(values.params),
                             search: Value::Object(values.search),
-                            loader: *loader,
-                            deferred: route.route.deferred.clone(),
-                            shared: route.shared,
-                            response_cache: route.response_cache,
+                            loader: branch.iter().any(|entry| entry.loader),
+                            response_cache: response_is_shared
+                                .then_some(route.response_cache)
+                                .flatten(),
                             markdown: route.route.document == "content"
                                 && public_markdown_metadata(&route.route.metadata)
-                                && (!*loader || route.shared),
+                                && loaders_are_shared,
                             document: document.clone(),
-                            view: view.clone(),
-                            cache_control: route.cache_control.clone(),
+                            branch,
+                            cache_control: if response_is_shared || !route.shared {
+                                route.cache_control.clone()
+                            } else {
+                                "no-store".to_owned()
+                            },
                         });
                     }
                 },
@@ -332,51 +495,94 @@ impl WebDocument {
     pub fn render_request(
         &self,
         request: &WebRenderRequest,
-        outcome: Option<Value>,
+        outcomes: Vec<Option<Value>>,
     ) -> Result<WebLoaderOutcome, String> {
-        let resolution = if request.loader {
-            parse_loader_outcome(
-                outcome.ok_or_else(|| "web Route loader returned no outcome".to_owned())?,
-            )?
-        } else {
-            if outcome.is_some() {
-                return Err("a loader-free web Route received loader output".to_owned());
-            }
-            LoaderResolution::Document {
-                data: None,
-                metadata: Map::new(),
-            }
-        };
-        let LoaderResolution::Document { data, metadata } = resolution else {
-            let LoaderResolution::Redirect(destination) = resolution else {
-                unreachable!("exhaustive loader resolution")
-            };
-            return Ok(WebLoaderOutcome::Redirect(
-                self.resolve_destination(&request.route, &destination)?,
-            ));
-        };
+        if outcomes.len() != request.branch.len() {
+            return Err(
+                "web Route branch returned an inconsistent loader outcome count".to_owned(),
+            );
+        }
         let mut document = request.document.clone();
-        let merged = merge_dynamic_metadata(&mut document, metadata)?;
-        let scope = RenderScope {
-            data: data
-                .clone()
-                .map(RuntimeValue::Json)
-                .unwrap_or(RuntimeValue::Undefined),
-            params: request.params.clone(),
-            search: request.search.clone(),
-            props: BTreeMap::new(),
-            state: Value::Object(Map::new()),
-            locals: BTreeMap::new(),
-        };
+        let mut status = request.status;
+        let mut resolutions = Vec::with_capacity(request.branch.len());
+        let mut merged = Map::new();
+        for (entry, outcome) in request.branch.iter().zip(outcomes) {
+            let resolution = if entry.loader {
+                parse_loader_outcome(outcome.ok_or_else(|| {
+                    format!("web Route loader {:?} returned no outcome", entry.route)
+                })?)?
+            } else {
+                if outcome.is_some() {
+                    return Err(format!(
+                        "loader-free web Route {:?} received loader output",
+                        entry.route
+                    ));
+                }
+                LoaderResolution::Document {
+                    data: None,
+                    metadata: Map::new(),
+                    status: None,
+                }
+            };
+            let LoaderResolution::Document {
+                data,
+                metadata,
+                status: explicit_status,
+            } = resolution
+            else {
+                let LoaderResolution::Redirect {
+                    destination,
+                    status,
+                } = resolution
+                else {
+                    unreachable!("exhaustive loader resolution")
+                };
+                return Ok(WebLoaderOutcome::Redirect {
+                    location: self.resolve_destination(&entry.route, &destination)?,
+                    status,
+                });
+            };
+            if let Some(explicit_status) = explicit_status {
+                status = explicit_status;
+            }
+            let mut entry_metadata = entry
+                .metadata
+                .as_object()
+                .cloned()
+                .ok_or_else(|| "web Route branch metadata must be an object".to_owned())?;
+            entry_metadata.extend(metadata.clone());
+            merged = merge_dynamic_metadata(&mut document, metadata)?;
+            resolutions.push((
+                data,
+                entry_metadata,
+                explicit_status.unwrap_or(entry.status),
+            ));
+        }
         let mut boundaries = DeferredBoundaries::default();
-        let pending = evaluate_render_node(
-            &request.view,
-            &scope,
-            &self.components,
-            &[],
-            &mut boundaries,
-        )?;
-        validate_deferred_boundaries(&boundaries, &request.deferred)?;
+        let mut pending = Vec::new();
+        for (entry, (data, _, _)) in request.branch.iter().zip(&resolutions).rev() {
+            let scope = RenderScope {
+                children: pending,
+                data: data
+                    .clone()
+                    .map(RuntimeValue::Json)
+                    .unwrap_or(RuntimeValue::Undefined),
+                params: entry.params.clone(),
+                search: entry.search.clone(),
+                props: BTreeMap::new(),
+                state: Value::Object(Map::new()),
+                locals: BTreeMap::new(),
+            };
+            pending =
+                evaluate_render_node(&entry.view, &scope, &self.components, &[], &mut boundaries)?;
+        }
+        let deferred = request
+            .branch
+            .iter()
+            .flat_map(|entry| entry.deferred.iter().cloned())
+            .collect::<Vec<_>>();
+        let has_deferred = !deferred.is_empty();
+        validate_deferred_boundaries(&boundaries, &deferred)?;
         let mut sequence = RenderSequence::default();
         let root = pending
             .iter()
@@ -391,16 +597,39 @@ impl WebDocument {
             Value::String(if interactive { "hydrate" } else { "static" }.to_owned()),
         );
         object.insert("root".to_owned(), Value::Array(root));
+        let hydration_branch = request
+            .branch
+            .iter()
+            .zip(&resolutions)
+            .map(|(entry, (data, metadata, status))| {
+                json!({
+                    "route": route_identity_parts(&entry.route),
+                    "params": entry.params,
+                    "search": entry.search,
+                    "status": status,
+                    "loader": match data {
+                        Some(data) => json!({ "data": data }),
+                        None => Value::Bool(false),
+                    },
+                    "metadata": metadata,
+                })
+            })
+            .collect::<Vec<_>>();
+        let (data, _, _) = resolutions
+            .last()
+            .ok_or_else(|| "web Route branch cannot be empty".to_owned())?;
         let hydration = json!({
             "version": 1,
             "route": route_identity_parts(&request.route),
             "location": request.location,
             "params": request.params,
             "search": request.search,
+            "status": status,
             "loader": match data {
                 Some(data) => json!({ "data": data }),
                 None => Value::Bool(false),
             },
+            "branch": hydration_branch,
             "metadata": merged,
         });
         object.insert(
@@ -422,6 +651,7 @@ impl WebDocument {
         let route_data = serde_json::to_string(&hydration)
             .map_err(|error| format!("encode web Route state: {error}"))?;
         Ok(WebLoaderOutcome::Document {
+            status,
             etag: crate::strong_etag(html.as_bytes()),
             markdown,
             markdown_etag,
@@ -429,11 +659,11 @@ impl WebDocument {
             html,
             route_data,
             cache_control: request.cache_control.clone(),
-            deferred: (!request.deferred.is_empty()).then(|| WebDeferredDocument {
+            deferred: has_deferred.then(|| WebDeferredDocument {
                 boundaries,
                 components: self.components.clone(),
                 emitted: HashSet::new(),
-                fields: request.deferred.clone(),
+                fields: deferred,
             }),
         })
     }
@@ -442,23 +672,38 @@ impl WebDocument {
         let destination = destination
             .as_object()
             .ok_or_else(|| "web Route redirect destination must be an object".to_owned())?;
-        let to = destination
-            .get("to")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "web Route redirect destination requires to".to_owned())?;
         let source_feature = source
             .rsplit_once('.')
             .map(|(feature, _)| feature)
             .unwrap_or("");
-        let local = (!source_feature.is_empty()).then(|| format!("{source_feature}.{to}"));
+        let to = match (
+            destination.get("to"),
+            destination.get("feature"),
+            destination.get("route"),
+        ) {
+            (Some(Value::String(to)), None, None) => to.clone(),
+            (None, Some(Value::String(feature)), Some(Value::String(route)))
+                if !feature.is_empty() && !route.is_empty() =>
+            {
+                format!("{feature}.{route}")
+            }
+            (None, None, Some(Value::String(route))) if !route.is_empty() => {
+                if source_feature.is_empty() {
+                    route.clone()
+                } else {
+                    format!("{source_feature}.{route}")
+                }
+            }
+            _ => return Err("web Route redirect destination must name one Route".to_owned()),
+        };
         let suffix = format!(".{to}");
         let mut matches = self.routes.iter().filter(|route| {
             let identity = route_identity(&route.route);
+            let address = route_address(&route.route);
             identity == to
-                || local
-                    .as_ref()
-                    .is_some_and(|candidate| identity == *candidate)
+                || address == to
                 || identity.ends_with(&suffix)
+                || address.ends_with(&suffix)
         });
         let route = matches
             .next()
@@ -468,6 +713,58 @@ impl WebDocument {
         }
         format_route_destination(&route.route, destination)
     }
+}
+
+fn validate_dynamic_branch(
+    leaf: &RouteDefinition,
+    branch: &[DynamicRouteBranch],
+) -> Result<(), String> {
+    if branch.is_empty() {
+        return Err("dynamic web Route branch cannot be empty".to_owned());
+    }
+    for (index, entry) in branch.iter().enumerate() {
+        validate_route(&entry.route)?;
+        validate_render_node(&entry.view)?;
+        if !entry.loader && !entry.route.deferred.is_empty() {
+            return Err(format!(
+                "loader-free web Route {:?} declares deferred data",
+                route_identity(&entry.route)
+            ));
+        }
+        let expected_parent = index
+            .checked_sub(1)
+            .map(|parent| route_identity(&branch[parent].route));
+        if entry.route.parent.as_deref() != expected_parent.as_deref() {
+            return Err(format!(
+                "dynamic web Route branch has inconsistent parent for {:?}",
+                route_identity(&entry.route)
+            ));
+        }
+    }
+    let branch_leaf = &branch.last().expect("checked non-empty branch").route;
+    if route_identity(branch_leaf) != route_identity(leaf)
+        || branch_leaf.address != leaf.address
+        || branch_leaf.path != leaf.path
+        || branch_leaf.document != leaf.document
+    {
+        return Err("dynamic web Route branch leaf does not match its artifact".to_owned());
+    }
+    Ok(())
+}
+
+fn select_route_values(
+    values: &Map<String, Value>,
+    fields: &[RouteParameter],
+) -> Map<String, Value> {
+    fields
+        .iter()
+        .filter_map(|field| {
+            values
+                .get(&field.name)
+                .cloned()
+                .map(|value| (field.name.clone(), value))
+        })
+        .collect()
 }
 
 impl WebDeferredDocument {
@@ -586,6 +883,13 @@ fn route_identity(route: &RouteDefinition) -> String {
         route.name.clone()
     } else {
         format!("{}.{}", route.feature, route.name)
+    }
+}
+
+fn route_address(route: &RouteDefinition) -> String {
+    match route.address.as_deref() {
+        Some(address) if !address.is_empty() => format!("{address}.{}", route.name),
+        _ => route_identity(route),
     }
 }
 
@@ -770,6 +1074,7 @@ fn apply_initial_presentation(
 fn validate_render_node(value: &Value) -> Result<(), String> {
     match string(value, "kind")? {
         "none" => validate_keys(value, &["kind"], "web render none"),
+        "children" => validate_keys(value, &["kind"], "web render children"),
         "text" => {
             validate_keys(value, &["kind", "value"], "web render text")?;
             validate_render_value(required(value, "value")?)
@@ -957,7 +1262,7 @@ fn parse_loader_outcome(value: Value) -> Result<LoaderResolution, String> {
     }
     if object
         .keys()
-        .any(|name| !matches!(name.as_str(), "data" | "metadata" | "redirect"))
+        .any(|name| !matches!(name.as_str(), "data" | "metadata" | "redirect" | "status"))
     {
         return Err("web Route loader outcome has unsupported fields".to_owned());
     }
@@ -966,12 +1271,39 @@ fn parse_loader_outcome(value: Value) -> Result<LoaderResolution, String> {
         None => Map::new(),
     };
     if let Some(destination) = object.get("redirect") {
-        return Ok(LoaderResolution::Redirect(destination.clone()));
+        return Ok(LoaderResolution::Redirect {
+            destination: destination.clone(),
+            status: loader_status(object.get("status"), true)?.unwrap_or(302),
+        });
     }
     Ok(LoaderResolution::Document {
         data: object.get("data").cloned(),
         metadata,
+        status: loader_status(object.get("status"), false)?,
     })
+}
+
+fn loader_status(value: Option<&Value>, redirect: bool) -> Result<Option<u16>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let status = value
+        .as_u64()
+        .and_then(|status| u16::try_from(status).ok())
+        .ok_or_else(|| "web Route loader status must be an integer".to_owned())?;
+    let valid = if redirect {
+        valid_redirect_status(status)
+    } else {
+        valid_route_status(status)
+    };
+    if !valid {
+        return Err(if redirect {
+            "unsupported web Route redirect status".to_owned()
+        } else {
+            "unsupported web Route document status".to_owned()
+        });
+    }
+    Ok(Some(status))
 }
 
 fn validate_dynamic_metadata(value: &Value) -> Result<&Map<String, Value>, String> {
@@ -1216,6 +1548,7 @@ enum PendingNode {
 
 #[derive(Clone)]
 struct RenderScope {
+    children: Vec<PendingNode>,
     data: RuntimeValue,
     params: Value,
     search: Value,
@@ -1280,6 +1613,7 @@ fn evaluate_render_node(
 ) -> Result<Vec<PendingNode>, String> {
     match string(node, "kind")? {
         "none" => Ok(Vec::new()),
+        "children" => Ok(scope.children.clone()),
         "text" => render_value_nodes(
             evaluate_render_value(required(node, "value")?, scope)?,
             scope,
@@ -1385,6 +1719,7 @@ fn evaluate_render_node(
                 }
             }
             let component_scope = RenderScope {
+                children: Vec::new(),
                 data: RuntimeValue::Undefined,
                 params: Value::Object(Map::new()),
                 search: Value::Object(Map::new()),
@@ -1407,6 +1742,7 @@ fn evaluate_render_node(
                 let mut locals = scope.locals.clone();
                 locals.insert(name.to_owned(), RuntimeValue::Json(value));
                 let item_scope = RenderScope {
+                    children: scope.children.clone(),
                     data: scope.data.clone(),
                     params: scope.params.clone(),
                     search: scope.search.clone(),
@@ -1883,10 +2219,12 @@ fn format_route_destination(
     route: &RouteDefinition,
     destination: &Map<String, Value>,
 ) -> Result<String, String> {
-    if destination
-        .keys()
-        .any(|name| !matches!(name.as_str(), "hash" | "params" | "search" | "to"))
-    {
+    if destination.keys().any(|name| {
+        !matches!(
+            name.as_str(),
+            "feature" | "hash" | "params" | "route" | "search" | "to"
+        )
+    }) {
         return Err("web Route destination has unsupported fields".to_owned());
     }
     let params = destination
@@ -2223,8 +2561,16 @@ fn is_uuid(value: &str) -> bool {
 }
 
 fn validate_route(route: &RouteDefinition) -> Result<(), String> {
+    if route.address.as_deref().is_some_and(|address| {
+        address.is_empty() || address.split('.').any(|part| !valid_identifier(part))
+    }) {
+        return Err("web route has an invalid interface address".to_owned());
+    }
     if !route.path.starts_with('/') {
         return Err("web route path must be absolute".to_owned());
+    }
+    if !valid_route_status(route.status) {
+        return Err("unsupported web route document status".to_owned());
     }
     if route.document != "content" && route.document != "shell" {
         return Err("unsupported web route document plan".to_owned());
@@ -2272,14 +2618,217 @@ fn validate_route(route: &RouteDefinition) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_delivery(
+    route: &RouteDefinition,
+    document: &Value,
+    request: &RouteRequest,
+    delivery: &RouteDelivery,
+) -> Result<(), String> {
+    let expected_production = if route.document == "shell" {
+        "client"
+    } else if matches!(request, RouteRequest::Disabled(false)) {
+        "precomputed"
+    } else {
+        "request"
+    };
+    if delivery.production != expected_production {
+        return Err("web route delivery production is inconsistent".to_owned());
+    }
+    let branch = match request {
+        RouteRequest::Dynamic(request) => request.branch.as_slice(),
+        RouteRequest::Disabled(_) => &[],
+    };
+    let stream =
+        !route.deferred.is_empty() || branch.iter().any(|entry| !entry.route.deferred.is_empty());
+    if delivery.stream != stream {
+        return Err("web route delivery stream decision is inconsistent".to_owned());
+    }
+    if delivery.reasons.is_empty()
+        || delivery.reasons.iter().any(|reason| reason.is_empty())
+        || delivery.reasons.iter().collect::<HashSet<_>>().len() != delivery.reasons.len()
+    {
+        return Err("web route delivery reasons are invalid".to_owned());
+    }
+    let mut representations = delivery
+        .representations
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    if representations.len() != delivery.representations.len()
+        || !representations.remove("document")
+        || representations
+            .iter()
+            .any(|representation| !matches!(*representation, "markdown" | "route-data"))
+    {
+        return Err("web route delivery representations are invalid".to_owned());
+    }
+    let markdown = route.document == "content"
+        && !route
+            .metadata
+            .get("robots")
+            .and_then(Value::as_str)
+            .is_some_and(|robots| {
+                robots
+                    .split(',')
+                    .any(|value| value.trim().eq_ignore_ascii_case("noindex"))
+            })
+        && !stream
+        && branch.iter().filter(|entry| entry.loader).all(|entry| {
+            matches!(
+                &entry.route.cache,
+                RouteCache::Policy(policy) if policy.scope == "public"
+            )
+        });
+    if delivery
+        .representations
+        .iter()
+        .any(|representation| representation == "markdown")
+        != markdown
+    {
+        return Err("web route delivery markdown decision is inconsistent".to_owned());
+    }
+    if delivery
+        .representations
+        .iter()
+        .any(|representation| representation == "route-data")
+        != matches!(request, RouteRequest::Dynamic(_))
+    {
+        return Err("web route delivery state decision is inconsistent".to_owned());
+    }
+    let document = document
+        .as_object()
+        .ok_or_else(|| "web route document must be an object".to_owned())?;
+    let runtime = document.get("entry").is_some_and(Value::is_string);
+    let hydration = document
+        .get("hydration")
+        .is_some_and(|value| value != &Value::Bool(false));
+    if delivery.client.runtime != runtime || delivery.client.hydration != hydration {
+        return Err("web route client delivery is inconsistent".to_owned());
+    }
+    let cache_document = route.params.is_empty()
+        && route.search.is_empty()
+        && (route.document == "shell"
+            || matches!(
+                &route.cache,
+                RouteCache::Policy(policy) if policy.scope == "public"
+            ));
+    if delivery.worker.cache_document != cache_document {
+        return Err("web route worker delivery is inconsistent".to_owned());
+    }
+    let publicly_readable = branch.iter().filter(|entry| entry.loader).all(|entry| {
+        matches!(
+            &entry.route.cache,
+            RouteCache::Policy(policy) if policy.scope == "public"
+        )
+    });
+    let index = route.document == "content"
+        && route.status == 200
+        && publicly_readable
+        && !route
+            .metadata
+            .get("robots")
+            .and_then(Value::as_str)
+            .is_some_and(|robots| {
+                robots
+                    .split(',')
+                    .any(|value| value.trim().eq_ignore_ascii_case("noindex"))
+            });
+    let sitemap = index && route.params.is_empty() && route.search.is_empty();
+    if delivery.discovery.index != index || delivery.discovery.sitemap != sitemap {
+        return Err("web route discovery delivery is inconsistent".to_owned());
+    }
+    Ok(())
+}
+
+fn default_route_status() -> u16 {
+    200
+}
+
+fn valid_route_status(status: u16) -> bool {
+    matches!(
+        status,
+        200 | 201
+            | 202
+            | 203
+            | 207
+            | 208
+            | 226
+            | 400
+            | 401
+            | 402
+            | 403
+            | 404
+            | 405
+            | 406
+            | 408
+            | 409
+            | 410
+            | 412
+            | 413
+            | 414
+            | 415
+            | 417
+            | 418
+            | 421
+            | 422
+            | 423
+            | 424
+            | 425
+            | 426
+            | 428
+            | 429
+            | 431
+            | 451
+            | 500
+            | 501
+            | 502
+            | 503
+            | 504
+            | 505
+            | 506
+            | 507
+            | 508
+            | 510
+            | 511
+    )
+}
+
+fn valid_redirect_status(status: u16) -> bool {
+    matches!(status, 301 | 302 | 303 | 307 | 308)
+}
+
 fn validate_routes(routes: &[RouteDocument]) -> Result<(), String> {
     let mut identities = HashSet::new();
-    let mut patterns = BTreeMap::new();
+    let mut parents = BTreeMap::new();
     for route in routes {
         let identity = route_identity(&route.route);
         if !identities.insert(identity.clone()) {
             return Err(format!("duplicate web Route {identity:?}"));
         }
+        parents.insert(identity, route.route.parent.clone());
+    }
+    for (identity, parent) in &parents {
+        if parent
+            .as_ref()
+            .is_some_and(|parent| !identities.contains(parent))
+        {
+            return Err(format!(
+                "web Route {identity:?} has unknown parent {parent:?}"
+            ));
+        }
+        let mut visited = HashSet::new();
+        let mut current = Some(identity.as_str());
+        while let Some(candidate) = current {
+            if !visited.insert(candidate) {
+                return Err(format!("web Route parent cycle at {candidate:?}"));
+            }
+            current = parents.get(candidate).and_then(Option::as_deref);
+        }
+    }
+
+    let mut patterns: BTreeMap<String, String> = BTreeMap::new();
+    for route in routes {
+        let identity = route_identity(&route.route);
         let pattern = route
             .route
             .path
@@ -2296,13 +2845,35 @@ fn validate_routes(routes: &[RouteDocument]) -> Result<(), String> {
             })
             .collect::<Vec<_>>()
             .join("/");
-        if let Some(previous) = patterns.insert(pattern, identity.clone()) {
+        if let Some(previous) = patterns.get(&pattern) {
+            if route_is_ancestor(&parents, previous, &identity)
+                || route_is_ancestor(&parents, &identity, previous)
+            {
+                patterns.insert(pattern, identity);
+                continue;
+            }
             return Err(format!(
                 "web Routes {previous:?} and {identity:?} are ambiguous"
             ));
         }
+        patterns.insert(pattern, identity);
     }
     Ok(())
+}
+
+fn route_is_ancestor(
+    parents: &BTreeMap<String, Option<String>>,
+    ancestor: &str,
+    descendant: &str,
+) -> bool {
+    let mut current = parents.get(descendant).and_then(Option::as_deref);
+    while let Some(candidate) = current {
+        if candidate == ancestor {
+            return true;
+        }
+        current = parents.get(candidate).and_then(Option::as_deref);
+    }
+    false
 }
 
 fn validate_fields(fields: &[RouteParameter], location: &str) -> Result<(), String> {
@@ -2712,6 +3283,15 @@ fn escape_markdown_destination(value: &str) -> String {
         .replace(')', "%29")
 }
 
+fn escape_discovery_xml(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
 fn render(document: &Value) -> Result<String, String> {
     validate_keys(
         document,
@@ -2723,13 +3303,14 @@ fn render(document: &Value) -> Result<String, String> {
             "preloads",
             "rendering",
             "root",
+            "scripts",
             "styles",
             "title",
             "version",
         ],
         "web document",
     )?;
-    if document.get("version").and_then(Value::as_u64) != Some(5) {
+    if document.get("version").and_then(Value::as_u64) != Some(6) {
         return Err("unsupported web document version".to_owned());
     }
     let rendering = string(document, "rendering")?;
@@ -2757,6 +3338,10 @@ fn render(document: &Value) -> Result<String, String> {
         .get("preloads")
         .and_then(Value::as_array)
         .ok_or_else(|| "web document preloads must be an array".to_owned())?;
+    let scripts = document
+        .get("scripts")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "web document scripts must be an array".to_owned())?;
     let metadata = document
         .get("metadata")
         .and_then(Value::as_object)
@@ -2771,6 +3356,14 @@ fn render(document: &Value) -> Result<String, String> {
             .ok_or_else(|| "web document preload must be a string".to_owned())?;
         if !preload.starts_with('/') {
             return Err("web document preload must be absolute".to_owned());
+        }
+    }
+    for script in scripts {
+        let script = script
+            .as_str()
+            .ok_or_else(|| "web document script must be a string".to_owned())?;
+        if !script.starts_with('/') {
+            return Err("web document script must be absolute".to_owned());
         }
     }
     let root = document
@@ -2839,6 +3432,14 @@ fn render(document: &Value) -> Result<String, String> {
         escape_attribute(&mut output, entry);
         output.push_str("\"></script>");
     }
+    for script in scripts {
+        output.push_str("<script type=\"module\" async src=\"");
+        escape_attribute(
+            &mut output,
+            script.as_str().expect("validated auxiliary script"),
+        );
+        output.push_str("\"></script>");
+    }
     output.push_str("</body></html>");
     Ok(output)
 }
@@ -2850,7 +3451,8 @@ fn validate_hydration(value: &Value) -> Result<(), String> {
     validate_keys(
         value,
         &[
-            "loader", "location", "metadata", "params", "route", "search", "version",
+            "branch", "loader", "location", "metadata", "params", "route", "search", "status",
+            "version",
         ],
         "web Route hydration",
     )?;
@@ -2875,6 +3477,11 @@ fn validate_hydration(value: &Value) -> Result<(), String> {
         .get("search")
         .and_then(Value::as_object)
         .ok_or_else(|| "web Route hydration search must be an object".to_owned())?;
+    let status = required(value, "status")?
+        .as_u64()
+        .and_then(|status| u16::try_from(status).ok())
+        .filter(|status| valid_route_status(*status))
+        .ok_or_else(|| "web Route hydration status is invalid".to_owned())?;
     validate_web_metadata(
         value
             .get("metadata")
@@ -2886,6 +3493,55 @@ fn validate_hydration(value: &Value) -> Result<(), String> {
         .ok_or_else(|| "web Route hydration loader is required".to_owned())?;
     if loader != &Value::Bool(false) {
         validate_keys(loader, &["data"], "web Route hydration loader")?;
+    }
+    if let Some(branch) = value.get("branch") {
+        let branch = branch
+            .as_array()
+            .filter(|branch| !branch.is_empty())
+            .ok_or_else(|| "web Route hydration branch must be a non-empty array".to_owned())?;
+        for entry in branch {
+            validate_keys(
+                entry,
+                &["loader", "metadata", "params", "route", "search", "status"],
+                "web Route hydration branch entry",
+            )?;
+            let entry_route = required(entry, "route")?;
+            validate_keys(
+                entry_route,
+                &["feature", "name"],
+                "web Route hydration branch identity",
+            )?;
+            string(entry_route, "feature")?;
+            string(entry_route, "name")?;
+            required(entry, "params")?
+                .as_object()
+                .ok_or_else(|| "web Route hydration branch params must be an object".to_owned())?;
+            required(entry, "search")?
+                .as_object()
+                .ok_or_else(|| "web Route hydration branch search must be an object".to_owned())?;
+            required(entry, "status")?
+                .as_u64()
+                .and_then(|status| u16::try_from(status).ok())
+                .filter(|status| valid_route_status(*status))
+                .ok_or_else(|| "web Route hydration branch status is invalid".to_owned())?;
+            validate_web_metadata(
+                required(entry, "metadata")?,
+                "web Route hydration branch metadata",
+            )?;
+            let entry_loader = required(entry, "loader")?;
+            if entry_loader != &Value::Bool(false) {
+                validate_keys(entry_loader, &["data"], "web Route hydration branch loader")?;
+            }
+        }
+        let leaf = branch.last().expect("checked non-empty branch");
+        if required(leaf, "route")? != route
+            || required(leaf, "params")? != required(value, "params")?
+            || required(leaf, "search")? != required(value, "search")?
+            || required(leaf, "loader")? != loader
+            || required(leaf, "status")?.as_u64() != Some(u64::from(status))
+        {
+            return Err("web Route hydration branch leaf is mismatched".to_owned());
+        }
     }
     Ok(())
 }
@@ -3419,13 +4075,14 @@ mod tests {
 
     fn document() -> Value {
         json!({
-            "version": 5,
+            "version": 6,
             "rendering": "hydrate",
             "language": "en",
             "title": "A < B & C",
             "metadata": {},
             "entry": "/app.js",
             "preloads": ["/shared.js"],
+            "scripts": ["/installation.js"],
             "styles": [".root{color:red}"],
             "hydration": false,
             "root": [{
@@ -3447,6 +4104,9 @@ mod tests {
         assert!(rendered.contains("<title>A &lt; B &amp; C</title>"));
         assert!(rendered.contains("<link rel=\"modulepreload\" href=\"/app.js\">"));
         assert!(rendered.contains("<link rel=\"modulepreload\" href=\"/shared.js\">"));
+        assert!(
+            rendered.contains("<script type=\"module\" async src=\"/installation.js\"></script>")
+        );
         assert!(rendered.contains("<!--kit:t0-->&lt;script&gt;&amp;\"'"));
     }
 
@@ -3475,6 +4135,7 @@ mod tests {
         static_document["rendering"] = json!("static");
         static_document["entry"] = json!(false);
         static_document["preloads"] = json!([]);
+        static_document["scripts"] = json!([]);
         let rendered = render(&static_document).expect("render static document");
         assert!(rendered.contains("data-kit-rendering=\"static\""));
         assert!(!rendered.contains("modulepreload"));
@@ -3531,39 +4192,48 @@ mod tests {
         let request = WebRenderRequest {
             route: "tasks.detail".to_owned(),
             location: "/tasks/42".to_owned(),
+            status: 200,
             params: json!({ "id": "42" }),
             search: json!({}),
             loader: true,
-            deferred: Vec::new(),
-            shared: false,
             response_cache: None,
             markdown: true,
             document: document(),
-            view: json!({
-                "kind": "component",
-                "target": "tasks.Card",
-                "props": [
-                    {
-                        "name": "title",
-                        "node": false,
-                        "value": { "kind": "path", "root": "data", "path": ["title"] }
-                    },
-                    {
-                        "name": "kind",
-                        "node": false,
-                        "value": { "kind": "literal", "value": "request" }
-                    }
-                ]
-            }),
+            branch: vec![WebRenderBranch {
+                route: "tasks.detail".to_owned(),
+                params: json!({ "id": "42" }),
+                search: json!({}),
+                status: 200,
+                loader: true,
+                deferred: Vec::new(),
+                shared: false,
+                metadata: json!({}),
+                view: json!({
+                    "kind": "component",
+                    "target": "tasks.Card",
+                    "props": [
+                        {
+                            "name": "title",
+                            "node": false,
+                            "value": { "kind": "path", "root": "data", "path": ["title"] }
+                        },
+                        {
+                            "name": "kind",
+                            "node": false,
+                            "value": { "kind": "literal", "value": "request" }
+                        }
+                    ]
+                }),
+            }],
             cache_control: "private, no-store".to_owned(),
         };
         let outcome = renderer
             .render_request(
                 &request,
-                Some(json!({
+                vec![Some(json!({
                     "data": { "title": "</script><script>bad()</script>" },
                     "metadata": { "title": "Task 42" }
-                })),
+                }))],
             )
             .expect("render request");
         let WebLoaderOutcome::Document { html, .. } = outcome else {
@@ -3576,11 +4246,107 @@ mod tests {
     }
 
     #[test]
+    fn renders_nested_route_branches_with_isolated_loader_state() {
+        let renderer = WebDocument {
+            fallback: document_content(&document()).expect("fallback"),
+            routes: Vec::new(),
+            components: BTreeMap::new(),
+        };
+        let request = WebRenderRequest {
+            route: "tasks.detail".to_owned(),
+            location: "/workspace/tasks/42".to_owned(),
+            status: 200,
+            params: json!({ "id": "42" }),
+            search: json!({}),
+            loader: true,
+            response_cache: None,
+            markdown: true,
+            document: document(),
+            branch: vec![
+                WebRenderBranch {
+                    route: "shell.workspace".to_owned(),
+                    params: json!({}),
+                    search: json!({}),
+                    status: 200,
+                    loader: true,
+                    deferred: Vec::new(),
+                    shared: false,
+                    metadata: json!({ "title": "Workspace" }),
+                    view: json!({
+                        "kind": "element",
+                        "element": "Root",
+                        "tag": "main",
+                        "attributes": [],
+                        "children": [
+                            {
+                                "kind": "text",
+                                "value": { "kind": "path", "root": "data", "path": ["label"] }
+                            },
+                            { "kind": "children" }
+                        ]
+                    }),
+                },
+                WebRenderBranch {
+                    route: "tasks.detail".to_owned(),
+                    params: json!({ "id": "42" }),
+                    search: json!({}),
+                    status: 200,
+                    loader: true,
+                    deferred: Vec::new(),
+                    shared: false,
+                    metadata: json!({ "title": "Task" }),
+                    view: json!({
+                        "kind": "element",
+                        "element": "Root",
+                        "tag": "article",
+                        "attributes": [],
+                        "children": [{
+                            "kind": "text",
+                            "value": { "kind": "path", "root": "data", "path": ["title"] }
+                        }]
+                    }),
+                },
+            ],
+            cache_control: "private, no-store".to_owned(),
+        };
+        let outcome = renderer
+            .render_request(
+                &request,
+                vec![
+                    Some(json!({ "data": { "label": "Workspace" } })),
+                    Some(json!({
+                        "data": { "title": "Task 42" },
+                        "metadata": { "title": "Task 42" }
+                    })),
+                ],
+            )
+            .expect("render branch");
+        let WebLoaderOutcome::Document {
+            html, route_data, ..
+        } = outcome
+        else {
+            panic!("expected document");
+        };
+        assert!(html.contains("<main"));
+        assert!(html.contains("Workspace<article"));
+        assert!(html.contains("Task 42</article>"));
+        let hydration: Value = serde_json::from_str(&route_data).expect("hydration");
+        assert_eq!(
+            hydration["branch"][0]["route"],
+            json!({ "feature": "shell", "name": "workspace" })
+        );
+        assert_eq!(hydration["branch"][1]["params"], json!({ "id": "42" }));
+    }
+
+    #[test]
     fn matches_static_parameter_and_wildcard_routes() {
         let route = |path: &str| RouteDefinition {
+            address: None,
             feature: "test".to_owned(),
             name: "route".to_owned(),
+            parent: None,
             path: path.to_owned(),
+            status: 200,
             document: "shell".to_owned(),
             cache: RouteCache::Disabled(false),
             metadata: json!({}),

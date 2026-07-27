@@ -12,19 +12,15 @@ declare const systemContract: unique symbol;
 declare const applicationContract: unique symbol;
 
 type FeatureValue = Readonly<{ [Name in keyof Feature<FeatureContract>]?: unknown }>;
-
 type FeatureValues = Readonly<Record<string, FeatureValue>>;
-
 type FeatureContracts<Features extends FeatureValues> = {
   readonly [Name in keyof Features]: FeatureContractOf<Features[Name]>;
 };
-
 type FeaturesOf<Contract> = Contract extends {
   Features?: infer Features;
 }
   ? Extract<NonNullable<Features>, Record<string, FeatureContract>>
   : Empty;
-
 type DefinitionField<Name extends PropertyKey, Value extends object> = keyof Value extends never
   ? { readonly [Key in Name]?: never }
   : { readonly [Key in Name]: Value };
@@ -56,82 +52,71 @@ type ApplicationInterfaceDefinitions<Contract extends ApplicationContract> = {
     ? ApplyApplicationInterfaceKind<Kind, ApplicationOwner<Contract>>
     : never;
 };
-type ApplicationInterfaceContracts<Contract extends ApplicationContract> = {
-  readonly [Name in keyof ApplicationInterfaces<Contract>]: Readonly<{
-    Interface: {
-      Platform: ApplicationInterfaces<Contract>[Name];
+type ApplicationCompilerContract<Contract extends ApplicationContract> = Readonly<
+  ApplicationOwner<Contract> & {
+    Application: Contract;
+    Interfaces: {
+      readonly [Name in keyof ApplicationInterfaces<Contract>]: Readonly<{
+        Interface: {
+          Platform: ApplicationInterfaces<Contract>[Name];
+        };
+      }>;
     };
-  }>;
-};
+  }
+>;
 
 /** Type-level meaning of one independently addressable product experience. */
 export type ApplicationContract = Readonly<{
+  Name?: string;
   Features?: Record<string, FeatureContract>;
   Interfaces?: PlatformContract;
 }>;
 
-/** Internal Feature projection consumed by the generic compiler and runtime. */
-export type ApplicationFeatureContract<Contract extends ApplicationContract> = Readonly<
-  ApplicationOwner<Contract> & {
-    App: true;
-    Interfaces: ApplicationInterfaceContracts<Contract>;
-  }
->;
-
-/** One Application implementation. Features select values; interfaces add Platform policy. */
-export type Application<Contract extends ApplicationContract = ApplicationContract> = Readonly<
-  Feature<ApplicationFeatureContract<Contract>> & {
-    interfaces: ApplicationInterfaceDefinitions<Contract>;
-    [applicationContract]?: Contract;
-  }
->;
+/**
+ * One Application implementation.
+ *
+ * Applications compose Platform interfaces over Feature requirements. Concrete
+ * Feature instances are owned once by the System and executable behavior stays
+ * in those Features.
+ */
+export type Application<Contract extends ApplicationContract = ApplicationContract> = Readonly<{
+  interfaces: ApplicationInterfaceDefinitions<Contract>;
+  [applicationContract]?: ApplicationCompilerContract<Contract>;
+}>;
 
 export type ApplicationContractOf<Value> =
   Value extends Readonly<{
-    [applicationContract]?: infer Contract extends ApplicationContract;
+    [applicationContract]?: {
+      Application: infer Contract extends ApplicationContract;
+    };
   }>
     ? Contract
     : never;
 
 /** Validates one Application while retaining its exact semantic contract. */
 export function createApplication<Contract extends ApplicationContract>(
-  definition: Omit<Feature<ApplicationFeatureContract<Contract>>, "programs"> &
-    Readonly<{ interfaces: ApplicationInterfaceDefinitions<Contract> }> &
-    ([FeatureEnvironmentConflict<ApplicationFeatureContract<Contract>>] extends [never]
-      ? unknown
-      : never),
+  definition: Readonly<{ interfaces: ApplicationInterfaceDefinitions<Contract> }>,
 ): Application<Contract> {
-  return definition as Application<Contract>;
+  return definition;
 }
 
-type ApplicationValue = Readonly<{ [applicationContract]?: ApplicationContract }>;
+type ApplicationValue = Readonly<{
+  [applicationContract]?: ApplicationCompilerContract<ApplicationContract>;
+}>;
 type ApplicationValues = Readonly<Record<string, ApplicationValue>>;
 type ApplicationContracts<Applications extends ApplicationValues> = {
-  readonly [Name in keyof Applications]: ApplicationFeatureContract<
-    ApplicationContractOf<Applications[Name]>
-  >;
+  readonly [Name in keyof Applications]: ApplicationContractOf<Applications[Name]>;
 };
 type ApplicationsOf<Contract> = Contract extends {
   Applications?: infer Applications;
 }
-  ? Extract<
-      NonNullable<Applications>,
-      Record<string, ApplicationFeatureContract<ApplicationContract>>
-    >
+  ? Extract<NonNullable<Applications>, Record<string, ApplicationContract>>
   : Empty;
-type StandaloneFeaturesOf<Contract> = string extends keyof ApplicationsOf<Contract>
-  ? FeaturesOf<Contract>
-  : {
-      readonly [Name in Exclude<
-        keyof FeaturesOf<Contract>,
-        keyof ApplicationsOf<Contract>
-      >]: Extract<FeaturesOf<Contract>[Name], FeatureContract>;
-    };
 type NormalizedSystemContract<
   Features extends FeatureValues,
   Applications extends ApplicationValues,
 > = Readonly<{
-  Features: FeatureContracts<Features> & ApplicationContracts<Applications>;
+  Features: FeatureContracts<Features>;
   Applications: ApplicationContracts<Applications>;
 }>;
 
@@ -141,20 +126,13 @@ type SystemApplicationSpecifications<Contract> = Contract extends {
   ? Extract<NonNullable<Applications>, Record<string, ApplicationContract>>
   : Empty;
 type NormalizedDeclaredSystemContract<Contract extends SystemDefinitionContract> = Readonly<{
-  Features: FeaturesOf<Contract> & {
-    readonly [Name in keyof SystemApplicationSpecifications<Contract>]: ApplicationFeatureContract<
-      SystemApplicationSpecifications<Contract>[Name]
-    >;
-  };
-  Applications: {
-    readonly [Name in keyof SystemApplicationSpecifications<Contract>]: ApplicationFeatureContract<
-      SystemApplicationSpecifications<Contract>[Name]
-    >;
-  };
+  Features: FeaturesOf<Contract>;
+  Applications: SystemApplicationSpecifications<Contract>;
 }>;
+type SystemFeatureRoot<Contract> = Readonly<{ Features: FeaturesOf<Contract> }>;
 type DeclaredSystemConflict<Contract extends SystemDefinitionContract> =
   | Extract<keyof FeaturesOf<Contract>, keyof SystemApplicationSpecifications<Contract>>
-  | FeatureEnvironmentConflict<NormalizedDeclaredSystemContract<Contract>>;
+  | FeatureEnvironmentConflict<SystemFeatureRoot<Contract>>;
 
 /** Type-level declaration for one company System before adapter meaning is projected. */
 export type SystemDefinitionContract = Readonly<{
@@ -165,20 +143,20 @@ export type SystemDefinitionContract = Readonly<{
 /** The normalized company-level product contract consumed by realization. */
 export type SystemContract = FeatureContract &
   Readonly<{
-    Applications?: Record<string, ApplicationFeatureContract<ApplicationContract>>;
+    Applications?: Record<string, ApplicationContract>;
   }>;
 
 export type SystemMetadata = Readonly<{ name: string }>;
 
 type ExactSystemDefinition<Contract extends SystemContract> = DefinitionField<
   "features",
-  FeatureDefinitions<StandaloneFeaturesOf<Contract>>
+  FeatureDefinitions<FeaturesOf<Contract>, SystemFeatureRoot<Contract>>
 > &
   DefinitionField<
     "applications",
     {
-      readonly [Name in keyof ApplicationsOf<Contract>]: Feature<
-        Extract<ApplicationsOf<Contract>[Name], FeatureContract>
+      readonly [Name in keyof ApplicationsOf<Contract>]: Application<
+        Extract<ApplicationsOf<Contract>[Name], ApplicationContract>
       >;
     }
   >;
@@ -204,13 +182,16 @@ export type SystemContractOf<Value> =
     ? Contract
     : never;
 
-export type SystemFeatures<Contract extends SystemContract> = StandaloneFeaturesOf<Contract>;
+export type SystemFeatures<Contract extends SystemContract> = FeaturesOf<Contract>;
 export type SystemApplications<Contract extends SystemContract> = ApplicationsOf<Contract>;
 
 type DeclaredSystemDefinition<Contract extends SystemDefinitionContract> = Readonly<{
   metadata?: SystemMetadata;
 }> &
-  DefinitionField<"features", FeatureDefinitions<FeaturesOf<Contract>>> &
+  DefinitionField<
+    "features",
+    FeatureDefinitions<FeaturesOf<Contract>, SystemFeatureRoot<Contract>>
+  > &
   DefinitionField<
     "applications",
     {
@@ -235,7 +216,10 @@ export function createSystem<
     features?: Features;
     applications?: Applications;
   }> &
-    ([FeatureEnvironmentConflict<NormalizedSystemContract<Features, Applications>>] extends [never]
+    ([
+      | Extract<keyof Features, keyof Applications>
+      | FeatureEnvironmentConflict<{ Features: FeatureContracts<Features> }>,
+    ] extends [never]
       ? unknown
       : never),
 ): System<NormalizedSystemContract<Features, Applications>>;

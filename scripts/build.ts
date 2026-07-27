@@ -62,6 +62,7 @@ await rm(resolve(distDir, "scripts"), { force: true, recursive: true });
 await rewriteDeclarationAliases();
 await copySemanticSources();
 await copyFeatureProviderSources();
+await copyPlatformNativeSources();
 
 await build({
   configFile: false,
@@ -104,24 +105,6 @@ for (const pattern of ["runtime/Cargo.toml", "runtime/src/**/*.rs"]) {
       const output = resolve(outputRoot, file);
       await mkdir(dirname(output), { recursive: true });
       await copyFile(resolve(rustCompilerSource, file), output);
-    }
-  }
-}
-const serverRustSource = resolve(sourceDir, "platforms/server/adapter/rust");
-for (const pattern of [
-  "providers/**/Cargo.toml",
-  "providers/**/src/**/*.rs",
-  "distribution/Cargo.toml",
-  "distribution/src/**/*.rs",
-]) {
-  for await (const file of glob(pattern, { cwd: serverRustSource })) {
-    for (const outputRoot of [
-      resolve(distDir, "src/platforms/server/adapter/rust"),
-      resolve(distDir, "source/platforms/server/adapter/rust"),
-    ]) {
-      const output = resolve(outputRoot, file);
-      await mkdir(dirname(output), { recursive: true });
-      await copyFile(resolve(serverRustSource, file), output);
     }
   }
 }
@@ -256,6 +239,22 @@ async function copyFeatureProviderSources(): Promise<void> {
       const output = resolve(distDir, "source", file);
       await mkdir(dirname(output), { recursive: true });
       await copyFile(resolve(sourceDir, file), output);
+    }
+  }
+}
+
+async function copyPlatformNativeSources(): Promise<void> {
+  for (const pattern of [
+    "platforms/*/adapter/**/Cargo.toml",
+    "platforms/*/adapter/**/src/**/*.rs",
+  ]) {
+    for await (const file of glob(pattern, { cwd: sourceDir })) {
+      if (file.split("/").includes("fixtures")) continue;
+      for (const outputRoot of [resolve(distDir, "src"), resolve(distDir, "source")]) {
+        const output = resolve(outputRoot, file);
+        await mkdir(dirname(output), { recursive: true });
+        await copyFile(resolve(sourceDir, file), output);
+      }
     }
   }
 }

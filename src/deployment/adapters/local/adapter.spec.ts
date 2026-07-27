@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 
 import { afterEach, describe, expect, test } from "vitest";
 
-import type { ApplicationFeatureContract, System } from "@/core/system";
+import type { System } from "@/core/system";
 import {
   applyDeployment,
   createDeployment,
@@ -14,6 +14,7 @@ import {
   type Release,
 } from "@/deployment";
 import { createLocalDeploymentAdapter } from "@/deployment/adapters/local";
+import type { ServerPlatform } from "@/platforms/server";
 import type { WebPlatform } from "@/platforms/web";
 
 const directories: string[] = [];
@@ -71,7 +72,7 @@ describe("local Deployment adapter", { tags: ["production"] }, () => {
       const system = {} as System<{
         Programs: {
           server: {
-            Environment: { Name: "server"; Platform: { Name: "server" } };
+            Environment: { Name: "server"; Platform: ServerPlatform };
             Requires: {};
             Provides: {};
           };
@@ -264,7 +265,7 @@ describe("local Deployment adapter", { tags: ["production"] }, () => {
     const system = {} as System<{
       Programs: {
         server: {
-          Environment: { Name: "server"; Platform: { Name: "server" } };
+          Environment: { Name: "server"; Platform: ServerPlatform };
           Requires: { token: Readonly<{ value(input: {}): string }> };
           Provides: {};
         };
@@ -297,11 +298,9 @@ describe("local Deployment adapter", { tags: ["production"] }, () => {
       artifacts: fixture.artifacts,
       state: fixture.state,
     });
-    type App = ApplicationFeatureContract<{ Features: {}; Interfaces: WebPlatform }>;
+    type App = { Features: {}; Interfaces: WebPlatform };
     const system = {} as System<{
-      Features: {
-        app: App;
-      };
+      Features: {};
       Applications: { app: App };
     }>;
     const deployment = createDeployment(system, {
@@ -344,6 +343,14 @@ describe("local Deployment adapter", { tags: ["production"] }, () => {
     expect(prebuilt.headers.get("cache-control")).toBe(
       "public, max-age=60, stale-while-revalidate=30",
     );
+    const robots = await fetch(new URL("/robots.txt", locations[0]));
+    expect(robots.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+    expect(await robots.text()).toContain(`Sitemap: ${locations[0]}/sitemap.xml`);
+    const sitemap = await fetch(new URL("/sitemap.xml", locations[0]));
+    expect(sitemap.headers.get("content-type")).toBe("application/xml; charset=utf-8");
+    const sitemapBody = await sitemap.text();
+    expect(sitemapBody).toContain(`<loc>${locations[0]}/public</loc>`);
+    expect(sitemapBody).not.toContain("elsewhere.test");
     await removeDeployment(deployment);
   });
 
@@ -352,7 +359,7 @@ describe("local Deployment adapter", { tags: ["production"] }, () => {
     const system = {} as System<{
       Programs: {
         server: {
-          Environment: { Name: "server"; Platform: { Name: "server" } };
+          Environment: { Name: "server"; Platform: ServerPlatform };
           Requires: {};
           Provides: {};
         };
@@ -406,34 +413,6 @@ async function localFixture(withSecret = false): Promise<{
   await writeFile(resolve(artifacts, "public/index.html"), "<main>prebuilt delivery</main>");
   await writeFile(resolve(artifacts, "assets/app-12345678.js"), "export {};");
   await writeFile(
-    resolve(artifacts, "routes.ir.json"),
-    JSON.stringify({
-      version: 3,
-      components: [],
-      routes: [
-        {
-          route: {
-            feature: "content",
-            name: "public",
-            path: "/public",
-            document: "content",
-            cache: {
-              scope: "public",
-              maxAge: "1m",
-              staleWhileRevalidate: "30s",
-            },
-            metadata: {},
-            params: [],
-            search: [],
-            deferred: [],
-          },
-          document: {},
-          request: false,
-        },
-      ],
-    }),
-  );
-  await writeFile(
     executable,
     `#!/bin/sh
 status="$KIT_PROCESS_STATUS_FILE"
@@ -473,9 +452,49 @@ while true; do sleep 1; done
           environment: "browser-main",
           digest: "web-v1",
           root: ".",
-          files: ["index.html", "public/index.html", "routes.ir.json", "assets/app-12345678.js"],
+          files: ["index.html", "public/index.html", "assets/app-12345678.js"],
           dependencies: [],
           configuration: [],
+          exposure: {
+            kind: "http-assets",
+            fallback: "index.html",
+            files: [
+              { path: "index.html", cacheControl: "no-cache" },
+              {
+                path: "public/index.html",
+                cacheControl: "public, max-age=60, stale-while-revalidate=30",
+              },
+              {
+                path: "assets/app-12345678.js",
+                cacheControl: "public, max-age=31536000, immutable",
+              },
+            ],
+            responses: [
+              {
+                path: "/robots.txt",
+                status: 200,
+                headers: {
+                  "cache-control": "public, max-age=300",
+                  "content-type": "text/plain; charset=utf-8",
+                },
+                body: "User-agent: *\nAllow: /\nSitemap: {{origin}}/sitemap.xml\n",
+                substitutions: ["origin"],
+              },
+              {
+                path: "/sitemap.xml",
+                status: 200,
+                headers: {
+                  "cache-control": "public, max-age=300",
+                  "content-type": "application/xml; charset=utf-8",
+                },
+                body:
+                  '<?xml version="1.0" encoding="UTF-8"?>' +
+                  '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">' +
+                  "<url><loc>{{origin}}/public</loc></url></urlset>\n",
+                substitutions: ["origin"],
+              },
+            ],
+          },
         },
         {
           identity: "program/server",

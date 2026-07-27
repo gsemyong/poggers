@@ -5,15 +5,16 @@ import type {
   DependencyProvider,
 } from "@/core/dependency";
 import type { FeatureContract } from "@/core/feature";
-import type { UIDefinition, UIElement } from "@/core/ui/language";
 import type {
   WebApplicationInterfaceKind,
+  WebApplicationSpecification,
   WebNavigation,
   WebProgramDefinitionKind,
   WebRouteContract,
   WebRoutes,
 } from "@/platforms/web/routing";
 import type { Child, IntrinsicElements } from "@/platforms/web/ui";
+import type { UIDefinition, UIElement } from "@/platforms/web/ui/language";
 
 type WebPrimitiveName = Extract<keyof IntrinsicElements, string>;
 type WebDependency<Operations extends Readonly<Record<string, (input: never) => unknown>>> =
@@ -61,11 +62,14 @@ export type WebUI = Readonly<{
 }>;
 
 /** The web realization family. Its main thread may render the web UI language. */
-export type WebPlatform = {
+export type WebPlatform<
+  Specification extends WebApplicationSpecification = WebApplicationSpecification,
+> = {
   readonly Name: "web";
+  readonly Specification: Specification;
   readonly UI: WebUI;
   readonly Program: WebProgramDefinitionKind;
-  readonly Application: WebApplicationInterfaceKind;
+  readonly Application: WebApplicationInterfaceKind<Specification>;
 };
 export type BrowserMainThread = {
   readonly Name: "browser-main";
@@ -180,24 +184,36 @@ export type {
   VirtualForOptions,
 } from "@/platforms/web/ui";
 export type {
+  Choice,
+  Decimal,
   Deferred,
   DeferredValue,
+  Duration,
+  Flag,
+  Integer,
+  List,
   PathParameterName,
-  Validate,
+  Text,
+  UUID,
   ValidationInput,
   ValidationOutput,
-  ValidationRules,
   WebDestination,
   WebInstallation,
   WebInstallationIcon,
+  WebInstallationScreenshot,
+  WebNavigationType,
+  WebApplicationSpecification,
   WebJSON,
   WebNavigation,
   WebRouteCache,
   WebRouteContract,
   WebRouteMetadata,
   WebRouteMetadataResult,
+  WebRouteMount,
   WebRouteOutcome,
+  WebRedirectStatus,
   WebRouteSpecification,
+  WebRouteStatus,
   WebRoutes,
   WebServerRouteRequest,
   WebStructuredData,

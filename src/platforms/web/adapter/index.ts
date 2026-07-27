@@ -5,7 +5,7 @@ import type { WebDevelopmentOptions } from "@/platforms/web/adapter/development"
 import { createWebPresentationAdapter } from "@/platforms/web/adapter/presentation/adapter";
 import { createWebUIAdapter, type WebUIAdapter } from "@/platforms/web/adapter/ui/adapter";
 
-export type WebPlatformAdapter = PlatformAdapter<WebPlatform, WebUIAdapter>;
+export type WebPlatformAdapter = PlatformAdapter<WebPlatform> & Readonly<{ ui: WebUIAdapter }>;
 export type WebPlatformAdapterOptions = WebDevelopmentOptions;
 
 /** Creates the complete development, production, Component, and Presentation web realization. */

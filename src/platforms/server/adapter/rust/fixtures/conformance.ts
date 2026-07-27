@@ -19,6 +19,7 @@ import { dirname, resolve } from "node:path";
 import type { ProgramContributionIR, ProgramIR } from "@/compiler/ir";
 import { linkProgram } from "@/compiler/linker";
 import { generateRustProgram } from "@/compiler/rust/lowering";
+import { serverProgramExecution } from "@/platforms/server/adapter";
 
 type RustVerificationSource = Readonly<{
   name: string;
@@ -188,7 +189,7 @@ function generateVerificationSource(contribution: ProgramContributionIR): RustVe
     contributions: [contribution],
   };
   const linked = linkProgram(program);
-  const source = generateRustProgram(linked);
+  const source = generateRustProgram(linked, serverProgramExecution);
   const name = `kit_${createHash("sha256")
     .update(canonicalRustSource(source))
     .digest("hex")

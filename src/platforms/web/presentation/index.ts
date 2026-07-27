@@ -1,10 +1,10 @@
-import type { ComponentOwner } from "@/core/ui/component";
+import type { WebSpring, WebTrack, WebTween } from "@/platforms/web/presentation/dynamics";
 import type {
   ConfiguredPresentation as CoreConfiguredPresentation,
   Presentation as CorePresentation,
-} from "@/core/ui/presentation";
-import type { WebSpring, WebTrack, WebTween } from "@/platforms/web/presentation/dynamics";
+} from "@/platforms/web/presentation/language";
 import type { IntrinsicElements } from "@/platforms/web/ui";
+import type { ComponentOwner } from "@/platforms/web/ui/component";
 
 type Empty = Record<never, never>;
 declare const webContainerBrand: unique symbol;

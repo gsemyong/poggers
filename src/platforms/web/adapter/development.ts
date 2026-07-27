@@ -1,12 +1,15 @@
-import type { DevelopmentSession, PlatformDevelopmentInput } from "@/adapter";
+import type {
+  DevelopmentProgramAttachments,
+  DevelopmentSession,
+  PlatformDevelopmentInput,
+} from "@/adapter";
 import type { WebPlatform } from "@/platforms/web";
 import { runWebInterface } from "@/platforms/web/adapter/pipeline";
-import type { DevelopmentWebLoaderRegistry } from "@/platforms/web/adapter/server";
 
 export type WebDevelopmentOptions = Readonly<{
   developmentPort?: number;
   serverOrigin?: string;
-  webLoaders?: DevelopmentWebLoaderRegistry;
+  programAttachments?: DevelopmentProgramAttachments;
 }>;
 
 /** Starts every selected web interface and owns their complete lifecycle. */
@@ -24,7 +27,7 @@ export async function developWebSystem(
         port: (options.developmentPort ?? 3000) + index,
         strictPort: true,
         serverOrigin: options.serverOrigin,
-        webLoaders: options.webLoaders,
+        programAttachments: options.programAttachments,
         report: input.report,
       }),
     ),

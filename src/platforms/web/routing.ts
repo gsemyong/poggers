@@ -1,17 +1,22 @@
-import type {
-  FeatureContract,
-  FeatureUIAPIs,
-  ProgramOwner,
-  UIContributionAPI,
-} from "@/core/feature";
+import type { DependencyImplementations } from "@/core/dependency";
+import type { FeatureContract, ProgramOwner } from "@/core/feature";
 import type {
   ApplicationInterfaceKind,
   ProgramContract,
   ProgramDefinitionKind,
+  ProgramProvides,
+  ProgramRequires,
 } from "@/core/program";
-import type { ComponentComposition, ComponentUI } from "@/core/ui/component";
-import type { ConfiguredPresentationFor } from "@/core/ui/presentation";
 import type { WebPresentationLanguage } from "@/platforms/web/presentation";
+import type { ConfiguredPresentationFor } from "@/platforms/web/presentation/language";
+import type {
+  ComponentComposition,
+  ComponentContract,
+  ComponentDefinitions,
+  ComponentUI,
+  RootComponentName,
+} from "@/platforms/web/ui/component";
+import type { UIContract, UIDefinition, UIElementName } from "@/platforms/web/ui/language";
 
 declare const validation: unique symbol;
 declare const deferred: unique symbol;
@@ -21,6 +26,178 @@ export const WEB_MANIFEST_PATH = "/manifest.webmanifest";
 type Scalar = string | number | boolean;
 type SearchValue = Scalar | readonly Scalar[];
 type Empty = Record<never, never>;
+type ActionRecord = Record<string, (...args: never[]) => unknown>;
+type ProgramResource = Disposable | AsyncDisposable | AsyncIterable<unknown>;
+type ProgramResourceResult = void | ProgramResource | PromiseLike<void | ProgramResource>;
+type UIKey = "State" | "Actions" | "Components";
+type Mutable<Value extends object> = { -readonly [Key in keyof Value]: Value[Key] };
+type ActionArguments<Action> = Action extends (...args: infer Args) => unknown ? Args : never;
+type ActionResult<Action> = Action extends (...args: never[]) => infer Result ? Result : never;
+
+type ProgramState<Contract> = Contract extends { State: infer Value extends object }
+  ? Value
+  : Empty;
+type ProgramActions<Contract> = Contract extends {
+  Actions: infer Value extends ActionRecord;
+}
+  ? Value
+  : Empty;
+type ProgramComponents<Contract> = Contract extends {
+  Components: infer Value extends Record<string, ComponentContract>;
+}
+  ? Value
+  : Empty;
+type HasProgramUI<Contract> = [Extract<keyof Contract, UIKey>] extends [never] ? false : true;
+type ProgramsOfFeature<Owner> = Owner extends {
+  Programs: infer Programs extends Record<string, ProgramContract>;
+}
+  ? Programs
+  : Empty;
+type FeaturesOfFeature<Owner> = Owner extends {
+  Features: infer Features extends Record<string, FeatureContract>;
+}
+  ? Features
+  : Empty;
+type ProgramNameWithUI<Owner extends FeatureContract> = {
+  [Name in keyof ProgramsOfFeature<Owner>]: HasProgramUI<
+    ProgramsOfFeature<Owner>[Name]
+  > extends true
+    ? Name
+    : never;
+}[keyof ProgramsOfFeature<Owner>];
+type UIOf<Owner extends FeatureContract> =
+  HasProgramUI<Owner> extends true
+    ? Owner
+    : ProgramNameWithUI<Owner> extends infer Name
+      ? Name extends keyof ProgramsOfFeature<Owner>
+        ? ProgramsOfFeature<Owner>[Name]
+        : never
+      : never;
+type ActionAPI<Contract> = {
+  readonly [Name in keyof ProgramActions<Contract>]: ProgramActions<Contract>[Name];
+};
+type APICollision<Contract> = Extract<keyof ProgramState<Contract>, keyof ProgramActions<Contract>>;
+
+/** The state and actions exposed by one web UI contribution. */
+export type WebUIContributionAPI<Owner extends FeatureContract> =
+  UIOf<Owner> extends infer UI
+    ? [APICollision<UI>] extends [never]
+      ? Readonly<ProgramState<UI>> & ActionAPI<UI>
+      : never
+    : Empty;
+
+/** Child Feature UI APIs visible to one web Program contribution. */
+export type WebFeatureUIAPIs<
+  Owner extends FeatureContract,
+  ProgramName extends PropertyKey = ProgramNameWithUI<Owner>,
+> = {
+  readonly [Name in keyof FeaturesOfFeature<Owner>]: WebUIContributionAPI<
+    ProgramOwner<Extract<FeaturesOfFeature<Owner>[Name], FeatureContract>, ProgramName>
+  >;
+};
+
+type WebUIActionContext<
+  Owner extends FeatureContract,
+  ProgramName extends keyof ProgramsOfFeature<Owner>,
+  Contract extends ProgramContract,
+> = Readonly<{
+  dependencies: Readonly<ProgramRequires<Contract> & ProgramProvides<Contract>>;
+  features: WebFeatureUIAPIs<Owner, ProgramName>;
+  state: Mutable<ProgramState<Contract>>;
+}>;
+type WebUIActionDefinitions<
+  Owner extends FeatureContract,
+  ProgramName extends keyof ProgramsOfFeature<Owner>,
+  Contract extends ProgramContract,
+> = {
+  readonly [Name in keyof ProgramActions<Contract>]: (
+    context: WebUIActionContext<Owner, ProgramName, Contract>,
+    ...args: ActionArguments<ProgramActions<Contract>[Name]>
+  ) => ActionResult<ProgramActions<Contract>[Name]>;
+};
+type WebUIComponentDefinitions<
+  Owner extends FeatureContract,
+  ProgramName extends keyof ProgramsOfFeature<Owner>,
+  Root extends FeatureContract,
+> = ComponentDefinitions<ProgramOwner<Root, ProgramName>, ProgramOwner<Owner, ProgramName>>;
+type WebProgramUIFields<
+  Owner extends FeatureContract,
+  ProgramName extends keyof ProgramsOfFeature<Owner>,
+  Contract extends ProgramContract,
+  Root extends FeatureContract,
+> = DefinitionField<"state", Mutable<ProgramState<Contract>>> &
+  DefinitionField<"actions", WebUIActionDefinitions<Owner, ProgramName, Contract>> &
+  DefinitionField<"components", WebUIComponentDefinitions<Owner, ProgramName, Root>> & {
+    root?: RootComponentName<ProgramOwner<Owner, ProgramName>>;
+  };
+type ComponentPrimitiveNames<Contract> = [keyof ProgramComponents<Contract>] extends [never]
+  ? never
+  : ProgramComponents<Contract>[keyof ProgramComponents<Contract>] extends {
+        Elements: infer Elements extends Record<string, string>;
+      }
+    ? Elements[keyof Elements]
+    : never;
+type SupportsWebComponents<Contract extends ProgramContract> =
+  Contract["Environment"]["Platform"] extends {
+    UI: infer UI extends UIContract;
+  }
+    ? UI extends UIDefinition<UI>
+      ? [ComponentPrimitiveNames<Contract>] extends [never]
+        ? true
+        : Exclude<ComponentPrimitiveNames<Contract>, UIElementName<UI>> extends never
+          ? true
+          : false
+      : false
+    : false;
+type ValidWebProgramContract<Contract extends ProgramContract> =
+  HasProgramUI<Contract> extends true ? SupportsWebComponents<Contract> : true;
+type WebProgramStartContext<
+  Owner extends FeatureContract,
+  ProgramName extends keyof ProgramsOfFeature<Owner>,
+  Contract extends ProgramContract,
+> = Readonly<
+  {
+    dependencies: ProgramRequires<Contract>;
+  } & (Contract extends { Provides: infer Provides extends object }
+    ? { provides: readonly Extract<keyof Provides, string>[] }
+    : Empty) &
+    (HasProgramUI<Contract> extends true
+      ? {
+          actions: ActionAPI<Contract>;
+          features: WebFeatureUIAPIs<Owner, ProgramName>;
+        }
+      : Empty)
+>;
+type WebProgramStartResult<Contract extends ProgramContract> = Contract extends {
+  Provides: infer Provides extends object;
+}
+  ? DependencyImplementations<Provides> | PromiseLike<DependencyImplementations<Provides>>
+  : ProgramResourceResult;
+type WebProgramStartField<
+  Owner extends FeatureContract,
+  ProgramName extends keyof ProgramsOfFeature<Owner>,
+  Contract extends ProgramContract,
+> = Contract extends { Provides: object }
+  ? {
+      start(
+        context: WebProgramStartContext<Owner, ProgramName, Contract>,
+      ): WebProgramStartResult<Contract>;
+    }
+  : {
+      start?(
+        context: WebProgramStartContext<Owner, ProgramName, Contract>,
+      ): WebProgramStartResult<Contract>;
+    };
+
+export type WebRouteMount = Readonly<{
+  Path: string;
+  Route?: string;
+  Children?: Readonly<Record<string, WebRouteMount>>;
+}>;
+
+export type WebApplicationSpecification = Readonly<{
+  Mounts?: Readonly<Record<string, WebRouteMount>>;
+}>;
 
 /** Data whose server result may reveal after the Route shell. */
 export type Deferred<Value> = Readonly<{ [deferred]: Value }>;
@@ -49,7 +226,7 @@ export type WebServerRouteRequest = Readonly<{
 
 type ValidatedScalar<Value> = Value extends readonly (infer Element)[] ? Element : Value;
 
-export type ValidationRules<Value> = Readonly<{
+type ValidationRules<Value> = Readonly<{
   Integer?: ValidatedScalar<Value> extends number ? true : never;
   Minimum?: ValidatedScalar<Value> extends number ? number : never;
   Maximum?: ValidatedScalar<Value> extends number ? number : never;
@@ -59,13 +236,38 @@ export type ValidationRules<Value> = Readonly<{
   Default?: Value extends readonly unknown[] ? never : Value;
 }>;
 
-/** Compiler-readable validation metadata whose decoded TypeScript value remains `Value`. */
-export type Validate<
+type ScalarSchema<
   Value extends SearchValue,
   Rules extends ValidationRules<Value> = Empty,
 > = Readonly<{
   [validation]?: Readonly<{ Value: Value; Rules: Rules }>;
 }>;
+
+export type Text<Rules extends Omit<ValidationRules<string>, "Integer" | "Format"> = Empty> =
+  ScalarSchema<string, Rules>;
+
+export type UUID = ScalarSchema<string, { Format: "uuid" }>;
+
+export type Integer<Rules extends Omit<ValidationRules<number>, "Integer" | "Format"> = Empty> =
+  ScalarSchema<number, Rules & { Integer: true }>;
+
+export type Decimal<Rules extends Omit<ValidationRules<number>, "Integer" | "Format"> = Empty> =
+  ScalarSchema<number, Rules>;
+
+export type Flag<Rules extends Pick<ValidationRules<boolean>, "Default"> = Empty> = ScalarSchema<
+  boolean,
+  Rules
+>;
+
+export type Choice<
+  Value extends Scalar,
+  Rules extends Pick<ValidationRules<Value>, "Default"> = Empty,
+> = ScalarSchema<Value, Rules>;
+
+export type List<
+  Value extends Scalar,
+  Rules extends Omit<ValidationRules<readonly Value[]>, "Integer" | "Format"> = Empty,
+> = ScalarSchema<readonly Value[], Rules>;
 
 export type WebRouteContract = Readonly<{ Params: object; SearchInput: object }>;
 type ResolvedWebRoute<Route> = Route extends WebRouteSpecification
@@ -73,18 +275,79 @@ type ResolvedWebRoute<Route> = Route extends WebRouteSpecification
   : Route extends WebRouteContract
     ? Route
     : never;
+type RouteWithInheritedParams<Parent, Route> = Parent extends {
+  ParamSchema: infer ParentSchema extends object;
+  Params: infer ParentParams extends object;
+  SearchSchema: infer ParentSearchSchema extends object;
+  Search: infer ParentSearch extends object;
+  SearchInput: infer ParentSearchInput extends object;
+}
+  ? Route extends {
+      ParamSchema: infer RouteSchema extends object;
+      Params: infer RouteParams extends object;
+      SearchSchema: infer RouteSearchSchema extends object;
+      Search: infer RouteSearch extends object;
+      SearchInput: infer RouteSearchInput extends object;
+      LoadContext: infer Context extends object;
+    }
+    ? Readonly<
+        Omit<
+          Route,
+          "LoadContext" | "Params" | "ParamSchema" | "Search" | "SearchInput" | "SearchSchema"
+        > & {
+          ParamSchema: ParentSchema & RouteSchema;
+          Params: ParentParams & RouteParams;
+          SearchSchema: ParentSearchSchema & RouteSearchSchema;
+          Search: ParentSearch & RouteSearch;
+          SearchInput: ParentSearchInput & RouteSearchInput;
+          LoadContext: Omit<Context, "params" | "search"> & {
+            params: Readonly<ParentParams & RouteParams>;
+            search: Readonly<ParentSearch & RouteSearch>;
+          };
+        }
+      >
+    : Route
+  : Route;
+type ResolvedWebRouteIn<
+  Routes extends Readonly<Record<string, unknown>>,
+  Name extends keyof Routes,
+  Depth extends readonly unknown[] = [],
+> = Depth["length"] extends 16
+  ? never
+  : Routes[Name] extends WebRouteContract
+    ? Routes[Name]
+    : ResolvedWebRoute<Routes[Name]> extends infer Route
+      ? Route extends { Parent: infer Parent }
+        ? [Parent] extends [never]
+          ? Route
+          : Parent extends keyof Routes
+            ? RouteWithInheritedParams<
+                ResolvedWebRouteIn<Routes, Parent, readonly [...Depth, unknown]>,
+                Route
+              >
+            : never
+        : Route
+      : never;
 type ResolvedWebRoutes<Routes extends Readonly<Record<string, unknown>>> = {
-  readonly [Name in keyof Routes as ResolvedWebRoute<Routes[Name]> extends never
+  readonly [Name in keyof Routes as ResolvedWebRouteIn<Routes, Name> extends never
     ? never
-    : Name]: ResolvedWebRoute<Routes[Name]>;
+    : Name]: ResolvedWebRouteIn<Routes, Name>;
 };
 type DestinationField<Name extends string, Value extends object> = keyof Value extends never
   ? { readonly [Key in Name]?: never }
   : Empty extends Value
     ? { readonly [Key in Name]?: Readonly<Value> }
     : { readonly [Key in Name]: Readonly<Value> };
+type RouteAddress<Name extends string, Prefix extends string = ""> = string extends Name
+  ? Readonly<{ feature?: string; route: string }>
+  : Name extends `${infer Head}.${infer Rest}`
+    ? RouteAddress<Rest, Prefix extends "" ? Head : `${Prefix}.${Head}`>
+    : Prefix extends ""
+      ? Readonly<{ feature?: never; route: Name }>
+      : Readonly<{ feature: Prefix; route: Name }>;
 type RouteDestination<Name extends PropertyKey, Route extends WebRouteContract> = Readonly<
-  { to: Name } & DestinationField<"params", Route["Params"]> &
+  RouteAddress<Extract<Name, string>> &
+    DestinationField<"params", Route["Params"]> &
     DestinationField<"search", Route["SearchInput"]> & { hash?: string }
 >;
 
@@ -94,7 +357,7 @@ export type WebDestination<
 > = {
   [Name in keyof ResolvedWebRoutes<Routes>]: RouteDestination<
     Name,
-    ResolvedWebRoutes<Routes>[Name]
+    Extract<ResolvedWebRoutes<Routes>[Name], WebRouteContract>
   >;
 }[keyof ResolvedWebRoutes<Routes>];
 
@@ -105,11 +368,33 @@ export type WebInstallationIcon = Readonly<{
   purpose?: readonly ("any" | "maskable" | "monochrome")[];
 }>;
 
+export type WebInstallationScreenshot = Readonly<{
+  src: string;
+  sizes: string;
+  type?: string;
+  formFactor?: "narrow" | "wide";
+  label?: string;
+}>;
+
 export type WebInstallation<Contract extends FeatureContract> = Readonly<{
   shortName?: string;
+  description?: string;
   start: WebDestination<WebRoutes<Contract>>;
   display?: "browser" | "fullscreen" | "minimal-ui" | "standalone";
+  orientation?:
+    | "any"
+    | "natural"
+    | "landscape"
+    | "landscape-primary"
+    | "landscape-secondary"
+    | "portrait"
+    | "portrait-primary"
+    | "portrait-secondary";
+  themeColor?: string;
+  backgroundColor?: string;
+  categories?: readonly string[];
   icons: readonly WebInstallationIcon[];
+  screenshots?: readonly WebInstallationScreenshot[];
   shortcuts?: readonly Readonly<{
     name: string;
     destination: WebDestination<WebRoutes<Contract>>;
@@ -120,28 +405,60 @@ export type WebInstallation<Contract extends FeatureContract> = Readonly<{
   }>;
 }>;
 
-type WebInterfaceDefinition<Owner extends FeatureContract> = Readonly<{
-  presentation: ConfiguredPresentationFor<Owner, WebPresentationLanguage>;
-  routes?: Partial<
-    Readonly<
-      Record<
-        Extract<
-          keyof (Owner extends {
-            Features: infer Features extends Record<string, FeatureContract>;
+type FeaturesOfApplication<Owner> = Owner extends {
+  Features: infer Features extends Record<string, FeatureContract>;
+}
+  ? Features
+  : Empty;
+type InvalidApplicationMount<Owner, Mounts extends Readonly<Record<string, WebRouteMount>>> = {
+  [Role in keyof Mounts]: Role extends keyof FeaturesOfApplication<Owner>
+    ?
+        | (Mounts[Role] extends {
+            Route: infer Route extends string;
           }
-            ? Features
-            : Empty),
-          string
-        >,
-        string
-      >
-    >
-  >;
-  installation?: WebInstallation<Owner>;
-}>;
+            ? Route extends RootWebRouteName<
+                Extract<FeaturesOfApplication<Owner>[Role], FeatureContract>
+              >
+              ? never
+              : Route
+            : never)
+        | (Mounts[Role] extends {
+            Children: infer Children extends Readonly<Record<string, WebRouteMount>>;
+          }
+            ? InvalidApplicationMount<Owner, Children>
+            : never)
+    : Role;
+}[keyof Mounts];
+type ValidApplicationMounts<
+  Owner,
+  Specification extends WebApplicationSpecification,
+> = Specification extends {
+  Mounts: infer Mounts extends Readonly<Record<string, WebRouteMount>>;
+}
+  ? [InvalidApplicationMount<Owner, Mounts>] extends [never]
+    ? true
+    : false
+  : true;
 
-export interface WebApplicationInterfaceKind extends ApplicationInterfaceKind {
-  readonly Definition: WebInterfaceDefinition<Extract<this["Owner"], FeatureContract>>;
+type WebInterfaceDefinition<
+  Owner extends FeatureContract,
+  Specification extends WebApplicationSpecification,
+> =
+  ValidApplicationMounts<Owner, Specification> extends true
+    ? Readonly<{
+        presentation: ConfiguredPresentationFor<Owner, WebPresentationLanguage>;
+        installation?: WebInstallation<Owner>;
+      }>
+    : never;
+
+export interface WebApplicationInterfaceKind<
+  Specification extends WebApplicationSpecification = WebApplicationSpecification,
+> extends ApplicationInterfaceKind {
+  readonly Specification: Specification;
+  readonly Definition: WebInterfaceDefinition<
+    Extract<this["Owner"], FeatureContract>,
+    Specification
+  >;
 }
 
 type ProgramsOf<Owner> = Owner extends {
@@ -163,17 +480,22 @@ type WebProgramRoutes<Program> = Program extends {
   Environment: { Platform: { Name: "web" } };
   Routes: infer Routes extends Record<string, unknown>;
 }
-  ? {
-      [Name in keyof Routes as ResolvedWebRoute<Routes[Name]> extends never
-        ? never
-        : Name]: ResolvedWebRoute<Routes[Name]>;
-    }
+  ? ResolvedWebRoutes<Routes>
   : Empty;
 type LocalWebRoutes<Owner> = UnionToIntersection<
   {
     [Name in keyof ProgramsOf<Owner>]: WebProgramRoutes<ProgramsOf<Owner>[Name]>;
   }[keyof ProgramsOf<Owner>]
 >;
+type RootWebRouteName<Owner> = {
+  [Name in Extract<keyof LocalWebRoutes<Owner>, string>]: ResolvedWebRoute<
+    LocalWebRoutes<Owner>[Name]
+  > extends { Parent: infer Parent }
+    ? [Parent] extends [never]
+      ? Name
+      : never
+    : never;
+}[Extract<keyof LocalWebRoutes<Owner>, string>];
 type QualifiedRoutes<Routes, Prefix extends string> = {
   [Name in Extract<keyof Routes, string> as Prefix extends ""
     ? Name
@@ -196,10 +518,8 @@ type WebRoutesIn<
         }[Extract<keyof FeaturesOf<Owner>, string>]
       >;
 
-type ValidWebRoutes<Routes> = {
-  [Name in keyof Routes as ResolvedWebRoute<Routes[Name]> extends never
-    ? never
-    : Name]: ResolvedWebRoute<Routes[Name]>;
+type ValidWebRoutes<Routes extends Readonly<Record<string, unknown>>> = {
+  [Name in keyof Routes as Routes[Name] extends never ? never : Name]: Routes[Name];
 };
 
 /** Every qualified web Route contributed by one Application's Feature contract. */
@@ -207,16 +527,40 @@ export type WebRoutes<Owner extends FeatureContract> = Readonly<
   ValidWebRoutes<WebRoutesIn<Owner, "">>
 >;
 
+const webRouteStatuses = [
+  200, 201, 202, 203, 207, 208, 226, 400, 401, 402, 403, 404, 405, 406, 408, 409, 410, 412, 413,
+  414, 415, 417, 418, 421, 422, 423, 424, 425, 426, 428, 429, 431, 451, 500, 501, 502, 503, 504,
+  505, 506, 507, 508, 510, 511,
+] as const;
+const webRedirectStatuses = [301, 302, 303, 307, 308] as const;
+
+/** Final document statuses that retain a response body. */
+export type WebRouteStatus = (typeof webRouteStatuses)[number];
+export type WebRedirectStatus = (typeof webRedirectStatuses)[number];
+
+/** @internal Validates status meaning at serialized adapter boundaries. */
+export function isWebRouteStatus(value: unknown): value is WebRouteStatus {
+  return (webRouteStatuses as readonly unknown[]).includes(value);
+}
+
+/** @internal Validates redirect status meaning at serialized adapter boundaries. */
+export function isWebRedirectStatus(value: unknown): value is WebRedirectStatus {
+  return (webRedirectStatuses as readonly unknown[]).includes(value);
+}
+
 export type WebRouteOutcome<Data> =
-  | Readonly<{ data: DeferredDataInput<Data> }>
-  | Readonly<{ redirect: WebDestination }>;
+  | Readonly<{ data: DeferredDataInput<Data>; status?: WebRouteStatus }>
+  | Readonly<{ redirect: WebDestination; status?: WebRedirectStatus }>;
+
+/** A compiler-readable duration used by web delivery policy. */
+export type Duration = `${number}${"ms" | "s" | "m" | "h" | "d"}`;
 
 export type WebRouteCache =
   | false
   | Readonly<{
       Scope: "public" | "private";
-      MaxAge?: string;
-      StaleWhileRevalidate?: string;
+      MaxAge?: Duration;
+      StaleWhileRevalidate?: Duration;
     }>;
 
 export type WebRouteMetadata = Readonly<{
@@ -307,13 +651,14 @@ export type WebRouteMetadataResult = Readonly<{
 }>;
 
 export type WebRouteSpecification = Readonly<{
+  Parent?: string;
   Path: string;
+  Status?: WebRouteStatus;
   Cache?: WebRouteCache;
   Metadata?: WebRouteMetadata;
-  Params?: Readonly<Record<string, Validate<Scalar>>>;
-  Search?: Readonly<Record<string, Validate<SearchValue>>>;
+  Params?: Readonly<Record<string, ScalarSchema<Scalar>>>;
+  Search?: Readonly<Record<string, ScalarSchema<SearchValue>>>;
   Data?: unknown;
-  Dependencies?: object;
 }>;
 
 type ValidationMetadata<Value> =
@@ -368,7 +713,7 @@ export type PathParameterName<Path extends string> = Path extends `${infer Segme
   ? PathParameterInSegment<Segment> | PathParameterName<Rest>
   : PathParameterInSegment<Path>;
 type DefaultParams<Path extends string> = Readonly<{
-  [Name in PathParameterName<Path>]: Validate<string>;
+  [Name in PathParameterName<Path>]: Text;
 }>;
 type ParamsSchema<Spec extends WebRouteSpecification> = Spec extends {
   Params: infer Params extends object;
@@ -383,11 +728,6 @@ type SearchSchema<Spec extends WebRouteSpecification> = Spec extends {
 type DataOf<Spec extends WebRouteSpecification> = Spec extends { Data: infer Data }
   ? Data
   : undefined;
-type DependenciesOf<Spec extends WebRouteSpecification> = Spec extends {
-  Dependencies: infer Dependencies extends object;
-}
-  ? Dependencies
-  : Empty;
 type HasData<Spec extends WebRouteSpecification> = Spec extends { Data: unknown } ? true : false;
 type RouteCache<Spec extends WebRouteSpecification> = Spec extends {
   Cache: infer Cache extends WebRouteCache;
@@ -417,6 +757,8 @@ export type WebRoute<Spec extends WebRouteSpecification> =
   ExactPathParameters<Spec> extends true
     ? Readonly<{
         Path: Spec["Path"];
+        Parent: Spec extends { Parent: infer Parent extends string } ? Parent : never;
+        Status: Spec extends { Status: infer Status extends WebRouteStatus } ? Status : 200;
         Cache: RouteCache<Spec>;
         Metadata: RouteMetadata<Spec>;
         MetadataResult: Omit<WebRouteMetadataResult, "manifest">;
@@ -426,12 +768,14 @@ export type WebRoute<Spec extends WebRouteSpecification> =
         Search: ValidationOutput<SearchSchema<Spec>>;
         SearchInput: ValidationInput<SearchSchema<Spec>>;
         Destination: Readonly<
-          { to: PropertyKey } & DestinationField<"params", ValidationOutput<ParamsSchema<Spec>>> &
+          { route: PropertyKey } & DestinationField<
+            "params",
+            ValidationOutput<ParamsSchema<Spec>>
+          > &
             DestinationField<"search", ValidationInput<SearchSchema<Spec>>> & { hash?: string }
         >;
         Data: DataOf<Spec>;
         Deferred: Readonly<Record<Extract<DeferredDataKeys<DataOf<Spec>>, string>, true>>;
-        Dependencies: DependenciesOf<Spec>;
         Outcome: WebRouteOutcome<DataOf<Spec>>;
         LoadContext: Readonly<
           {
@@ -447,7 +791,6 @@ type CompleteWebRoute = WebRouteContract &
   Readonly<{
     Data: unknown;
     Deferred: Readonly<Record<string, true>>;
-    Dependencies: object;
     Params: object;
     Search: object;
     MetadataResult: object;
@@ -455,15 +798,6 @@ type CompleteWebRoute = WebRouteContract &
     LoadContext: object;
     Load: boolean;
   }>;
-type RoutesOf<Contract> = Contract extends {
-  Routes: infer Routes extends Record<string, unknown>;
-}
-  ? {
-      [Name in keyof Routes as ResolvedWebRoute<Routes[Name]> extends CompleteWebRoute
-        ? Name
-        : never]: Extract<ResolvedWebRoute<Routes[Name]>, CompleteWebRoute>;
-    }
-  : Empty;
 type DefinitionField<Name extends PropertyKey, Value extends object> = keyof Value extends never
   ? { readonly [Key in Name]?: never }
   : { readonly [Key in Name]: Value };
@@ -476,12 +810,13 @@ type RouteViewContext<
   data: Route["Data"];
   params: Readonly<Route["Params"]>;
   search: Readonly<Route["Search"]>;
-  feature: UIContributionAPI<Owner>;
-  features: FeatureUIAPIs<Owner, ProgramName>;
+  feature: WebUIContributionAPI<Owner>;
+  features: WebFeatureUIAPIs<Owner, ProgramName>;
   components: ComponentComposition<ProgramOwner<Root, ProgramName>>;
+  children: ComponentUI<ProgramOwner<Owner, ProgramName>>["Child"];
 }>;
-type RouteLoadContext<Route extends CompleteWebRoute> = Readonly<{
-  dependencies: Readonly<Route["Dependencies"]>;
+type RouteLoadContext<Route extends CompleteWebRoute, Contract extends ProgramContract> = Readonly<{
+  dependencies: ProgramRequires<Contract>;
 }> &
   Readonly<Route["LoadContext"]>;
 type RouteMetadataResult<Route extends CompleteWebRoute> =
@@ -503,41 +838,67 @@ type ResolvedRouteOutcome<
 > = ResolveRouteOutcome<Route["Outcome"], Root>;
 type RouteLoadField<
   Route extends CompleteWebRoute,
+  Contract extends ProgramContract,
   Root extends FeatureContract,
 > = Route["Load"] extends true
   ? {
       load(
-        context: RouteLoadContext<Route>,
+        context: RouteLoadContext<Route, Contract>,
       ):
         | (ResolvedRouteOutcome<Route, Root> & RouteMetadataResult<Route>)
         | PromiseLike<ResolvedRouteOutcome<Route, Root> & RouteMetadataResult<Route>>;
     }
   : { readonly load?: never };
-type WebRouteDefinitions<
+type WebRouteDefinitionsFor<
   Owner extends FeatureContract,
   ProgramName extends keyof ProgramsOf<Owner>,
   Contract extends ProgramContract,
   Root extends FeatureContract,
+  Routes extends Record<string, unknown>,
 > = {
-  readonly [Name in keyof RoutesOf<Contract>]: Readonly<
-    RouteLoadField<Extract<RoutesOf<Contract>[Name], CompleteWebRoute>, Root> & {
+  readonly [Name in keyof Routes as ResolvedWebRouteIn<Routes, Name> extends CompleteWebRoute
+    ? Name
+    : never]: Readonly<
+    RouteLoadField<Extract<ResolvedWebRouteIn<Routes, Name>, CompleteWebRoute>, Contract, Root> & {
       view(
         context: RouteViewContext<
           Owner,
           ProgramName,
-          Extract<RoutesOf<Contract>[Name], CompleteWebRoute>,
+          Extract<ResolvedWebRouteIn<Routes, Name>, CompleteWebRoute>,
           Root
         >,
       ): ComponentUI<ProgramOwner<Owner, ProgramName>>["Child"];
     }
   >;
 };
+type WebRouteDefinitions<
+  Owner extends FeatureContract,
+  ProgramName extends keyof ProgramsOf<Owner>,
+  Contract extends ProgramContract,
+  Root extends FeatureContract,
+> = Contract extends { Routes: infer Routes extends Record<string, unknown> }
+  ? WebRouteDefinitionsFor<Owner, ProgramName, Contract, Root, Routes>
+  : Empty;
 type WebProgramDefinitionFields<
   Owner extends FeatureContract,
   ProgramName extends keyof ProgramsOf<Owner>,
   Contract extends ProgramContract,
   Root extends FeatureContract,
-> = DefinitionField<"routes", WebRouteDefinitions<Owner, ProgramName, Contract, Root>>;
+> =
+  ValidWebProgramContract<Contract> extends true
+    ? Readonly<
+        (HasProgramUI<Contract> extends true
+          ? WebProgramUIFields<Owner, ProgramName, Contract, Root>
+          : {
+              state?: never;
+              actions?: never;
+              components?: never;
+              root?: never;
+            }) &
+          WebProgramStartField<Owner, ProgramName, Contract> &
+          DefinitionField<"routes", WebRouteDefinitions<Owner, ProgramName, Contract, Root>>
+      >
+    : never;
 
 export interface WebProgramDefinitionKind extends ProgramDefinitionKind {
   readonly Definition: WebProgramDefinitionFields<
@@ -554,5 +915,9 @@ export type WebNavigation<Routes extends Readonly<Record<string, unknown>>> = Re
   navigate(destination: WebDestination<Routes> & Readonly<{ replace?: boolean }>): void;
   back(): void;
   forward(): void;
-  subscribe(receive: (location: URL) => void): Disposable;
+  reload(): void;
+  subscribe(receive: (location: URL, type: WebNavigationType) => void): Disposable;
 }>;
+
+/** The browser transition that produced a client-side Route resolution. */
+export type WebNavigationType = "push" | "replace" | "traverse" | "reload";

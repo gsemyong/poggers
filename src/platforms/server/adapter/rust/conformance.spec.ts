@@ -6,11 +6,12 @@ import fc from "fast-check";
 import { afterEach, expect, test } from "vitest";
 
 import { compileSystem } from "@/compiler/source";
-import { executeProgramFixtureIR } from "@/execution/interpreter";
+import { serverCompilerExtension } from "@/platforms/server/adapter";
 import {
   buildRustProgram,
   createRustProgramSession,
 } from "@/platforms/server/adapter/rust/fixtures/conformance";
+import { executeServerProgramFixtureIR as executeProgramFixtureIR } from "@/platforms/server/adapter/typescript/runtime";
 
 const temporaryDirectories: string[] = [];
 
@@ -30,7 +31,7 @@ test(
     temporaryDirectories.push(directory);
     const entry = resolve(directory, "system.ts");
     await writeFile(entry, conformanceSource());
-    const ir = compileSystem(entry);
+    const ir = compileSystem(entry, [serverCompilerExtension]);
     const contribution = ir.programs[0]!.contributions[0]!;
     const executable = resolve(directory, "conformance");
     await buildRustProgram(contribution, executable);

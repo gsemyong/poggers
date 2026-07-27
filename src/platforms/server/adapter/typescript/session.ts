@@ -3,7 +3,14 @@ import { isAbsolute, relative, resolve } from "node:path";
 
 import { createServer, defaultServerConditions, type Plugin } from "vite";
 
-import type { DevelopmentSession, PlatformDevelopmentInput } from "@/adapter";
+import {
+  validateProgramAttachmentIR,
+  type DevelopmentProgramAttachments,
+  type DevelopmentSession,
+  type PlatformDevelopmentInput,
+  type ProgramAttachmentIR,
+  type ProgramAttachmentSource,
+} from "@/adapter";
 import {
   projectDependencyContracts,
   selectDependencyProviders,
@@ -32,30 +39,30 @@ import {
   startServerProgramInstance,
   type RunningServerProgram,
 } from "@/platforms/server/adapter/typescript/runtime";
-import {
-  planWebRouteLoaders,
-  type DevelopmentWebLoaderRegistry,
-  type WebRouteLoaderPlan,
-} from "@/platforms/web/adapter/server";
 
 export type ServerDevelopmentOptions = Readonly<{
   developmentPort?: number;
-  developmentWebPort?: number;
-  developmentHost?: NodeHostOptions;
-  webLoaders?: DevelopmentWebLoaderRegistry;
-  webOrigins?: readonly string[];
+  developmentHost?:
+    | NodeHostOptions
+    | ((input: PlatformDevelopmentInput<ServerPlatform>) => NodeHostOptions);
+  attachmentSources?: readonly ProgramAttachmentSource[];
+  programAttachments?: DevelopmentProgramAttachments;
 }>;
+
+type ResolvedServerDevelopmentOptions = Omit<ServerDevelopmentOptions, "developmentHost"> &
+  Readonly<{ developmentHost?: NodeHostOptions }>;
 
 /** Starts every server Program and owns their hot-replacement lifecycle. */
 export async function developServerPrograms(
   input: PlatformDevelopmentInput<ServerPlatform>,
   options: ServerDevelopmentOptions = {},
 ): Promise<DevelopmentSession> {
-  const developmentOptions: ServerDevelopmentOptions = {
+  const developmentOptions: ResolvedServerDevelopmentOptions = {
     ...options,
-    webOrigins:
-      options.webOrigins ??
-      developmentWebOrigins(input.ir, input.app, options.developmentWebPort ?? 3000),
+    developmentHost:
+      typeof options.developmentHost === "function"
+        ? options.developmentHost(input)
+        : options.developmentHost,
   };
   const source = resolve(input.directory, "src");
   const vite = await createServer({
@@ -120,6 +127,7 @@ export async function developServerPrograms(
           nextIR,
           new Set(compilation.change?.outputs ?? []),
           compilation.change?.source,
+          developmentOptions.attachmentSources ?? [],
         );
         if (!affected.names.size) return;
         candidate = moduleDefault(
@@ -176,8 +184,8 @@ type ActiveServerProgram = Readonly<{
   dependencies: Readonly<Record<string, unknown>>;
   externalDependencies: readonly DependencyIR[];
   providers: readonly SelectedDependencyProviderIR[];
-  loaderPlan: WebRouteLoaderPlan;
-  loaderRegistration?: Disposable;
+  attachmentPlans: readonly ProgramAttachmentIR[];
+  attachmentRegistrations: readonly Disposable[];
   program: ProgramIR;
   running: RunningServerProgram;
 }>;
@@ -189,10 +197,10 @@ async function startDevelopmentProgram(
   directory: string,
   appName: string,
   ir: SystemIR,
-  options: ServerDevelopmentOptions,
+  options: ResolvedServerDevelopmentOptions,
 ): Promise<ActiveServerProgram> {
-  const loaderPlan = planWebRouteLoaders(program, ir);
-  const externalDependencies = collectExternalDependencies(program, loaderPlan);
+  const attachmentPlans = projectProgramAttachments(options.attachmentSources ?? [], program, ir);
+  const externalDependencies = collectExternalDependencies(program, attachmentPlans);
   const providers = selectedDevelopmentProviders(ir, program, externalDependencies);
   const dependencies = await createNodeHost({
     ...options.developmentHost,
@@ -202,7 +210,7 @@ async function startDevelopmentProgram(
     providers: developmentFeatureProviders(system, providers),
     host: options.developmentHost?.host,
     port: serverPort(program.name, names, options.developmentPort),
-    webOrigins: options.webOrigins,
+    allowedOrigins: options.developmentHost?.allowedOrigins,
   });
   try {
     return await activateDevelopmentProgram({
@@ -212,8 +220,8 @@ async function startDevelopmentProgram(
       directory,
       externalDependencies,
       providers,
-      loaderPlan,
-      loaderRegistry: options.webLoaders,
+      attachmentPlans,
+      attachmentRegistry: options.programAttachments,
       program,
     });
   } catch (error) {
@@ -248,18 +256,6 @@ function developmentFeatureProviders(
   );
 }
 
-function developmentWebOrigins(
-  ir: SystemIR,
-  app: string | undefined,
-  firstPort: number,
-): readonly string[] {
-  return Object.freeze(
-    selectSystemOutputs(ir, app)
-      .interfaces.filter(({ platform }) => platform === "web")
-      .map((_, index) => `http://localhost:${firstPort + index}`),
-  );
-}
-
 async function activateDevelopmentProgram(input: {
   system: System<SystemContract>;
   appName: string;
@@ -267,26 +263,29 @@ async function activateDevelopmentProgram(input: {
   directory: string;
   externalDependencies: readonly DependencyIR[];
   providers: readonly SelectedDependencyProviderIR[];
-  loaderPlan: WebRouteLoaderPlan;
-  loaderRegistry?: DevelopmentWebLoaderRegistry;
+  attachmentPlans: readonly ProgramAttachmentIR[];
+  attachmentRegistry?: DevelopmentProgramAttachments;
   program: ProgramIR;
 }): Promise<ActiveServerProgram> {
   const running = await startServerProgramInstance(input.system, input.program, input.dependencies);
-  let loaderRegistration: Disposable | undefined;
+  const attachmentRegistrations: Disposable[] = [];
   try {
-    if (input.loaderPlan.loaders.length) {
-      if (!input.loaderRegistry) {
+    for (const plan of input.attachmentPlans) {
+      if (!plan.exports.length) continue;
+      if (!input.attachmentRegistry) {
         throw new Error(
-          `Server Program ${JSON.stringify(input.program.name)} owns web Route loaders, but ` +
-            "the server and web Platform Adapters do not share a development loader registry.",
+          `Server Program ${JSON.stringify(input.program.name)} owns portable attachment exports, ` +
+            "but no development attachment registry is configured.",
         );
       }
-      loaderRegistration = input.loaderRegistry.register({
-        system: canonicalPath(input.directory),
-        owner: input.program.name,
-        plan: input.loaderPlan,
-        dependencies: running.dependencies,
-      });
+      attachmentRegistrations.push(
+        input.attachmentRegistry.register({
+          system: canonicalPath(input.directory),
+          program: input.program.name,
+          plan,
+          dependencies: running.dependencies,
+        }),
+      );
     }
     return {
       system: input.system,
@@ -295,13 +294,13 @@ async function activateDevelopmentProgram(input: {
       dependencies: input.dependencies,
       externalDependencies: input.externalDependencies,
       providers: input.providers,
-      loaderPlan: input.loaderPlan,
-      loaderRegistration,
+      attachmentPlans: input.attachmentPlans,
+      attachmentRegistrations: Object.freeze(attachmentRegistrations),
       program: input.program,
       running,
     };
   } catch (error) {
-    loaderRegistration?.[Symbol.dispose]();
+    attachmentRegistrations.reverse().forEach((registration) => registration[Symbol.dispose]());
     await running[Symbol.asyncDispose]();
     throw error;
   }
@@ -315,7 +314,7 @@ async function replaceDevelopmentPrograms(input: {
   programs: readonly ProgramIR[];
   appName: string;
   ir: SystemIR;
-  options: ServerDevelopmentOptions;
+  options: ResolvedServerDevelopmentOptions;
 }): Promise<Map<string, ActiveServerProgram>> {
   const next = new Map(input.active);
   const replacements = new Map(input.programs.map((program) => [program.name, program]));
@@ -323,12 +322,14 @@ async function replaceDevelopmentPrograms(input: {
   for (const name of affected) {
     const previous = input.active.get(name);
     const replacement = replacements.get(name);
-    const loaderPlan = replacement ? planWebRouteLoaders(replacement, input.ir) : undefined;
+    const attachmentPlans = replacement
+      ? projectProgramAttachments(input.options.attachmentSources ?? [], replacement, input.ir)
+      : undefined;
     if (
       !previous ||
       !replacement ||
       JSON.stringify(previous.externalDependencies) !==
-        JSON.stringify(collectExternalDependencies(replacement, loaderPlan))
+        JSON.stringify(collectExternalDependencies(replacement, attachmentPlans))
     ) {
       throw new Error(
         `Server Program ${JSON.stringify(name)} changed its deployment or host Dependency ` +
@@ -343,8 +344,12 @@ async function replaceDevelopmentPrograms(input: {
     for (const name of affected) {
       const previous = input.active.get(name)!;
       const program = replacements.get(name)!;
-      const loaderPlan = planWebRouteLoaders(program, input.ir);
-      const externalDependencies = collectExternalDependencies(program, loaderPlan);
+      const attachmentPlans = projectProgramAttachments(
+        input.options.attachmentSources ?? [],
+        program,
+        input.ir,
+      );
+      const externalDependencies = collectExternalDependencies(program, attachmentPlans);
       const providers = selectedDevelopmentProviders(input.ir, program, externalDependencies);
       const providerReplacement = input.providerAffected.has(name)
         ? await beginNodeFeatureProviderReplacement(
@@ -362,8 +367,8 @@ async function replaceDevelopmentPrograms(input: {
           directory: previous.directory,
           externalDependencies: previous.externalDependencies,
           providers,
-          loaderPlan,
-          loaderRegistry: input.options.webLoaders,
+          attachmentPlans,
+          attachmentRegistry: input.options.programAttachments,
           program,
         }),
       );
@@ -392,6 +397,7 @@ function affectedPrograms(
   ir: SystemIR,
   affectedOutputs: ReadonlySet<string>,
   changedSource: string | undefined,
+  attachmentSources: readonly ProgramAttachmentSource[],
 ): AffectedServerPrograms {
   const previousNames = programNames([...active.values()].map(({ program }) => program));
   const nextNames = programNames(programs);
@@ -409,8 +415,8 @@ function affectedPrograms(
   for (const name of nextNames) {
     const before = active.get(name)?.program;
     const after = next.get(name)!;
-    const loaderPlan = planWebRouteLoaders(after, ir);
-    const dependencies = collectExternalDependencies(after, loaderPlan);
+    const attachmentPlans = projectProgramAttachments(attachmentSources, after, ir);
+    const dependencies = collectExternalDependencies(after, attachmentPlans);
     const providers = selectedDevelopmentProviders(ir, after, dependencies);
     if (
       providerMeaningChanged(
@@ -428,7 +434,7 @@ function affectedPrograms(
       !before ||
       affectedOutputs.has(after.id) ||
       JSON.stringify(before) !== JSON.stringify(after) ||
-      JSON.stringify(active.get(name)?.loaderPlan) !== JSON.stringify(loaderPlan)
+      JSON.stringify(active.get(name)?.attachmentPlans) !== JSON.stringify(attachmentPlans)
     ) {
       affected.add(name);
       continue;
@@ -512,8 +518,11 @@ function activeLocations(
 async function disposeActivePrograms(programs: Iterable<ActiveServerProgram>): Promise<void> {
   const values = [...programs].reverse();
   const results = await Promise.allSettled(
-    values.map(async ({ dependencies, loaderRegistration, running }) => {
-      loaderRegistration?.[Symbol.dispose]();
+    values.map(async ({ attachmentRegistrations, dependencies, running }) => {
+      attachmentRegistrations
+        .slice()
+        .reverse()
+        .forEach((registration) => registration[Symbol.dispose]());
       await running[Symbol.asyncDispose]();
       await disposeServerDependencies(dependencies);
     }),
@@ -525,8 +534,11 @@ async function disposeActivePrograms(programs: Iterable<ActiveServerProgram>): P
 
 async function disposeRunningPrograms(programs: Iterable<ActiveServerProgram>): Promise<void> {
   const results = await Promise.allSettled(
-    [...programs].reverse().map(async ({ loaderRegistration, running }) => {
-      loaderRegistration?.[Symbol.dispose]();
+    [...programs].reverse().map(async ({ attachmentRegistrations, running }) => {
+      attachmentRegistrations
+        .slice()
+        .reverse()
+        .forEach((registration) => registration[Symbol.dispose]());
       await running[Symbol.asyncDispose]();
     }),
   );
@@ -537,12 +549,29 @@ async function disposeRunningPrograms(programs: Iterable<ActiveServerProgram>): 
 
 function collectExternalDependencies(
   program: ProgramIR,
-  loaderPlan: WebRouteLoaderPlan = { contributions: [], loaders: [] },
+  attachmentPlans: readonly ProgramAttachmentIR[] = [],
 ): readonly DependencyIR[] {
   return linkProgram({
     ...program,
-    contributions: [...program.contributions, ...loaderPlan.contributions],
+    contributions: [
+      ...program.contributions,
+      ...attachmentPlans.flatMap((plan) =>
+        plan.contributions.map(({ contribution }) => contribution),
+      ),
+    ],
   }).external;
+}
+
+function projectProgramAttachments(
+  sources: readonly ProgramAttachmentSource[],
+  program: ProgramIR,
+  ir: SystemIR,
+): readonly ProgramAttachmentIR[] {
+  return sources
+    .map((source) => validateProgramAttachmentIR(source.project(program, ir), source.name))
+    .filter(({ contributions, exports, bindings }) =>
+      Boolean(contributions.length || exports.length || bindings.length),
+    );
 }
 
 function moduleDefault<Value>(module: unknown): Value {

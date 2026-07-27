@@ -3,7 +3,7 @@ import {
   type ActionEvent,
   type Event,
   type InvocationId,
-} from "@/core/ui/presentation";
+} from "@/platforms/web/presentation/language";
 
 type AnyFunction = (...arguments_: never[]) => unknown;
 

@@ -1,5 +1,5 @@
 import type { FeatureContract } from "@/core/feature";
-import type { ApplicationFeatureContract, System } from "@/core/system";
+import type { System } from "@/core/system";
 import {
   createDeployment,
   secret,
@@ -46,15 +46,13 @@ type PortalApplication = Readonly<{
   Features: { portal: PortalFeature };
   Interfaces: WebPlatform;
 }>;
-type Portal = ApplicationFeatureContract<PortalApplication>;
-
 type Contract = Readonly<{
   Features: {
     infrastructure: Infrastructure;
     product: Product;
-    portal: Portal;
+    portal: PortalFeature;
   };
-  Applications: { portal: Portal };
+  Applications: { portal: PortalApplication };
 }>;
 
 declare const system: System<Contract>;

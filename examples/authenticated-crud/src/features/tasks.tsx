@@ -1,9 +1,10 @@
-import { createFeature, createEntity, type EntityModel, type FeatureContractOf } from "kit";
+import { createFeature, type FeatureContractOf } from "kit";
+import { createEntity, type EntityModel } from "kit/features/entity";
 import {
   For,
   type BrowserMainThread,
   type Navigation,
-  type Validate,
+  type UUID,
   type WebDestination,
 } from "kit/web";
 
@@ -26,7 +27,11 @@ export type Tasks = EntityModel<{
 }>;
 
 type TaskRoutes = {
+  root: {
+    Path: "";
+  };
   list: {
+    Parent: "root";
     Path: "";
     Metadata: {
       Title: "Tasks";
@@ -35,13 +40,15 @@ type TaskRoutes = {
     };
   };
   create: {
+    Parent: "root";
     Path: "new";
     Metadata: { Title: "New task"; Robots: "noindex" };
   };
   edit: {
+    Parent: "root";
     Path: ":id";
     Metadata: { Title: "Edit task"; Robots: "noindex" };
-    Params: { id: Validate<string, { Format: "uuid" }> };
+    Params: { id: UUID };
   };
 };
 
@@ -131,25 +138,25 @@ export const tasks = createFeature<TasksFeatureDefinition>({
       state: { error: undefined },
       actions: {
         create({ dependencies }) {
-          dependencies.navigation.navigate({ to: "create" });
+          dependencies.navigation.navigate({ route: "create" });
         },
         edit({ dependencies }, { id }) {
-          dependencies.navigation.navigate({ to: "edit", params: { id } });
+          dependencies.navigation.navigate({ route: "edit", params: { id } });
         },
         back({ dependencies }) {
-          dependencies.navigation.navigate({ to: "list" });
+          dependencies.navigation.navigate({ route: "list" });
         },
         save({ dependencies, features, state }, { destination, title: inputTitle }) {
           const title = inputTitle.trim();
           if (!title) return;
           state.error = undefined;
           try {
-            if (destination.to === "edit") {
+            if (destination.route === "edit") {
               features.tasks.update({ id: destination.params.id, changes: { title } });
             } else {
               features.tasks.create({ title });
             }
-            dependencies.navigation.navigate({ to: "list" });
+            dependencies.navigation.navigate({ route: "list" });
           } catch (error) {
             state.error = message(error);
           }
@@ -210,11 +217,13 @@ export const tasks = createFeature<TasksFeatureDefinition>({
             } = elements;
             const title = () => {
               const destination = props.destination;
-              return state.title ?? (destination.to === "edit" ? (editingTask()?.title ?? "") : "");
+              return (
+                state.title ?? (destination.route === "edit" ? (editingTask()?.title ?? "") : "")
+              );
             };
             const editingTask = () => {
               const destination = props.destination;
-              return destination.to === "edit"
+              return destination.route === "edit"
                 ? tasks.entities.find((task) => task.id === destination.params.id)
                 : undefined;
             };
@@ -227,7 +236,7 @@ export const tasks = createFeature<TasksFeatureDefinition>({
                     <Copy>Plan the work, keep it moving, and close the loop.</Copy>
                   </Heading>
                   {() =>
-                    props.destination.to === "list" ? (
+                    props.destination.route === "list" ? (
                       <New type="button" onClick={() => feature.create()}>
                         New task
                       </New>
@@ -248,7 +257,7 @@ export const tasks = createFeature<TasksFeatureDefinition>({
                   }
                 </Status>
                 {() =>
-                  props.destination.to === "list" ? (
+                  props.destination.route === "list" ? (
                     tasks.entities.length ? (
                       <List>
                         <For each={() => tasks.entities} by="id">
@@ -289,7 +298,7 @@ export const tasks = createFeature<TasksFeatureDefinition>({
                         <EmptyCopy>Create the first task to start this workspace.</EmptyCopy>
                       </Empty>
                     )
-                  ) : props.destination.to === "edit" &&
+                  ) : props.destination.route === "edit" &&
                     tasks.synchronization === "synchronized" &&
                     !editingTask() ? (
                     <Empty>
@@ -310,9 +319,9 @@ export const tasks = createFeature<TasksFeatureDefinition>({
                       }}
                     >
                       <FormHeader>
-                        <Eyebrow>{props.destination.to === "edit" ? "Edit" : "New"}</Eyebrow>
+                        <Eyebrow>{props.destination.route === "edit" ? "Edit" : "New"}</Eyebrow>
                         <FormTitle>
-                          {props.destination.to === "edit" ? "Update task" : "Create task"}
+                          {props.destination.route === "edit" ? "Update task" : "Create task"}
                         </FormTitle>
                       </FormHeader>
                       <Label for="task-title">Task title</Label>
@@ -340,19 +349,24 @@ export const tasks = createFeature<TasksFeatureDefinition>({
         },
       },
       routes: {
+        root: {
+          view({ children }) {
+            return children;
+          },
+        },
         list: {
           view({ components: { Admin } }) {
-            return <Admin destination={{ to: "list" }} />;
+            return <Admin destination={{ route: "list" }} />;
           },
         },
         create: {
           view({ components: { Admin } }) {
-            return <Admin destination={{ to: "create" }} />;
+            return <Admin destination={{ route: "create" }} />;
           },
         },
         edit: {
           view({ components: { Admin }, params }) {
-            return <Admin destination={{ to: "edit", params: { id: params.id } }} />;
+            return <Admin destination={{ route: "edit", params: { id: params.id } }} />;
           },
         },
       },

@@ -1,4 +1,4 @@
-import type { PresentationSourceIR } from "@/compiler/presentation";
+import type { PresentationSourceIR } from "@/platforms/web/adapter/presentation/source";
 import type {
   WebElementPresentation,
   WebFeedback,

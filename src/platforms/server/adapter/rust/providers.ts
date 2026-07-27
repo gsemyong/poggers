@@ -192,37 +192,6 @@ export const httpDependency = defineServerProductionDependency({
       environment: "KIT_HTTP_SHUTDOWN_TIMEOUT_MS",
       default: "10000",
     },
-    {
-      name: "webCacheCapacity",
-      environment: "KIT_WEB_CACHE_CAPACITY",
-      default: "256",
-    },
-    {
-      name: "webCacheBytes",
-      environment: "KIT_WEB_CACHE_BYTES",
-      default: "16777216",
-    },
-    {
-      name: "webCacheRefreshes",
-      environment: "KIT_WEB_CACHE_REFRESHES",
-      default: "8",
-    },
-    {
-      name: "webOrigin",
-      environment: "KIT_WEB_ORIGIN",
-      default: "http://localhost:3000",
-      source: { kind: "process-location" },
-    },
-    {
-      name: "webRoot",
-      environment: "KIT_WEB_ROOT",
-      source: { kind: "assets", platform: "web", format: "single" },
-    },
-    {
-      name: "webInterfaces",
-      environment: "KIT_WEB_INTERFACES",
-      source: { kind: "assets", platform: "web", format: "interfaces" },
-    },
   ],
   crate: { package: "kit-server-http", directory: dependencyDirectory("http") },
   rust: { type: "kit_server_http::Http", constructor: "kit_server_http::create" },
@@ -253,6 +222,17 @@ export function defineServerProductionDependency(
     implementation.configuration.map(({ name }) => name),
     `Server production Dependency ${JSON.stringify(implementation.name)} configuration field`,
   );
+  duplicate(
+    implementation.bindings ?? [],
+    `Server production Dependency ${JSON.stringify(implementation.name)} attachment binding`,
+  );
+  for (const binding of implementation.bindings ?? []) {
+    if (!binding.trim()) {
+      throw new Error(
+        `Server production Dependency ${JSON.stringify(implementation.name)} attachment binding is empty.`,
+      );
+    }
+  }
   for (const field of implementation.configuration) {
     identifier(field.name, "server production configuration field");
     if (!/^[A-Z][A-Z0-9_]*$/.test(field.environment)) {

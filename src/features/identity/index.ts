@@ -5,7 +5,6 @@ import {
   type DependencyImplementations,
 } from "@/core/dependency";
 import { createFeature, type Feature } from "@/core/feature";
-import { startFeatureFixture } from "@/execution/process";
 import type {
   HttpField,
   HttpRequest,
@@ -236,6 +235,12 @@ export async function createIdentityFixture<Model extends IdentityModelDefinitio
       requests: readonly string[];
     }>
 > {
+  const [{ startFeatureFixture }, { serverProgramLanguageRuntime }, { webProgramLanguageRuntime }] =
+    await Promise.all([
+      import("@/execution/process"),
+      import("@/platforms/server/adapter/typescript/runtime"),
+      import("@/platforms/web/adapter/ui/process"),
+    ]);
   const name = "identity" as Model["Name"];
   const user = input.user;
   const requests: string[] = [];
@@ -254,6 +259,7 @@ export async function createIdentityFixture<Model extends IdentityModelDefinitio
   const server = await startFeatureFixture<IdentityFeature<Model>>({
     feature: identity,
     program: "server",
+    language: serverProgramLanguageRuntime,
     contributions: [
       {
         feature: "",
@@ -269,6 +275,7 @@ export async function createIdentityFixture<Model extends IdentityModelDefinitio
   const browser = await startFeatureFixture<IdentityFeature<Model>>({
     feature: identity,
     program: "browser",
+    language: webProgramLanguageRuntime,
     contributions: [{ feature: "", requires: ["http"], provides: [name] }],
     dependencies: {
       http: {
@@ -329,7 +336,7 @@ function jsonResponse(value: unknown, status = 200): HttpResponse {
 
 /** Feature-owned Better Auth realization for the Identity boundary. */
 const authenticationProvider: ServerDependencyProvider<AuthenticationBackend> = {
-  async development({ appName, configuration, origin, sqlite, webOrigins }) {
+  async development({ appName, allowedOrigins, configuration, origin, sqlite }) {
     const [{ betterAuth }, { getMigrations }] = await Promise.all([
       import("better-auth"),
       import("better-auth/db/migration"),
@@ -343,7 +350,7 @@ const authenticationProvider: ServerDependencyProvider<AuthenticationBackend> = 
       database,
       emailAndPassword: { enabled: true },
       secret: configuration.secret ?? "kit-development-authentication-secret",
-      trustedOrigins: [...webOrigins],
+      trustedOrigins: [...allowedOrigins],
     });
     await (await getMigrations(auth.options)).runMigrations();
     return Object.freeze({

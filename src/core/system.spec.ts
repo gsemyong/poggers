@@ -12,7 +12,6 @@ describe("System authoring", () => {
       Interfaces: WebPlatform;
     };
     const app = createApplication<Product>({
-      features: { leaf },
       interfaces: {
         web: {
           presentation: { parameters: {}, create: () => ({ Leaf: () => ({}) }) },
@@ -21,14 +20,15 @@ describe("System authoring", () => {
     });
     const system = createSystem({
       metadata: { name: "Company" },
+      features: { leaf },
       applications: { app },
     });
 
     expect(system).toEqual({
       metadata: { name: "Company" },
+      features: { leaf: {} },
       applications: {
         app: {
-          features: { leaf: {} },
           interfaces: {
             web: {
               presentation: { parameters: {}, create: expect.any(Function) },
@@ -38,6 +38,6 @@ describe("System authoring", () => {
       },
     });
     expect(system.applications.app).toBe(app);
-    expect(app.features.leaf).toBe(leaf);
+    expect(system.features.leaf).toBe(leaf);
   });
 });

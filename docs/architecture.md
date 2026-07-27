@@ -1,45 +1,62 @@
 # Architecture
 
-Kit is a portable TypeScript product language. A company Workspace describes
-one System made from reusable Features. Features contribute Programs for
-specific Environments, and Programs interact with authority outside their own
-logic through typed Dependencies. Platform Adapters realize that meaning for
-development and production.
+Kit is an extensible substrate for portable product languages. A company
+Workspace describes one System made from reusable Features and independently
+addressable Applications. Features contribute Programs for specific
+Environments, and Programs interact with everything outside their own logic
+through typed Dependencies.
+
+The substrate owns composition, identity, dependency direction, and compiler
+extension points. It does not prescribe one universal Program body. The
+Environment selected by a Program chooses a statically registered authoring
+language and Platform realization. Web UI, server processes, service workers,
+native UI, actors, and future Program kinds may therefore expose different
+optimal APIs while remaining composable through the same System, Feature,
+Program, and Dependency model.
 
 ```text
 TypeScript product source
-  -> System IR
-  -> linked Programs
+  -> adapter-owned semantic extensions
+  -> one linked System and Program graph
   -> Platform Adapters
-       |- live development sessions
+       |- live development realizations
        `- production artifacts
+  -> Deployment Adapter
+       `- placement, exposure, and scaling
 ```
 
 ## Invariants
 
 1. **System is the only root.** It is the complete compilation and development
    boundary for one Workspace.
-2. **Feature is the only recursive composition unit.** An Application owns one Feature
-   composition; its platform interfaces configure realization and never repeat
-   that composition.
+2. **Feature is the only recursive behavior-composition unit.** A Feature
+   co-locates contributions for several Program kinds without coupling those
+   Program languages to each other.
 3. **Program is the authored deployment unit.** Same-named compatible
    contributions link into one Program. A live replica is a Process.
-4. **Environment selects one Platform.** The Platform owns its authoring
-   language and optional UI language; Environments do not repeat that meaning.
-5. **Dependency is the interaction boundary.** A Dependency is provided either
+4. **Dependency is the interaction boundary.** A Dependency is provided either
    by another Feature contribution or by the selected Platform Adapter.
-6. **Adapters own realization.** Core contains no browser, Node.js, Vite, Rust,
-   database, transport, deployment, or protocol policy.
-7. **Component owns UI behavior and structure.** Its view is a pure projection
-   of state and props; actions mutate state and Programs perform effects.
-8. **Presentation depends on Component meaning, never the reverse.** It may
-   enrich named Elements with platform-specific experiential declarations but
-   cannot mutate product behavior.
-9. **One source revision has one semantic compilation.** Every adapter consumes
-   the same versioned IR.
-10. **The physical tree follows ownership.** Files split at real architectural,
+5. **Application is an addressable interface composition.** It requires Feature
+   contracts and contributes only Platform-owned interface meaning. Concrete
+   Feature instances remain owned once by the System.
+6. **Environment selects a Program language.** The selected Platform owns the
+   Program's additional type-level contract, implementation shape, compiler
+   extension, development realization, and production realization.
+7. **Adapters own realization.** Core contains no browser, DOM, native UI,
+   routing, Presentation, Node.js, Vite, Rust, database, transport, deployment,
+   or protocol policy.
+8. **UI is conditional Platform meaning.** JSX dispatch may be shared
+   infrastructure, but structural primitives, Components, navigation,
+   accessibility, Presentation declarations, and lifecycle semantics belong to
+   the selected UI-capable Platform.
+9. **Deployment is downstream.** It consumes immutable Program and interface
+   artifacts plus placement requirements; it does not participate in Feature
+   behavior or Platform authoring languages.
+10. **One source revision has one semantic compilation.** Every adapter consumes
+    the same versioned IR.
+11. **The physical tree follows ownership.** Files split at real architectural,
     lifecycle, or distribution boundaries, not for mechanical symmetry.
-11. **Portability is adapter-declared and frontend-enforced.** A Platform whose
+12. **Portability is adapter-declared and frontend-enforced.** A Platform whose
     backend consumes portable IR rejects target source during semantic
     compilation. A source-native Platform may own source without weakening
     another Platform's invariant.
@@ -90,15 +107,18 @@ export const tasks = createFeature<Tasks>({
 A Feature sees only its declared children and Dependencies. It has no ambient
 access to the consuming System.
 
-The generic contract declares Program Environments, Dependencies, UI state,
-actions, Components, Routes, and child Feature contracts directly. There is no
-`Program<...>` authoring wrapper: the implementation object fills the behavior
-required by that contract.
+The generic contract declares Program Environments, Dependencies, and child
+Feature contracts directly. The selected Program language contributes any
+additional fields such as lifecycle, state, actions, Components, or Routes.
+There is no `Program<...>` authoring wrapper: the implementation object fills
+the behavior required by the resulting contract.
 
 ### Application
 
-An Application is one named product experience. It selects its Feature values once
-and may expose that same behavior through one interface per Platform.
+An Application is one named, independently addressable product experience. Its
+contract declares the Feature roles it requires and the Platform interfaces it
+exposes. It owns no Programs, providers, state, Components, or concrete Feature
+instances.
 
 ```ts
 type Customer = {
@@ -107,34 +127,45 @@ type Customer = {
     shell: ShellFeature;
     tasks: FeatureContractOf<typeof tasks>;
   };
-  Interfaces: WebPlatform;
+  Interfaces: WebPlatform<{
+    Mounts: {
+      shell: {
+        Path: "";
+        Route: "workspace";
+        Children: {
+          tasks: { Path: "tasks"; Route: "root" };
+        };
+      };
+    };
+  }>;
 };
 
 export const customer = createApplication<Customer>({
-  features: {
-    identity,
-    shell: createShell({ name: "Customer" }),
-    tasks,
-  },
   interfaces: {
     web: {
       presentation: customerWeb,
-      routes: { shell: "", tasks: "tasks" },
       installation: customerInstallation,
     },
   },
 });
+
+export default createSystem({
+  features: { identity, shell, tasks },
+  applications: { customer },
+});
 ```
 
-The factory call creates a Feature instance. Reusing that exact value in
-several Applications references the same semantic instance; it does not instantiate or
-copy it. Calling the factory again creates another instance. This concrete
-value rule is both simpler and more precise than a type-only `uses` relation:
-types describe compatibility, while values select implementations.
+The System resolves each Application Feature role to exactly one compatible
+concrete Feature in its Feature graph. Missing and ambiguous roles are
+compilation errors. A factory call creates a Feature instance; reusing that
+exact value exposes one semantic instance through several Applications without
+copying its Programs or providers. Calling the factory again creates another
+instance, whose returned contract must retain enough type-level identity to
+disambiguate it when both instances are visible.
 
 An interface is not another Feature tree. It contains only Platform-owned
 configuration such as a web Presentation, route mounts, and installation policy. A web and
-iOS interface of the same Application therefore receive the same domain composition,
+native interface of the same Application therefore receive the same domain composition,
 while each Platform retains its own structure, navigation, accessibility, and
 Presentation language. An Application has at most one interface for a given Platform;
 independently addressable experiences with different route, loading, security,
@@ -155,12 +186,30 @@ rather than a second execution model.
 ### Environment And Platform
 
 An Environment names one execution context, such as `browser-main`,
-`browser-service-worker`, or `server`, and selects one Platform.
+`browser-service-worker`, or `server`, and selects one Platform-owned Program
+language.
 
-A Platform defines the authoring and realization family. Every Platform can run
-headless Programs; some also own a UI language. The web Platform, for example,
-owns browser structure, routes, navigation, metadata, rendering policy,
-installation, service-worker meaning, and its Presentation language.
+A Platform is a statically pluggable authoring and realization family. It may
+define several Environments with different Program contracts. The core does not
+assume that every Program has `start`, state, actions, Components, Routes, or a
+UI. Those fields are projected from the selected Program language into the
+Feature implementation and checked through the Environment's contract.
+
+One complete Platform extension owns:
+
+1. the generic type-level contract authors place in a Program declaration;
+2. the implementation fields that fill the contract's runtime gaps;
+3. compiler extraction into versioned, serializable extension IR;
+4. development execution, diagnostics, and hot replacement;
+5. production lowering and artifact generation;
+6. conformance evidence shared by development and production.
+
+The web Platform, for example, may own browser-main, worker, and service-worker
+Program languages; web routes, destinations, metadata, delivery, installation,
+and caching; and one or more compatible UI realizations. A DOM realization owns
+HTML structure and its Presentation language. A future Canvas or WebGPU
+realization may expose different structural and Presentation primitives without
+changing Feature, Program, Dependency, Application, or System.
 
 The web adapter derives loading work rather than exposing bundler controls.
 Only the entry and its shared dependencies are critical. Other Route modules
@@ -204,14 +253,19 @@ connect every replica to shared infrastructure.
 
 ### Component And Presentation
 
-A Component declares props, state, synchronous actions, slots, hierarchy,
-accessibility, lifecycle, and named Elements. Components compose through JSX
-while platform primitives remain platform-specific.
+Component and Presentation are not mandatory universal Program concepts. They
+belong to a UI-capable Program language.
 
-A Presentation maps the exact Component contract to one Platform's experiential
-declarations. It may read props, state, named Elements, observations, and typed
-parameters. Reuse comes from pure recipes and factories; object spread is the
-only explicit override mechanism.
+Such a language may define Components with props, state, actions, slots,
+hierarchy, accessibility, lifecycle, and named structural Elements. JSX is a
+shared syntax and dispatch mechanism; the selected adapter determines which
+primitives exist and what their semantics are.
+
+A compatible Presentation language maps the exact structural contract to that
+target's experiential declarations. It may read typed behavior meaning and
+target observations, but behavior cannot depend on Presentation. Another UI
+adapter may replace both structure and Presentation syntax while retaining the
+same neutral composition substrate.
 
 ### Platform Adapter
 
@@ -223,13 +277,327 @@ type PlatformAdapter<Platform> = {
   compiler?: readonly SourceCompilerExtension[];
   develop(input: PlatformDevelopmentInput<Platform>): Promise<DevelopmentSession>;
   build(input: PlatformProductionInput<Platform>): Promise<ProductionArtifacts>;
-  ui?: UIAdapter<Platform["UI"], unknown, unknown>;
 };
 ```
 
 Development prioritizes fast startup, diagnostics, and state-preserving hot
 replacement. Production prioritizes deterministic, minimal artifacts. Both
 consume the same linked IR and may use different implementation languages.
+Platform-private UI renderers, host libraries, and compilers may refine this
+type, but the neutral realization coordinator sees only this contract.
+
+## Extension Boundary
+
+Pluggable means statically replaceable behind checked contracts. It does not
+mean a runtime service locator, untyped plugin bag, or dynamically discovered
+framework callback.
+
+The compiler has two kinds of meaning:
+
+1. **neutral graph meaning**: Systems, Feature ownership, Program identity,
+   Environments, required and provided Dependencies, Applications, interfaces,
+   and output ownership;
+2. **adapter-owned dialect meaning**: the fields, operations, validation, and
+   IR required by one Program or Application-interface language.
+
+The generic frontend discovers registered dialects, gives each dialect only its
+owned declaration and implementation, preserves its versioned IR, and links the
+neutral graph. It does not interpret web Routes, DOM Elements, Presentation
+properties, actor commands, or server lifecycle operations. A Platform adapter
+consumes its own dialect IR and the relevant neutral graph projection.
+
+The generic portable-TypeScript backend translates supported procedural
+semantics without recognizing Feature factories or Platform concepts.
+Platform-specific host behavior remains behind Dependencies or adapter-owned
+lowering. Tightening the portable subset is preferable to adding
+Feature-specific code generation.
+
+Application interfaces use the same extension mechanism as Programs. Core
+knows that an Application has a named interface for a Platform; the Platform
+defines the interface contract. Web therefore owns route mounts, Presentation,
+installation, and delivery meaning. Another Platform may define an entirely
+different interface language.
+
+Dependency contracts remain semantic ports. Providers may come from another
+Feature or from a Platform adapter, and development and production providers
+must pass the same TypeScript-authored conformance suite. A Program never
+imports another adapter's runtime to communicate.
+
+Deployment is a separate downstream extension:
+
+```text
+linked System
+  -> Platform artifacts and requirements
+  -> Deployment plan
+  -> Deployment adapter
+  -> machines, processes, public endpoints, storage, and scaling
+```
+
+It may use Program identities, resource requirements, public interface
+artifacts, and semantic scaling declarations. It must not inspect Component,
+Route, or Presentation implementation details.
+
+### Change-locality gate
+
+The boundary is complete only when ordinary changes remain with their owner:
+
+| Change                             | Expected ownership                                                |
+| ---------------------------------- | ----------------------------------------------------------------- |
+| Add a web Route capability         | web Platform contract, compiler extension, adapter, and web tests |
+| Add a DOM Presentation declaration | DOM Presentation language, realization, and conformance tests     |
+| Add a service-worker event         | web service-worker Program language and adapter                   |
+| Add a native UI primitive          | that native Platform extension only                               |
+| Add a new Program kind             | its Platform extension plus one registration boundary             |
+| Change Feature composition         | core Feature/System compiler and cross-adapter contract tests     |
+| Change portable TypeScript         | generic frontend/backend and differential corpus                  |
+| Change placement or scaling        | deployment contract and selected deployment adapter               |
+
+Adding a normal web capability must not require teaching core or the generic
+portable backend about that capability. If it does, either the extension
+contract is insufficient or platform meaning has leaked into the substrate.
+
+### Current boundary gaps
+
+The migration began with four suspected leaks. The audit confirmed all four,
+plus three integration leaks, and the implementation now resolves them:
+
+| Audited leak                                                                 | Result                                                                                                                                                                           |
+| ---------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ProgramContract` required UI-shaped `State`, `Actions`, and `Components`    | Confirmed and removed. It now contains only Environment identity and declared Dependencies.                                                                                      |
+| The top-level adapter contract imported Component and Presentation semantics | Confirmed and removed. `PlatformAdapter` now exposes only compiler, development, and production realization.                                                                     |
+| Generic compiler/IR interpreted Platform fields                              | Confirmed and removed. Canonical graph nodes retain only neutral meaning plus owner-keyed, versioned extension IR.                                                               |
+| Ordinary web work crossed the web boundary                                   | Confirmed. Web source compilation, Presentation compilation, UI execution, Route attachments, document delivery, and native web HTTP realization now live under `platforms/web`. |
+| The server adapter planned web Route loaders                                 | Confirmed and replaced by versioned, adapter-neutral Program attachments emitted by web and consumed through an explicit registration boundary.                                  |
+| Deployment read `routes.ir.json` and web manifests                           | Confirmed and removed. It consumes generic artifact configuration, lifecycle, exposure, and placement requirements.                                                              |
+| The neutral package root eagerly loaded shipped Feature and server test code | Confirmed and removed. Reusable factories use explicit `kit/features/*` entries, and test realizations load adapter runtimes only when a fixture starts.                         |
+
+The former generic `core/ui` implementation was also not neutral. Its working
+Component and Presentation language now lives under the web Platform. Shared
+`jsx/runtime.ts` retains only opaque JSX dispatch and the extensible intrinsic
+registry. The `kit/ui` entry remains a compatibility facade over the same
+public web language; no second Presentation API was introduced.
+
+No known product-language leak remains in the audited neutral files. Three
+deliberate boundaries remain:
+
+1. `platforms.ts` is the package's single static registration and coordination
+   point for shipped Platforms. Adding a new Program kind adds its extension
+   and one registration here, without editing existing adapters.
+2. `ProductionExposure` is a neutral delivery protocol understood by
+   Deployment adapters. Adding a new exposure protocol requires extending that
+   protocol and the Deployment adapters that elect to support it; adding an
+   ordinary web Route or Presentation capability does not.
+3. `ui.ts` and selected `testing` exports are compatibility facades. They may
+   re-export web-owned declarations, but contain no implementation or semantic
+   interpretation.
+
+The neutral `kit` entry exports only substrate concepts. Shipped reusable
+Feature extensions are explicit entries under `kit/features/*`; importing the
+substrate therefore cannot evaluate an unrelated Feature, native provider, or
+server adapter. A Feature may still co-locate declarations for several
+Platforms, but test-only realization imports are lazy and do not enter a
+browser module graph until the corresponding fixture is explicitly started.
+
+The migration has passed focused browser verification and the complete
+repository/production gate. Future work uses the change-locality table above:
+ordinary Platform changes run that Platform's gates, while shared graph or
+portable-lowering changes additionally run compiler and native conformance.
+
+### Resulting dependency graph
+
+```text
+core
+  <- compiler neutral graph and TypeScript frontend
+  <- adapter realization contracts
+
+jsx/runtime
+  <- UI-capable Platform languages
+
+compiler extension contract
+  <- server compiler dialect
+  <- web compiler dialect
+  <- future Platform dialects
+
+realization coordinator
+  -> selected Platform adapters
+  -> immutable release artifacts
+
+platforms/web
+  -> web Program and Application languages
+  -> routing, UI, Presentation, SSR, PWA, HMR, delivery, native web HTTP
+
+platforms/server
+  -> headless Program language
+  -> TypeScript development and generated-Rust production
+  -> generic server Dependency providers
+
+platforms.ts
+  -> the one shipped-Platform registration and explicit web/server attachment
+
+deployment
+  <- Platform artifacts, requirements, and generic exposure protocols only
+  -> local or future target adapters
+```
+
+No arrow from core, the generic compiler IR, generic Rust lowering, the server
+implementation, or Deployment points into web product meaning.
+
+### Acceptance criteria
+
+- A headless Program language can omit every UI concept.
+- Two UI Platforms can define different structural and Presentation languages
+  in one System without global JSX or TypeScript configuration conflicts.
+- One Feature can co-locate Programs from several Platforms.
+- Program implementations receive only declared Dependencies.
+- Application interface syntax is fully Platform-owned.
+- Development and production consume equivalent versioned meaning.
+- A mock adapter can run the same semantic contract tests without browser,
+  native, or deployment infrastructure.
+- Adding an adapter requires no edits to existing adapters.
+- Removing an adapter removes no neutral core capability.
+- Deployment consumes artifacts and requirements without importing product UI
+  semantics.
+
+### Boundary migration
+
+This checklist is the active source of truth for the ownership migration.
+Focused checks accompany each stage. The complete repository gate runs once
+after all boundaries stabilize.
+
+#### 1. Freeze the neutral substrate
+
+- [x] Reduce the core Program contract to Environment identity plus declared
+      Dependencies.
+- [x] Make Feature project each Program implementation entirely through its
+      Environment-selected Program-language kind.
+- [x] Remove UI, Component, Presentation, lifecycle, and `start` interpretation
+      from core.
+- [x] Prove with type fixtures that a headless language has no UI fields, one
+      Feature can co-locate several Program languages, and Programs receive
+      only declared Dependencies.
+
+Gate: focused core type fixtures and core contract tests.
+
+#### 2. Freeze the extension contracts
+
+- [x] Define the minimal statically typed Program-language projection.
+- [x] Define the minimal statically typed Application-interface projection.
+- [x] Let a Platform project adapter-specific realization fields without
+      adding those fields to the neutral Platform Adapter contract.
+- [x] Require one registered compiler owner for each authored Program and
+      Application interface.
+- [x] Prove that a new Program kind needs only its extension plus registration,
+      and that two UI Platforms can expose unrelated languages in one System.
+
+Gate: adapter type fixtures and a mock extension conformance suite.
+
+#### 3. Move UI meaning to its owners
+
+- [x] Preserve the existing public web Component, Route, Presentation, and
+      installation APIs.
+- [x] Move UI Program projection, primitive checks, UI state/actions, roots,
+      and lifecycle into the selected UI-capable Platform.
+- [x] Keep shared JSX dispatch reusable without making a structural or
+      Presentation language part of core.
+- [x] Move live UI execution and hot replacement behind the web/UI adapter
+      boundary.
+
+Gate: focused web type fixtures, Component/runtime tests, Presentation tests,
+and one in-browser state-preserving navigation/HMR scenario.
+
+#### 4. Make compiler meaning dialect-owned
+
+- [x] Keep only graph identity, ownership, Environment, Dependencies, and
+      output ownership in canonical neutral IR.
+- [x] Replace generic Component, Presentation, UI-root, and `start` fields with
+      versioned extension IR selected by the owning compiler extension.
+- [x] Let compiler extensions declare and compile their own transitive source
+      units while generic incremental compilation tracks only source ownership.
+- [x] Keep portable TypeScript lowering limited to procedural functions chosen
+      by an extension; it must not recognize Feature, web, actor, or UI meaning.
+- [x] Prove development and production consume identical versioned meaning.
+
+Gate: compiler extension tests, clean-versus-incremental IR equivalence, and the
+portable TypeScript/Rust differential corpus.
+
+#### 5. Consolidate web ownership
+
+- [x] Keep routing, navigation, metadata, UI structure, Presentation, delivery,
+      PWA, browser development, and browser production under `platforms/web`.
+- [x] Replace server-side knowledge of web Route loaders with an explicit web
+      artifact or requirement boundary.
+- [x] Emit cache, discovery, and public-interface delivery artifacts from the
+      web Platform so Deployment does not read Route IR.
+- [x] Verify that an ordinary web capability changes only web-owned source and
+      tests.
+
+Gate: web compiler/lowering/delivery tests, SSR/PWA production fixtures, and
+focused browser verification.
+
+#### 6. Keep Deployment downstream
+
+- [x] Restrict Deployment inputs to immutable artifacts, generic exposure and
+      placement requirements, configuration, lifecycle, and scaling policy.
+- [x] Remove Route, Component, and Presentation inspection from Deployment
+      adapters.
+- [x] Run the same Deployment contract suite against the local adapter and one
+      mock adapter.
+
+Gate: Deployment contract, local adapter, OCI artifact, and local integration
+tests.
+
+#### 7. Remove superseded assumptions
+
+- [x] Delete superseded implementation paths only after no compiler, adapter,
+      example, or test consumes them. Public compatibility facades remain.
+- [x] Update the dependency graph and current-gap ledger to the resulting
+      ownership.
+- [x] Run type, source, API, web/browser, compiler/Rust, Deployment, package,
+      example, and production release gates once.
+
+### Migration evidence
+
+- `src/architecture.spec.ts` statically enforces the neutral substrate,
+  portable-lowering, server/web, Deployment, and package-entry dependency
+  directions.
+- Type fixtures prove a headless Program language has no UI fields, one Feature
+  can co-locate unrelated Program languages, two UI Platforms can expose
+  different JSX and Application-interface languages, and Programs cannot use
+  undeclared Dependencies.
+- Focused browser verification covered a minimal web state update and the
+  authenticated CRUD sign-up, navigation, mutation, direct reload, and style
+  path without loading server-runtime or native-provider modules into the
+  browser graph.
+- Development distribution verifies request-rendered loaders, nested Routes,
+  metadata, hydration, streaming, cache policy, PWA artifacts, and isolated
+  multi-Application interfaces through the web-owned attachment boundary.
+- TypeScript/Rust differential tests, the Cargo workspace, Deployment contract
+  tests, package-entry tests, and all examples pass.
+- `nub run check` passes after building the package once and includes the
+  focused generated-Rust production release gate.
+
+## Research Basis
+
+This architecture combines established ideas rather than inventing an
+unbounded plugin mechanism:
+
+- Ports and Adapters isolates application logic behind purposeful,
+  substitutable interfaces:
+  https://alistair.cockburn.us/hexagonal-architecture
+- The WebAssembly Component Model composes components by matching explicit
+  required and provided interfaces:
+  https://component-model.bytecodealliance.org/design/worlds.html
+- MLIR dialects demonstrate extensible domain-owned IR with explicit legality
+  and lowering boundaries:
+  https://mlir.llvm.org/docs/DefiningDialects/
+  https://mlir.llvm.org/docs/DialectConversion/
+- Bazel separates target Platforms and Toolchains from the rules that consume
+  them:
+  https://bazel.build/extending/platforms
+  https://bazel.build/versions/7.6.0/extending/toolchains
+- Domain-driven bounded contexts support cohesive vertical ownership while
+  allowing one domain model to span several physical services:
+  https://learn.microsoft.com/en-us/dotnet/architecture/microservices/microservice-ddd-cqrs-patterns/microservice-domain-model
 
 ## Composition
 
@@ -245,10 +613,13 @@ Dependencies, and records exact output ownership. This supports:
 Feature composition and cross-Feature communication are intentionally
 different operations:
 
-- an Application or Feature composes concrete child Feature values;
-- JSX composes Components from the visible Feature tree;
+- the System and recursive Features own concrete Feature values;
+- an Application declares typed roles over that graph and composes only its
+  Platform interfaces;
+- a UI-capable Program language may use JSX to compose visible Components;
 - separately realized Programs communicate through typed Dependencies;
-- Presentations enrich the exact Component contract for one Platform.
+- a compatible Presentation language enriches the exact structural contract
+  owned by its Platform.
 
 The compiler assigns every concrete Feature value a stable source identity.
 When the same value contributes the same headless Program through several Applications,
@@ -423,6 +794,10 @@ kit
 kit/ui
 kit/web
 kit/server
+kit/features/actor
+kit/features/data
+kit/features/entity
+kit/features/identity
 ```
 
 Feature-factory authors, tests, and deployment definitions use explicit

@@ -9,7 +9,7 @@ import {
 } from "@/core/dependency";
 import { createFeature, type Feature, type ProgramDefinition } from "@/core/feature";
 import { mapStream } from "@/core/stream";
-import { startFeatureFixture, type Process } from "@/execution/process";
+import type { Process } from "@/execution/process";
 import type {
   IdentityClient,
   IdentityModel,
@@ -1418,6 +1418,10 @@ export async function createEntityFixture<Model extends EntityModelDefinition>(
       as(principal: Model["Principal"]): EntityApi<Model>;
     }>
 > {
+  const [{ startFeatureFixture }, { serverProgramLanguageRuntime }] = await Promise.all([
+    import("@/execution/process"),
+    import("@/platforms/server/adapter/typescript/runtime"),
+  ]);
   const name = "entity" as Model["Name"];
   const events = createMemoryEventStore<EntityEvent<Model["Value"]>>();
   let identifier = 0;
@@ -1425,6 +1429,7 @@ export async function createEntityFixture<Model extends EntityModelDefinition>(
   const process = await startFeatureFixture<EntityFeature<Model>>({
     feature: entity,
     program: "server",
+    language: serverProgramLanguageRuntime,
     contributions: [
       {
         feature: "",
@@ -1472,6 +1477,15 @@ export async function createEntityBrowserFixture<Model extends EntityModelDefini
       restart(): Promise<void>;
     }>
 > {
+  const [
+    { startFeatureFixture },
+    { serverProgramLanguageRuntime },
+    { webContributionRuntime, webProgramLanguageRuntime },
+  ] = await Promise.all([
+    import("@/execution/process"),
+    import("@/platforms/server/adapter/typescript/runtime"),
+    import("@/platforms/web/adapter/ui/process"),
+  ]);
   const name = "entity" as Model["Name"];
   const events = createMemoryEventStore<EntityEvent<Model["Value"]>>();
   const storage = createEntityFixtureStore();
@@ -1485,6 +1499,7 @@ export async function createEntityBrowserFixture<Model extends EntityModelDefini
   const server = await startFeatureFixture<EntityFeature<Model>>({
     feature: entity,
     program: "server",
+    language: serverProgramLanguageRuntime,
     contributions: [
       {
         feature: "",
@@ -1510,6 +1525,7 @@ export async function createEntityBrowserFixture<Model extends EntityModelDefini
     startFeatureFixture<EntityFeature<Model>>({
       feature: entity,
       program: "browser",
+      language: webProgramLanguageRuntime,
       contributions: [
         {
           feature: "",
@@ -1561,8 +1577,9 @@ export async function createEntityBrowserFixture<Model extends EntityModelDefini
     }
     return createUncheckedDependencyClient(provided as never) as EntityApi<Model>;
   };
-  const state = () => browser.ui["feature"] as EntityState<Model>;
-  const actions = () => browser.contributions[0]!.ui!.actions as EntityActions<Model>;
+  const state = () => browser.exposed["feature"] as EntityState<Model>;
+  const actions = () =>
+    webContributionRuntime(browser.contributions[0]!.runtime).actions as EntityActions<Model>;
 
   return {
     get api() {

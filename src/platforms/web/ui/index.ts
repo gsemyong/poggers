@@ -1,6 +1,6 @@
-import type { JSXElement } from "@/core/ui/language";
 import type { JSXPlatformRegistration } from "@/jsx/runtime";
 import type { Deferred } from "@/platforms/web/routing";
+import type { JSXElement } from "@/platforms/web/ui/language";
 
 export type Child =
   | Node

@@ -13,7 +13,6 @@ import {
   startProcessDistribution,
   StaleProcessAuthorityError,
 } from "@/execution/distribution";
-import { executeLinkedProgramIR } from "@/execution/interpreter";
 import {
   createDependencyRequestHandler,
   createMemoryDependencyTransport,
@@ -21,12 +20,16 @@ import {
 } from "@/execution/transport";
 import { ActorError, createActor, type Actor } from "@/features/actor";
 import { createMemoryEventStore } from "@/features/entity";
+import { serverCompilerExtension, serverProgramExecution } from "@/platforms/server/adapter";
+import { executeServerLinkedProgramIR as executeLinkedProgramIR } from "@/platforms/server/adapter/typescript/runtime";
 
 let actorWorkerIdentity = 0;
 let compiledActorFixture: ReturnType<typeof compileSystem> | undefined;
 
 function actorFixtureSystem(): ReturnType<typeof compileSystem> {
-  compiledActorFixture ??= compileSystem(resolve(import.meta.dirname, "feature.typecheck.ts"));
+  compiledActorFixture ??= compileSystem(resolve(import.meta.dirname, "feature.typecheck.ts"), [
+    serverCompilerExtension,
+  ]);
   return compiledActorFixture;
 }
 
@@ -79,11 +82,12 @@ describe("Actor", () => {
     const server = ir.programs.find(({ name }) => name === "server");
 
     expect(
-      server?.contributions.map(({ implementation }) =>
-        implementation.kind === "source"
+      server?.contributions.map((contribution) => {
+        const implementation = serverProgramExecution(contribution);
+        return implementation.kind === "source"
           ? { kind: implementation.kind, diagnostic: implementation.diagnostic }
-          : { kind: implementation.kind },
-      ),
+          : { kind: implementation.kind };
+      }),
     ).toEqual([
       { kind: "portable" },
       { kind: "portable" },

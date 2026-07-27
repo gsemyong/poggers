@@ -1,4 +1,4 @@
-import type { EntitySnapshot } from "kit";
+import type { EntitySnapshot } from "kit/features/entity";
 import { createHttpTestSession, HttpTestResponseError, testSystem } from "kit/testing";
 import { expect } from "vitest";
 

@@ -4,10 +4,14 @@ import {
   Await,
   type BrowserMainThread,
   type BrowserServiceWorker,
+  type Choice,
   type ConfiguredWebPresentation,
+  type Flag,
+  type Integer,
+  type List,
   type Deferred,
   type Navigation,
-  type Validate,
+  type Text,
   type WebPresentation,
   type WebPlatform,
   type WebServiceWorkerRuntime,
@@ -15,7 +19,11 @@ import {
 } from "kit/web";
 
 type GreetingRoutes = {
+  root: {
+    Path: "";
+  };
   greeting: {
+    Parent: "root";
     Path: "hello/:name";
     Metadata: {
       Title: "Greeting";
@@ -38,62 +46,82 @@ type GreetingRoutes = {
         { "@context": "https://schema.org"; "@type": "WebPage"; name: "Greeting" },
       ];
     };
-    Params: { name: Validate<string, { MinimumLength: 1; MaximumLength: 40 }> };
-    Search: { punctuation?: Validate<"!" | "?", { Default: "!" }> };
+    Params: { name: Text<{ MinimumLength: 1; MaximumLength: 40 }> };
+    Search: { punctuation?: Choice<"!" | "?", { Default: "!" }> };
   };
   loaded: {
+    Parent: "root";
     Path: "loaded/:name";
-    Params: { name: Validate<string, { MinimumLength: 1; MaximumLength: 40 }> };
+    Params: { name: Text<{ MinimumLength: 1; MaximumLength: 40 }> };
     Data: { message: string };
-    Dependencies: { greetings: Greetings };
   };
   redirect: {
+    Parent: "root";
     Path: "go";
     Data: { message: string };
   };
   failure: {
+    Parent: "root";
     Path: "failure";
     Data: { message: string };
-    Dependencies: { greetings: Greetings };
   };
   deferred: {
+    Parent: "root";
     Path: "deferred/:name";
-    Params: { name: Validate<string, { MinimumLength: 1; MaximumLength: 40 }> };
+    Params: { name: Text<{ MinimumLength: 1; MaximumLength: 40 }> };
     Data: { message: string; activity: Deferred<string> };
-    Dependencies: { greetings: Greetings };
   };
   privateRequest: {
+    Parent: "root";
     Path: "private";
     Cache: { Scope: "private"; MaxAge: "1m" };
     Data: { message: string };
   };
   typed: {
+    Parent: "root";
     Path: "typed/:count/:enabled";
     Cache: { Scope: "public"; MaxAge: "1m"; StaleWhileRevalidate: "30s" };
     Params: {
-      count: Validate<number, { Integer: true; Minimum: 1; Maximum: 99 }>;
-      enabled: Validate<boolean>;
+      count: Integer<{ Minimum: 1; Maximum: 99 }>;
+      enabled: Flag;
     };
     Search: {
-      mode?: Validate<"compact" | "full", { Default: "compact" }>;
-      tag?: Validate<readonly string[], { MaximumLength: 12 }>;
+      mode?: Choice<"compact" | "full", { Default: "compact" }>;
+      tag?: List<string, { MaximumLength: 12 }>;
     };
   };
   cached: {
+    Parent: "root";
     Path: "cached/:name";
     Cache: { Scope: "public"; MaxAge: "500ms"; StaleWhileRevalidate: "2s" };
-    Params: { name: Validate<string, { MinimumLength: 1; MaximumLength: 40 }> };
+    Params: { name: Text<{ MinimumLength: 1; MaximumLength: 40 }> };
     Data: { message: string };
-    Dependencies: { greetings: Greetings };
+  };
+  nested: {
+    Parent: "root";
+    Path: "nested/:workspace";
+    Params: { workspace: Text<{ MinimumLength: 1; MaximumLength: 40 }> };
+    Data: { message: string };
+  };
+  nestedDetail: {
+    Parent: "nested";
+    Path: ":item";
+    Params: { item: Text<{ MinimumLength: 1; MaximumLength: 40 }> };
+    Data: { message: string };
   };
   typedRedirect: {
+    Parent: "root";
     Path: "typed-go";
     Data: { message: string };
   };
-  fileNew: { Path: "files/new" };
-  file: { Path: "files/:id" };
-  files: { Path: "files/*rest" };
-  client: { Path: "client"; Metadata: { Title: "Client"; Robots: "noindex" } };
+  fileNew: { Parent: "root"; Path: "files/new"; Status: 410 };
+  file: { Parent: "root"; Path: "files/:id" };
+  files: { Parent: "root"; Path: "files/*rest" };
+  client: {
+    Parent: "root";
+    Path: "client";
+    Metadata: { Title: "Client"; Robots: "noindex" };
+  };
 };
 
 type Greetings = Dependency<{
@@ -107,7 +135,7 @@ type Greeting = Readonly<{
   Programs: {
     browser: {
       Environment: BrowserMainThread;
-      Requires: { navigation: Navigation<GreetingRoutes> };
+      Requires: { greetings: Greetings; navigation: Navigation<GreetingRoutes> };
       Actions: { goClient(): void };
       Components: {
         Message: {
@@ -193,12 +221,12 @@ export type WebContract = Readonly<{
   Features: { background: Background; greeting: Greeting; origin: Origin };
 }>;
 
-const greeting = createFeature<Greeting>({
+export const greeting = createFeature<Greeting>({
   programs: {
     browser: {
       actions: {
         goClient({ dependencies }) {
-          dependencies.navigation.navigate({ to: "client" });
+          dependencies.navigation.navigate({ route: "client" });
         },
       },
       components: {
@@ -235,6 +263,11 @@ const greeting = createFeature<Greeting>({
         },
       },
       routes: {
+        root: {
+          view({ children }) {
+            return children;
+          },
+        },
         greeting: {
           view({ components: { Message }, params, search }) {
             return <Message message={`Hello, ${params.name}${search.punctuation}`} />;
@@ -245,6 +278,7 @@ const greeting = createFeature<Greeting>({
             return {
               data: { message: dependencies.greetings.message({ name: params.name }) },
               metadata: { title: `Loaded ${params.name}` },
+              status: 203 as const,
             };
           },
           view({ components: { Message }, data }) {
@@ -253,7 +287,7 @@ const greeting = createFeature<Greeting>({
         },
         redirect: {
           load() {
-            return { redirect: { to: "client" as const } };
+            return { redirect: { route: "client" as const }, status: 308 as const };
           },
           view({ components: { Message }, data }) {
             return <Message message={data.message} />;
@@ -314,11 +348,41 @@ const greeting = createFeature<Greeting>({
             return <Message message={data.message} />;
           },
         },
+        nested: {
+          load({ dependencies, params }) {
+            return {
+              data: {
+                message: dependencies.greetings.message({ name: `Workspace ${params.workspace}` }),
+              },
+            };
+          },
+          view({ components: { Message }, data, children }) {
+            return (
+              <>
+                <Message message={data.message} />
+                {children}
+              </>
+            );
+          },
+        },
+        nestedDetail: {
+          load({ dependencies, params }) {
+            return {
+              data: {
+                message: dependencies.greetings.message({ name: `Item ${params.item}` }),
+              },
+              metadata: { title: `${params.workspace}/${params.item}` },
+            };
+          },
+          view({ components: { Message }, data }) {
+            return <Message message={data.message} />;
+          },
+        },
         typedRedirect: {
           load() {
             return {
               redirect: {
-                to: "typed" as const,
+                route: "typed" as const,
                 params: { count: 2, enabled: true },
                 search: { mode: "compact", tag: ["one", "two"] },
                 hash: "details",
@@ -354,7 +418,7 @@ const greeting = createFeature<Greeting>({
   },
 });
 
-const origin = createFeature<Origin>({
+export const origin = createFeature<Origin>({
   programs: {
     server: {
       start() {
@@ -376,7 +440,7 @@ const origin = createFeature<Origin>({
   },
 });
 
-const background = createFeature<Background>({
+export const background = createFeature<Background>({
   programs: {
     offline: {
       start({ dependencies }) {
@@ -399,7 +463,7 @@ const background = createFeature<Background>({
   },
 });
 
-const dashboard = createFeature<AdminDashboard>({
+export const dashboard = createFeature<AdminDashboard>({
   programs: {
     browser: {
       components: {
@@ -437,7 +501,7 @@ const admin = {
   },
   installation: {
     shortName: "Admin",
-    start: { to: "dashboard.dashboard" },
+    start: { feature: "dashboard", route: "dashboard" },
     icons: [
       {
         src: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'%3E%3Crect width='192' height='192' rx='24' fill='%23522'/%3E%3C/svg%3E",
@@ -450,7 +514,7 @@ const admin = {
         type: "image/svg+xml",
       },
     ],
-    offline: { fallback: { to: "dashboard.dashboard" } },
+    offline: { fallback: { feature: "dashboard", route: "dashboard" } },
   },
 } as const;
 
@@ -476,7 +540,12 @@ const web = {
   presentation: webPresentation,
   installation: {
     shortName: "Conformance",
-    start: { to: "greeting.client" },
+    description: "Web delivery conformance application",
+    start: { feature: "greeting", route: "client" },
+    orientation: "any",
+    themeColor: "#111111",
+    backgroundColor: "#ffffff",
+    categories: ["productivity"],
     icons: [
       {
         src: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'%3E%3Crect width='192' height='192' rx='40' fill='%23111'/%3E%3C/svg%3E",
@@ -489,19 +558,40 @@ const web = {
         type: "image/svg+xml",
       },
     ],
-    offline: { fallback: { to: "greeting.client" } },
+    screenshots: [
+      {
+        src: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1280 720'%3E%3Crect width='1280' height='720' fill='%23111'/%3E%3C/svg%3E",
+        sizes: "1280x720",
+        type: "image/svg+xml",
+        formFactor: "wide",
+        label: "Conformance application",
+      },
+    ],
+    offline: { fallback: { feature: "greeting", route: "client" } },
   },
 } as const;
 
-type ProductApplication = WebContract & { Interfaces: WebPlatform };
-type AdministrationApplication = AdminContract & { Interfaces: WebPlatform };
+type ProductApplication = WebContract & {
+  Name: "Product";
+  Interfaces: WebPlatform<{
+    Mounts: {
+      greeting: { Path: ""; Route: "root" };
+    };
+  }>;
+};
+type AdministrationApplication = AdminContract & {
+  Name: "Administration";
+  Interfaces: WebPlatform<{
+    Mounts: {
+      dashboard: { Path: ""; Route: "dashboard" };
+    };
+  }>;
+};
 
 export const product = createApplication<ProductApplication>({
-  features: { background, greeting, origin },
   interfaces: { web },
 });
 
 export const administration = createApplication<AdministrationApplication>({
-  features: { background, dashboard },
   interfaces: { web: admin },
 });

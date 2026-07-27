@@ -1,4 +1,3 @@
-import type { UIContributionAPI } from "@/core/feature";
 import {
   createEntity,
   type EntityApi,
@@ -6,6 +5,7 @@ import {
   type EntityModel,
   type EntityService,
 } from "@/features/entity";
+import type { WebUIContributionAPI } from "@/platforms/web/routing";
 
 type Valid = EntityModel<{
   Name: "notes";
@@ -25,7 +25,7 @@ service.create({ principal: { id: "owner" }, value: { text: "note" } }) satisfie
   readonly text: string;
 }>;
 
-declare const state: UIContributionAPI<EntityBrowserFeature<Valid>>;
+declare const state: WebUIContributionAPI<EntityBrowserFeature<Valid>>;
 state.entities satisfies readonly Valid["Value"][];
 state.synchronization satisfies
   | "signed-out"

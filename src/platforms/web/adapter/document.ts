@@ -1,7 +1,4 @@
 import type { ProgramManifest } from "@/compiler/ir";
-import { evaluatePresentationFrame, isPresentationTemporalValue } from "@/core/ui/presentation";
-import { createActionEventLedger } from "@/execution/presentation";
-import { createUIContributionInstance, type UIContributionInstance } from "@/execution/process";
 import { activateJSXRenderer, jsx as renderIntrinsic } from "@/jsx/runtime";
 import {
   compiledWebComponentIdentity,
@@ -16,16 +13,25 @@ import {
   createWebAnimationHost,
   type WebAnimationHost,
 } from "@/platforms/web/adapter/presentation/runtime/animation";
+import {
+  createWebUIContributionInstance,
+  type WebUIContributionInstance,
+} from "@/platforms/web/adapter/ui/process";
 import { webUIRuntime } from "@/platforms/web/adapter/ui/runtime";
 import type {
   WebElementPresentation,
   WebPresentationEnvironment,
   WebPresentationElement,
 } from "@/platforms/web/presentation";
+import {
+  evaluatePresentationFrame,
+  isPresentationTemporalValue,
+} from "@/platforms/web/presentation/language";
+import { createActionEventLedger } from "@/platforms/web/presentation/runtime";
 import type { WebRouteMetadataResult } from "@/platforms/web/routing";
 import { activateWebUIRuntime } from "@/platforms/web/ui";
 
-export const WEB_DOCUMENT_IR_VERSION = 5 as const;
+export const WEB_DOCUMENT_IR_VERSION = 6 as const;
 export const WEB_ROUTE_DATA_MEDIA_TYPE = "application/vnd.kit.route+json";
 export const WEB_MARKDOWN_MEDIA_TYPE = "text/markdown";
 
@@ -99,6 +105,8 @@ export type WebDocumentIR = Readonly<{
   metadata: WebDocumentMetadataIR;
   entry: false | string;
   preloads: readonly string[];
+  /** Platform bootstraps that do not own or hydrate the UI. */
+  scripts: readonly string[];
   root: readonly WebDocumentNodeIR[];
   styles: readonly string[];
   hydration: false | WebRouteHydrationIR;
@@ -110,6 +118,17 @@ export type WebRouteHydrationIR = Readonly<{
   location: string;
   params: Readonly<Record<string, unknown>>;
   search: Readonly<Record<string, unknown>>;
+  status?: number;
+  loader: false | Readonly<{ data: unknown }>;
+  branch?: readonly WebRouteHydrationEntryIR[];
+  metadata: WebRouteMetadataResult;
+}>;
+
+export type WebRouteHydrationEntryIR = Readonly<{
+  route: Readonly<{ feature: string; name: string }>;
+  params: Readonly<Record<string, unknown>>;
+  search: Readonly<Record<string, unknown>>;
+  status?: number;
   loader: false | Readonly<{ data: unknown }>;
   metadata: WebRouteMetadataResult;
 }>;
@@ -154,6 +173,7 @@ export function prepareClientWebDocument(input: {
     metadata: input.metadata ?? {},
     entry: input.entry ?? "/app.js",
     preloads: Object.freeze([]),
+    scripts: Object.freeze([]),
     root: Object.freeze([]),
     styles: Object.freeze([]),
     hydration: false,
@@ -164,6 +184,15 @@ export type WebDocumentComponentContract = Readonly<{
   elements: Readonly<Record<string, string>>;
   state: readonly Readonly<{ name: string }>[];
   propCallbacks: readonly string[];
+}>;
+
+export type WebDocumentRouteEntry = Readonly<{
+  feature: string;
+  name: string;
+  params: Readonly<Record<string, unknown>>;
+  search: Readonly<Record<string, unknown>>;
+  data?: unknown;
+  metadata?: WebRouteMetadataResult;
 }>;
 
 type WebInitialComponentPresentationIR = Readonly<{
@@ -210,6 +239,7 @@ type RuntimeRouteViewContext = Readonly<{
   feature: Readonly<Record<string, unknown>>;
   features: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
   components: Readonly<Record<string, unknown>>;
+  children: unknown;
 }>;
 
 type RuntimeComponentDefinition = Readonly<{
@@ -222,6 +252,8 @@ type RuntimeComponentDefinition = Readonly<{
 }>;
 
 type RuntimeFeature = Readonly<{
+  /** @internal Canonical System Feature path for an Application projection. */
+  path?: string;
   programs?: Readonly<Record<string, RuntimeProgramDefinition>>;
   features?: Readonly<Record<string, RuntimeFeature>>;
   interfaces?: Readonly<Record<string, unknown>>;
@@ -279,7 +311,7 @@ type PreparedContribution = Readonly<{
   path: string;
   definition: RuntimeProgramDefinition;
   children: Record<string, Readonly<Record<string, unknown>>>;
-  instance?: UIContributionInstance;
+  instance?: WebUIContributionInstance;
 }>;
 
 const safeTag = /^[a-z][a-z0-9-]*$/;
@@ -314,6 +346,8 @@ const voidElements = new Set([
 export async function prepareWebDocument(input: {
   system: object;
   interface: string;
+  applicationName?: string;
+  features?: Readonly<Record<string, string>>;
   program: string;
   logicalProgram?: string;
   presentation: RuntimeConfiguredPresentation;
@@ -321,19 +355,20 @@ export async function prepareWebDocument(input: {
   components: Readonly<Record<string, WebDocumentComponentContract>>;
   presentationDependencies?: Readonly<Record<string, readonly unknown[]>>;
   entry?: string;
-  route?: Readonly<{
+  route?: WebDocumentRouteEntry &
+    Readonly<{
+      branch?: readonly WebDocumentRouteEntry[];
+    }>;
+  routes?: readonly Readonly<{
     feature: string;
     name: string;
-    params: Readonly<Record<string, unknown>>;
-    search: Readonly<Record<string, unknown>>;
-    data?: unknown;
-    metadata?: WebRouteMetadataResult;
-  }>;
+    parent?: string;
+  }>[];
 }): Promise<WebDocumentIR> {
   const system = input.system as RuntimeSystem;
   const logicalProgram = input.logicalProgram ?? input.program;
   const contributions = collectContributions(system, logicalProgram, input.manifest);
-  const instances: UIContributionInstance[] = [];
+  const instances: WebUIContributionInstance[] = [];
   const apis: Record<string, Readonly<Record<string, unknown>>> = Object.create(null);
   let document: WebDocumentIR | undefined;
   let failure: unknown;
@@ -342,7 +377,7 @@ export async function prepareWebDocument(input: {
     for (const contribution of [...contributions].sort(
       (left, right) => depth(right.path) - depth(left.path) || left.path.localeCompare(right.path),
     )) {
-      const instance = createUIContributionInstance(contribution.definition, {
+      const instance = createWebUIContributionInstance(contribution.definition, {
         name: `document:${contribution.path}`,
         dependencies: unavailableDependencies(contribution.path),
         features: contribution.children,
@@ -361,6 +396,7 @@ export async function prepareWebDocument(input: {
     const presentation = createPreparedPresentation(
       system,
       input.interface,
+      input.features,
       logicalProgram,
       input.presentation,
       apis,
@@ -369,6 +405,7 @@ export async function prepareWebDocument(input: {
       const composition = createComponentComposition({
         system,
         interface: input.interface,
+        features: input.features,
         program: logicalProgram,
         contracts: input.components,
         apis,
@@ -376,6 +413,7 @@ export async function prepareWebDocument(input: {
         presentationDependencies: input.presentationDependencies ?? {},
         styles,
         routed: Boolean(input.route),
+        routes: input.routes,
       });
       const renderer = activateJSXRenderer(
         (tag, props) =>
@@ -393,10 +431,12 @@ export async function prepareWebDocument(input: {
           version: WEB_DOCUMENT_IR_VERSION,
           rendering: "hydrate",
           language: input.route?.metadata?.language ?? "en",
-          title: input.route?.metadata?.title ?? system.metadata?.name ?? "Kit",
+          title:
+            input.route?.metadata?.title ?? input.applicationName ?? system.metadata?.name ?? "Kit",
           metadata: documentMetadata(input.route?.metadata),
           entry: input.entry ?? "/app.js",
           preloads: Object.freeze([]),
+          scripts: Object.freeze([]),
           root: Object.freeze(lowerChildren(root, { element: 0, text: 0 })),
           styles: Object.freeze([...styles].sort()),
           hydration: false,
@@ -437,6 +477,7 @@ export async function prepareWebDocument(input: {
 export async function prepareInitialWebPresentation(input: {
   system: object;
   interface: string;
+  features?: Readonly<Record<string, string>>;
   program: string;
   logicalProgram?: string;
   presentation: RuntimeConfiguredPresentation;
@@ -448,7 +489,7 @@ export async function prepareInitialWebPresentation(input: {
   const system = input.system as RuntimeSystem;
   const logicalProgram = input.logicalProgram ?? input.program;
   const contributions = collectContributions(system, logicalProgram, input.manifest);
-  const instances: UIContributionInstance[] = [];
+  const instances: WebUIContributionInstance[] = [];
   const apis: Record<string, Readonly<Record<string, unknown>>> = Object.create(null);
   const result: Record<string, WebInitialComponentPresentationIR> = Object.create(null);
   const styles = new Set<string>();
@@ -458,7 +499,7 @@ export async function prepareInitialWebPresentation(input: {
     for (const contribution of [...contributions].sort(
       (left, right) => depth(right.path) - depth(left.path) || left.path.localeCompare(right.path),
     )) {
-      const instance = createUIContributionInstance(contribution.definition, {
+      const instance = createWebUIContributionInstance(contribution.definition, {
         name: `presentation:${contribution.path}`,
         dependencies: unavailableDependencies(contribution.path),
         features: contribution.children,
@@ -476,6 +517,7 @@ export async function prepareInitialWebPresentation(input: {
     const prepared = createPreparedPresentation(
       system,
       input.interface,
+      input.features,
       logicalProgram,
       input.presentation,
       apis,
@@ -572,6 +614,7 @@ type PendingWebNode =
 type RenderSlot = Readonly<{ kind: "slot"; nodes: readonly PendingWebNode[] }>;
 
 type CompiledRenderScope = Readonly<{
+  children: readonly PendingWebNode[];
   data: unknown;
   params: Readonly<Record<string, unknown>>;
   search: Readonly<Record<string, unknown>>;
@@ -612,9 +655,20 @@ type PrepareCompiledWebDocumentInput = Readonly<{
   components: readonly CompiledWebComponentIR[];
   params: Readonly<Record<string, unknown>>;
   search: Readonly<Record<string, unknown>>;
+  status?: number;
   loader: false | Readonly<{ data: unknown }>;
   deferred?: readonly string[];
   metadata: WebRouteHydrationIR["metadata"];
+  branch?: readonly Readonly<{
+    route: Readonly<{ feature: string; name: string }>;
+    view: WebRenderNodeIR;
+    params: Readonly<Record<string, unknown>>;
+    search: Readonly<Record<string, unknown>>;
+    status?: number;
+    loader: false | Readonly<{ data: unknown }>;
+    deferred?: readonly string[];
+    metadata: WebRouteHydrationIR["metadata"];
+  }>[];
   signal?: AbortSignal;
 }>;
 
@@ -627,27 +681,51 @@ export function prepareCompiledWebDocument(input: PrepareCompiledWebDocumentInpu
 export function prepareCompiledWebDocumentStream(
   input: PrepareCompiledWebDocumentInput,
 ): PreparedCompiledWebDocument {
-  const deferred = prepareCompiledDeferredData(
-    input.loader === false ? undefined : input.loader.data,
-    input.deferred ?? [],
-  );
+  const branch = input.branch ?? [
+    {
+      route: input.route,
+      view: input.view,
+      params: input.params,
+      search: input.search,
+      loader: input.loader,
+      deferred: input.deferred,
+      metadata: input.metadata,
+    },
+  ];
+  let deferredOffset = 0;
+  const prepared = branch.map((entry) => {
+    const deferred = prepareCompiledDeferredData(
+      entry.loader === false ? undefined : entry.loader.data,
+      entry.deferred ?? [],
+      deferredOffset,
+    );
+    deferredOffset += entry.deferred?.length ?? 0;
+    return Object.freeze({ ...entry, deferred });
+  });
   const context: CompiledRenderContext = {
     component: createCompiledWebComponentResolver(input.components),
     boundaries: new Map(),
   };
-  const pending = evaluateRenderNode(
-    input.view,
-    {
-      data: deferred.data,
-      params: input.params,
-      search: input.search,
-      props: {},
-      state: {},
-      locals: {},
-    },
-    context,
+  const pending = prepared.reduceRight<readonly PendingWebNode[]>(
+    (children, entry) =>
+      evaluateRenderNode(
+        entry.view,
+        {
+          children,
+          data: entry.deferred.data,
+          params: entry.params,
+          search: entry.search,
+          props: {},
+          state: {},
+          locals: {},
+        },
+        context,
+        [],
+      ),
     [],
   );
+  const leaf = prepared.at(-1);
+  if (!leaf) throw new TypeError("Compiled web Route branch cannot be empty.");
   const sequence = { element: 0, text: 0, prefix: "" };
   const metadata = documentMetadata(input.metadata);
   const language = input.metadata.language ?? input.document.language;
@@ -667,7 +745,23 @@ export function prepareCompiledWebDocumentStream(
           location: input.location,
           params: Object.freeze({ ...input.params }),
           search: Object.freeze({ ...input.search }),
-          loader: input.loader === false ? false : Object.freeze({ data: deferred.hydration }),
+          status: input.status ?? 200,
+          loader: leaf.loader === false ? false : Object.freeze({ data: leaf.deferred.hydration }),
+          branch: Object.freeze(
+            prepared.map((entry) =>
+              Object.freeze({
+                route: Object.freeze({ ...entry.route }),
+                params: Object.freeze({ ...entry.params }),
+                search: Object.freeze({ ...entry.search }),
+                status: entry.status ?? 200,
+                loader:
+                  entry.loader === false
+                    ? false
+                    : Object.freeze({ data: entry.deferred.hydration }),
+                metadata: entry.metadata,
+              }),
+            ),
+          ),
           metadata: webRouteHydrationMetadata({ language, metadata, title }),
         })
       : false,
@@ -675,13 +769,18 @@ export function prepareCompiledWebDocumentStream(
   validateWebDocument(document);
   return Object.freeze({
     document,
-    frames: createDeferredFrames(deferred.sources, context, input.signal),
+    frames: createDeferredFrames(
+      prepared.flatMap(({ deferred }) => deferred.sources),
+      context,
+      input.signal,
+    ),
   });
 }
 
 function prepareCompiledDeferredData(
   value: unknown,
   fields: readonly string[],
+  offset = 0,
 ): Readonly<{
   data: unknown;
   hydration: unknown;
@@ -700,7 +799,7 @@ function prepareCompiledDeferredData(
     }
     const source = Object.freeze({
       [compiledDeferred]: true as const,
-      boundary: `d${index}`,
+      boundary: `d${offset + index}`,
       field,
       run: () => Reflect.apply(run, undefined, []),
     });
@@ -841,6 +940,8 @@ function evaluateRenderNode(
   switch (node.kind) {
     case "none":
       return [];
+    case "children":
+      return scope.children;
     case "text":
       return renderValueAsNodes(evaluateRenderValue(node.value, scope));
     case "fragment":
@@ -916,6 +1017,7 @@ function evaluateRenderNode(
       return evaluateRenderNode(
         component.view,
         {
+          children: [],
           data: undefined,
           params: {},
           search: {},
@@ -1151,8 +1253,11 @@ export function renderWebDocument(document: WebDocumentIR): string {
     document.entry === false
       ? ""
       : `<script type="module" async src="${escapeAttribute(document.entry)}"></script>`;
+  const auxiliaryScripts = document.scripts
+    .map((source) => `<script type="module" async src="${escapeAttribute(source)}"></script>`)
+    .join("");
   const staticDocument = document.rendering === "static";
-  return `<!doctype html><html lang="${escapeAttribute(document.language)}"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">${styles}${preloads}<title>${escapeText(document.title)}</title>${metadata}</head><body><div id="app" data-kit-rendering="${document.rendering}">${document.root.map((node) => renderNode(node, staticDocument)).join("")}</div>${hydration}${script}</body></html>`;
+  return `<!doctype html><html lang="${escapeAttribute(document.language)}"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">${styles}${preloads}<title>${escapeText(document.title)}</title>${metadata}</head><body><div id="app" data-kit-rendering="${document.rendering}">${document.root.map((node) => renderNode(node, staticDocument)).join("")}</div>${hydration}${script}${auxiliaryScripts}</body></html>`;
 }
 
 /** Renders the public text representation from the same semantic document tree as HTML. */
@@ -1381,6 +1486,7 @@ export function validateWebDocument(document: WebDocumentIR): void {
       "preloads",
       "rendering",
       "root",
+      "scripts",
       "styles",
       "title",
       "version",
@@ -1408,6 +1514,12 @@ export function validateWebDocument(document: WebDocumentIR): void {
     document.preloads.some((value) => typeof value !== "string" || !value.startsWith("/"))
   ) {
     throw new TypeError("Web document preloads must be absolute paths.");
+  }
+  if (
+    !Array.isArray(document.scripts) ||
+    document.scripts.some((value) => typeof value !== "string" || !value.startsWith("/"))
+  ) {
+    throw new TypeError("Web document scripts must be absolute paths.");
   }
   if (typeof document.title !== "string")
     throw new TypeError("Web document title must be a string.");
@@ -1550,7 +1662,17 @@ function validateWebDocumentNodes(root: readonly WebDocumentNodeIR[], rootPrefix
 function validateRouteHydration(hydration: WebRouteHydrationIR): void {
   assertKeys(
     hydration,
-    ["loader", "location", "metadata", "params", "route", "search", "version"],
+    [
+      ...(hydration.branch === undefined ? [] : ["branch"]),
+      "loader",
+      "location",
+      "metadata",
+      "params",
+      "route",
+      "search",
+      ...(hydration.status === undefined ? [] : ["status"]),
+      "version",
+    ],
     "web Route hydration",
   );
   if (hydration.version !== 1) throw new TypeError("Unsupported web Route hydration version.");
@@ -1563,10 +1685,58 @@ function validateRouteHydration(hydration: WebRouteHydrationIR): void {
   }
   validateJsonRecord(hydration.params, "web Route hydration params");
   validateJsonRecord(hydration.search, "web Route hydration search");
+  validateHydrationStatus(hydration.status);
   validateHydrationMetadata(hydration.metadata);
   if (hydration.loader !== false) {
     assertKeys(hydration.loader, ["data"], "web Route hydration loader");
     validateJsonValue(hydration.loader.data, "web Route hydration data", new Set());
+  }
+  if (hydration.branch !== undefined) {
+    if (!Array.isArray(hydration.branch) || hydration.branch.length === 0) {
+      throw new TypeError("Web Route hydration branch must be a non-empty array.");
+    }
+    for (const entry of hydration.branch) {
+      assertKeys(
+        entry,
+        [
+          "loader",
+          "metadata",
+          "params",
+          "route",
+          "search",
+          ...(entry.status === undefined ? [] : ["status"]),
+        ],
+        "web Route hydration branch entry",
+      );
+      assertKeys(entry.route, ["feature", "name"], "web Route hydration branch identity");
+      if (typeof entry.route.feature !== "string" || typeof entry.route.name !== "string") {
+        throw new TypeError("Web Route hydration branch identity must contain strings.");
+      }
+      validateJsonRecord(entry.params, "web Route hydration branch params");
+      validateJsonRecord(entry.search, "web Route hydration branch search");
+      validateHydrationStatus(entry.status);
+      validateHydrationMetadata(entry.metadata);
+      if (entry.loader !== false) {
+        assertKeys(entry.loader, ["data"], "web Route hydration branch loader");
+        validateJsonValue(entry.loader.data, "web Route hydration branch data", new Set());
+      }
+    }
+    const leaf = hydration.branch.at(-1)!;
+    if (
+      leaf.route.feature !== hydration.route.feature ||
+      leaf.route.name !== hydration.route.name
+    ) {
+      throw new TypeError("Web Route hydration branch leaf is mismatched.");
+    }
+  }
+}
+
+function validateHydrationStatus(status: number | undefined): void {
+  if (
+    status !== undefined &&
+    (!Number.isInteger(status) || status < 200 || status > 599 || status === 204 || status === 205)
+  ) {
+    throw new TypeError("Web Route hydration status is invalid.");
   }
 }
 
@@ -1769,6 +1939,7 @@ function collectContributions(
 function createComponentComposition(input: {
   system: RuntimeSystem;
   interface: string;
+  features?: Readonly<Record<string, string>>;
   program: string;
   contracts: Readonly<Record<string, WebDocumentComponentContract>>;
   apis: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
@@ -1776,12 +1947,13 @@ function createComponentComposition(input: {
   presentationDependencies: Readonly<Record<string, readonly unknown[]>>;
   styles: Set<string>;
   routed: boolean;
+  routes?: readonly Readonly<{ feature: string; name: string; parent?: string }>[];
 }) {
   const renderers: Record<string, (props?: Readonly<Record<string, unknown>>) => unknown> =
     Object.create(null);
   const localGroups: Record<string, Record<string, unknown>> = { "": Object.create(null) };
   const namespaces: Record<string, Record<string, unknown>> = { "": Object.create(null) };
-  const owner = runtimeInterfaceOwner(input.system, input.interface);
+  const owner = runtimeInterfaceOwner(input.system, input.interface, input.features);
   const appPath = owner.path;
   const appFeature = owner.feature;
 
@@ -1824,15 +1996,26 @@ function createComponentComposition(input: {
       return root();
     },
     renderRoute(route: NonNullable<Parameters<typeof prepareWebDocument>[0]["route"]>) {
-      const definition = resolveRoute(input.system, input.program, route.feature, route.name);
-      return definition.view({
-        data: route.data,
-        params: route.params,
-        search: route.search,
-        feature: input.apis[route.feature] ?? {},
-        features: childFeatureApis(route.feature, input.apis),
-        components: componentsForOwner(route.feature, localGroups, namespaces),
-      });
+      let children: unknown = null;
+      const values = new Map(
+        (route.branch ?? [route]).map(
+          (entry) => [`${entry.feature}.${entry.name}`, entry] as const,
+        ),
+      );
+      for (const entry of [...documentRouteBranch(input.routes ?? [route], route)].reverse()) {
+        const definition = resolveRoute(input.system, input.program, entry.feature, entry.name);
+        const value = values.get(`${entry.feature}.${entry.name}`);
+        children = definition.view({
+          data: value?.data,
+          params: value?.params ?? route.params,
+          search: value?.search ?? route.search,
+          feature: input.apis[entry.feature] ?? {},
+          features: childFeatureApis(entry.feature, input.apis),
+          components: componentsForOwner(entry.feature, localGroups, namespaces),
+          children,
+        });
+      }
+      return children;
     },
   };
 }
@@ -1847,6 +2030,30 @@ function resolveRoute(
   const route = feature?.programs?.[program]?.routes?.[name];
   if (!route) throw new TypeError(`Missing implementation for web Route ${path}.${name}.`);
   return route;
+}
+
+function documentRouteBranch(
+  routes: readonly Readonly<{ feature: string; name: string; parent?: string }>[],
+  leaf: Readonly<{ feature: string; name: string }>,
+): readonly Readonly<{ feature: string; name: string; parent?: string }>[] {
+  const identity = (route: Readonly<{ feature: string; name: string }>) =>
+    `${route.feature}.${route.name}`;
+  const byIdentity = new Map(routes.map((route) => [identity(route), route] as const));
+  const result: Array<Readonly<{ feature: string; name: string; parent?: string }>> = [];
+  const visited = new Set<string>();
+  let current: Readonly<{ feature: string; name: string; parent?: string }> | undefined =
+    byIdentity.get(identity(leaf)) ?? leaf;
+  while (current) {
+    const key = identity(current);
+    if (visited.has(key)) throw new TypeError(`Route parent cycle at ${JSON.stringify(key)}.`);
+    visited.add(key);
+    result.push(current);
+    if (!current.parent) break;
+    const parent = byIdentity.get(current.parent);
+    if (!parent) throw new TypeError(`Unknown Route parent ${JSON.stringify(current.parent)}.`);
+    current = parent;
+  }
+  return result.reverse();
 }
 
 function renderComponent(input: {
@@ -2055,7 +2262,7 @@ function collectNamespaces(
   for (const [name, feature] of Object.entries(features ?? {}).sort(([left], [right]) =>
     left.localeCompare(right),
   )) {
-    const path = parent ? `${parent}.${name}` : name;
+    const path = feature.path ?? (parent ? `${parent}.${name}` : name);
     const local: Record<string, unknown> = Object.create(null);
     for (const component of Object.keys(feature.programs?.[program]?.components ?? {}).sort()) {
       const renderer = renderers[featureComponentName(path, component)];
@@ -2080,12 +2287,13 @@ function collectNamespaces(
 
 function collectRoots(feature: RuntimeFeature, program: string, path: string): string[] {
   const roots: string[] = [];
+  const owner = feature.path ?? path;
   const root = feature.programs?.[program]?.root;
-  if (root) roots.push(featureComponentName(path, root));
+  if (root) roots.push(featureComponentName(owner, root));
   for (const [name, child] of Object.entries(feature.features ?? {}).sort(([left], [right]) =>
     left.localeCompare(right),
   )) {
-    roots.push(...collectRoots(child, program, `${path}.${name}`));
+    roots.push(...collectRoots(child, program, `${owner}.${name}`));
   }
   return roots;
 }
@@ -2121,11 +2329,12 @@ function childFeatureApis(
 function createPreparedPresentation(
   system: RuntimeSystem,
   interfacePath: string,
+  features: Readonly<Record<string, string>> | undefined,
   program: string,
   configured: RuntimeConfiguredPresentation,
   apis: Readonly<Record<string, Readonly<Record<string, unknown>>>>,
 ): PreparedPresentation {
-  const owner = runtimeInterfaceOwner(system, interfacePath);
+  const owner = runtimeInterfaceOwner(system, interfacePath, features);
   const appPath = owner.path;
   const appFeature = owner.feature;
   const hosts: WebAnimationHost[] = [];
@@ -2170,7 +2379,7 @@ function createPreparedPresentation(
     for (const [name, feature] of Object.entries(features ?? {}).sort(([left], [right]) =>
       left.localeCompare(right),
     )) {
-      const path = parent ? `${parent}.${name}` : name;
+      const path = feature.path ?? (parent ? `${parent}.${name}` : name);
       const createFeature = tree[capitalize(name)];
       if (typeof createFeature !== "function") continue;
       const definition = feature.programs?.[program];
@@ -2227,6 +2436,46 @@ function requireRuntimeFeature(system: RuntimeSystem, path: string): RuntimeFeat
   return feature;
 }
 
+function projectApplicationFeature(
+  system: RuntimeSystem,
+  appPath: string,
+  bindings: Readonly<Record<string, string>> | undefined,
+): RuntimeFeature {
+  if (!bindings || Object.keys(bindings).length === 0) {
+    return requireRuntimeFeature(system, appPath);
+  }
+  return {
+    features: Object.freeze(
+      Object.fromEntries(
+        Object.entries(bindings)
+          .sort(([left], [right]) => left.localeCompare(right))
+          .map(([role, path]) => [
+            role,
+            projectRuntimeFeature(requireRuntimeFeature(system, path), path),
+          ]),
+      ),
+    ),
+  };
+}
+
+function projectRuntimeFeature(feature: RuntimeFeature, path: string): RuntimeFeature {
+  return {
+    ...feature,
+    path,
+    ...(feature.features
+      ? {
+          features: Object.freeze(
+            Object.fromEntries(
+              Object.entries(feature.features)
+                .sort(([left], [right]) => left.localeCompare(right))
+                .map(([name, child]) => [name, projectRuntimeFeature(child, `${path}.${name}`)]),
+            ),
+          ),
+        }
+      : {}),
+  };
+}
+
 function interfaceAppPath(path: string): string {
   const segments = path.split(".").filter(Boolean);
   if (segments.length < 2) {
@@ -2238,14 +2487,21 @@ function interfaceAppPath(path: string): string {
 function runtimeInterfaceOwner(
   system: RuntimeSystem,
   interfacePath: string,
+  features: Readonly<Record<string, string>> | undefined,
 ): Readonly<{ path: string; feature: RuntimeFeature }> {
   const appPath = interfaceAppPath(interfacePath);
-  const app = requireRuntimeFeature(system, appPath);
+  const app = system.applications?.[appPath];
+  if (!app) {
+    throw new TypeError(`Missing runtime Application ${JSON.stringify(appPath)}.`);
+  }
   const name = interfacePath.slice(appPath.length + 1);
   if (!app.interfaces?.[name]) {
     throw new TypeError(`Missing runtime interface ${JSON.stringify(interfacePath)}.`);
   }
-  return { path: appPath, feature: app };
+  return {
+    path: appPath,
+    feature: projectApplicationFeature(system, appPath, features),
+  };
 }
 
 function componentsForOwner(

@@ -13,6 +13,7 @@ import {
   createJetStreamEventStore,
   createNodeHost,
 } from "@/platforms/server/adapter/typescript/host";
+import { serverProgramLanguageRuntime } from "@/platforms/server/adapter/typescript/runtime";
 
 type Note = Readonly<{ id: string; ownerId: string; text: string }>;
 type Notes = EntityModel<{
@@ -243,6 +244,7 @@ async function startReplica(
   ]);
   const process = createProgramContributionInstance(notes.programs.server as never, {
     address: { program: "api", feature: "notes" },
+    language: serverProgramLanguageRuntime,
     provides: ["notes"],
     dependencies: {
       events,

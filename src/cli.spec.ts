@@ -17,8 +17,11 @@ import { resolve } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { createProject, runCli } from "@/cli";
+import type { SourceCompilerExtension } from "@/compiler/extension";
 import { SYSTEM_IR_VERSION } from "@/compiler/ir";
 import { compileSystem } from "@/compiler/source";
+import { platformAdapters } from "@/platforms";
+import { WEB_COMPILER_IR_VERSION } from "@/platforms/web/adapter/lowering";
 import { validateUIProgramRoot } from "@/platforms/web/adapter/pipeline";
 
 const directories: string[] = [];
@@ -146,15 +149,25 @@ describe("project template", () => {
         "code",
         "ENOENT",
       );
-      const manifest = compileSystem(resolve(target, "src/system.ts"));
+      const manifest = compileShippedSystem(resolve(target, "src/system.ts"));
       expect(manifest.version).toBe(SYSTEM_IR_VERSION);
       expect(manifest.platforms).toEqual(["web"]);
-      expect(manifest.features.map(({ id }) => id)).toEqual(["feature/main", "feature/main.shell"]);
+      expect(manifest.features.map(({ id }) => id)).toEqual(["feature/shell"]);
       expect(manifest.programs).toHaveLength(1);
       expect(manifest.programs[0]).toMatchObject({
         id: "program/main.web.browser",
         environment: { name: "browser-main", platform: "web" },
-        ui: { root: { feature: "main.shell", component: "Root" } },
+        contributions: [
+          {
+            feature: "shell",
+            extensions: {
+              web: {
+                version: WEB_COMPILER_IR_VERSION,
+                ui: { root: "Root" },
+              },
+            },
+          },
+        ],
       });
       const webOutput = resolve(target, "dist/interfaces/main.web");
       const html = await readFile(resolve(webOutput, "index.html"), "utf8");
@@ -244,7 +257,9 @@ describe("project template", () => {
       for (const name of await readdir(examples)) {
         const source = resolve(examples, name, "src");
         await expectCanonicalSourceRoot(source);
-        expect(compileSystem(resolve(source, "system.ts")).programs.length).toBeGreaterThan(0);
+        expect(compileShippedSystem(resolve(source, "system.ts")).programs.length).toBeGreaterThan(
+          0,
+        );
       }
     },
   );
@@ -267,6 +282,7 @@ describe("project template", () => {
       await runCli(["build", "--json", "--dir", directory], {
         edge: {
           name: "edge",
+          compiler: [edgeCompilerExtension],
           async develop() {
             throw new Error("The build fixture must not start development.");
           },
@@ -370,6 +386,7 @@ export default createDeployment(system as never, {
     const adapter = {
       edge: {
         name: "edge",
+        compiler: [edgeCompilerExtension],
         async develop() {
           throw new Error("Deployment must use production artifacts.");
         },
@@ -441,8 +458,9 @@ while true; do sleep 1; done
       const output = await mkdtemp(resolve(tmpdir(), "kit-focused-cli-"));
       directories.push(output);
       const observed = new Map<string, readonly string[]>();
-      const adapter = (name: string) => ({
+      const adapter = (name: keyof typeof platformAdapters) => ({
         name,
+        compiler: platformAdapters[name]!.compiler,
         async develop() {
           throw new Error("The focused build fixture must not start development.");
         },
@@ -495,6 +513,18 @@ while true; do sleep 1; done
       await expect(run(artifact, [], directory)).resolves.toBe(0);
     },
   );
+});
+
+function compileShippedSystem(source: string) {
+  return compileSystem(
+    source,
+    Object.values(platformAdapters).flatMap(({ compiler = [] }) => compiler),
+  );
+}
+
+const edgeCompilerExtension: SourceCompilerExtension = Object.freeze({
+  name: "edge",
+  program: () => ({ ir: { version: 1 } }),
 });
 
 async function expectCanonicalSourceRoot(source: string): Promise<void> {

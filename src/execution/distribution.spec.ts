@@ -22,6 +22,7 @@ import {
   createMemoryDependencyTransport,
   createRemoteDependency,
 } from "@/execution/transport";
+import { serverProgramLanguageRuntime } from "@/platforms/server/adapter/typescript/runtime";
 
 const string: TypeIR = { kind: "primitive", name: "string" };
 const number: TypeIR = { kind: "primitive", name: "number" };
@@ -555,6 +556,7 @@ describe("generic Process distribution", () => {
         await assembleProgram({
           system,
           name: "server",
+          language: serverProgramLanguageRuntime,
           dependencies: {},
           manifest,
           distribute: ({ program, contracts, providers }) =>
