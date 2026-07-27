@@ -24,7 +24,7 @@ import { linkProgram } from "@/compiler/linker";
 import type { DependencyContract } from "@/core/dependency";
 import { resolveFeatureProvider } from "@/core/feature";
 import type { System, SystemContract } from "@/core/system";
-import { packageSourceAliases } from "@/package";
+import { packageSourceAliases, packageSourceRoot } from "@/package";
 import type { ServerDependencyProvider, ServerPlatform } from "@/platforms/server";
 import {
   beginNodeFeatureProviderReplacement,
@@ -72,7 +72,7 @@ export async function developServerPrograms(
     plugins: [systemAliasPlugin(source)],
     root: input.directory,
     resolve: {
-      alias: packageSourceAliases(resolve(import.meta.dirname, "../../.."), moduleExtension()),
+      alias: packageSourceAliases(),
       conditions: ["source", ...defaultServerConditions],
     },
     server: { middlewareMode: true, ws: false },
@@ -602,19 +602,15 @@ function serverPort(
   return configured + (index < 0 ? 0 : index);
 }
 
-function moduleExtension(): ".js" | ".ts" {
-  return import.meta.filename.endsWith(".ts") ? ".ts" : ".js";
-}
-
 function systemAliasPlugin(source: string): Plugin {
-  const kit = resolve(import.meta.dirname, "../../..");
   return {
     name: "kit-system-alias",
     enforce: "pre",
     resolveId(id, importer) {
       if (!id.startsWith("@/")) return;
       const owner = importer?.split("?", 1)[0] ?? "";
-      const root = inside(source, owner) || !inside(kit, owner) ? source : kit;
+      const root =
+        inside(source, owner) || !inside(packageSourceRoot, owner) ? source : packageSourceRoot;
       return this.resolve(resolve(root, id.slice(2)), importer, { skipSelf: true });
     },
   };

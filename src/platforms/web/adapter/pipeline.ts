@@ -1539,7 +1539,7 @@ function viteConfiguration(
     ...(development ? { optimizeDeps: { include: [], noDiscovery: true } } : {}),
     plugins: vitePlugins(paths, ir, presentationAssets),
     resolve: {
-      alias: packageSourceAliases(resolve(import.meta.dirname, "../../.."), moduleExtension()),
+      alias: packageSourceAliases(),
       conditions: ["source", ...defaultClientConditions],
     },
     root: paths.directory,
@@ -3342,7 +3342,7 @@ export default { documents, presentation };
       customLogger: viteReporter(report),
       root: paths.directory,
       resolve: {
-        alias: packageSourceAliases(resolve(import.meta.dirname, "../../.."), moduleExtension()),
+        alias: packageSourceAliases(),
         conditions: ["source", ...defaultServerConditions],
       },
       plugins: vitePlugins(paths, undefined, presentationAssets),

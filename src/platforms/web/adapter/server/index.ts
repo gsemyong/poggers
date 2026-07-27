@@ -176,7 +176,7 @@ export const webHttpProductionDependency = Object.freeze({
   ],
   crate: {
     package: "kit-web-http",
-    directory: resolve(import.meta.dirname, "server/rust/http"),
+    directory: resolve(import.meta.dirname, "rust/http"),
   },
   rust: { type: "kit_web_http::Http", constructor: "kit_web_http::create" },
 } satisfies ServerProductionDependency);

@@ -356,52 +356,21 @@ Adding a normal web capability must not require teaching core or the generic
 portable backend about that capability. If it does, either the extension
 contract is insufficient or platform meaning has leaked into the substrate.
 
-### Current boundary gaps
+### Boundary invariants
 
-The migration began with four suspected leaks. The audit confirmed all four,
-plus three integration leaks, and the implementation now resolves them:
+`platforms/index.ts` is the package's single static registration point for
+shipped Platforms. Adding a Program kind adds its extension and one
+registration without changing an existing adapter.
 
-| Audited leak                                                                 | Result                                                                                                                                                                           |
-| ---------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ProgramContract` required UI-shaped `State`, `Actions`, and `Components`    | Confirmed and removed. It now contains only Environment identity and declared Dependencies.                                                                                      |
-| The top-level adapter contract imported Component and Presentation semantics | Confirmed and removed. `PlatformAdapter` now exposes only compiler, development, and production realization.                                                                     |
-| Generic compiler/IR interpreted Platform fields                              | Confirmed and removed. Canonical graph nodes retain only neutral meaning plus owner-keyed, versioned extension IR.                                                               |
-| Ordinary web work crossed the web boundary                                   | Confirmed. Web source compilation, Presentation compilation, UI execution, Route attachments, document delivery, and native web HTTP realization now live under `platforms/web`. |
-| The server adapter planned web Route loaders                                 | Confirmed and replaced by versioned, adapter-neutral Program attachments emitted by web and consumed through an explicit registration boundary.                                  |
-| Deployment read `routes.ir.json` and web manifests                           | Confirmed and removed. It consumes generic artifact configuration, lifecycle, exposure, and placement requirements.                                                              |
-| The neutral package root eagerly loaded shipped Feature and server test code | Confirmed and removed. Reusable factories use explicit `kit/features/*` entries, and test realizations load adapter runtimes only when a fixture starts.                         |
+`ProductionExposure` is the neutral delivery protocol shared by Platform and
+Deployment adapters. Adding an exposure protocol may change that contract and
+the Deployment adapters that support it; adding an ordinary Route,
+Presentation declaration, or Component does not.
 
-The former generic `core/ui` implementation was also not neutral. Its working
-Component and Presentation language now lives under the web Platform. Shared
-`jsx/runtime.ts` retains only opaque JSX dispatch and the extensible intrinsic
-registry. The `kit/ui` entry remains a compatibility facade over the same
-public web language; no second Presentation API was introduced.
-
-No known product-language leak remains in the audited neutral files. Three
-deliberate boundaries remain:
-
-1. `platforms.ts` is the package's single static registration and coordination
-   point for shipped Platforms. Adding a new Program kind adds its extension
-   and one registration here, without editing existing adapters.
-2. `ProductionExposure` is a neutral delivery protocol understood by
-   Deployment adapters. Adding a new exposure protocol requires extending that
-   protocol and the Deployment adapters that elect to support it; adding an
-   ordinary web Route or Presentation capability does not.
-3. `ui.ts` and selected `testing` exports are compatibility facades. They may
-   re-export web-owned declarations, but contain no implementation or semantic
-   interpretation.
-
-The neutral `kit` entry exports only substrate concepts. Shipped reusable
-Feature extensions are explicit entries under `kit/features/*`; importing the
-substrate therefore cannot evaluate an unrelated Feature, native provider, or
-server adapter. A Feature may still co-locate declarations for several
-Platforms, but test-only realization imports are lazy and do not enter a
-browser module graph until the corresponding fixture is explicitly started.
-
-The migration has passed focused browser verification and the complete
-repository/production gate. Future work uses the change-locality table above:
-ordinary Platform changes run that Platform's gates, while shared graph or
-portable-lowering changes additionally run compiler and native conformance.
+The neutral `kit` entry exports only substrate concepts. Reusable Feature
+factories use explicit `kit/features/*` entries, while each Platform owns its
+complete product language under its own entry. Importing the substrate cannot
+evaluate an unrelated Feature, provider, or adapter.
 
 ### Resulting dependency graph
 
@@ -431,7 +400,7 @@ platforms/server
   -> TypeScript development and generated-Rust production
   -> generic server Dependency providers
 
-platforms.ts
+platforms/index.ts
   -> the one shipped-Platform registration and explicit web/server attachment
 
 deployment
@@ -457,124 +426,6 @@ implementation, or Deployment points into web product meaning.
 - Removing an adapter removes no neutral core capability.
 - Deployment consumes artifacts and requirements without importing product UI
   semantics.
-
-### Boundary migration
-
-This checklist is the active source of truth for the ownership migration.
-Focused checks accompany each stage. The complete repository gate runs once
-after all boundaries stabilize.
-
-#### 1. Freeze the neutral substrate
-
-- [x] Reduce the core Program contract to Environment identity plus declared
-      Dependencies.
-- [x] Make Feature project each Program implementation entirely through its
-      Environment-selected Program-language kind.
-- [x] Remove UI, Component, Presentation, lifecycle, and `start` interpretation
-      from core.
-- [x] Prove with type fixtures that a headless language has no UI fields, one
-      Feature can co-locate several Program languages, and Programs receive
-      only declared Dependencies.
-
-Gate: focused core type fixtures and core contract tests.
-
-#### 2. Freeze the extension contracts
-
-- [x] Define the minimal statically typed Program-language projection.
-- [x] Define the minimal statically typed Application-interface projection.
-- [x] Let a Platform project adapter-specific realization fields without
-      adding those fields to the neutral Platform Adapter contract.
-- [x] Require one registered compiler owner for each authored Program and
-      Application interface.
-- [x] Prove that a new Program kind needs only its extension plus registration,
-      and that two UI Platforms can expose unrelated languages in one System.
-
-Gate: adapter type fixtures and a mock extension conformance suite.
-
-#### 3. Move UI meaning to its owners
-
-- [x] Preserve the existing public web Component, Route, Presentation, and
-      installation APIs.
-- [x] Move UI Program projection, primitive checks, UI state/actions, roots,
-      and lifecycle into the selected UI-capable Platform.
-- [x] Keep shared JSX dispatch reusable without making a structural or
-      Presentation language part of core.
-- [x] Move live UI execution and hot replacement behind the web/UI adapter
-      boundary.
-
-Gate: focused web type fixtures, Component/runtime tests, Presentation tests,
-and one in-browser state-preserving navigation/HMR scenario.
-
-#### 4. Make compiler meaning dialect-owned
-
-- [x] Keep only graph identity, ownership, Environment, Dependencies, and
-      output ownership in canonical neutral IR.
-- [x] Replace generic Component, Presentation, UI-root, and `start` fields with
-      versioned extension IR selected by the owning compiler extension.
-- [x] Let compiler extensions declare and compile their own transitive source
-      units while generic incremental compilation tracks only source ownership.
-- [x] Keep portable TypeScript lowering limited to procedural functions chosen
-      by an extension; it must not recognize Feature, web, actor, or UI meaning.
-- [x] Prove development and production consume identical versioned meaning.
-
-Gate: compiler extension tests, clean-versus-incremental IR equivalence, and the
-portable TypeScript/Rust differential corpus.
-
-#### 5. Consolidate web ownership
-
-- [x] Keep routing, navigation, metadata, UI structure, Presentation, delivery,
-      PWA, browser development, and browser production under `platforms/web`.
-- [x] Replace server-side knowledge of web Route loaders with an explicit web
-      artifact or requirement boundary.
-- [x] Emit cache, discovery, and public-interface delivery artifacts from the
-      web Platform so Deployment does not read Route IR.
-- [x] Verify that an ordinary web capability changes only web-owned source and
-      tests.
-
-Gate: web compiler/lowering/delivery tests, SSR/PWA production fixtures, and
-focused browser verification.
-
-#### 6. Keep Deployment downstream
-
-- [x] Restrict Deployment inputs to immutable artifacts, generic exposure and
-      placement requirements, configuration, lifecycle, and scaling policy.
-- [x] Remove Route, Component, and Presentation inspection from Deployment
-      adapters.
-- [x] Run the same Deployment contract suite against the local adapter and one
-      mock adapter.
-
-Gate: Deployment contract, local adapter, OCI artifact, and local integration
-tests.
-
-#### 7. Remove superseded assumptions
-
-- [x] Delete superseded implementation paths only after no compiler, adapter,
-      example, or test consumes them. Public compatibility facades remain.
-- [x] Update the dependency graph and current-gap ledger to the resulting
-      ownership.
-- [x] Run type, source, API, web/browser, compiler/Rust, Deployment, package,
-      example, and production release gates once.
-
-### Migration evidence
-
-- `src/architecture.spec.ts` statically enforces the neutral substrate,
-  portable-lowering, server/web, Deployment, and package-entry dependency
-  directions.
-- Type fixtures prove a headless Program language has no UI fields, one Feature
-  can co-locate unrelated Program languages, two UI Platforms can expose
-  different JSX and Application-interface languages, and Programs cannot use
-  undeclared Dependencies.
-- Focused browser verification covered a minimal web state update and the
-  authenticated CRUD sign-up, navigation, mutation, direct reload, and style
-  path without loading server-runtime or native-provider modules into the
-  browser graph.
-- Development distribution verifies request-rendered loaders, nested Routes,
-  metadata, hydration, streaming, cache policy, PWA artifacts, and isolated
-  multi-Application interfaces through the web-owned attachment boundary.
-- TypeScript/Rust differential tests, the Cargo workspace, Deployment contract
-  tests, package-entry tests, and all examples pass.
-- `nub run check` passes after building the package once and includes the
-  focused generated-Rust production release gate.
 
 ## Research Basis
 
@@ -663,10 +514,10 @@ directory: each contract stays beside the concept that owns it. Rust workspace
 files live at the repository root because they coordinate repository tooling,
 not TypeScript product source.
 
-Top-level source entries are public facades or whole-System coordination:
+Top-level source entries are public contracts or whole-System coordination:
 
-- `index.ts`, `ui.ts`, `factory.ts`, `deployment/index.ts`, and Platform modules
-  define package entry points;
+- `index.ts`, `factory.ts`, `deployment/index.ts`, and Platform modules define
+  package entry points;
 - `realization.ts` coordinates one compiled System with selected adapters;
 - `testing/index.ts` verifies complete development and production realizations;
 - `cli.ts` exposes the command boundary.
@@ -791,7 +642,6 @@ Ordinary product code uses:
 
 ```text
 kit
-kit/ui
 kit/web
 kit/server
 kit/features/actor

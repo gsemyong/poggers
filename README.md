@@ -76,5 +76,7 @@ nub src/cli.ts dev --dir examples/authenticated-crud
 nub src/cli.ts dev --dir examples/presentation
 ```
 
-See the [architecture](docs/architecture.md), [Feature convention](docs/features.md),
-and [Portable TypeScript profile](docs/portable-typescript.md).
+Reference: [architecture](docs/architecture.md), [Feature factories](docs/features.md),
+[Portable TypeScript](docs/portable-typescript.md), [Actors](docs/actors.md),
+[Data](docs/data.md), [web](docs/web.md), [Presentation](docs/presentation.md), and
+[Deployment](docs/deployment.md).

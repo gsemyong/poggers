@@ -1,15 +1,17 @@
-import { animate, settled, velocity } from "kit/ui";
 import {
+  animate,
   createAudioAsset,
   createContainer,
   createImageAsset,
   follow,
   pulse,
+  settled,
   spring,
   type ConfiguredWebPresentation,
   type WebColor,
   type WebPresentation,
   type WebStyle,
+  velocity,
 } from "kit/web";
 
 import type { Main } from "@/apps/main";

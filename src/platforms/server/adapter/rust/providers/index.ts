@@ -27,8 +27,7 @@ export type ResolvedServerProductionDependency = Readonly<{
   implementation: ServerProductionDependency;
 }>;
 
-const dependencyDirectory = (name: string): string =>
-  resolve(import.meta.dirname, "providers", name);
+const dependencyDirectory = (name: string): string => resolve(import.meta.dirname, name);
 
 export const alarmDependency = defineServerProductionDependency({
   name: "alarm",

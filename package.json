@@ -27,11 +27,6 @@
       "types": "./dist/src/index.d.ts",
       "default": "./dist/src/index.js"
     },
-    "./ui": {
-      "source": "./dist/source/ui.ts",
-      "types": "./dist/src/ui.d.ts",
-      "default": "./dist/src/ui.js"
-    },
     "./jsx-dev-runtime": {
       "source": "./dist/source/jsx/development.ts",
       "types": "./dist/src/jsx/development.d.ts",
@@ -81,11 +76,6 @@
       "source": "./dist/source/deployment/artifacts/oci/index.ts",
       "types": "./dist/src/deployment/artifacts/oci/index.d.ts",
       "default": "./dist/src/deployment/artifacts/oci/index.js"
-    },
-    "./cli": {
-      "source": "./dist/source/cli.ts",
-      "types": "./dist/src/cli.d.ts",
-      "default": "./dist/src/cli.js"
     },
     "./deployment": {
       "source": "./dist/source/deployment/index.ts",

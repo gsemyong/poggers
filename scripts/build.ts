@@ -157,7 +157,7 @@ async function assertJavaScriptSyntax(): Promise<void> {
 
 async function assertCommandRuntimes(): Promise<void> {
   await Promise.all(
-    ["realization.js", "platforms.js"].map(
+    ["realization.js", "platforms/index.js"].map(
       (file) => import(pathToFileURL(resolve(distDir, "src", file)).href),
     ),
   );

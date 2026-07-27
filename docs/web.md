@@ -369,60 +369,37 @@ Status meanings:
 | Presentation                    | Delegated | Presentation completion and conformance is tracked by its own existing-system audit.                                                                                        |
 | DNS/CDN/TLS/protocols           | Delegated | Deployment adapters consume immutable assets and mutable delivery policy.                                                                                                   |
 
-## Remaining Work
+## Open Gaps
 
-### 1. Route semantics
+### Route semantics
 
-- [x] Separate Application from Feature behavior.
-- [x] Own concrete Features once in System.
-- [x] Resolve Application roles exactly.
-- [x] Compose typed local and cross-Feature branches.
-- [x] Add `children` rendering.
-- [x] Add semantic path/search codecs and typed destinations.
-- [x] Derive exact loader Dependency use.
-- [ ] Add optional path-segment semantics if ambiguity can be rejected
-      deterministically.
-- [ ] Add typed status and not-found outcomes with explicit branch behavior.
-- [ ] Add typed discoverable instances for parameterized public Routes.
+- Optional path segments need deterministic ambiguity rejection.
+- Status and not-found outcomes need explicit typed branch behavior.
+- Parameterized public Routes need typed discoverable instances.
 
-### 2. Delivery planning
+### Delivery planning
 
-- [ ] Create one pure, serializable Delivery Plan.
-- [ ] Use it for document, stream, hydration, cache, bundle, asset, and worker
-      choices.
-- [ ] Record a reason for every derived decision.
-- [ ] Add cache variation, invalidation, stale-if-error, and private-cache
-      invariants.
-- [ ] Generate sitemap and robots resources from Route meaning.
+- One pure, serializable Delivery Plan must own document, stream, hydration,
+  cache, bundle, asset, and worker choices and record the reason for each.
+- Cache variation, invalidation, stale-if-error, and private-cache invariants
+  remain incomplete.
+- Route meaning does not yet generate sitemap and robots resources.
 
-### 3. Browser realization
+### Browser realization
 
-- [x] Resolve and render complete Route branches.
-- [x] Cancel superseded loader work and ignore stale results.
-- [ ] Preserve parent DOM/state across child-only navigation where the renderer
-      can prove identity.
-- [ ] Define and test scroll restoration and navigation focus.
-- [ ] Prove branch-level selective hydration and zero-JavaScript output.
-- [ ] Derive critical hints and bounded intent warming from artifact evidence.
-- [ ] Harden worker scope, updates, private caches, and offline behavior.
+- Parent DOM and state continuity across child-only navigation needs identity
+  evidence.
+- Scroll restoration and navigation focus need explicit policy and tests.
+- Branch-level selective hydration and zero-JavaScript output need conformance
+  evidence.
+- Critical hints and bounded intent warming must be derived from artifact
+  evidence.
+- Worker scope, updates, private caches, and offline behavior need hardening.
 
-### 4. Production realization
+### Production realization
 
-- [x] Execute branch loaders in generated Rust.
-- [x] Render branch views with isolated state in generated Rust.
-- [x] Accept the public typed redirect contract in generated Rust.
-- [x] Prove the broad external request fixture in development and production.
-- [ ] Consume the final Delivery Plan directly in both realizations.
-- [ ] Add parity evidence for every new outcome and discovery path.
-- [ ] Keep generic TypeScript-to-Rust lowering free of web-specific logic.
-
-### 5. Cleanup
-
-- [ ] Migrate every example and document to the final contract.
-- [ ] Remove old flat-route, hidden-Application-Feature, and internal destination
-      residues.
-- [ ] Remove temporary heuristics superseded by the planner.
-- [ ] Keep one public spelling for every semantic outcome.
+- Development and production must consume the final Delivery Plan directly.
+- Every new outcome and discovery path needs differential parity evidence.
 
 ## Verification
 

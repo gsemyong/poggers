@@ -1,5 +1,5 @@
 import { readFile, readdir } from "node:fs/promises";
-import { resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 
 import { describe, expect, test } from "vitest";
 
@@ -86,6 +86,21 @@ describe("architectural ownership", () => {
     const systemTesting = await readFile(resolve(sourceRoot, "testing/index.ts"), "utf8");
     expect(systemTesting).not.toMatch(/KIT_WEB_|routes\.ir\.json|WebAssetManifest/);
   });
+
+  test("represents each architectural unit with one directory boundary", async () => {
+    const conflicts: string[] = [];
+    for (const directory of await directories(sourceRoot)) {
+      const name = basename(directory);
+      const siblings = await readdir(dirname(directory));
+      for (const extension of [".ts", ".tsx", ".rs"]) {
+        if (siblings.includes(`${name}${extension}`)) {
+          conflicts.push(`${directory} conflicts with ${name}${extension}`);
+        }
+      }
+    }
+
+    expect(conflicts).toEqual([]);
+  });
 });
 
 function implementationSource(path: string): boolean {
@@ -103,6 +118,16 @@ async function files(directory: string): Promise<string[]> {
     const path = resolve(directory, entry.name);
     if (entry.isDirectory()) result.push(...(await files(path)));
     else if (entry.isFile()) result.push(path);
+  }
+  return result;
+}
+
+async function directories(directory: string): Promise<string[]> {
+  const result: string[] = [];
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const path = resolve(directory, entry.name);
+    result.push(path, ...(await directories(path)));
   }
   return result;
 }

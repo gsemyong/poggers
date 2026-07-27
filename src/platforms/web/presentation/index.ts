@@ -532,6 +532,7 @@ export {
   track,
   tween,
 } from "@/platforms/web/presentation/dynamics";
+export { animate, settled, velocity } from "@/platforms/web/presentation/language";
 export type {
   WebDecay,
   WebDecayOptions,

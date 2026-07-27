@@ -637,7 +637,7 @@ async function loadDeployment(
     plugins: [sourceAliasPlugin(source, framework)],
     root: directory,
     resolve: {
-      alias: packageSourceAliases(framework, moduleExtension()),
+      alias: packageSourceAliases(),
       conditions: ["source", ...defaultServerConditions],
     },
     server: { middlewareMode: true, ws: false },
@@ -667,10 +667,6 @@ async function loadDeployment(
     process.chdir(workingDirectory);
     await vite.close();
   }
-}
-
-function moduleExtension(): ".js" | ".ts" {
-  return import.meta.filename.endsWith(".ts") ? ".ts" : ".js";
 }
 
 function sourceAliasPlugin(project: string, framework: string): Plugin {
