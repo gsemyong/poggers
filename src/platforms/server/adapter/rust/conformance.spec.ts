@@ -119,6 +119,10 @@ type Platform = { readonly Name: string };
 type Environment = { readonly Name: string; readonly Platform: Platform };
 type Program<E extends Environment, C extends object = {}> = Readonly<C & { Environment: E }>;
 declare const featureContract: unique symbol;
+declare const dependencyDefinition: unique symbol;
+type Dependency<Definition extends { Operations: object }> = Readonly<
+  Definition["Operations"] & { readonly [dependencyDefinition]?: Definition }
+>;
 type Feature<C> = { readonly [featureContract]?: C; programs: unknown };
 const createFeature = <Contract>(value: Feature<Contract>): Feature<Contract> => value;
 const createSystem = <Features extends Readonly<Record<string, object>>>(value: {
@@ -166,15 +170,20 @@ type Result = {
   raced: number;
   settled: number;
 };
+type Concurrent = Dependency<{
+  Operations: { read(input: { value: number }): Promise<number> };
+}>;
+type InputSource = Dependency<{ Operations: { read(input: {}): Promise<Input> } }>;
+type Output = Dependency<{ Operations: { write(input: Result): Promise<void> } }>;
 type Worker = {
   Programs: {
     worker: Program<
       { Name: "server"; Platform: { Name: "server" } },
       {
         Requires: {
-          concurrent: { read(input: { value: number }): Promise<number> };
-          input: { read(input: {}): Promise<Input> };
-          output: { write(input: Result): Promise<void> };
+          concurrent: Concurrent;
+          input: InputSource;
+          output: Output;
         };
       }
     >;
@@ -185,9 +194,9 @@ const worker = createFeature<Worker>({
     worker: {
       async start({ dependencies }: {
         dependencies: {
-          concurrent: { read(input: { value: number }): Promise<number> };
-          input: { read(input: {}): Promise<Input> };
-          output: { write(input: Result): Promise<void> };
+          concurrent: Concurrent;
+          input: InputSource;
+          output: Output;
         };
       }) {
         const value = await dependencies.input.read({});

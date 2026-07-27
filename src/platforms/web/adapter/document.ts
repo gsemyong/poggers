@@ -256,13 +256,16 @@ type RuntimeFeature = Readonly<{
   path?: string;
   programs?: Readonly<Record<string, RuntimeProgramDefinition>>;
   features?: Readonly<Record<string, RuntimeFeature>>;
+}>;
+
+type RuntimeApplication = Readonly<{
   interfaces?: Readonly<Record<string, unknown>>;
 }>;
 
 type RuntimeSystem = Readonly<{
   metadata?: Readonly<{ name?: string }>;
   features?: Readonly<Record<string, RuntimeFeature>>;
-  applications?: Readonly<Record<string, RuntimeFeature>>;
+  applications?: Readonly<Record<string, RuntimeApplication>>;
 }>;
 
 type RuntimeConfiguredPresentation = Readonly<{
@@ -1980,7 +1983,6 @@ function createComponentComposition(input: {
     appPath,
   );
   namespaces[""] = Object.assign(Object.create(null), local, children);
-  namespaces[appPath] = children;
   const roots = collectRoots(appFeature, input.program, appPath);
   if ((input.routed && roots.length !== 0) || (!input.routed && roots.length !== 1)) {
     throw new TypeError(
@@ -2422,7 +2424,7 @@ function createPreparedPresentation(
 function resolveRuntimeFeature(system: RuntimeSystem, path: string): RuntimeFeature | undefined {
   const [root, ...segments] = path.split(".").filter(Boolean);
   if (!root) return undefined;
-  let feature = system.applications?.[root] ?? system.features?.[root];
+  let feature = system.features?.[root];
   for (const name of segments) {
     feature = feature?.features?.[name];
     if (!feature) return undefined;
@@ -2438,16 +2440,12 @@ function requireRuntimeFeature(system: RuntimeSystem, path: string): RuntimeFeat
 
 function projectApplicationFeature(
   system: RuntimeSystem,
-  appPath: string,
   bindings: Readonly<Record<string, string>> | undefined,
 ): RuntimeFeature {
-  if (!bindings || Object.keys(bindings).length === 0) {
-    return requireRuntimeFeature(system, appPath);
-  }
   return {
     features: Object.freeze(
       Object.fromEntries(
-        Object.entries(bindings)
+        Object.entries(bindings ?? {})
           .sort(([left], [right]) => left.localeCompare(right))
           .map(([role, path]) => [
             role,
@@ -2500,7 +2498,7 @@ function runtimeInterfaceOwner(
   }
   return {
     path: appPath,
-    feature: projectApplicationFeature(system, appPath, features),
+    feature: projectApplicationFeature(system, features),
   };
 }
 

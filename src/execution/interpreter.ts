@@ -88,14 +88,8 @@ export async function executeProgramContributionIR(
   execution: PortableProgramExecutionIR,
   dependencies: DependencyImplementations,
 ): Promise<ExecutionTrace> {
-  const envelopeContracts = projectDependencyContracts(
-    program.requires.filter(({ binding }) => binding === "envelope"),
-  );
-  const mounted = Object.freeze({
-    ...dependencies,
-    ...conformExternalDependencies(envelopeContracts, dependencies),
-  }) as DependencyImplementations;
-  validateDependencies(program, mounted);
+  const contracts = projectDependencyContracts(program.requires);
+  const mounted = conformExternalDependencies(contracts, dependencies) as DependencyImplementations;
   if (execution.kind !== "portable") {
     throw new Error(`Program ${JSON.stringify(program.id)} is ${execution.kind}, not portable IR.`);
   }
@@ -221,12 +215,10 @@ export async function executeLinkedProgramIR(
             `[${actual.join(", ")}] but its contract declares [${declared.join(", ")}].`,
         );
       }
-      const providerContracts = projectDependencyContracts(
-        contribution.provides.filter(({ binding }) => binding === "envelope"),
-      );
+      const providerContracts = projectDependencyContracts(contribution.provides);
       const mounted = conformExternalDependencies(providerContracts, execution.result);
       for (const name of declared) {
-        const dependency = mounted[name] ?? execution.result[name];
+        const dependency = mounted[name];
         deferred.get(name)?.bind(dependency as object);
         providers[name] = dependency;
         resources.push(dependency);
@@ -308,13 +300,21 @@ export async function executeProgramFixtureIR(
     for (const operation of dependency.type.fields) {
       if (operation.type.kind !== "function") continue;
       const key = `${dependency.name}.${operation.name}`;
+      const output =
+        operation.type.result.kind === "promise"
+          ? operation.type.result.value
+          : operation.type.result.kind === "stream"
+            ? operation.type.result.element
+            : operation.type.result;
       const respond = () => {
         const response = pending.get(key)?.shift();
         if (!response) throw new Error(`missing fixture response for ${key}`);
         if ("error" in response) {
           throw new FixtureDependencyError(response.error.message, response.error.data);
         }
-        return response.ok;
+        return output.kind === "primitive" && output.name === "void" && response.ok === null
+          ? undefined
+          : response.ok;
       };
       implementation[operation.name] =
         operation.type.result.kind === "promise" ? async () => respond() : () => respond();
@@ -379,32 +379,6 @@ class FixtureDependencyError extends Error {
     super(message);
     this.name = "FixtureDependencyError";
     this.data = data;
-  }
-}
-
-function validateDependencies(
-  program: ProgramContributionIR,
-  dependencies: DependencyImplementations,
-): void {
-  for (const contract of program.requires) {
-    const implementation = dependencies[contract.name];
-    if (!implementation) {
-      throw new Error(
-        `Program ${JSON.stringify(program.id)} is missing Dependency ${JSON.stringify(contract.name)}.`,
-      );
-    }
-    if (typeof Reflect.get(implementation, dependencyInvocation) === "function") continue;
-    if (contract.type.kind !== "record") continue;
-    for (const operation of contract.type.fields) {
-      if (
-        operation.type.kind === "function" &&
-        typeof implementation[operation.name] !== "function"
-      ) {
-        throw new Error(
-          `Dependency ${JSON.stringify(contract.name)} is missing operation ${JSON.stringify(operation.name)}.`,
-        );
-      }
-    }
   }
 }
 
@@ -1352,9 +1326,7 @@ export class HotUpdateCoordinator<Value, Snapshot, Manifest = unknown> {
   #manifest: Manifest | undefined;
   #transaction = Promise.resolve();
 
-  constructor(
-    private readonly compatible: (previous: Manifest, next: Manifest) => boolean = () => true,
-  ) {}
+  constructor(private readonly same: (previous: Manifest, next: Manifest) => boolean = Object.is) {}
 
   get value(): Value | undefined {
     return this.#active?.value;
@@ -1380,8 +1352,8 @@ export class HotUpdateCoordinator<Value, Snapshot, Manifest = unknown> {
   async #replace(
     candidate: HotCandidate<Value, Snapshot, Manifest>,
   ): Promise<HotUpdateResult<Value>> {
-    if (this.#manifest && !this.compatible(this.#manifest, candidate.manifest)) {
-      return { status: "rejected", reason: "incompatible-manifest" };
+    if (this.#manifest !== undefined && !this.same(this.#manifest, candidate.manifest)) {
+      return { status: "rejected", reason: "manifest-changed" };
     }
 
     let prepared: Awaited<ReturnType<typeof candidate.prepare>>;

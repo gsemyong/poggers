@@ -23,6 +23,7 @@ import {
 } from "@/adapter";
 import {
   collectDependencyOperations,
+  dependencyContractIdentity,
   dependencyOperationIdentity,
   selectDependencyProviders,
   type DependencyOperationIR,
@@ -38,13 +39,13 @@ import {
   type PortableProgramProjection,
   type RustProgramFunctionExport,
 } from "@/compiler/rust/lowering";
+import type { ServerProviderConfiguration } from "@/platforms/server";
 import { serverProgramExecution } from "@/platforms/server/adapter";
 import {
   defineServerProductionDependency,
   resolveServerProductionDependencies,
   serverProductionDependencies,
   type ResolvedServerProductionDependency,
-  type ServerProductionConfiguration,
   type ServerProductionDependency,
 } from "@/platforms/server/adapter/rust/providers";
 
@@ -69,7 +70,7 @@ export type ServerProductionBuild = Readonly<{
 export type ServerProductionRequirement = Readonly<{
   dependency: string;
   implementation: string;
-  configuration: readonly ServerProductionConfiguration[];
+  configuration: readonly ServerProviderConfiguration[];
 }>;
 
 export type ServerProductionProfile = "debug" | "release";
@@ -244,7 +245,6 @@ export async function buildServerProgram(input: {
     workspace,
     requirements,
   );
-  await removeLegacyWorkspaceCaches(resolve(cacheRoot, "workspaces"));
   await retainCache(cacheRoot, workspace, semanticHash);
   return builtResult;
 }
@@ -346,6 +346,7 @@ type RustProgramAttachments = Readonly<{
 
 type RustDistributionContract = Readonly<{
   name: string;
+  identity: string;
   bindings: readonly string[];
   operations: readonly DependencyOperationIR[];
 }>;
@@ -459,8 +460,14 @@ function rustDistributionContracts(linked: LinkedProgramIR): readonly RustDistri
             `${JSON.stringify(synchronous.name)} is synchronous and cannot cross a Process boundary.`,
         );
       }
+      const contract = {
+        name: dependency.name,
+        operations,
+        reference: dependency.reference,
+      };
       return {
         name: dependency.name,
+        identity: dependencyContractIdentity(contract),
         bindings: dependency.reference!.bindings,
         operations,
       };
@@ -758,6 +765,7 @@ function rustProviderOperation(operation: string): string {
 function rustDistributionContract(contract: RustDistributionContract): string {
   return `            kit_server_distribution::DistributionContract {
                 name: ${rustString(contract.name)},
+                identity: ${rustString(contract.identity)},
                 bindings: vec![${contract.bindings.map(rustString).join(", ")}],
                 operations: vec![
 ${contract.operations
@@ -1056,24 +1064,6 @@ async function generatedWorkspaces(directory: string): Promise<readonly string[]
   };
   await visit(directory);
   return workspaces;
-}
-
-async function removeLegacyWorkspaceCaches(directory: string): Promise<void> {
-  for (const project of await readdir(directory, { withFileTypes: true }).catch(() => [])) {
-    if (!project.isDirectory()) continue;
-    const projectDirectory = resolve(directory, project.name);
-    for (const workspace of await readdir(projectDirectory, { withFileTypes: true }).catch(
-      () => [],
-    )) {
-      if (!workspace.isDirectory()) continue;
-      const root = resolve(projectDirectory, workspace.name);
-      await Promise.all(
-        ["crates", "target"].map((name) =>
-          rm(resolve(root, name), { force: true, recursive: true }),
-        ),
-      );
-    }
-  }
 }
 
 async function retainTargetCache(cacheRoot: string, workspace: string): Promise<void> {

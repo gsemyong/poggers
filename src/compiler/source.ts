@@ -551,25 +551,6 @@ function compileSystemProgram(
   const applicationValues = applicationsValue
     ? requireObject(checker, applicationsValue, "System applications must be an object.")
     : undefined;
-  if (featureValues && applicationValues) {
-    const featureNames = new Set(
-      checker
-        .getTypeAtLocation(featureValues)
-        .getProperties()
-        .map((symbol) => symbol.getName()),
-    );
-    const duplicate = checker
-      .getTypeAtLocation(applicationValues)
-      .getProperties()
-      .map((symbol) => symbol.getName())
-      .find((name) => featureNames.has(name));
-    if (duplicate) {
-      throw diagnostic(
-        applicationValues,
-        `System cannot use ${JSON.stringify(duplicate)} for both a Feature and an Application.`,
-      );
-    }
-  }
 
   const metadata = objectExpression(checker, objectMember(checker, systemObject, "metadata"));
   const systemName =
@@ -822,7 +803,7 @@ function validateProgramEnvironments(programs: readonly UnassembledProgramIR[]):
     }
     if (JSON.stringify(previous) === JSON.stringify(program.environment)) continue;
     throw new SystemDiagnostic(
-      `Program ${JSON.stringify(program.name)} has incompatible execution contexts ` +
+      `Program ${JSON.stringify(program.name)} has different execution contexts ` +
         `${JSON.stringify(previous.name)} and ${JSON.stringify(program.environment.name)}.`,
       program.span,
     );
@@ -2099,18 +2080,25 @@ function dependencyList(
           ),
         )
       : undefined;
-    const operations = definition
-      ? propertyType(checker, definition, "Operations", symbol.valueDeclaration ?? at)
-      : api;
+    if (!definition) {
+      throw diagnostic(
+        symbol.valueDeclaration ?? at,
+        `Dependency ${JSON.stringify(symbol.getName())} must use the semantic Dependency type.`,
+      );
+    }
+    const operations = propertyType(
+      checker,
+      definition,
+      "Operations",
+      symbol.valueDeclaration ?? at,
+    );
     if (!operations) {
       throw diagnostic(
         symbol.valueDeclaration ?? at,
         `Dependency ${JSON.stringify(symbol.getName())} has no Operations definition.`,
       );
     }
-    const reference = definition
-      ? propertyType(checker, definition, "Reference", symbol.valueDeclaration ?? at)
-      : undefined;
+    const reference = propertyType(checker, definition, "Reference", symbol.valueDeclaration ?? at);
     const referenceName = reference
       ? literalProperty(checker, reference, "Name", symbol.valueDeclaration ?? at)
       : undefined;
@@ -2123,12 +2111,13 @@ function dependencyList(
     const referenceInputs = reference
       ? propertyType(checker, reference, "Inputs", symbol.valueDeclaration ?? at)
       : undefined;
-    const failures = definition
-      ? propertyType(checker, definition, "Failures", symbol.valueDeclaration ?? at)
-      : undefined;
-    const heartbeats = definition
-      ? propertyType(checker, definition, "Heartbeats", symbol.valueDeclaration ?? at)
-      : undefined;
+    const failures = propertyType(checker, definition, "Failures", symbol.valueDeclaration ?? at);
+    const heartbeats = propertyType(
+      checker,
+      definition,
+      "Heartbeats",
+      symbol.valueDeclaration ?? at,
+    );
     return {
       name: symbol.getName(),
       type: lowerType(checker, operations, at, new Set(), symbol.getName()),
@@ -2152,7 +2141,6 @@ function dependencyList(
             })),
           }
         : {}),
-      ...(definition ? { binding: "envelope" as const } : {}),
       ...(referenceName !== undefined &&
       referenceArgument !== undefined &&
       typeof referenceName === "string" &&

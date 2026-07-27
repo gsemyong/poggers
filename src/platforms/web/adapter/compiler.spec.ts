@@ -181,6 +181,10 @@ function compositionSource(): string {
   return `
 declare const featureContract: unique symbol;
 declare const applicationContract: unique symbol;
+declare const dependencyDefinition: unique symbol;
+type Dependency<Definition extends { Operations: object }> = Readonly<
+  Definition["Operations"] & { readonly [dependencyDefinition]?: Definition }
+>;
 type Feature<Contract> = Readonly<{ readonly [featureContract]?: Contract }>;
 type Application<Contract> = Readonly<{
   readonly interfaces: object;
@@ -235,12 +239,13 @@ type Route = {
   SearchSchema: {};
   Data: { title: string; activity: Deferred<string> };
 };
+type Feed = Dependency<{ Operations: { read(input: {}): Promise<string> } }>;
 type Activity = {
   Programs: {
     browser: Program<
       Environment,
       {
-        Requires: { feed: { read(input: {}): Promise<string> } };
+        Requires: { feed: Feed };
         Routes: { activity: Route };
       }
     >;
@@ -257,7 +262,7 @@ const activity = createFeature<Activity>({
       routes: {
         activity: {
           async load({ dependencies }: {
-            dependencies: { feed: { read(input: {}): Promise<string> } };
+            dependencies: { feed: Feed };
           }) {
             const title = await dependencies.feed.read({});
             return {
@@ -324,12 +329,15 @@ type Route = {
   };
   Data: { title: string };
 };
+type TaskService = Dependency<{
+  Operations: { get(input: { id: string }): Promise<{ title: string }> };
+}>;
 type Tasks = {
   Programs: {
     browser: Program<
       Environment,
       {
-        Requires: { tasks: { get(input: { id: string }): Promise<{ title: string }> } };
+        Requires: { tasks: TaskService };
         Routes: { edit: Route };
       }
     >;
@@ -354,7 +362,7 @@ const tasks = createFeature<Tasks>({
       routes: {
         edit: {
           async load({ dependencies, params }: {
-            dependencies: { tasks: { get(input: { id: string }): Promise<{ title: string }> } };
+            dependencies: { tasks: TaskService };
             params: { id: string };
           }) {
             const task = await dependencies.tasks.get({ id: params.id });

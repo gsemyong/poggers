@@ -19,17 +19,17 @@ type Provider = Readonly<{
 type Consumer = Readonly<{
   Programs: { server: Program<Server, { Requires: { reader: Reader; clock: Clock } }> };
 }>;
-type App = Readonly<{ Features: { provider: Provider; consumer: Consumer } }>;
+type Root = Readonly<{ Features: { provider: Provider; consumer: Consumer } }>;
 
 describe("server Platform runtime", () => {
   test("executes a fully portable Program from IR and owns its host scope", async () => {
     const calls: string[] = [];
     const running = await startServerPrograms(
-      { features: {} } as unknown as System<App>,
+      { features: {} } as unknown as System<Root>,
       [portableProgram()],
       () => ({
         clock: {
-          async tick(input: { value: number }) {
+          async tick({ input }: { input: { value: number } }) {
             calls.push(`tick:${input.value}`);
             return input.value + 1;
           },
@@ -48,7 +48,7 @@ describe("server Platform runtime", () => {
 
   test("creates and owns one host scope for each Process instance", async () => {
     const calls: string[] = [];
-    const system: System<App> = {
+    const system: System<Root> = {
       features: {
         provider: {
           programs: {
@@ -108,7 +108,7 @@ describe("server Platform runtime", () => {
     let host = 0;
     const observed: number[] = [];
     const disposed: number[] = [];
-    const system: System<App> = {
+    const system: System<Root> = {
       features: {
         provider: {
           programs: {

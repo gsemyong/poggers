@@ -582,7 +582,7 @@ Read [the reference](/reference).
     const system = {
       metadata: { name: "A <safe> title" },
       applications: {
-        app: { interfaces: { web: { presentation: emptyPresentation } } },
+        shell: { interfaces: { web: { presentation: emptyPresentation } } },
       },
       features: {
         shell: {
@@ -640,7 +640,7 @@ Read [the reference](/reference).
 
     const first = await prepareWebDocument({
       system,
-      interface: "app.web",
+      interface: "shell.web",
       features: { shell: "shell" },
       program: "browser",
       presentation: emptyPresentation,
@@ -649,7 +649,7 @@ Read [the reference](/reference).
     });
     const second = await prepareWebDocument({
       system,
-      interface: "app.web",
+      interface: "shell.web",
       features: { shell: "shell" },
       program: "browser",
       presentation: emptyPresentation,

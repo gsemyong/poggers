@@ -8,7 +8,7 @@ import { createWebPresentationAdapter } from "@/platforms/web/adapter/presentati
 import type { PresentationAdapterInstance } from "@/platforms/web/adapter/presentation/contract";
 import { createWebUIAdapter } from "@/platforms/web/adapter/ui/adapter";
 import {
-  createPresentationGraph,
+  createPresentationGraph as createPresentationGraphImplementation,
   ownedPresentationTargets,
 } from "@/platforms/web/adapter/ui/component/adapter";
 import { readScoped, type Child } from "@/platforms/web/adapter/ui/component/runtime";
@@ -19,7 +19,7 @@ type Program<Environment, Contract extends object = object> = Readonly<
   Contract & { Environment: Environment }
 >;
 
-const createInterfaceUI = createWebUIAdapter(createWebPresentationAdapter()).component
+const createInterfaceUIImplementation = createWebUIAdapter(createWebPresentationAdapter()).component
   .createInterfaceUI;
 const boundary = {} as Element;
 const emptyPresentation = Object.freeze({
@@ -27,12 +27,47 @@ const emptyPresentation = Object.freeze({
   create: () => Object.freeze({}),
 });
 
+function createInterfaceUI(
+  input: Parameters<typeof createInterfaceUIImplementation>[0],
+): ReturnType<typeof createInterfaceUIImplementation> {
+  return createInterfaceUIImplementation({
+    features: testFeatureBindings(input.system),
+    ...input,
+  });
+}
+
+function createPresentationGraph(
+  input: Parameters<typeof createPresentationGraphImplementation>[0],
+): ReturnType<typeof createPresentationGraphImplementation> {
+  return createPresentationGraphImplementation({
+    features: testFeatureBindings(input.system),
+    ...input,
+  });
+}
+
+function testFeatureBindings(system: unknown): Readonly<Record<string, string>> {
+  const root = (
+    system as Readonly<{
+      features?: Readonly<{
+        web?: Readonly<{ features?: Readonly<Record<string, unknown>> }>;
+      }>;
+    }>
+  ).features?.web?.features;
+  return Object.freeze(
+    Object.fromEntries(Object.keys(root ?? {}).map((name) => [name, `web.${name}`])),
+  );
+}
+
 function testSystem(features: Readonly<Record<string, unknown>>): System {
   return {
+    applications: {
+      web: {
+        interfaces: { main: { presentation: emptyPresentation } },
+      },
+    },
     features: {
       web: {
         features,
-        interfaces: { main: { presentation: emptyPresentation } },
       },
     },
   } as unknown as System;

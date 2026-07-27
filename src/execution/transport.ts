@@ -1,5 +1,5 @@
 import {
-  dependencyOperationIdentity,
+  dependencyContractIdentity,
   type DependencyContractIR,
   type DependencyOperationIR,
 } from "@/compiler/ir";
@@ -320,7 +320,7 @@ export function createRemoteDependency(
         version: DEPENDENCY_PROTOCOL_VERSION,
         dependency: contract.name,
         operation: operation.name,
-        contract: dependencyOperationIdentity(operation),
+        contract: dependencyContractIdentity(contract),
         invocation: {
           id: invocation.id,
           attempt: invocation.attempt,
@@ -474,10 +474,10 @@ function validateRequest(
       false,
     );
   }
-  if (request.contract !== dependencyOperationIdentity(operation)) {
+  if (request.contract !== dependencyContractIdentity(dependency)) {
     throw new RemoteDependencyError(
-      "incompatible-contract",
-      `Dependency ${dependency.name}.${operation.name} has an incompatible operation contract.`,
+      "contract-mismatch",
+      `Dependency ${dependency.name} does not match the target contract.`,
       false,
     );
   }

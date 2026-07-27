@@ -285,7 +285,7 @@ async function assertVocabulary(): Promise<void> {
   for await (const file of glob("**/*.{js,json,rs,ts,tsx}", { cwd: distDir })) {
     const contents = await readFile(resolve(distDir, file), "utf8");
     if (/capabilit(?:y|ies)/i.test(contents)) {
-      throw new Error(`Legacy dependency terminology leaked into ${file}.`);
+      throw new Error(`Obsolete dependency terminology leaked into ${file}.`);
     }
   }
 }

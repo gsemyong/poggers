@@ -47,7 +47,6 @@ const heartbeat = {
 
 const serviceContract: DependencyContractIR = {
   name: "service",
-  binding: "envelope",
   operations: [
     {
       name: "changes",
@@ -175,7 +174,6 @@ test("binds identity locally and sends only serializable reference operations", 
   const requests: unknown[] = [];
   const contract: DependencyContractIR = {
     name: "counter",
-    binding: "envelope",
     reference: { name: "get", argument: "input", bindings: ["key"], inputs: ["add"] },
     operations: [
       {
@@ -221,7 +219,7 @@ test("binds identity locally and sends only serializable reference operations", 
   expect(requests).toEqual([{ key: "counter-1", input: { amount: 4 } }]);
 });
 
-test("rejects incompatible protocols, operation contracts, and frame ordering before ambiguity", async () => {
+test("rejects protocol, whole-Dependency contract, and frame mismatches before execution", async () => {
   const calls = vi.fn();
   const serverContract: DependencyContractIR = {
     ...serviceContract,
@@ -243,12 +241,12 @@ test("rejects incompatible protocols, operation contracts, and frame ordering be
       },
     }),
   );
-  const incompatible = createRemoteDependency(serviceContract, "worker", network) as {
+  const changed = createRemoteDependency(serviceContract, "worker", network) as {
     work(input: { value: number }): Promise<number>;
   };
 
-  await expect(incompatible.work({ value: 1 })).rejects.toMatchObject({
-    code: "incompatible-contract",
+  await expect(changed.work({ value: 1 })).rejects.toMatchObject({
+    code: "contract-mismatch",
     uncertain: false,
   });
   expect(calls).not.toHaveBeenCalled();
@@ -270,8 +268,8 @@ test("rejects incompatible protocols, operation contracts, and frame ordering be
     uncertain: true,
   });
 
-  const compatibleCalls = vi.fn();
-  const compatibleServer: DependencyContractIR = {
+  const extraOperationCalls = vi.fn();
+  const extraOperationServer: DependencyContractIR = {
     ...serviceContract,
     operations: [
       ...serviceContract.operations,
@@ -283,32 +281,35 @@ test("rejects incompatible protocols, operation contracts, and frame ordering be
       },
     ],
   };
-  const compatibleNetwork = createMemoryDependencyTransport();
-  compatibleNetwork.bind(
-    "compatible-worker",
-    createDependencyRequestHandler([compatibleServer], {
+  const extraOperationNetwork = createMemoryDependencyTransport();
+  extraOperationNetwork.bind(
+    "extra-operation-worker",
+    createDependencyRequestHandler([extraOperationServer], {
       service: {
         addedLater: async () => "new",
         changes: async function* () {},
         local: () => "local",
         work: async ({ input }: { input: { value: number } }) => {
-          compatibleCalls();
+          extraOperationCalls();
           return input.value;
         },
       },
     }),
   );
-  const rolling = createRemoteDependency(
+  const extraOperation = createRemoteDependency(
     serviceContract,
-    "compatible-worker",
-    compatibleNetwork,
+    "extra-operation-worker",
+    extraOperationNetwork,
   ) as { work(input: { value: number }): Promise<number> };
-  await expect(rolling.work({ value: 2 })).resolves.toBe(2);
-  expect(compatibleCalls).toHaveBeenCalledTimes(1);
+  await expect(extraOperation.work({ value: 2 })).rejects.toMatchObject({
+    code: "contract-mismatch",
+    uncertain: false,
+  });
+  expect(extraOperationCalls).not.toHaveBeenCalled();
 
-  const wrongProtocol = createRemoteDependency(serviceContract, "compatible-worker", {
+  const wrongProtocol = createRemoteDependency(serviceContract, "extra-operation-worker", {
     open: ({ target, request }) =>
-      compatibleNetwork.open({
+      extraOperationNetwork.open({
         target,
         request: { ...request, version: 2 as typeof DEPENDENCY_PROTOCOL_VERSION },
       }),
@@ -317,7 +318,7 @@ test("rejects incompatible protocols, operation contracts, and frame ordering be
     code: "unsupported-protocol",
     uncertain: false,
   });
-  expect(compatibleCalls).toHaveBeenCalledTimes(1);
+  expect(extraOperationCalls).not.toHaveBeenCalled();
 });
 
 test("accepts delayed frames and rejects duplicate stream delivery", async () => {

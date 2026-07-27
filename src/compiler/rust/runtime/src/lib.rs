@@ -823,7 +823,6 @@ struct EngineState {
     external: RwLock<BTreeMap<String, Arc<dyn Dependency>>>,
     declared: RwLock<BTreeSet<String>>,
     provided: RwLock<BTreeMap<String, Value>>,
-    provided_envelopes: RwLock<BTreeSet<String>>,
     resources: Mutex<Vec<Value>>,
     stable_functions: Mutex<BTreeMap<String, NativeFunction>>,
     tasks: AtomicUsize,
@@ -838,7 +837,6 @@ impl Engine {
             external: RwLock::new(BTreeMap::new()),
             declared: RwLock::new(BTreeSet::new()),
             provided: RwLock::new(BTreeMap::new()),
-            provided_envelopes: RwLock::new(BTreeSet::new()),
             resources: Mutex::new(Vec::new()),
             stable_functions: Mutex::new(BTreeMap::new()),
             tasks: AtomicUsize::new(0),
@@ -886,12 +884,8 @@ impl Engine {
     }
 
     pub fn dependency_value(&self, name: &str) -> NativeResult<Value> {
-        if let Some(value) = read(&self.0.provided).get(name) {
-            return Ok(if read(&self.0.provided_envelopes).contains(name) {
-                Value::Dependency(name.to_owned())
-            } else {
-                value.clone()
-            });
+        if read(&self.0.provided).contains_key(name) {
+            return Ok(Value::Dependency(name.to_owned()));
         }
         if read(&self.0.external).contains_key(name) {
             return Ok(Value::Dependency(name.to_owned()));
@@ -930,12 +924,7 @@ impl Engine {
         }
     }
 
-    pub fn provide(
-        &self,
-        names: &[&str],
-        envelope_names: &[&str],
-        value: Value,
-    ) -> NativeResult<()> {
+    pub fn provide(&self, names: &[&str], value: Value) -> NativeResult<()> {
         let record = value.as_record()?;
         let actual = record.keys().map(String::as_str).collect::<Vec<_>>();
         if actual != names {
@@ -943,14 +932,6 @@ impl Engine {
                 "InvalidProvision",
                 format!("Provided {actual:?}, declared {names:?}."),
             ));
-        }
-        for name in envelope_names {
-            if !names.contains(name) {
-                return Err(NativeError::new(
-                    "InvalidProvision",
-                    format!("Envelope Dependency {name:?} is not provided by this contribution."),
-                ));
-            }
         }
         let mut provided = write(&self.0.provided);
         for name in names {
@@ -968,8 +949,6 @@ impl Engine {
             provided.insert((*name).to_owned(), value.clone());
             lock(&self.0.resources).push(value);
         }
-        write(&self.0.provided_envelopes)
-            .extend(envelope_names.iter().map(|name| (*name).to_owned()));
         Ok(())
     }
 
@@ -1301,29 +1280,23 @@ impl Engine {
                 format!("Missing provided Dependency {name}.{operation}."),
             )
         })?;
-        if read(&self.0.provided_envelopes).contains(name) {
-            let dispatcher = value.as_record()?.get("@dependencyInvocation").cloned();
-            if let Some(dispatcher) = dispatcher {
-                return self
-                    .invoke(
-                        dispatcher,
-                        vec![
-                            Value::String(operation.to_owned()),
-                            input,
-                            invocation.to_value(),
-                        ],
-                    )
-                    .await;
-            }
+        let dispatcher = value.as_record()?.get("@dependencyInvocation").cloned();
+        if let Some(dispatcher) = dispatcher {
+            return self
+                .invoke(
+                    dispatcher,
+                    vec![
+                        Value::String(operation.to_owned()),
+                        input,
+                        invocation.to_value(),
+                    ],
+                )
+                .await;
         }
-        let input = if read(&self.0.provided_envelopes).contains(name) {
-            Value::record(IndexMap::from([
-                ("input".to_owned(), input),
-                ("invocation".to_owned(), invocation.to_value()),
-            ]))
-        } else {
-            input
-        };
+        let input = Value::record(IndexMap::from([
+            ("input".to_owned(), input),
+            ("invocation".to_owned(), invocation.to_value()),
+        ]));
         self.method(value, operation, vec![input]).await
     }
 
@@ -2014,7 +1987,6 @@ mod tests {
         engine
             .provide(
                 &["peer"],
-                &[],
                 Value::record(IndexMap::from([(
                     "peer".to_owned(),
                     Value::record(IndexMap::new()),
@@ -2023,7 +1995,7 @@ mod tests {
             .expect("bind internal Dependency");
         assert!(matches!(
             engine.dependency_value("peer").expect("provided value"),
-            Value::Record(_)
+            Value::Dependency(name) if name == "peer"
         ));
     }
 
@@ -2035,12 +2007,18 @@ mod tests {
             .install_router(Arc::new(PassThroughRouter(routes.clone())))
             .expect("install router");
         let read = NativeFunction::new(|_engine, arguments| {
-            Box::pin(async move { Ok(arguments.into_iter().next().unwrap_or(Value::Undefined)) })
+            Box::pin(async move {
+                let context = arguments.into_iter().next().unwrap_or(Value::Undefined);
+                Ok(context
+                    .as_record()?
+                    .get("input")
+                    .cloned()
+                    .unwrap_or(Value::Undefined))
+            })
         });
         engine
             .provide(
                 &["peer"],
-                &[],
                 Value::record(IndexMap::from([(
                     "peer".to_owned(),
                     Value::record(IndexMap::from([("read".to_owned(), Value::Function(read))])),

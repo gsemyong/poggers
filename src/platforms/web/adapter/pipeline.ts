@@ -1342,6 +1342,7 @@ async function prepareInterface(
       documentEvaluator,
       developmentDocumentEvaluatorSource({
         system: paths.system,
+        application: contract.interface.app,
         interface: contract.interface.path,
         applicationName: contract.applicationName,
         features: contract.interface.features,
@@ -1453,6 +1454,7 @@ async function prepareInterface(
         import.meta.dirname,
         `../../../execution/process${moduleExtension()}`,
       ),
+      application: contract.interface.app,
       interface: contract.interface.path,
       features: contract.interface.features,
       program: ui,
@@ -2123,7 +2125,7 @@ function routeModuleSource(input: {
   return `import system from ${JSON.stringify(system)};
 
 const [root, ...path] = ${JSON.stringify(input.route.feature.split(".").filter(Boolean))};
-let feature = system.applications?.[root] ?? system.features?.[root];
+let feature = system.features?.[root];
 for (const name of path) {
   feature = feature?.features?.[name];
 }
@@ -3268,14 +3270,10 @@ async function prepareProductionDocuments(
       `import system from ${JSON.stringify(paths.system)};
 import { prepareClientWebDocument, prepareInitialWebPresentation, prepareWebDocument } from ${JSON.stringify(resolve(import.meta.dirname, `document${moduleExtension()}`))};
 
-const [appRoot, ...appPath] = ${JSON.stringify(contract.interface.app.split(".").filter(Boolean))};
-let appFeature = system.applications?.[appRoot] ?? system.features?.[appRoot];
-for (const name of appPath) {
-  appFeature = appFeature?.features?.[name];
-}
-const interfaceFeature =
-  appFeature?.interfaces?.[${JSON.stringify(contract.interface.path.slice(contract.interface.app.length + 1))}];
-if (!interfaceFeature?.presentation) {
+const application = system.applications?.[${JSON.stringify(contract.interface.app)}];
+const interfaceDefinition =
+  application?.interfaces?.[${JSON.stringify(contract.interface.path.slice(contract.interface.app.length + 1))}];
+if (!interfaceDefinition?.presentation) {
   throw new Error(${JSON.stringify(`Web interface ${contract.interface.path} has no Presentation.`)});
 }
 const routes = ${JSON.stringify(staticRoutes)};
@@ -3295,7 +3293,7 @@ const documents = await Promise.all((routes.length ? routes : ${contract.routes.
         features: ${JSON.stringify(contract.interface.features)},
         program: ${JSON.stringify(contract.uiProgram)},
         logicalProgram: ${JSON.stringify(program.logicalName)},
-        presentation: interfaceFeature.presentation,
+        presentation: interfaceDefinition.presentation,
         routes: ${JSON.stringify(contract.routes)},
         manifest: ${JSON.stringify(collectProgramManifest(program))},
         components: ${JSON.stringify(contract.components)},
@@ -3325,7 +3323,7 @@ const presentation = await prepareInitialWebPresentation({
   features: ${JSON.stringify(contract.interface.features)},
   program: ${JSON.stringify(contract.uiProgram)},
   logicalProgram: ${JSON.stringify(program.logicalName)},
-  presentation: interfaceFeature.presentation,
+  presentation: interfaceDefinition.presentation,
   manifest: ${JSON.stringify(collectProgramManifest(program))},
   components: ${JSON.stringify(contract.components)},
   targets: ${JSON.stringify(presentationTargets)},
@@ -3805,6 +3803,7 @@ if (development) {
 
 function candidateSource(input: {
   system: string;
+  application: string;
   interface: string;
   features: Readonly<Record<string, string>>;
   development: boolean;
@@ -3904,17 +3903,13 @@ import { createWebHost } from ${JSON.stringify(input.host)};
 import { startProcess } from ${JSON.stringify(input.processRuntime)};
 
 export const manifest = ${JSON.stringify(input.hotManifest)};
-const [appRoot, ...appPath] = ${JSON.stringify(input.interface.split(".").slice(0, -1).filter(Boolean))};
-let appFeature = system.applications?.[appRoot] ?? system.features?.[appRoot];
-for (const name of appPath) {
-  appFeature = appFeature?.features?.[name];
-}
-const interfaceFeature =
-  appFeature?.interfaces?.[${JSON.stringify(input.interface.split(".").at(-1))}];
-if (!interfaceFeature?.presentation) {
+const application = system.applications?.[${JSON.stringify(input.application)}];
+const interfaceDefinition =
+  application?.interfaces?.[${JSON.stringify(input.interface.slice(input.application.length + 1))}];
+if (!interfaceDefinition?.presentation) {
   throw new Error(${JSON.stringify(`Web interface ${input.interface} has no Presentation.`)});
 }
-export const presentation = interfaceFeature.presentation;
+export const presentation = interfaceDefinition.presentation;
 const headlessPrograms = ${JSON.stringify(input.headless)};
 const workerPrograms = ${JSON.stringify(input.workers)};
 const routeModules = {
@@ -4047,6 +4042,7 @@ export async function activate(root${input.development ? ", previous = {}" : ""}
 
 function developmentDocumentEvaluatorSource(input: {
   system: string;
+  application: string;
   interface: string;
   applicationName: string;
   features: Readonly<Record<string, string>>;
@@ -4061,14 +4057,10 @@ function developmentDocumentEvaluatorSource(input: {
   return `import system from ${JSON.stringify(system)};
 import { prepareWebDocument } from ${JSON.stringify(input.document)};
 
-const [appRoot, ...appPath] = ${JSON.stringify(input.interface.split(".").slice(0, -1).filter(Boolean))};
-let appFeature = system.applications?.[appRoot] ?? system.features?.[appRoot];
-for (const name of appPath) {
-  appFeature = appFeature?.features?.[name];
-}
-const interfaceFeature =
-  appFeature?.interfaces?.[${JSON.stringify(input.interface.split(".").at(-1))}];
-if (!interfaceFeature?.presentation) {
+const application = system.applications?.[${JSON.stringify(input.application)}];
+const interfaceDefinition =
+  application?.interfaces?.[${JSON.stringify(input.interface.slice(input.application.length + 1))}];
+if (!interfaceDefinition?.presentation) {
   throw new Error(${JSON.stringify(`Web interface ${input.interface} has no Presentation.`)});
 }
 export { system };
@@ -4080,7 +4072,7 @@ export const prepare = (input) =>
     applicationName: ${JSON.stringify(input.applicationName)},
     features: ${JSON.stringify(input.features)},
     routes: ${JSON.stringify(input.routes)},
-    presentation: interfaceFeature.presentation,
+    presentation: interfaceDefinition.presentation,
   });
 `;
 }
@@ -4240,7 +4232,7 @@ addEventListener("pagehide", dispose, { once: true });
 `;
   }
   return `import * as initialCandidate from ${JSON.stringify(candidate)};
-import { HotUpdateCoordinator, isWebHotReplacementCompatible } from ${JSON.stringify(input.runtime)};
+import { HotUpdateCoordinator, sameWebHotReplacementManifest } from ${JSON.stringify(input.runtime)};
 import { startWebDeferredStream } from ${JSON.stringify(input.stream)};
 
 startWebDeferredStream();
@@ -4248,7 +4240,7 @@ const root = document.querySelector("#app");
 if (!root) throw new Error("Missing UI root.");
 const coordinator =
   import.meta.hot?.data.coordinator ??
-  new HotUpdateCoordinator(isWebHotReplacementCompatible);
+  new HotUpdateCoordinator(sameWebHotReplacementManifest);
 let activations = 0;
 const apply = async (candidate, updateKind) => {
   const started = performance.now();
@@ -4270,7 +4262,7 @@ const apply = async (candidate, updateKind) => {
     });
     status = result.status;
     if (result.status === "rejected") {
-      if (result.reason === "incompatible-manifest") {
+      if (result.reason === "manifest-changed") {
         location.reload();
         return;
       }
@@ -4336,7 +4328,6 @@ export function validateUIProgramRoot(system: Record<string, unknown>, program: 
     }
   };
   visit(system.features, "");
-  visit(system.applications, "");
   if ((routes === 0 && roots.length !== 1) || (routes > 0 && roots.length !== 0)) {
     throw new Error(
       routes > 0

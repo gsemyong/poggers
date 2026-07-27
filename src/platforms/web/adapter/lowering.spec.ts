@@ -6,8 +6,8 @@ import {
   composeWebRoutePath,
   createWebHotReplacementManifest,
   formatWebRoute,
-  isWebHotReplacementCompatible,
   matchWebRoute,
+  sameWebHotReplacementManifest,
   validateWebRouteMetadata,
   validateWebRoutes,
   WEB_COMPILER_IR_VERSION,
@@ -320,7 +320,7 @@ describe("web routing", () => {
 });
 
 describe("web hot replacement meaning", () => {
-  it("accepts additive and removed state fields but rejects changed fields", () => {
+  it("requires the exact current state contract", () => {
     const before = hotManifest(record({ count: numberType(), label: stringType() }));
     const added = hotManifest(
       record({ count: numberType(), label: stringType(), enabled: booleanType() }),
@@ -328,9 +328,10 @@ describe("web hot replacement meaning", () => {
     const removed = hotManifest(record({ count: numberType() }));
     const changed = hotManifest(record({ count: stringType(), label: stringType() }));
 
-    expect(isWebHotReplacementCompatible(before, added)).toBe(true);
-    expect(isWebHotReplacementCompatible(before, removed)).toBe(true);
-    expect(isWebHotReplacementCompatible(before, changed)).toBe(false);
+    expect(sameWebHotReplacementManifest(before, before)).toBe(true);
+    expect(sameWebHotReplacementManifest(before, added)).toBe(false);
+    expect(sameWebHotReplacementManifest(before, removed)).toBe(false);
+    expect(sameWebHotReplacementManifest(before, changed)).toBe(false);
   });
 
   it("derives a stable manifest from semantic IR rather than source spans", () => {
@@ -339,44 +340,46 @@ describe("web hot replacement meaning", () => {
     );
   });
 
-  it("rejects incompatible Component state, callback props, Elements, and Platform", () => {
+  it("rejects every changed Component and Environment contract", () => {
     const before = hotManifest(record({}), [hotComponent()]);
 
     expect(
-      isWebHotReplacementCompatible(
+      sameWebHotReplacementManifest(
         before,
         hotManifest(record({}), [hotComponent({ state: record({ offset: stringType() }) })]),
       ),
     ).toBe(false);
     expect(
-      isWebHotReplacementCompatible(
+      sameWebHotReplacementManifest(
         before,
         hotManifest(record({}), [hotComponent({ propCallbacks: ["onDismiss"] })]),
       ),
     ).toBe(false);
     expect(
-      isWebHotReplacementCompatible(
+      sameWebHotReplacementManifest(
         before,
         hotManifest(record({}), [hotComponent({ elements: [{ name: "Root", element: "main" }] })]),
       ),
     ).toBe(false);
     expect(
-      isWebHotReplacementCompatible(
+      sameWebHotReplacementManifest(
         before,
         hotManifest(record({}), [], { name: "browser-main", platform: "canvas" }),
       ),
     ).toBe(false);
   });
 
-  it("accepts compatible state and implementation-only action changes", () => {
+  it("accepts only an identical structural manifest", () => {
     const before = hotManifest(record({}), [hotComponent()]);
-    const next = hotComponent({
-      state: record({ offset: numberType(), dragging: booleanType() }),
-      actions: ["drag", "release"],
-      implementation: { state: true, actions: true, mount: true, view: true },
-    });
+    const same = hotManifest(record({}), [hotComponent()]);
+    const changed = hotManifest(record({}), [
+      hotComponent({
+        actions: ["drag", "release"],
+      }),
+    ]);
 
-    expect(isWebHotReplacementCompatible(before, hotManifest(record({}), [next]))).toBe(true);
+    expect(sameWebHotReplacementManifest(before, same)).toBe(true);
+    expect(sameWebHotReplacementManifest(before, changed)).toBe(false);
   });
 });
 

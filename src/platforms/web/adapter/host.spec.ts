@@ -291,7 +291,7 @@ function dependency<const Name extends string>(
   name: Name,
   operations: readonly DependencyOperationIR[],
 ): DependencyContractIR & Readonly<{ name: Name }> {
-  return { name, binding: "envelope", operations };
+  return { name, operations };
 }
 
 function operation(name: string, input: boolean, output: TypeIR): DependencyOperationIR {

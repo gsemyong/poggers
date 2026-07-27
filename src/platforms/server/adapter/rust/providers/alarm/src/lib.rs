@@ -163,7 +163,7 @@ pub async fn create(context: DependencyContext) -> NativeResult<Alarm> {
         || !configuration.allow_message_schedules
     {
         return Err(invalid(
-            "The existing JetStream stream is incompatible with the Alarm contract.",
+            "The existing JetStream stream does not match the Alarm contract.",
         ));
     }
     let state = get_or_create_state(&jetstream, state, replicas).await?;
@@ -187,7 +187,7 @@ pub async fn create(context: DependencyContext) -> NativeResult<Alarm> {
         || consumer_configuration.filter_subject != DELIVERY_SUBJECT
     {
         return Err(invalid(
-            "The existing JetStream consumer is incompatible with the Alarm contract.",
+            "The existing JetStream consumer does not match the Alarm contract.",
         ));
     }
     Ok(Alarm {

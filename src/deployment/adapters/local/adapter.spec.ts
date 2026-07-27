@@ -211,7 +211,7 @@ describe("local Deployment adapter", { tags: ["production"] }, () => {
     },
   );
 
-  test("rejects an incompatible Process target before replacing healthy replicas", async () => {
+  test("rejects a mismatched Process target before replacing healthy replicas", async () => {
     const fixture = await localFixture();
     const adapter = createLocalDeploymentAdapter({
       artifacts: fixture.artifacts,
@@ -224,14 +224,14 @@ describe("local Deployment adapter", { tags: ["production"] }, () => {
     const original = onlyProcess(initial.state);
     pids.add(original.pid!);
     initial.state.gateways.forEach(({ pid }) => pids.add(pid));
-    const incompatible = {
+    const mismatched = {
       ...fixture.release,
-      digest: "release-incompatible",
+      digest: "release-mismatched",
       artifacts: fixture.release.artifacts.map((artifact) =>
         artifact.deployment === "process"
           ? {
               ...artifact,
-              digest: "program-incompatible",
+              digest: "program-mismatched",
               target: {
                 operatingSystem: process.platform === "linux" ? "darwin" : "linux",
                 architecture: process.arch,
@@ -241,7 +241,7 @@ describe("local Deployment adapter", { tags: ["production"] }, () => {
       ),
     } satisfies Release;
 
-    const rejected = await applyDeployment(deployment, incompatible);
+    const rejected = await applyDeployment(deployment, mismatched);
     expect(rejected.state).toMatchObject({
       converged: false,
       release: fixture.release.digest,
@@ -298,10 +298,10 @@ describe("local Deployment adapter", { tags: ["production"] }, () => {
       artifacts: fixture.artifacts,
       state: fixture.state,
     });
-    type App = { Features: {}; Interfaces: WebPlatform };
+    type Application = { Features: {}; Interfaces: WebPlatform };
     const system = {} as System<{
       Features: {};
-      Applications: { app: App };
+      Applications: { app: Application };
     }>;
     const deployment = createDeployment(system, {
       adapter,

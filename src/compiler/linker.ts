@@ -69,14 +69,13 @@ export function linkProgram(program: ProgramIR): LinkedProgramIR {
     if (!canonical) continue;
     for (const consumer of consumers) {
       if (
-        canonical.binding !== consumer.dependency.binding ||
         !sameType(canonical.type, consumer.dependency.type) ||
         !sameOptionalType(canonical.failures, consumer.dependency.failures) ||
         !sameHeartbeats(canonical.heartbeats, consumer.dependency.heartbeats) ||
         !sameReference(canonical.reference, consumer.dependency.reference)
       ) {
         throw new ProgramLinkError(
-          `Program ${JSON.stringify(program.name)} has incompatible contracts for Dependency ` +
+          `Program ${JSON.stringify(program.name)} has different contracts for Dependency ` +
             `${JSON.stringify(name)} between ${JSON.stringify(provider?.feature ?? consumers[0]!.feature)} ` +
             `and ${JSON.stringify(consumer.feature)}.`,
           program.contributions.find(({ feature }) => feature === consumer.feature)?.span ??
@@ -92,7 +91,6 @@ export function linkProgram(program: ProgramIR): LinkedProgramIR {
       type: canonical.type,
       ...(canonical.failures ? { failures: canonical.failures } : {}),
       ...(canonical.heartbeats ? { heartbeats: canonical.heartbeats } : {}),
-      ...(canonical.binding ? { binding: canonical.binding } : {}),
       ...(canonical.reference ? { reference: canonical.reference } : {}),
       consumers: consumers.map(({ feature }) => feature),
       ...(provider ? { provider: provider.feature } : {}),
@@ -127,14 +125,11 @@ export function collectProgramManifest(program: ProgramIR): ProgramManifest {
   const linked = linkProgram(program);
   return {
     name: program.name,
-    bindings: linked.dependencies
-      .filter(({ binding }) => binding === "envelope")
-      .map((dependency) => ({
-        name: dependency.name,
-        binding: "envelope",
-        operations: collectDependencyOperations(dependency),
-        ...(dependency.reference ? { reference: dependency.reference } : {}),
-      })),
+    bindings: linked.dependencies.map((dependency) => ({
+      name: dependency.name,
+      operations: collectDependencyOperations(dependency),
+      ...(dependency.reference ? { reference: dependency.reference } : {}),
+    })),
     contributions: linked.contributions.map(({ contribution }) => ({
       feature: contribution.feature,
       requires: contribution.requires.map((dependency) => dependency.name).sort(),

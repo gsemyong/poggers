@@ -72,7 +72,7 @@ retained exact contract. One match is selected. No match and more than one
 match are errors. A factory that intentionally creates several instances of one
 kind must retain an instance discriminator in its returned contract.
 
-The compiler assembles same-named compatible Program contributions after
+The compiler assembles same-named, contract-identical Program contributions after
 Feature composition. Feature and Application names do not become deployment
 topology by accident.
 

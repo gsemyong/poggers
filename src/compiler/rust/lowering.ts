@@ -85,14 +85,9 @@ class RustProgramGenerator {
         )
         .join("\n        ");
       const provides = contribution.provides.map(({ name }) => name).sort();
-      const providerEnvelopes = contribution.provides
-        .filter(({ binding }) => binding === "envelope")
-        .map(({ name }) => name)
-        .sort();
       const retain = provides.length
         ? `engine.provide(
         &[${provides.map(rustString).join(", ")}],
-        &[${providerEnvelopes.map(rustString).join(", ")}],
         result,
     )?;`
         : "engine.retain(result);";

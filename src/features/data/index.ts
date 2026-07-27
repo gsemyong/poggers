@@ -691,7 +691,7 @@ export function createTursoDataStore<Record extends EntityValue = EntityValue>(
   return Object.freeze(store);
 }
 
-/** Implements the DataStore provider envelope for a host adapter. */
+/** Implements the DataStore provider context for a host adapter. */
 function createTursoDataStoreImplementation<Record extends EntityValue = EntityValue>(
   database: TursoDatabaseSource,
 ): DependencyImplementation<DataStore<Record>> & AsyncDisposable {

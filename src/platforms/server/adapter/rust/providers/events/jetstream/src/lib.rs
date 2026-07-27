@@ -55,7 +55,7 @@ pub async fn create(context: DependencyContext) -> NativeResult<Events> {
     {
         return Err(NativeError::new(
             "InvalidEventStore",
-            "The existing JetStream stream is incompatible with the events contract.",
+            "The existing JetStream stream does not match the events contract.",
         ));
     }
     Ok(Events {

@@ -30,7 +30,7 @@ export {
   createMemoryDataStore,
 } from "@/features/data";
 export { createIdentityFixture } from "@/features/identity";
-export { createWebUIContributionInstance as createUIContributionInstance } from "@/platforms/web/adapter/ui/process";
+export { createWebUIContributionInstance } from "@/platforms/web/adapter/ui/process";
 export { startFeatureFixture } from "@/execution/process";
 export { createPresentationFrame } from "@/platforms/web/presentation/runtime";
 export {

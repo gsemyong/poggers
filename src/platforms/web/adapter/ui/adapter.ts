@@ -10,7 +10,7 @@ import type { WebPresentationEnvironment } from "@/platforms/web/presentation";
 import { activateWebUIRuntime } from "@/platforms/web/ui";
 
 export { HotUpdateCoordinator } from "@/execution/interpreter";
-export { isWebHotReplacementCompatible } from "@/platforms/web/adapter/lowering";
+export { sameWebHotReplacementManifest } from "@/platforms/web/adapter/lowering";
 export { render } from "@/platforms/web/adapter/ui/component/runtime";
 export { webProgramLanguageRuntime } from "@/platforms/web/adapter/ui/process";
 

@@ -10,7 +10,7 @@ describe("hot update coordination", () => {
     expect(coordinator.value).toBe("first");
 
     const prepareFailed: HotCandidate<string, number, string> = {
-      manifest: "compatible",
+      manifest: "current",
       async prepare() {
         throw new Error("invalid source");
       },
@@ -23,7 +23,7 @@ describe("hot update coordination", () => {
     expect(coordinator.value).toBe("first");
 
     const activationFailed: HotCandidate<string, number, string> = {
-      manifest: "compatible",
+      manifest: "current",
       async prepare() {
         return {
           async activate() {
@@ -56,7 +56,7 @@ describe("hot update coordination", () => {
     expect(events.at(-1)).toBe("dispose:second");
   });
 
-  test("delegates compatibility to the owning dialect", async () => {
+  test("preserves state only when the owning dialect reports the exact same manifest", async () => {
     const coordinator = new HotUpdateCoordinator<string, number, string>(
       (previous, next) => previous === next,
     );
@@ -64,7 +64,7 @@ describe("hot update coordination", () => {
 
     expect(await coordinator.replace(candidate("next", 2, [], false, "changed"))).toEqual({
       status: "rejected",
-      reason: "incompatible-manifest",
+      reason: "manifest-changed",
     });
     expect(coordinator.value).toBe("first");
     await coordinator.dispose();
@@ -76,7 +76,7 @@ function candidate(
   snapshot: number,
   events: string[],
   resume = false,
-  manifest = "compatible",
+  manifest = "current",
 ): HotCandidate<string, number, string> {
   return {
     manifest,

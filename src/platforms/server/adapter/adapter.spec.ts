@@ -377,7 +377,9 @@ export default createSystem({
 function providerSystemSource(): string {
   return `${types()}
 import { probeProvider } from "./provider";
-type Probe = { read(input: {}): string; disposals(input: {}): string };
+type Probe = Dependency<{
+  Operations: { read(input: {}): string; disposals(input: {}): string };
+}>;
 type Root = { Features: {
   probe: {
     Programs: { server: Program<Server, { Requires: { http: Http; probe: Probe } }> };
@@ -528,6 +530,10 @@ type Platform = { Name: "server" };
 type Server = { Name: "server"; Platform: Platform };
 type Program<Environment, Contract extends object = {}> = Contract & { Environment: Environment };
 declare const featureContract: unique symbol;
+declare const dependencyDefinition: unique symbol;
+type Dependency<Definition extends { Operations: object }> = Readonly<
+  Definition["Operations"] & { readonly [dependencyDefinition]?: Definition }
+>;
 type Feature<Contract> = Readonly<{ readonly [featureContract]?: Contract }>;
 function createFeature<Contract>(definition: object): Feature<Contract> {
   return definition as Feature<Contract>;
@@ -536,8 +542,12 @@ function createSystem(definition: object): object {
   return definition;
 }
 type HttpResponse = { status: number; headers: readonly { name: string; value: string }[]; body: string | undefined; stream: AsyncIterable<string> | undefined };
-type Http = { route(input: { path: string; handle(request: { method: string; path: string; query: readonly { name: string; value: string }[]; headers: readonly { name: string; value: string }[]; body: string }): Promise<HttpResponse> }): Disposable };
-type Clock = { now(input: {}): number };
+type Http = Dependency<{
+  Operations: {
+    route(input: { path: string; handle(request: { method: string; path: string; query: readonly { name: string; value: string }[]; headers: readonly { name: string; value: string }[]; body: string }): Promise<HttpResponse> }): Disposable;
+  };
+}>;
+type Clock = Dependency<{ Operations: { now(input: {}): number } }>;
 `;
 }
 

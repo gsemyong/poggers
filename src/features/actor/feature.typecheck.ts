@@ -96,8 +96,6 @@ const account = createActor<AccountModel>({
   },
 });
 
-type LedgerStateV1 = Readonly<{ balance: number }>;
-type LedgerCreditV1 = Readonly<{ amount: number }>;
 type LedgerModel = Actor<{
   Name: "ledger";
   Key: string;
@@ -127,25 +125,6 @@ const ledger = createActor<LedgerModel>({
     },
     snapshot({ state }) {
       return { ...state };
-    },
-  },
-  migrations: {
-    state: [
-      (({ state }) => ({
-        balance: state.balance,
-        revision: 0,
-      })) satisfies Actor.StateMigration<LedgerStateV1, LedgerModel["State"]>,
-    ],
-    methods: {
-      credit: [
-        (({ input }) => ({
-          amount: input.amount,
-          expectedRevision: 0,
-        })) satisfies Actor.MethodMigration<
-          LedgerCreditV1,
-          { amount: number; expectedRevision: number }
-        >,
-      ],
     },
   },
 });
@@ -418,8 +397,6 @@ type DocumentModel = Actor<{
     snapshot: Actor.Read<undefined, Readonly<DocumentModel["State"]>>;
   };
 }>;
-type DocumentStateV1 = Readonly<{ content: string }>;
-type DocumentEditV1 = Readonly<{ content: string }>;
 type DocumentEdit = Readonly<{ content: string; expectedRevision: number }>;
 
 const document = createActor<DocumentModel>({
@@ -448,22 +425,6 @@ const document = createActor<DocumentModel>({
       return { ...state };
     },
   },
-  migrations: {
-    state: [
-      (({ state }) => ({
-        content: state.content,
-        revision: 0,
-      })) satisfies Actor.StateMigration<DocumentStateV1, DocumentModel["State"]>,
-    ],
-    methods: {
-      edit: [
-        (({ input }) => ({
-          content: input.content,
-          expectedRevision: 0,
-        })) satisfies Actor.MethodMigration<DocumentEditV1, DocumentEdit>,
-      ],
-    },
-  },
 });
 
 declare const documentClient: Actor.Reference<typeof document>;
@@ -471,20 +432,6 @@ const documentReference = documentClient.get({ key: "document-1" });
 documentReference.create({ owner: "user-1", content: "Initial" });
 documentReference.edit({ content: "Edited", expectedRevision: 1 });
 documentReference.snapshot();
-
-createActor<ReminderModel>({
-  state: (_context) => ({
-    due: null,
-    fired: 0,
-  }),
-  methods: reminderMethods,
-  migrations: {
-    methods: {
-      // @ts-expect-error A migration must target a method owned by this Actor.
-      missing: [],
-    },
-  },
-});
 
 type CycleAMethods = {
   ping: Actor.Method<undefined, Readonly<{ actor: "a" }>>;

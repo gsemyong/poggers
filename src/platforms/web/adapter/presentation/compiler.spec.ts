@@ -406,7 +406,7 @@ const presentation = (({ parameters }) => ({
     );
   });
 
-  it("hides compatible multi-line truncation artifacts behind semantic maxLines", () => {
+  it("hides browser-specific multi-line truncation artifacts behind semantic maxLines", () => {
     const compiled = compileWebStyle({
       text: { maxLines: 3, wrap: "pretty" },
     });

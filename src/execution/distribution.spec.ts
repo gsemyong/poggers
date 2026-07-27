@@ -1,11 +1,6 @@
 import { describe, expect, test } from "vitest";
 
-import {
-  dependencyOperationIdentity,
-  type DependencyContractIR,
-  type ProgramManifest,
-  type TypeIR,
-} from "@/compiler/ir";
+import { type DependencyContractIR, type ProgramManifest, type TypeIR } from "@/compiler/ir";
 import { invokeDependency, type DependencyInvocationAuthority } from "@/core/dependency";
 import {
   admitProcessInvocation,
@@ -28,7 +23,6 @@ const string: TypeIR = { kind: "primitive", name: "string" };
 const number: TypeIR = { kind: "primitive", name: "number" };
 const contract: DependencyContractIR = {
   name: "counter",
-  binding: "envelope",
   reference: {
     name: "get",
     argument: "input",
@@ -101,13 +95,13 @@ describe("generic Process distribution", () => {
 
   test("uses deterministic rendezvous placement with minimal scale-out movement", async () => {
     const directory = createMemoryProcessDirectory();
-    const capabilities = processContracts([contract]);
+    const contracts = processContracts([contract]);
     await directory.join({
       id: "a",
       target: "memory://a",
       program: "server",
       version: "v1",
-      contracts: capabilities,
+      contracts,
       now: 0,
       leaseDuration: 1_000,
     });
@@ -116,11 +110,10 @@ describe("generic Process distribution", () => {
       target: "memory://b",
       program: "server",
       version: "v1",
-      contracts: capabilities,
+      contracts,
       now: 0,
       leaseDuration: 1_000,
     });
-    const write = contract.operations.find(({ name }) => name === "write")!;
     const partitions = Array.from({ length: 128 }, (_, partition) => ({
       scope: JSON.stringify(["partition", partition]),
       program: "server",
@@ -131,8 +124,7 @@ describe("generic Process distribution", () => {
     for (const partition of partitions) {
       const owner = await directory.locate({
         partition,
-        operation: "write",
-        contract: dependencyOperationIdentity(write),
+        contracts,
         now: 1,
         leaseDuration: 100,
       });
@@ -144,7 +136,7 @@ describe("generic Process distribution", () => {
       target: "memory://c",
       program: "server",
       version: "v2",
-      contracts: capabilities,
+      contracts,
       now: 2,
       leaseDuration: 1_000,
     });
@@ -152,8 +144,7 @@ describe("generic Process distribution", () => {
     for (const partition of partitions) {
       const owner = await directory.locate({
         partition,
-        operation: "write",
-        contract: dependencyOperationIdentity(write),
+        contracts,
         now: 3,
         leaseDuration: 100,
       });
@@ -168,22 +159,20 @@ describe("generic Process distribution", () => {
 
   test("increments failure and ownership epochs after expiry and restart", async () => {
     const directory = createMemoryProcessDirectory();
-    const capabilities = processContracts([contract]);
+    const contracts = processContracts([contract]);
     const first = await directory.join({
       id: "worker",
       target: "memory://old",
       program: "server",
       version: "v1",
-      contracts: capabilities,
+      contracts,
       now: 0,
       leaseDuration: 10,
     });
-    const write = contract.operations.find(({ name }) => name === "write")!;
     const partition = processPartition("server", contract, { key: "one" }, 16);
     const old = await directory.locate({
       partition,
-      operation: "write",
-      contract: dependencyOperationIdentity(write),
+      contracts,
       now: 1,
       leaseDuration: 10,
     });
@@ -194,14 +183,13 @@ describe("generic Process distribution", () => {
       target: "memory://new",
       program: "server",
       version: "v1",
-      contracts: capabilities,
+      contracts,
       now: 11,
       leaseDuration: 10,
     });
     const current = await directory.locate({
       partition,
-      operation: "write",
-      contract: dependencyOperationIdentity(write),
+      contracts,
       now: 12,
       leaseDuration: 10,
     });
@@ -589,13 +577,13 @@ describe("generic Process distribution", () => {
     let now = 0;
     const directory = createMemoryProcessDirectory();
     const transport = createMemoryDependencyTransport();
-    const capabilities = processContracts([contract]);
+    const contracts = processContracts([contract]);
     const oldMember = await directory.join({
       id: "old",
       target: "memory://old",
       program: "server",
       version: "v1",
-      contracts: capabilities,
+      contracts,
       now,
       leaseDuration: 1_000,
     });
@@ -619,12 +607,10 @@ describe("generic Process distribution", () => {
         admitProcessInvocation(directory, () => now),
       ),
     );
-    const read = contract.operations.find(({ name }) => name === "read")!;
     const partition = processPartition("server", contract, { key: "stale" }, 32);
     const current = await directory.locate({
       partition,
-      operation: "read",
-      contract: dependencyOperationIdentity(read),
+      contracts,
       now,
       leaseDuration: 100,
     });
@@ -634,15 +620,14 @@ describe("generic Process distribution", () => {
       target: "memory://next",
       program: "server",
       version: "v1",
-      contracts: capabilities,
+      contracts,
       now,
       leaseDuration: 1_000,
     });
     await directory.drain({ id: oldMember.id, failureEpoch: oldMember.failureEpoch, now });
     await directory.locate({
       partition,
-      operation: "read",
-      contract: dependencyOperationIdentity(read),
+      contracts,
       now,
       leaseDuration: 100,
     });
@@ -669,49 +654,46 @@ describe("generic Process distribution", () => {
     }
   });
 
-  test("excludes members whose operation contract is incompatible", async () => {
+  test("places work only on members with the exact whole-Program contract", async () => {
     const directory = createMemoryProcessDirectory();
-    const compatible = processContracts([contract]);
-    const incompatible = {
+    const contracts = processContracts([contract]);
+    const changed = {
       counter: {
-        ...compatible.counter,
-        read: "incompatible",
+        ...contracts.counter,
+        read: "changed",
       },
     };
     await directory.join({
-      id: "compatible",
-      target: "memory://compatible",
+      id: "current",
+      target: "memory://current",
       program: "server",
       version: "v1",
-      contracts: compatible,
+      contracts,
       now: 0,
       leaseDuration: 100,
     });
     await directory.join({
-      id: "incompatible",
-      target: "memory://incompatible",
+      id: "changed",
+      target: "memory://changed",
       program: "server",
       version: "v2",
-      contracts: incompatible,
+      contracts: changed,
       now: 0,
       leaseDuration: 100,
     });
-    const read = contract.operations.find(({ name }) => name === "read")!;
     const owner = await directory.locate({
       partition: processPartition("server", contract, { key: "one" }, 32),
-      operation: "read",
-      contract: dependencyOperationIdentity(read),
+      contracts,
       now: 1,
       leaseDuration: 10,
     });
-    expect(owner.owner).toBe("compatible");
+    expect(owner.owner).toBe("current");
 
-    await directory.drain({ id: "compatible", failureEpoch: 1, now: 2 });
+    await directory.drain({ id: "current", failureEpoch: 1, now: 2 });
     await expect(
       directory.locate({
         partition: processPartition("server", contract, { key: "one" }, 32),
-        operation: "read",
-        contract: dependencyOperationIdentity(read),
+        contracts,
         now: 2,
         leaseDuration: 10,
       }),

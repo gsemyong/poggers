@@ -32,7 +32,7 @@ TypeScript product source
 2. **Feature is the only recursive behavior-composition unit.** A Feature
    co-locates contributions for several Program kinds without coupling those
    Program languages to each other.
-3. **Program is the authored deployment unit.** Same-named compatible
+3. **Program is the authored deployment unit.** Same-named, contract-identical
    contributions link into one Program. A live replica is a Process.
 4. **Dependency is the interaction boundary.** A Dependency is provided either
    by another Feature contribution or by the selected Platform Adapter.
@@ -155,7 +155,7 @@ export default createSystem({
 });
 ```
 
-The System resolves each Application Feature role to exactly one compatible
+The System resolves each Application Feature role to exactly one matching
 concrete Feature in its Feature graph. Missing and ambiguous roles are
 compilation errors. A factory call creates a Feature instance; reusing that
 exact value exposes one semantic instance through several Applications without
@@ -174,7 +174,7 @@ values.
 
 ### Program And Process
 
-A Program is the linked result of every compatible contribution with the same
+A Program is the linked result of every contract-identical contribution with the same
 semantic name and Environment. Different names produce independently realizable
 artifacts. Feature and Application composition never rewrites Program names.
 
@@ -206,7 +206,7 @@ One complete Platform extension owns:
 
 The web Platform, for example, may own browser-main, worker, and service-worker
 Program languages; web routes, destinations, metadata, delivery, installation,
-and caching; and one or more compatible UI realizations. A DOM realization owns
+and caching; and one or more matching UI realizations. A DOM realization owns
 HTML structure and its Presentation language. A future Canvas or WebGPU
 realization may expose different structural and Presentation primitives without
 changing Feature, Program, Dependency, Application, or System.
@@ -246,7 +246,7 @@ There are two provider origins:
 1. another Feature contribution provides a portable semantic API;
 2. a Platform Adapter provides a host API still unresolved after linking.
 
-The linker rejects missing, duplicate, incompatible, and cyclic providers. Each
+The linker rejects missing, duplicate, different, and cyclic providers. Each
 Process owns one provider scope and disposes it in reverse ownership order.
 Process-local instantiation does not imply process-local data: a provider may
 connect every replica to shared infrastructure.
@@ -261,7 +261,7 @@ hierarchy, accessibility, lifecycle, and named structural Elements. JSX is a
 shared syntax and dispatch mechanism; the selected adapter determines which
 primitives exist and what their semantics are.
 
-A compatible Presentation language maps the exact structural contract to that
+A matching Presentation language maps the exact structural contract to that
 target's experiential declarations. It may read typed behavior meaning and
 target observations, but behavior cannot depend on Presentation. Another UI
 adapter may replace both structure and Presentation syntax while retaining the
@@ -469,14 +469,14 @@ different operations:
   Platform interfaces;
 - a UI-capable Program language may use JSX to compose visible Components;
 - separately realized Programs communicate through typed Dependencies;
-- a compatible Presentation language enriches the exact structural contract
+- a matching Presentation language enriches the exact structural contract
   owned by its Platform.
 
 The compiler assigns every concrete Feature value a stable source identity.
 When the same value contributes the same headless Program through several Applications,
 linking retains one contribution and records all owning Applications. UI contributions
 are assigned to the interface whose Platform matches their Environment. This
-is semantic sharing, not heuristic deduplication by compatible type or name.
+is semantic sharing, not heuristic deduplication by similar type or name.
 
 Cross-Feature communication has one rule: composition reads an explicitly
 exposed child API, while authority or communication across separately realized
@@ -759,9 +759,10 @@ The retained compiler stores independently hashed Feature and Presentation
 units. A stale restart discards only units whose source closure changed, and
 every incremental compiler test compares the resulting IR with a clean
 compilation. Web HMR also distinguishes authored UI bodies from Presentation
-bodies: the former replaces the compatible interface while preserving Program
-state; the latter explicitly reconfigures the mounted Presentation graph and
-its generated styles without rebuilding the Program.
+bodies: the former preserves Program state only while the complete structural
+manifest remains identical; the latter explicitly reconfigures the mounted
+Presentation graph and its generated styles without rebuilding the Program.
+Any structural manifest change reloads the web Program.
 
 Generated native verification is similarly staged. Exact semantic matches use
 the bounded content-addressed cache without invoking Cargo. IR and lowering
@@ -783,18 +784,18 @@ implementations.
 Generated databases, caches, Rust targets, build output, and temporary source
 are ignored and never part of the architecture.
 
-## Compatibility
+## Exact Version Policy
 
-Kit has three compatibility boundaries:
+Kit accepts only the current source, semantic IR, Feature API, persisted
+Feature format, adapter contract, and wire protocol. There are no deprecated
+aliases, migration hooks, upcasters, version negotiation paths, or additive
+contract rollouts. A changed contract fails before execution and must be
+replaced as one coordinated revision.
 
-1. portable TypeScript accepted by the compiler;
-2. product-facing APIs exposed by Feature factories;
-3. adapter contracts connecting semantic meaning to realizations.
-
-An adapter must accept the current semantic IR version and implement every
-Platform contract it declares. Development and production realizations pass
-the same contract suites. Unsupported portable syntax is a compilation error,
-never a silent runtime fallback.
+Development and production realizations pass the same current-contract suites.
+Unsupported portable syntax, stale persisted data, stale generated IR, and
+changed remote contracts are explicit errors. HMR retains state only when the
+Platform-owned structural manifest is exactly unchanged.
 
 The package is private and pre-1.0. Public changes require the affected type,
 package, example, and release checks.

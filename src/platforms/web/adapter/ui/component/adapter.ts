@@ -130,7 +130,6 @@ type RuntimeFeature = Readonly<{
 type RuntimeSystem = Readonly<{
   metadata?: Readonly<{ name?: string }>;
   features?: Readonly<Record<string, RuntimeFeature>>;
-  applications?: Readonly<Record<string, RuntimeFeature>>;
 }>;
 
 export type RuntimeConfiguredPresentation = Readonly<{
@@ -248,7 +247,7 @@ export async function createInterfaceUI<Contract extends SystemContract>({
 }: CreateInterfaceUIOptions<Contract>): Promise<InterfaceUI> {
   const runtimeSystem = system as RuntimeSystem;
   const appPath = interfaceAppPath(interfacePath);
-  const appFeature = projectApplicationFeature(runtimeSystem, appPath, features);
+  const appFeature = projectApplicationFeature(runtimeSystem, features);
   let configuredPresentation = presentation;
   validatePresentation(configuredPresentation);
   const presentationInstance = presentationAdapter.mount({
@@ -1110,7 +1109,7 @@ function inferEmptyProgramManifest(
       visit(child, childPath);
     }
   };
-  visit(projectApplicationFeature(system, appPath, features), appPath);
+  visit(projectApplicationFeature(system, features), appPath);
   return { name, bindings: [], contributions };
 }
 
@@ -1359,7 +1358,7 @@ function componentLocalName(component: string): string {
 function resolveRuntimeFeature(system: RuntimeSystem, path: string): RuntimeFeature | undefined {
   const [root, ...segments] = path.split(".").filter(Boolean);
   if (!root) return undefined;
-  let feature = system.applications?.[root] ?? system.features?.[root];
+  let feature = system.features?.[root];
   for (const name of segments) {
     feature = feature?.features?.[name];
     if (!feature) return undefined;
@@ -1375,16 +1374,12 @@ function requireRuntimeFeature(system: RuntimeSystem, path: string): RuntimeFeat
 
 function projectApplicationFeature(
   system: RuntimeSystem,
-  appPath: string,
   bindings: Readonly<Record<string, string>> | undefined,
 ): RuntimeFeature {
-  if (!bindings || Object.keys(bindings).length === 0) {
-    return requireRuntimeFeature(system, appPath);
-  }
   return {
     features: Object.freeze(
       Object.fromEntries(
-        Object.entries(bindings)
+        Object.entries(bindings ?? {})
           .sort(([left], [right]) => left.localeCompare(right))
           .map(([role, path]) => [
             role,
@@ -1611,7 +1606,7 @@ export function createPresentationGraph(options: {
   dependencies?: PresentationDependencyManifest;
 }): RuntimePresentationGraph {
   const appPath = interfaceAppPath(options.interface);
-  const appFeature = projectApplicationFeature(options.system, appPath, options.features);
+  const appFeature = projectApplicationFeature(options.system, options.features);
   const scopeIdentities = collectPresentationScopes(appFeature, appPath);
   const scopePaths = Object.keys(scopeIdentities).sort();
   const scopeIndexes = new Map(scopePaths.map((path, index) => [path, index]));
@@ -2016,7 +2011,7 @@ async function createProgramUI(
   const owner = root ? componentOwner(root) : undefined;
   const appPath = interfaceAppPath(interfacePath);
   const api = apis[owner ?? appPath] ?? Object.freeze({});
-  const appFeature = projectApplicationFeature(system, appPath, featureBindings);
+  const appFeature = projectApplicationFeature(system, featureBindings);
 
   let disposed = false;
   const captureHotState = (): HotRenderState => {
@@ -2069,7 +2064,7 @@ function collectProgramRoots(
       visit(feature, `${owner}.${name}`);
     }
   };
-  visit(projectApplicationFeature(system, appPath, featureBindings), appPath);
+  visit(projectApplicationFeature(system, featureBindings), appPath);
   if (roots.length !== 1 && (required || roots.length > 1)) {
     throw new Error(
       `UI Program "${program}" must define exactly one root Component; found ${roots.length}.`,

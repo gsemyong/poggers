@@ -197,14 +197,12 @@ function conformDependency(
         : Reflect.apply(
             Reflect.get(implementation, operation) as (...values: unknown[]) => unknown,
             implementation,
-            contract.binding === "envelope"
-              ? [
-                  {
-                    input,
-                    invocation: providerInvocation(contract.name, contractOperation, invocation),
-                  },
-                ]
-              : [input],
+            [
+              {
+                input,
+                invocation: providerInvocation(contract.name, contractOperation, invocation),
+              },
+            ],
           );
     return conformDependencyOutput(contract.name, contractOperation, output);
   };
@@ -614,7 +612,6 @@ type RuntimeFeature = Readonly<{
 
 type RuntimeSystem = Readonly<{
   features?: Readonly<Record<string, RuntimeFeature>>;
-  applications?: Readonly<Record<string, RuntimeFeature>>;
 }>;
 
 /** Adapter-owned live interpretation of one authored Program contribution. */
@@ -1047,18 +1044,7 @@ export function planProgram(
     const definition = feature.programs?.[logicalName];
     if (definition && declarations.has(path)) runtime.set(path, { definition, children });
   };
-  const roots = new Map<string, RuntimeFeature>(sortedEntries(system.features));
-  for (const [applicationName, application] of sortedEntries(system.applications)) {
-    if (roots.has(applicationName)) {
-      throw new Error(
-        `System defines both a Feature and an Application named "${applicationName}".`,
-      );
-    }
-    roots.set(applicationName, application);
-  }
-  for (const [featureName, feature] of [...roots].sort(([left], [right]) =>
-    left.localeCompare(right),
-  )) {
+  for (const [featureName, feature] of sortedEntries(system.features)) {
     visit(feature, featureName);
   }
   if (!runtime.size) throw new Error(`System does not define Program "${name}".`);

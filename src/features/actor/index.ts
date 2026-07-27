@@ -65,7 +65,8 @@ export type ActorInfrastructureFailure =
   | Readonly<{ type: "overloaded"; retryAt?: number }>
   | Readonly<{ type: "unavailable"; retryAt?: number }>
   | Readonly<{ type: "cycle"; path: readonly Readonly<{ actor: string; key: string }>[] }>
-  | Readonly<{ type: "incompatible"; schema: string }>
+  | Readonly<{ type: "invalid"; reason: string }>
+  | Readonly<{ type: "conflict"; invocation: string }>
   | Readonly<{ type: "poisoned"; invocation: string; attempts: number }>
   | Readonly<{ type: "result-expired"; invocation: string }>;
 
@@ -149,15 +150,6 @@ type ActorReadContext<
   input: Input;
 }>;
 
-type ActorMigrationProcedure = (context: never) => object;
-
-type ActorMigrations<Model extends ActorModelDefinition> = Readonly<{
-  state?: readonly ActorMigrationProcedure[];
-  methods?: Readonly<
-    Partial<Record<Extract<keyof Model["Methods"], string>, readonly ActorMigrationProcedure[]>>
-  >;
-}>;
-
 type InputOfMethod<Method extends ActorMethodDefinition> = Method["Input"];
 type ResultOfMethod<Method extends ActorMethodDefinition> = Method["Result"];
 type FailuresOfMethod<Method extends ActorMethodDefinition> = Method["Failures"];
@@ -178,7 +170,6 @@ type ActorImplementation<Model extends ActorModelDefinition> = Readonly<{
   methods: Readonly<{
     [Name in keyof Model["Methods"]]: ActorMethodProcedure<Model, Model["Methods"][Name]>;
   }>;
-  migrations?: ActorMigrations<Model>;
 }>;
 
 type ValidActorImplementation<Model extends ActorModelDefinition> =
@@ -370,12 +361,6 @@ export namespace Actor {
   export type Error = ActorError;
   export type Failure = ActorInfrastructureFailure;
   export type Outcome<Result, Failure = never> = ActorOutcome<Result, Failure>;
-  export type StateMigration<Previous extends object, Next extends object> = (
-    context: Readonly<{ state: Readonly<Previous> }>,
-  ) => Next;
-  export type MethodMigration<Previous extends object, Next extends object> = (
-    context: Readonly<{ input: Previous }>,
-  ) => Next;
 }
 
 /**
@@ -446,7 +431,6 @@ type ActorJournalAccepted = Readonly<{
   invocation: string;
   operation: string;
   input?: object;
-  commandVersion?: number;
   at: number;
 }>;
 
@@ -460,7 +444,6 @@ type ActorJournalCompleted<Model extends ActorModelDefinition> = Readonly<{
   type: "actor.command.completed";
   invocation: string;
   state: Model["State"];
-  stateVersion?: number;
   outcome: ActorOutcome<object, object>;
   at: number;
 }>;
@@ -495,7 +478,6 @@ type ActorJournalTimerScheduled = Readonly<{
   dueAt: number;
   operation: string;
   input: object;
-  commandVersion: number;
   at: number;
 }>;
 
@@ -567,7 +549,6 @@ type ActorJournalSnapshot<Model extends ActorModelDefinition> = Readonly<{
   format: "kit.actor";
   version: 1;
   state: Model["State"];
-  stateVersion: number;
   accepted: readonly ActorJournalAccepted[];
   expired: readonly ActorJournalAccepted[];
   claims: readonly ActorJournalClaimed[];
@@ -667,7 +648,6 @@ type ActiveActorTimer = Readonly<{
   dueAt: number;
   operation: string;
   input: object;
-  commandVersion: number;
 }>;
 
 type ActorTimerSlot = {
@@ -676,12 +656,8 @@ type ActorTimerSlot = {
   dueAt: number;
   operation: string;
   input: object;
-  commandVersion: number;
   active: boolean;
 };
-
-type RuntimeStateMigration = (context: Readonly<{ state: Readonly<object> }>) => object;
-type RuntimeCommandMigration = (context: Readonly<{ input: object }>) => object;
 
 class ActorCommandFailure extends Error {
   constructor(readonly failure: object) {
@@ -860,7 +836,6 @@ function compactActorTimers(timers: readonly ActorJournalTimerEvent[]): ActorJou
 
 function actorJournalSnapshot<Model extends ActorModelDefinition>(
   journal: ActorJournal<Model>,
-  stateVersion: number,
 ): ActorJournalSnapshot<Model> {
   const settledIndex = settledActorInvocationIndex(
     journal.completed,
@@ -952,7 +927,6 @@ function actorJournalSnapshot<Model extends ActorModelDefinition>(
     format: "kit.actor",
     version: 1,
     state: journal.state,
-    stateVersion,
     accepted,
     expired,
     claims,
@@ -963,19 +937,126 @@ function actorJournalSnapshot<Model extends ActorModelDefinition>(
   };
 }
 
+function assertActorRecord(
+  value: object,
+  required: readonly string[],
+  optional: readonly string[],
+  reason: string,
+): void {
+  const keys = Object.keys(value);
+  for (const requiredField of required) {
+    let present = false;
+    for (const candidateKey of keys) {
+      if (candidateKey === requiredField) present = true;
+    }
+    if (!present) throw new ActorError({ type: "invalid", reason });
+  }
+  for (const actualKey of keys) {
+    let known = false;
+    for (const requiredCandidate of required) {
+      if (actualKey === requiredCandidate) known = true;
+    }
+    for (const optionalCandidate of optional) {
+      if (actualKey === optionalCandidate) known = true;
+    }
+    if (!known) throw new ActorError({ type: "invalid", reason });
+  }
+}
+
+function assertActorJournalEvent<Model extends ActorModelDefinition>(
+  event: ActorJournalEvent<Model>,
+): void {
+  if (event.type === "actor.registered") {
+    assertActorRecord(event, ["type", "key", "at"], [], "actor registration contract");
+  } else if (event.type === "actor.command.accepted") {
+    assertActorRecord(
+      event,
+      ["type", "invocation", "operation", "at"],
+      ["input"],
+      "actor command contract",
+    );
+  } else if (event.type === "actor.command.claimed") {
+    assertActorRecord(
+      event,
+      ["type", "invocation", "owner", "attempt", "until", "at"],
+      [],
+      "actor claim contract",
+    );
+  } else if (event.type === "actor.command.failed") {
+    assertActorRecord(event, ["type", "invocation", "failure", "at"], [], "actor failure contract");
+  } else if (event.type === "actor.command.poisoned") {
+    assertActorRecord(event, ["type", "invocation", "attempts", "at"], [], "actor poison contract");
+  } else if (event.type === "actor.timer.scheduled") {
+    assertActorRecord(
+      event,
+      ["type", "timer", "generation", "dueAt", "operation", "input", "at"],
+      [],
+      "actor timer contract",
+    );
+  } else if (event.type === "actor.timer.cancelled") {
+    assertActorRecord(event, ["type", "timer", "generation", "at"], [], "actor timer contract");
+  } else if (event.type === "actor.timer.fired") {
+    assertActorRecord(
+      event,
+      ["type", "timer", "generation", "invocation", "at"],
+      [],
+      "actor timer contract",
+    );
+  } else if (event.type === "actor.command.completed") {
+    assertActorRecord(
+      event,
+      ["type", "invocation", "state", "outcome", "at"],
+      [],
+      "actor state contract",
+    );
+  } else {
+    throw new ActorError({ type: "invalid", reason: "actor journal contract" });
+  }
+}
+
 function restoreActorSnapshot<Model extends ActorModelDefinition>(
   revision: number,
   snapshot: ActorJournalSnapshot<Model>,
-  stateMigrations: readonly RuntimeStateMigration[],
 ): ActorJournal<Model> {
+  assertActorRecord(
+    snapshot,
+    [
+      "format",
+      "version",
+      "state",
+      "accepted",
+      "expired",
+      "claims",
+      "failed",
+      "poisoned",
+      "completed",
+      "timers",
+    ],
+    [],
+    "actor snapshot contract",
+  );
   if (snapshot.format !== "kit.actor" || snapshot.version !== 1) {
-    throw new ActorError({ type: "incompatible", schema: "snapshot" });
+    throw new ActorError({ type: "invalid", reason: "actor snapshot contract" });
   }
-  const state = migrateActorState(snapshot.state, snapshot.stateVersion, stateMigrations);
+  for (const acceptedEvent of snapshot.accepted) {
+    assertActorJournalEvent<Model>(acceptedEvent);
+  }
+  for (const expiredEvent of snapshot.expired) {
+    assertActorJournalEvent<Model>(expiredEvent);
+  }
+  for (const claimEvent of snapshot.claims) assertActorJournalEvent<Model>(claimEvent);
+  for (const failedEvent of snapshot.failed) assertActorJournalEvent<Model>(failedEvent);
+  for (const poisonedEvent of snapshot.poisoned) {
+    assertActorJournalEvent<Model>(poisonedEvent);
+  }
+  for (const completedEvent of snapshot.completed) {
+    assertActorJournalEvent<Model>(completedEvent);
+  }
+  for (const timerEvent of snapshot.timers) assertActorJournalEvent<Model>(timerEvent);
   return {
     revision,
     snapshotRevision: revision,
-    state,
+    state: snapshot.state,
     accepted: snapshot.accepted,
     expired: snapshot.expired,
     pending: pendingActorInvocations(
@@ -997,7 +1078,6 @@ async function readActorJournal<Model extends ActorModelDefinition>(
   stream: string,
   key: Model["Key"],
   initialize: (context: ActorInitialContext<Model>) => Model["State"],
-  stateMigrations: readonly RuntimeStateMigration[],
   cache: ActorActivationCache<Model>,
   at: number,
 ): Promise<ActorJournal<Model>> {
@@ -1007,7 +1087,7 @@ async function readActorJournal<Model extends ActorModelDefinition>(
     if (cached === undefined) {
       const snapshot = await events.loadSnapshot({ stream });
       if (snapshot !== undefined) {
-        cached = restoreActorSnapshot(snapshot.revision, snapshot.snapshot, stateMigrations);
+        cached = restoreActorSnapshot(snapshot.revision, snapshot.snapshot);
       }
     }
     const stored = await events.read({
@@ -1039,6 +1119,7 @@ async function readActorJournal<Model extends ActorModelDefinition>(
     for (const entry of stored) {
       revision = entry.revision;
       const event = entry.event;
+      assertActorJournalEvent<Model>(event);
       if (event.type === "actor.command.accepted") {
         accepted.push(event);
         pendingCandidates.push(event);
@@ -1056,7 +1137,7 @@ async function readActorJournal<Model extends ActorModelDefinition>(
         timers.push(event);
       } else if (event.type === "actor.command.completed") {
         completed.push(event);
-        state = migrateActorState(event.state, event.stateVersion ?? 0, stateMigrations);
+        state = event.state;
       }
     }
     const pending = pendingActorInvocations(pendingCandidates, completed, failed, poisoned);
@@ -1178,7 +1259,6 @@ function activeActorTimers<Model extends ActorModelDefinition>(
           dueAt: event.dueAt,
           operation: event.operation,
           input: event.input,
-          commandVersion: event.commandVersion,
           active: true,
         });
       } else {
@@ -1186,7 +1266,6 @@ function activeActorTimers<Model extends ActorModelDefinition>(
         existing.dueAt = event.dueAt;
         existing.operation = event.operation;
         existing.input = event.input;
-        existing.commandVersion = event.commandVersion;
         existing.active = true;
       }
     } else if (existing !== undefined) {
@@ -1202,7 +1281,6 @@ function activeActorTimers<Model extends ActorModelDefinition>(
         dueAt: slot.dueAt,
         operation: slot.operation,
         input: slot.input,
-        commandVersion: slot.commandVersion,
       });
     }
   }
@@ -1234,7 +1312,7 @@ function resolveActorCommandOperation<Model extends ActorModelDefinition>(
   for (const name of names) {
     if (commands[name] === command) return name;
   }
-  throw new ActorError({ type: "incompatible", schema: "timer-command" });
+  throw new ActorError({ type: "invalid", reason: "unknown Actor reminder method" });
 }
 
 function actorTimerEvents<Model extends ActorModelDefinition>(
@@ -1242,7 +1320,6 @@ function actorTimerEvents<Model extends ActorModelDefinition>(
   intents: readonly ActorTimerIntent[],
   commands: Readonly<Partial<Record<string, RuntimeCommandHandler<Model>>>>,
   commandNames: readonly string[],
-  migrations: Readonly<Partial<Record<string, readonly RuntimeCommandMigration[]>>>,
   now: number,
 ): readonly ActorJournalTimerEvent[] {
   const events: ActorJournalTimerEvent[] = [];
@@ -1264,57 +1341,11 @@ function actorTimerEvents<Model extends ActorModelDefinition>(
         dueAt: intent.dueAt,
         operation,
         input: intent.input,
-        commandVersion: migrations[operation]?.length ?? 0,
         at: now,
       });
     }
   }
   return events;
-}
-
-function migrateActorState<Model extends ActorModelDefinition>(
-  state: Model["State"],
-  version: number,
-  migrations: readonly RuntimeStateMigration[],
-): Model["State"] {
-  if (version > migrations.length) {
-    throw new ActorError({ type: "incompatible", schema: `state:${version}` });
-  }
-  let migrated: object = state;
-  for (let current = version; current < migrations.length; current += 1) {
-    const migrate = migrations[current];
-    if (migrate === undefined) {
-      throw new ActorError({ type: "incompatible", schema: `state:${current}` });
-    }
-    migrated = migrate({ state: migrated });
-  }
-  return migrated as Model["State"];
-}
-
-function migrateActorInput(
-  accepted: ActorJournalAccepted,
-  migrations: Readonly<Partial<Record<string, readonly RuntimeCommandMigration[]>>>,
-): object | undefined {
-  const operationMigrations = migrations[accepted.operation] ?? [];
-  const version = accepted.commandVersion ?? 0;
-  if (version > operationMigrations.length) {
-    throw new ActorError({
-      type: "incompatible",
-      schema: `${accepted.operation}:${version}`,
-    });
-  }
-  let input = accepted.input;
-  for (let current = version; current < operationMigrations.length; current += 1) {
-    const migrate = operationMigrations[current];
-    if (migrate === undefined || input === undefined) {
-      throw new ActorError({
-        type: "incompatible",
-        schema: `${accepted.operation}:${current}`,
-      });
-    }
-    input = migrate({ input });
-  }
-  return input;
 }
 
 function pendingActorCommand<Model extends ActorModelDefinition>(
@@ -1405,19 +1436,17 @@ function assertMatchingActorInvocation(
   accepted: ActorJournalAccepted,
   operation: string,
   input: object | undefined,
-  migrations: Readonly<Partial<Record<string, readonly RuntimeCommandMigration[]>>>,
 ): void {
-  const migrated = migrateActorInput(accepted, migrations);
   if (
     accepted.operation === operation &&
-    ((migrated === undefined && input === undefined) ||
-      (migrated !== undefined &&
+    ((accepted.input === undefined && input === undefined) ||
+      (accepted.input !== undefined &&
         input !== undefined &&
-        JSON.stringify(migrated) === JSON.stringify(input)))
+        JSON.stringify(accepted.input) === JSON.stringify(input)))
   ) {
     return;
   }
-  throw new ActorError({ type: "incompatible", schema: accepted.invocation });
+  throw new ActorError({ type: "conflict", invocation: accepted.invocation });
 }
 
 async function executeActorCommand<Model extends ActorModelDefinition>(
@@ -1427,20 +1456,12 @@ async function executeActorCommand<Model extends ActorModelDefinition>(
   key: Model["Key"],
   commands: Readonly<Partial<Record<string, RuntimeCommandHandler<Model>>>>,
   dependencies: DependenciesOf<Model>,
-  migrations: Readonly<Partial<Record<string, readonly RuntimeCommandMigration[]>>>,
   executionContext: ExecutionContext,
 ): Promise<ActorCommandExecution<Model>> {
   return (await executionContext.run({
     scope: { kind: "actor", actor: name, key },
     async task() {
-      return await executeActorCommandInScope(
-        accepted,
-        state,
-        key,
-        commands,
-        dependencies,
-        migrations,
-      );
+      return await executeActorCommandInScope(accepted, state, key, commands, dependencies);
     },
   })) as ActorCommandExecution<Model>;
 }
@@ -1451,20 +1472,18 @@ async function executeActorCommandInScope<Model extends ActorModelDefinition>(
   key: Model["Key"],
   commands: Readonly<Partial<Record<string, RuntimeCommandHandler<Model>>>>,
   dependencies: DependenciesOf<Model>,
-  migrations: Readonly<Partial<Record<string, readonly RuntimeCommandMigration[]>>>,
 ): Promise<ActorCommandExecution<Model>> {
   const command = commands[accepted.operation];
   if (command === undefined) {
-    throw new ActorError({ type: "incompatible", schema: accepted.operation });
+    throw new ActorError({ type: "invalid", reason: `unknown Actor method ${accepted.operation}` });
   }
   const next = cloneActorState(state);
-  const input = migrateActorInput(accepted, migrations);
   const timers: ActorTimerIntent[] = [];
   try {
     const value = await command({
       key,
       state: next,
-      input,
+      input: accepted.input,
       dependencies,
       invocation: { id: accepted.invocation },
       fail(failure: object): never {
@@ -1524,9 +1543,7 @@ async function admitActorCommand<Model extends ActorModelDefinition>(
   stream: string,
   key: Model["Key"],
   initialize: (context: ActorInitialContext<Model>) => Model["State"],
-  stateMigrations: readonly RuntimeStateMigration[],
   cache: ActorActivationCache<Model>,
-  commandMigrations: Readonly<Partial<Record<string, readonly RuntimeCommandMigration[]>>>,
   name: Model["Name"],
   operation: string,
   request: RuntimeRequest<Model>,
@@ -1540,18 +1557,17 @@ async function admitActorCommand<Model extends ActorModelDefinition>(
       stream,
       key,
       initialize,
-      stateMigrations,
       cache,
       dependencies.clock.now({}),
     );
     const previous = journal.accepted.find((candidate) => candidate.invocation === invocationId);
     if (previous !== undefined) {
-      assertMatchingActorInvocation(previous, operation, request.input, commandMigrations);
+      assertMatchingActorInvocation(previous, operation, request.input);
       return invocationId;
     }
     const expired = journal.expired.find((candidate) => candidate.invocation === invocationId);
     if (expired !== undefined) {
-      assertMatchingActorInvocation(expired, operation, request.input, commandMigrations);
+      assertMatchingActorInvocation(expired, operation, request.input);
       throw new ActorError({ type: "result-expired", invocation: invocationId });
     }
     if (pendingActorCommandCount(journal) >= 1_024) {
@@ -1569,7 +1585,6 @@ async function admitActorCommand<Model extends ActorModelDefinition>(
           invocation: invocationId,
           operation,
           input: request.input,
-          commandVersion: commandMigrations[operation]?.length ?? 0,
           at: dependencies.clock.now({}),
         },
       ],
@@ -1594,9 +1609,7 @@ async function admitSerializedActorCommand<Model extends ActorModelDefinition>(
   registry: string,
   key: Model["Key"],
   initialize: (context: ActorInitialContext<Model>) => Model["State"],
-  stateMigrations: readonly RuntimeStateMigration[],
   cache: ActorActivationCache<Model>,
-  commandMigrations: Readonly<Partial<Record<string, readonly RuntimeCommandMigration[]>>>,
   name: Model["Name"],
   operation: string,
   request: RuntimeRequest<Model>,
@@ -1619,9 +1632,7 @@ async function admitSerializedActorCommand<Model extends ActorModelDefinition>(
           stream,
           key,
           initialize,
-          stateMigrations,
           cache,
-          commandMigrations,
           name,
           operation,
           request,
@@ -1638,7 +1649,6 @@ async function recordActorCommandFailure<Model extends ActorModelDefinition>(
   stream: string,
   key: Model["Key"],
   initialize: (context: ActorInitialContext<Model>) => Model["State"],
-  stateMigrations: readonly RuntimeStateMigration[],
   cache: ActorActivationCache<Model>,
   invocation: string,
   owner: string,
@@ -1650,7 +1660,6 @@ async function recordActorCommandFailure<Model extends ActorModelDefinition>(
       stream,
       key,
       initialize,
-      stateMigrations,
       cache,
       dependencies.clock.now({}),
     );
@@ -1684,7 +1693,6 @@ async function admitDueActorTimer<Model extends ActorModelDefinition>(
   stream: string,
   key: Model["Key"],
   initialize: (context: ActorInitialContext<Model>) => Model["State"],
-  stateMigrations: readonly RuntimeStateMigration[],
   cache: ActorActivationCache<Model>,
 ): Promise<boolean> {
   for (let attempt = 0; attempt < 128; attempt += 1) {
@@ -1693,7 +1701,6 @@ async function admitDueActorTimer<Model extends ActorModelDefinition>(
       stream,
       key,
       initialize,
-      stateMigrations,
       cache,
       dependencies.clock.now({}),
     );
@@ -1711,7 +1718,6 @@ async function admitDueActorTimer<Model extends ActorModelDefinition>(
           invocation,
           operation: timer.operation,
           input: timer.input,
-          commandVersion: timer.commandVersion,
           at: now,
         },
         {
@@ -1733,7 +1739,6 @@ async function snapshotActorHistory<Model extends ActorModelDefinition>(
   stream: string,
   key: Model["Key"],
   initialize: (context: ActorInitialContext<Model>) => Model["State"],
-  stateMigrations: readonly RuntimeStateMigration[],
   cache: ActorActivationCache<Model>,
 ): Promise<void> {
   const journal = await readActorJournal(
@@ -1741,7 +1746,6 @@ async function snapshotActorHistory<Model extends ActorModelDefinition>(
     stream,
     key,
     initialize,
-    stateMigrations,
     cache,
     dependencies.clock.now({}),
   );
@@ -1750,7 +1754,7 @@ async function snapshotActorHistory<Model extends ActorModelDefinition>(
     stream,
     expectedRevision: journal.snapshotRevision,
     revision: journal.revision,
-    snapshot: actorJournalSnapshot(journal, stateMigrations.length),
+    snapshot: actorJournalSnapshot(journal),
   });
   let through = journal.revision;
   if (!saved) {
@@ -1768,9 +1772,7 @@ async function drainActorCommands<Model extends ActorModelDefinition>(
   name: Model["Name"],
   key: Model["Key"],
   initialize: (context: ActorInitialContext<Model>) => Model["State"],
-  stateMigrations: readonly RuntimeStateMigration[],
   cache: ActorActivationCache<Model>,
-  commandMigrations: Readonly<Partial<Record<string, readonly RuntimeCommandMigration[]>>>,
   commands: Readonly<Partial<Record<string, RuntimeCommandHandler<Model>>>>,
   commandNames: readonly string[],
   modelDependencies: DependenciesOf<Model>,
@@ -1779,21 +1781,13 @@ async function drainActorCommands<Model extends ActorModelDefinition>(
   authority?: DependencyInvocationAuthority,
 ): Promise<ActorJournalCompleted<Model> | undefined> {
   for (let executionAttempt = 0; executionAttempt < 2_048; executionAttempt += 1) {
-    const admittedTimer = await admitDueActorTimer(
-      dependencies,
-      stream,
-      key,
-      initialize,
-      stateMigrations,
-      cache,
-    );
+    const admittedTimer = await admitDueActorTimer(dependencies, stream, key, initialize, cache);
     if (!admittedTimer) {
       const executionJournal = await readActorJournal(
         dependencies.events,
         stream,
         key,
         initialize,
-        stateMigrations,
         cache,
         dependencies.clock.now({}),
       );
@@ -1877,7 +1871,6 @@ async function drainActorCommands<Model extends ActorModelDefinition>(
             key,
             commands,
             modelDependencies,
-            commandMigrations,
             dependencies.executionContext,
           );
           if (execution.outcome.status === "failed") {
@@ -1890,7 +1883,6 @@ async function drainActorCommands<Model extends ActorModelDefinition>(
               stream,
               key,
               initialize,
-              stateMigrations,
               cache,
               pending.invocation,
               owner,
@@ -1907,7 +1899,6 @@ async function drainActorCommands<Model extends ActorModelDefinition>(
             stream,
             key,
             initialize,
-            stateMigrations,
             cache,
             dependencies.clock.now({}),
           );
@@ -1932,7 +1923,6 @@ async function drainActorCommands<Model extends ActorModelDefinition>(
                   type: "actor.command.completed",
                   invocation: pending.invocation,
                   state: execution.state,
-                  stateVersion: stateMigrations.length,
                   outcome: execution.outcome,
                   at: completedAt,
                 },
@@ -1942,7 +1932,6 @@ async function drainActorCommands<Model extends ActorModelDefinition>(
                 execution.timers,
                 commands,
                 commandNames,
-                commandMigrations,
                 completedAt,
               );
               for (const timerEvent of timerEvents) completionEvents.push(timerEvent);
@@ -1954,14 +1943,7 @@ async function drainActorCommands<Model extends ActorModelDefinition>(
               if (appended !== undefined) {
                 committed = true;
                 try {
-                  await snapshotActorHistory(
-                    dependencies,
-                    stream,
-                    key,
-                    initialize,
-                    stateMigrations,
-                    cache,
-                  );
+                  await snapshotActorHistory(dependencies, stream, key, initialize, cache);
                 } catch {
                   // Snapshotting is retried after later commits; journal state is authoritative.
                 }
@@ -1982,7 +1964,6 @@ async function scheduleActorWake<Model extends ActorModelDefinition>(
   name: Model["Name"],
   key: Model["Key"],
   initialize: (context: ActorInitialContext<Model>) => Model["State"],
-  stateMigrations: readonly RuntimeStateMigration[],
   cache: ActorActivationCache<Model>,
 ): Promise<void> {
   const journal = await readActorJournal(
@@ -1990,7 +1971,6 @@ async function scheduleActorWake<Model extends ActorModelDefinition>(
     stream,
     key,
     initialize,
-    stateMigrations,
     cache,
     dependencies.clock.now({}),
   );
@@ -2076,11 +2056,6 @@ function createActorFeature<Model extends ActorModelDefinition>(
               commands[methodName] = method as RuntimeCommandHandler<Model>;
             }
           }
-          const stateMigrations = (definition.migrations?.state ??
-            []) as readonly RuntimeStateMigration[];
-          const commandMigrations = (definition.migrations?.methods ?? {}) as Readonly<
-            Partial<Record<string, readonly RuntimeCommandMigration[]>>
-          >;
           const commandNames = Object.keys(commands);
           const registered = await registeredActorKeys(runtimeDependencies.events, registry);
           const registrations: ActorRegistrationCache = {
@@ -2091,15 +2066,7 @@ function createActorFeature<Model extends ActorModelDefinition>(
             const stream = actorStream(name, key);
             registrations.keys[actorRegistrationKey(key)] = true;
             resolveActorExecutionSlot(slots, stream);
-            await scheduleActorWake(
-              runtimeDependencies,
-              stream,
-              name,
-              key,
-              initialize,
-              stateMigrations,
-              cache,
-            );
+            await scheduleActorWake(runtimeDependencies, stream, name, key, initialize, cache);
             idleActorActivation(cache, stream, runtimeDependencies.clock.now({}));
           }
           return {
@@ -2177,9 +2144,7 @@ function createActorFeature<Model extends ActorModelDefinition>(
                             name,
                             request.key,
                             initialize,
-                            stateMigrations,
                             cache,
-                            commandMigrations,
                             commands,
                             commandNames,
                             modelDependencies,
@@ -2205,9 +2170,7 @@ function createActorFeature<Model extends ActorModelDefinition>(
                         registry,
                         request.key,
                         initialize,
-                        stateMigrations,
                         cache,
-                        commandMigrations,
                         name,
                         operation,
                         request,
@@ -2220,7 +2183,6 @@ function createActorFeature<Model extends ActorModelDefinition>(
                         name,
                         request.key,
                         initialize,
-                        stateMigrations,
                         cache,
                       );
                       return { id: invocationId };
@@ -2239,9 +2201,7 @@ function createActorFeature<Model extends ActorModelDefinition>(
                               registry,
                               request.key,
                               initialize,
-                              stateMigrations,
                               cache,
-                              commandMigrations,
                               name,
                               operation,
                               request,
@@ -2254,9 +2214,7 @@ function createActorFeature<Model extends ActorModelDefinition>(
                               name,
                               request.key,
                               initialize,
-                              stateMigrations,
                               cache,
-                              commandMigrations,
                               commands,
                               commandNames,
                               modelDependencies,
@@ -2281,7 +2239,6 @@ function createActorFeature<Model extends ActorModelDefinition>(
                         name,
                         request.key,
                         initialize,
-                        stateMigrations,
                         cache,
                       );
                       throw error;
@@ -2296,7 +2253,6 @@ function createActorFeature<Model extends ActorModelDefinition>(
                       stream,
                       request.key,
                       initialize,
-                      stateMigrations,
                       cache,
                       runtimeDependencies.clock.now({}),
                     );
@@ -2317,9 +2273,7 @@ function createActorFeature<Model extends ActorModelDefinition>(
                           name,
                           request.key,
                           initialize,
-                          stateMigrations,
                           cache,
-                          commandMigrations,
                           commands,
                           commandNames,
                           modelDependencies,
@@ -2332,7 +2286,6 @@ function createActorFeature<Model extends ActorModelDefinition>(
                           stream,
                           request.key,
                           initialize,
-                          stateMigrations,
                           cache,
                           runtimeDependencies.clock.now({}),
                         );

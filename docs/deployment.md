@@ -101,7 +101,7 @@ Deployment adapters, not a second deployment language.
 OCI conformance has two levels. The ordinary focused test verifies canonical
 layout, layer contents, target metadata, non-root execution, and every
 descriptor digest without starting a container. The production runtime smoke
-is opt-in and requires a compatible Linux Rust target plus a Docker-compatible
+is opt-in and requires a supported Linux Rust target plus an OCI
 `image load`/`run` command:
 
 ```sh
@@ -146,7 +146,7 @@ replica count then follows the ordinary plan/apply path.
   not claim multi-machine scheduling, DNS, certificate issuance, cloud
   provisioning, or multi-region consensus.
 - OCI packaging is reproducible and digest-verified. Running an OCI image still
-  requires a compatible target artifact and an OCI runtime supplied by a
+  requires a matching target artifact and an OCI runtime supplied by a
   concrete Deployment adapter.
 - The current native server adapter emits for its build host. A general
   cross-target Linux production build and a multi-machine container Deployment

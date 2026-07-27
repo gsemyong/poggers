@@ -15,7 +15,7 @@ Kit's substrate has two concepts:
 Three composition boundaries organize that meaning:
 
 1. A **Feature** collocates Program contributions and composes child Features.
-2. An **Application** selects concrete Features and exposes Platform interfaces.
+2. An **Application** declares typed Feature roles and exposes Platform interfaces.
 3. A **System** is the one company-level compilation and realization root.
 
 Platforms extend Program and Application authoring at typed adapter boundaries;
@@ -65,8 +65,7 @@ Every factory:
 - lowers portable behavior through the generic TypeScript subset;
 - packages Feature-owned Dependency providers;
 - exposes a focused testing fixture when direct semantic testing is useful;
-- documents compatibility when persisted state or calls survive source
-  revisions.
+- rejects persisted state or calls that do not match the current contract.
 
 There is no `createFeatureFactory` wrapper and no compiler registry of factory
 names. The compiler discovers the retained Feature contract and ordinary
@@ -133,12 +132,13 @@ src/
   system.spec.ts       optional cross-System behavior
 ```
 
-One Application occupies one file until its own semantic content justifies a directory.
-The Application selects concrete Feature values once and declares adapter-owned
-interfaces over that composition. Presentations are grouped by Platform because
-their authoring languages are Platform-specific. Reusable parameters, recipes,
-and typed Feature fragments stay in that Platform file until they become a
-genuine independently owned design system.
+One Application occupies one file until its own semantic content justifies a
+directory. The Application declares typed Feature roles and adapter-owned
+interfaces over them; the System owns and resolves each concrete Feature value
+once. Presentations are grouped by Platform because their authoring languages
+are Platform-specific. Reusable parameters, recipes, and typed Feature
+fragments stay in that Platform file until they become a genuine independently
+owned design system.
 
 Feature files are named by product meaning, such as `identity.tsx` or
 `tasks.tsx`; a mechanical `feature.tsx` layer adds no information. Feature
@@ -159,10 +159,11 @@ requirements, and owner-collocated native sources. A System does not maintain
 a dependency-wiring file, and Platforms do not recognize Feature names.
 
 The compiler derives operation names, modes, inputs, outputs, failures,
-heartbeats, references, and compatibility identities from the Dependency
-contract. Generated native Programs call the exact required provider methods;
-a missing method fails native compilation. No Feature-specific Rust lowering
-is allowed.
+heartbeats, references, and exact contract identities from the Dependency
+contract. Plain operation records are rejected instead of being interpreted as
+Dependencies. Generated native Programs call the exact required provider
+methods; a missing method fails native compilation. No Feature-specific Rust
+lowering is allowed.
 
 Development executes authored TypeScript when a provided Dependency promises a
 truly synchronous operation. Async-only portable Programs may execute through

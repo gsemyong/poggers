@@ -87,6 +87,27 @@ describe("architectural ownership", () => {
     expect(systemTesting).not.toMatch(/KIT_WEB_|routes\.ir\.json|WebAssetManifest/);
   });
 
+  test("keeps Applications out of executable Feature ownership", async () => {
+    const feature = await readFile(resolve(sourceRoot, "core/feature.ts"), "utf8");
+    const process = await readFile(resolve(sourceRoot, "execution/process.ts"), "utf8");
+    const compiler = await readFile(resolve(sourceRoot, "compiler/source.ts"), "utf8");
+
+    expect(feature).not.toMatch(/\bapplications\b/);
+    expect(process).not.toMatch(/\bapplications\b/);
+    expect(compiler).not.toContain("for both a Feature and an Application");
+
+    for (const file of [
+      "platforms/web/adapter/document.ts",
+      "platforms/web/adapter/pipeline.ts",
+      "platforms/web/adapter/ui/component/adapter.ts",
+    ]) {
+      const source = await readFile(resolve(sourceRoot, file), "utf8");
+      expect(source, file).not.toMatch(
+        /applications\?\.\[[^\]]+\]\s*\?\?\s*system\.features|visit\(system\.applications/,
+      );
+    }
+  });
+
   test("represents each architectural unit with one directory boundary", async () => {
     const conflicts: string[] = [];
     for (const directory of await directories(sourceRoot)) {

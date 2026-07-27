@@ -136,7 +136,7 @@ Configure the server database path with `KIT_DATA_DATABASE`. Tests can use
 
 - Search matches are deterministic, but `score` is not yet a portable relevance
   ranking guarantee.
-- Incremental projection updates, schema migrations, and event upcasters remain
-  future work.
+- Incremental projection updates remain future work. Persisted data must match
+  the current schema; this Feature exposes no migration or upcasting API.
 - Physical cross-device Turso push/pull is intentionally not part of this
   Feature. Entity owns synchronization, identity, authorization, and rejection.

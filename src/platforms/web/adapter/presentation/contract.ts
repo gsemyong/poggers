@@ -53,7 +53,7 @@ export type PresentationAdapterInstance<Language extends PresentationLanguage, T
   dispose(): void;
 };
 
-/** Web-owned realization boundary for one compatible Presentation language. */
+/** Web-owned realization boundary for one matching Presentation language. */
 export type PresentationAdapter<Language extends PresentationLanguage, Target> = {
   mount(options: {
     readonly boundary: Target;

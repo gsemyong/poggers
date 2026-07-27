@@ -257,6 +257,23 @@ describe("System compiler", { tags: ["compiler"] }, () => {
     ]);
   });
 
+  test("keeps Feature and Application names in distinct namespaces", async () => {
+    const source = sharedApplicationFeatureSystemSource().replace(
+      "applications: { customer, operations },",
+      "applications: { shared: customer, operations },",
+    );
+    const ir = compileSystem(await fixture(source));
+
+    expect(ir.apps.map(({ path }) => path)).toEqual(["operations", "shared"]);
+    expect(ir.features.map(({ path }) => path)).toEqual(["shared"]);
+    expect(ir.programs[0]?.contributions).toEqual([
+      expect.objectContaining({
+        feature: "shared",
+        apps: ["operations", "shared"],
+      }),
+    ]);
+  });
+
   test("emits byte-identical System IR for Feature and Application placement permutations", async () => {
     const top = ["shared", "operationsService", "customerService"] as const;
     const app = ["service", "web"] as const;
@@ -300,7 +317,7 @@ describe("System compiler", { tags: ["compiler"] }, () => {
     ]);
   });
 
-  test("rejects one Program name assigned to incompatible execution contexts", async () => {
+  test("rejects one Program name assigned to different execution contexts", async () => {
     const entry = await fixture(
       systemSource().replace(
         'type Child = { Programs: { cloud: Program<{ Name: "server"; Platform: { Name: "server" } }> } };',
@@ -316,7 +333,7 @@ describe("System compiler", { tags: ["compiler"] }, () => {
     }
     expect(failure).toBeInstanceOf(SystemDiagnostic);
     expect(String(failure)).toMatch(
-      /system\.ts:\d+:\d+: Program "cloud" has incompatible execution contexts "device" and "server"/,
+      /system\.ts:\d+:\d+: Program "cloud" has different execution contexts "device" and "server"/,
     );
   });
 
@@ -564,7 +581,11 @@ export const clean = ({ parameters }: { parameters: { sheet: unknown } }) => ({
     const writes: unknown[] = [];
     await executeProgramIR(ir, "feature/worker/program/cloud", {
       numbers: { read: async () => [1, 2, 3], offset: () => 4 },
-      output: { write: async (input) => writes.push(input) },
+      output: {
+        async write({ input }) {
+          writes.push(input);
+        },
+      },
     });
     expect(writes).toEqual([{ category: "large", value: 10 }]);
 
@@ -577,21 +598,14 @@ export const clean = ({ parameters }: { parameters: { sheet: unknown } }) => ({
     expect(() => compileSystem(unawaited)).toThrow(/must be awaited/);
   });
 
-  test("extracts a semantic Dependency's consumer operations and provider binding", async () => {
+  test("extracts a semantic Dependency's consumer and provider contract", async () => {
     const source = systemSource().replace(
-      `type Numbers = {
-  read(input: { count: number }): Promise<readonly number[]>;
-};`,
-      `declare const dependencyDefinition: unique symbol;
-type DependencyDefinition = Readonly<{
-  Operations: Readonly<Record<string, (input: never) => unknown>>;
-  Failures?: Readonly<Record<string, object>>;
-  Heartbeats?: Readonly<Record<string, unknown>>;
-}>;
-type Dependency<Definition extends DependencyDefinition> = Readonly<
-  Definition["Operations"] & { readonly [dependencyDefinition]: Definition }
->;
-type Numbers = Dependency<{
+      `type Numbers = Dependency<{
+  Operations: {
+    read(input: { count: number }): Promise<readonly number[]>;
+  };
+}>;`,
+      `type Numbers = Dependency<{
   Operations: {
     read(input: { count: number }): Promise<readonly number[]>;
   };
@@ -610,7 +624,6 @@ type Numbers = Dependency<{
 
     expect(numbers).toEqual({
       name: "numbers",
-      binding: "envelope",
       failures: {
         kind: "record",
         fields: [
@@ -685,13 +698,21 @@ type Numbers = Dependency<{
     expect(collectProgramManifest(program).bindings).toEqual([
       {
         name: "numbers",
-        binding: "envelope",
         operations: [
           expect.objectContaining({
             name: "read",
             mode: "asynchronous",
             failures: numbers?.failures,
             heartbeat: numbers?.heartbeats?.[0]?.type,
+          }),
+        ],
+      },
+      {
+        name: "output",
+        operations: [
+          expect.objectContaining({
+            name: "write",
+            mode: "asynchronous",
           }),
         ],
       },
@@ -709,7 +730,11 @@ type Numbers = Dependency<{
           return [context.input.count];
         },
       },
-      output: { write: async (input) => void writes.push(input) },
+      output: {
+        async write({ input }) {
+          writes.push(input);
+        },
+      },
     });
     expect(invocations).toEqual([
       {
@@ -780,9 +805,31 @@ type Numbers = Dependency<{
     const writes: unknown[] = [];
     await executeProgramIR(ir, "feature/worker/program/cloud", {
       numbers: { read: async () => [1, 2, 3] },
-      output: { write: async (input) => void writes.push(input) },
+      output: {
+        async write({ input }) {
+          writes.push(input);
+        },
+      },
     });
     expect(writes).toEqual([{ category: "small", value: 6 }]);
+  });
+
+  test("rejects plain operation records in place of semantic Dependencies", async () => {
+    const source = systemSource().replace(
+      `type Numbers = Dependency<{
+  Operations: {
+    read(input: { count: number }): Promise<readonly number[]>;
+  };
+}>;`,
+      `type Numbers = {
+  read(input: { count: number }): Promise<readonly number[]>;
+};`,
+    );
+    const entry = await fixture(source);
+
+    expect(() => compileSystem(entry)).toThrow(
+      'Dependency "numbers" must use the semantic Dependency type.',
+    );
   });
 
   test("preserves a recursive static function reference without expanding it recursively", async () => {
@@ -820,7 +867,11 @@ const child = createFeature<Child>`,
     const writes: unknown[] = [];
     await executeProgramIR(ir, "feature/worker/program/cloud", {
       numbers: { read: async () => [1, 2, 3] },
-      output: { write: async (input) => void writes.push(input) },
+      output: {
+        async write({ input }) {
+          writes.push(input);
+        },
+      },
     });
     expect(writes).toEqual([{ category: "small", value: 6 }]);
   });
@@ -888,7 +939,11 @@ const child = createFeature<Child>`,
           yield { revision: 3 };
         },
       },
-      output: { write: async (input) => writes.push(input) },
+      output: {
+        async write({ input }) {
+          writes.push(input);
+        },
+      },
     });
     expect(writes).toEqual([{ revision: 2 }]);
   });
@@ -932,7 +987,11 @@ const child = createFeature<Child>`,
     const writes: unknown[] = [];
     await executeProgramIR(ir, "feature/worker/program/cloud", {
       numbers: { read: async () => [] },
-      output: { write: async (input) => writes.push(input) },
+      output: {
+        async write({ input }) {
+          writes.push(input);
+        },
+      },
     });
     expect(writes).toEqual([{ category: "large", value: 10 }]);
   });
@@ -989,14 +1048,18 @@ const child = createFeature<Child>`,
     const writes: unknown[] = [];
     await executeProgramIR(ir, "feature/worker/program/cloud", {
       numbers: {
-        async read({ count }: { count: number }) {
+        async read({ input: { count } }: { input: { count: number } }) {
           calls.push(count);
           if (count === 3) return slow;
           if (count === 6) throw new Error("expected rejection");
           return [count];
         },
       },
-      output: { write: async (input) => writes.push(input) },
+      output: {
+        async write({ input }) {
+          writes.push(input);
+        },
+      },
     });
     resolveSlow([3]);
 
@@ -1039,7 +1102,11 @@ const child = createFeature<Child>`,
     const writes: unknown[] = [];
     await executeProgramIR(ir, "feature/worker/program/cloud", {
       numbers: { read: async () => [] },
-      output: { write: async (input) => writes.push(input) },
+      output: {
+        async write({ input }) {
+          writes.push(input);
+        },
+      },
     });
     expect(writes).toEqual([{ category: "small", value: 5 }]);
   });
@@ -1100,10 +1167,12 @@ const child = createFeature<Child>`,
   test("expands standard mapped types into their portable semantic shape", async () => {
     const entry = await fixture(
       systemSource()
-        .replace("type Numbers = {", "type Numbers = Readonly<{")
-        .replace("};\ntype Output = {", "}>;\ntype Output = {")
-        .replace("input: { count: number }", "input: Readonly<{ count: number }>")
-        .replace("Promise<readonly number[]>", "Promise<ReadonlyArray<number>>"),
+        .replace("Operations: {\n    read", "Operations: Readonly<{\n    read")
+        .replace(
+          "Promise<readonly number[]>;\n  };\n}>;\ntype Output",
+          "Promise<ReadonlyArray<number>>;\n  }>;\n}>;\ntype Output",
+        )
+        .replace("input: { count: number }", "input: Readonly<{ count: number }>"),
     );
     const numbers = programContribution(
       compileSystem(entry),
@@ -1442,7 +1511,7 @@ const child = createFeature<Child>`,
 
     await using _execution = await executeLinkedProgramIR(linkProgram(program), {
       output: {
-        async write(input) {
+        async write({ input }) {
           writes.push(input);
         },
       },
@@ -1488,7 +1557,7 @@ const child = createFeature<Child>`,
     const execution = await executeProgramIR(ir, "feature/worker/program/cloud", {
       numbers: { read: async () => [1, 2, 3, 4] },
       output: {
-        async write(input) {
+        async write({ input }) {
           writes.push(input);
         },
       },
@@ -1533,7 +1602,11 @@ const child = createFeature<Child>`,
     const writes: unknown[] = [];
     await executeProgramIR(ir, "feature/worker/program/cloud", {
       numbers: { read: async () => [2, 4, 6] },
-      output: { write: async (input) => writes.push(input) },
+      output: {
+        async write({ input }) {
+          writes.push(input);
+        },
+      },
     });
     expect(writes).toEqual([{ category: "large", value: 12 }]);
   });
@@ -1600,7 +1673,7 @@ const child = createFeature<Child>`,
         },
       },
       output: {
-        async write(input) {
+        async write({ input }) {
           writes.push(input);
         },
       },
@@ -1650,7 +1723,7 @@ const child = createFeature<Child>`,
         },
       },
       output: {
-        async write(input) {
+        async write({ input }) {
           writes.push(input);
         },
       },
@@ -1811,6 +1884,10 @@ function compositionTypes(): string {
   return `
 declare const featureContract: unique symbol;
 declare const applicationContract: unique symbol;
+declare const dependencyDefinition: unique symbol;
+type Dependency<Definition extends { Operations: object }> = Readonly<
+  Definition["Operations"] & { readonly [dependencyDefinition]?: Definition }
+>;
 type Feature<C> = Readonly<{ readonly [featureContract]?: C }>;
 type Application<C> = Readonly<{
   readonly interfaces: object;
@@ -1838,11 +1915,12 @@ function createSystem(definition: object): object {
 function typeLiteralFactorySystemSource(): string {
   return `
 import { createSystem, type Feature } from "@/index";
+import type { Dependency } from "@/index";
 import { typeLiteral } from "@/factory";
 import type { ServerPlatform } from "@/platforms/server";
 
 type Server = { Name: "server"; Platform: ServerPlatform };
-type Reader = { read(input: {}): Promise<string> };
+type Reader = Dependency<{ Operations: { read(input: {}): Promise<string> } }>;
 type Model = { Name: string };
 type NamedFeature<Definition extends Model> = {
   Programs: {
@@ -1870,7 +1948,7 @@ function createNamedServer<Definition extends Model>(
           const name = identity();
           return {
             [name]: {
-              async read(_input: {}) {
+              async read(_context: { input: {} }) {
                 return value;
               },
             },
@@ -1892,13 +1970,14 @@ function typeSchemaFactorySystemSource(): string {
   return `
 import {
   createSystem,
+  type Dependency,
   type Feature,
 } from "@/index";
 import { typeLiteral, typeSchema } from "@/factory";
 import type { ServerPlatform } from "@/platforms/server";
 
 type Server = { Name: "server"; Platform: ServerPlatform };
-type Reader = { describe(input: {}): Promise<object> };
+type Reader = Dependency<{ Operations: { describe(input: {}): Promise<object> } }>;
 type Model = { Name: string; Data: object };
 type SchemaFeature<Definition extends Model> = {
   Programs: {
@@ -1917,7 +1996,7 @@ function createSchemaFeature<Definition extends Model>(): Feature<SchemaFeature<
           const name = typeLiteral<Definition["Name"]>();
           return {
             [name]: {
-              async describe(_input: {}) {
+              async describe(_context: { input: {} }) {
                 return typeSchema<Definition["Data"]>() as object;
               },
             },
@@ -1955,9 +2034,11 @@ type Math = Dependency<{
     triple(input: { value: number }): Promise<number>;
   };
 }>;
-type Output = {
-  write(input: { doubled: number; tripled: number }): Promise<void>;
-};
+type Output = Dependency<{
+  Operations: {
+    write(input: { doubled: number; tripled: number }): Promise<void>;
+  };
+}>;
 type Provider = {
   Programs: { server: { Environment: Server; Provides: { math: Math } } };
 };
@@ -2022,13 +2103,15 @@ export default createSystem({
 
 function sharedHostDependencySystemSource(): string {
   return `
-import { createSystem, type Feature } from "@/index";
+import { createSystem, type Dependency, type Feature } from "@/index";
 import type { ServerPlatform } from "@/platforms/server";
 
 type Server = { Name: "server"; Platform: ServerPlatform };
-type EventStore<Event = object> = {
-  append(input: { events: readonly Event[] }): Promise<void>;
-};
+type EventStore<Event = object> = Dependency<{
+  Operations: {
+    append(input: { events: readonly Event[] }): Promise<void>;
+  };
+}>;
 type Model = { Event: object };
 type Slice<Definition extends Model> = {
   Programs: {
@@ -2068,10 +2151,6 @@ type Environment = { readonly Name: "server"; readonly Platform: Platform };
 type Program<E extends Environment, C extends object = {}> = Readonly<C & { Environment: E }>;
 ${compositionTypes()}
 
-declare const dependencyDefinition: unique symbol;
-type Dependency<Definition extends { Operations: object }> = Readonly<
-  Definition["Operations"] & { readonly [dependencyDefinition]: Definition }
->;
 type Output = Dependency<{
   Operations: { write(input: { value: string }): Promise<void> };
 }>;
@@ -2114,11 +2193,13 @@ export default createSystem({ features: { worker } });
 
 function throwingSystemSource(): string {
   return `
-import { createFeature, createSystem } from "@/index";
+import { createFeature, createSystem, type Dependency } from "@/index";
 import type { ServerPlatform } from "@/platforms/server";
 
 type Server = { Name: "server"; Platform: ServerPlatform };
-type Output = { write(input: { value: string }): Promise<void> };
+type Output = Dependency<{
+  Operations: { write(input: { value: string }): Promise<void> };
+}>;
 type Worker = {
   Programs: {
     server: { Environment: Server; Requires: { output: Output } };
@@ -2148,12 +2229,16 @@ type Environment = { readonly Name: string; readonly Platform: Platform; readonl
 type Program<E extends Environment, C extends object = {}> = Readonly<C & { Environment: E }>;
 ${compositionTypes()}
 
-type Numbers = {
-  read(input: { count: number }): Promise<readonly number[]>;
-};
-type Output = {
-  write(input: { category: "large" | "small"; value: number }): Promise<void>;
-};
+type Numbers = Dependency<{
+  Operations: {
+    read(input: { count: number }): Promise<readonly number[]>;
+  };
+}>;
+type Output = Dependency<{
+  Operations: {
+    write(input: { category: "large" | "small"; value: number }): Promise<void>;
+  };
+}>;
 type Child = { Programs: { cloud: Program<{ Name: "server"; Platform: { Name: "server" } }> } };
 type Worker = {
   Programs: {
@@ -2163,10 +2248,6 @@ type Worker = {
     >;
   };
   Features: { child: Child };
-};
-type App = {
-  Features: { child: Child; worker: Worker };
-  Presentations: "rich" | "plain";
 };
 
 const child = createFeature<Child>({ programs: { cloud: {} } });
@@ -2204,14 +2285,17 @@ type Platform = { readonly Name: "server" };
 type Environment = { readonly Name: "server"; readonly Platform: Platform };
 type Program<E extends Environment, C extends object = {}> = Readonly<C & { Environment: E }>;
 ${compositionTypes()}
-type Changes = { subscribe(input: {}): AsyncIterable<{ revision: number }> };
-type Output = { write(input: { revision: number }): Promise<void> };
+type Changes = Dependency<{
+  Operations: { subscribe(input: {}): AsyncIterable<{ revision: number }> };
+}>;
+type Output = Dependency<{
+  Operations: { write(input: { revision: number }): Promise<void> };
+}>;
 type Worker = {
   Programs: {
     cloud: Program<Environment, { Requires: { changes: Changes; output: Output } }>;
   };
 };
-type App = { Features: { worker: Worker } };
 
 const worker = createFeature<Worker>({
   programs: {
@@ -2330,7 +2414,6 @@ type Orders = {
 type Jobs = {
   Programs: { worker: Program<Server>; "browser-worker": Program<BrowserWorker> };
 };
-type App = { Features: { orders: Orders; jobs: Jobs } };
 
 const shared = createFeature<Shared>({ programs: { api: {}, "browser-worker": {} } });
 const orders = createFeature<Orders>({
@@ -2504,12 +2587,14 @@ type Tasks = {
     server: Program<
       { Name: "server"; Platform: { Name: "server" } },
       {
-        Requires: { repository: { read(input: {}): Promise<readonly string[]> } };
+        Requires: { repository: Repository };
       }
     >;
   };
 };
-type App = { Features: { tasks: Tasks } };
+type Repository = Dependency<{
+  Operations: { read(input: {}): Promise<readonly string[]> };
+}>;
 
 function countTasks<Values extends readonly string[]>(values: Values): number {
   return values.length;
@@ -2517,7 +2602,7 @@ function countTasks<Values extends readonly string[]>(values: Values): number {
 
 function createTasksFeature<const Name extends string>(name: Name, implementation: {
   run(input: {
-    dependencies: { repository: { read(input: {}): Promise<readonly string[]> } };
+    dependencies: { repository: Repository };
   }): Promise<void>;
 }): Feature<Tasks> {
   return {
@@ -2561,7 +2646,6 @@ type Data = {
     >;
   };
 };
-type App = { Features: { data: Data } };
 declare function createData(): Feature<Data>;
 
 export default createSystem({
@@ -2577,12 +2661,13 @@ type Platform = { readonly Name: "server" };
 type Environment = { readonly Name: "server"; readonly Platform: Platform };
 type Program<E, C extends object = {}> = Readonly<C & { Environment: E }>;
 ${compositionTypes()}
-type Repository = { read(input: {}): Promise<readonly string[]> };
+type Repository = Dependency<{
+  Operations: { read(input: {}): Promise<readonly string[]> };
+}>;
 type Child = {
   Programs: { api: Program<Environment, { Requires: { repository: Repository } }> };
 };
 type Parent = { Features: { child: Child } };
-type App = { Features: { parent: Parent } };
 
 function createChild() {
   return createFeature<Child>({
@@ -2612,7 +2697,9 @@ type Environment = { readonly Name: string; readonly Platform: Platform };
 type Program<E extends Environment, C extends object = {}> = Readonly<C & { Environment: E }>;
 ${compositionTypes()}
 
-type Repository = { read(input: {}): Promise<readonly string[]> };
+type Repository = Dependency<{
+  Operations: { read(input: {}): Promise<readonly string[]> };
+}>;
 type Tasks = {
   Programs: {
     server: Program<
@@ -2621,7 +2708,6 @@ type Tasks = {
     >;
   };
 };
-type App = { Features: { tasks: Tasks } };
 
 function defineServerFeature<Contract>(threshold: number): Feature<Tasks> {
   const server = {
@@ -2650,10 +2736,6 @@ type Environment = { readonly Name: "server"; readonly Platform: Platform };
 type Program<E extends Environment, C extends object = {}> = Readonly<C & { Environment: E }>;
 ${compositionTypes()}
 
-declare const dependencyDefinition: unique symbol;
-type Dependency<Definition extends { Operations: object }> = Readonly<
-  Definition["Operations"] & { readonly [dependencyDefinition]: Definition }
->;
 type Output = Dependency<{
   Operations: { write(input: { value: string }): Promise<void> };
 }>;

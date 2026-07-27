@@ -97,13 +97,18 @@ test("rejects unknown external Dependencies and host source before Cargo", async
       system: "invalid",
       cache: resolve(directory, "cache"),
       directory,
-      output: resolve(directory, "incompatible"),
+      output: resolve(directory, "mismatched"),
       program: {
         ...program,
         contributions: [
           {
             ...program.contributions[0]!,
-            requires: [{ name: "clock", type: { kind: "primitive", name: "number" } }],
+            requires: [
+              {
+                name: "clock",
+                type: { kind: "primitive", name: "number" },
+              },
+            ],
           },
         ],
       },
@@ -232,7 +237,7 @@ test(
               async read() {
                 return input;
               },
-              async record(value: unknown) {
+              async record({ input: value }: Readonly<{ input: unknown }>) {
                 reference.push(value);
               },
             },
@@ -601,7 +606,7 @@ test.skipIf(spawnSync("nats-server", ["--version"], { stdio: "ignore" }).status 
         nextAmount: 5,
         nextDelay: 2_000,
       },
-      { KIT_PROCESS_VERSION: "compatible-v2" },
+      { KIT_PROCESS_VERSION: "implementation-v2" },
     );
     await expect
       .poll(async () => (await recordedActorValues(output, replicas.get("p4"))).includes(10), {
@@ -752,6 +757,10 @@ function networkRecorderDependency() {
 function compositionSource(): string {
   return `
 declare const featureContract: unique symbol;
+declare const dependencyDefinition: unique symbol;
+type Dependency<Definition extends { Operations: object }> = Readonly<
+  Definition["Operations"] & { readonly [dependencyDefinition]?: Definition }
+>;
 type Feature<Contract> = Readonly<{ readonly [featureContract]?: Contract }>;
 function createFeature<Contract>(definition: object): Feature<Contract> {
   return definition as Feature<Contract>;
@@ -770,31 +779,27 @@ type Platform = { readonly Name: "server" };
 type Environment = { readonly Name: "server"; readonly Platform: Platform };
 type Program<E extends Environment, C extends object = {}> = Readonly<C & { Environment: E }>;
 ${compositionSource()}
-declare const dependencyDefinition: unique symbol;
-type DependencyDefinition = Readonly<{
-  Operations: Readonly<Record<string, (input: never) => unknown>>;
-}>;
-type Dependency<Definition extends DependencyDefinition> = Readonly<
-  Definition["Operations"] & { readonly [dependencyDefinition]: Definition }
->;
 type Formatter = Dependency<{
   Operations: {
     format(input: { value: string }): Promise<string>;
   };
 }>;
-type Recorder = {
-  read(input: {}): Promise<{ left: number; right: number }>;
-  record(input: { value: string }): Promise<void>;
-};
-type Peer = {
-  read(input: {}): string;
-  readPeer(input: {}): string;
-};
+type Recorder = Dependency<{
+  Operations: {
+    read(input: {}): Promise<{ left: number; right: number }>;
+    record(input: { value: string }): Promise<void>;
+  };
+}>;
+type Peer = Dependency<{
+  Operations: {
+    read(input: {}): Promise<string>;
+    readPeer(input: {}): Promise<string>;
+  };
+}>;
 type Formatting = { Programs: { worker: Program<Environment, { Requires: { recorder: Recorder }; Provides: { formatter: Formatter } }> } };
 type Left = { Programs: { worker: Program<Environment, { Requires: { right: Peer }; Provides: { left: Peer } }> } };
 type Right = { Programs: { worker: Program<Environment, { Requires: { left: Peer }; Provides: { right: Peer } }> } };
 type Consumer = { Programs: { worker: Program<Environment, { Requires: { formatter: Formatter; left: Peer; recorder: Recorder; right: Peer } }> } };
-type App = { Features: { formatting: Formatting; left: Left; right: Right; consumer: Consumer } };
 
 const stableSuffix = (value: string): string => \`${"${value}"}!\`;
 
@@ -860,8 +865,8 @@ const left = createFeature<Left>({
             read(_input: {}) {
               return "left";
             },
-            readPeer(_input: {}) {
-              return dependencies.right.read({});
+            async readPeer(_input: {}) {
+              return await dependencies.right.read({});
             },
           },
         };
@@ -878,8 +883,8 @@ const right = createFeature<Right>({
             read(_input: {}) {
               return "right";
             },
-            readPeer(_input: {}) {
-              return dependencies.left.read({});
+            async readPeer(_input: {}) {
+              return await dependencies.left.read({});
             },
           },
         };
@@ -906,7 +911,7 @@ const consumer = createFeature<Consumer>({
         computed[selected] = value;
         await dependencies.recorder.record({ value: computed[selected] });
         await dependencies.recorder.record({
-          value: \`${"${dependencies.left.readPeer({})}"}:${"${dependencies.right.readPeer({})}"}\`,
+          value: \`${"${await dependencies.left.readPeer({})}"}:${"${await dependencies.right.readPeer({})}"}\`,
         });
       },
     },
@@ -1467,22 +1472,25 @@ type Environment = { readonly Name: "server"; readonly Platform: Platform };
 type Program<E extends Environment, C extends object = {}> = Readonly<C & { Environment: E }>;
 ${compositionSource()}
 type StoredEvent = { stream: string; revision: number; event: { value: string } };
-type Events = {
-  read(input: {
-    stream: string;
-    after?: number;
-    limit?: number;
-  }): Promise<readonly StoredEvent[]>;
-  append(input: { stream: string; expectedRevision: number; events: readonly { value: string }[] }): Promise<readonly StoredEvent[] | undefined>;
-  subscribe(input: { stream: string; after?: number }): AsyncIterable<StoredEvent>;
-};
+type Events = Dependency<{
+  Operations: {
+    read(input: {
+      stream: string;
+      after?: number;
+      limit?: number;
+    }): Promise<readonly StoredEvent[]>;
+    append(input: { stream: string; expectedRevision: number; events: readonly { value: string }[] }): Promise<readonly StoredEvent[] | undefined>;
+    subscribe(input: { stream: string; after?: number }): AsyncIterable<StoredEvent>;
+  };
+}>;
 type Command = { action: string; stream: string; expectedRevision: number; after: number; value: string };
-type Recorder = {
-  read(input: {}): Promise<Command>;
-  record(input: { value: string }): Promise<void>;
-};
+type Recorder = Dependency<{
+  Operations: {
+    read(input: {}): Promise<Command>;
+    record(input: { value: string }): Promise<void>;
+  };
+}>;
 type Worker = { Programs: { worker: Program<Environment, { Requires: { events: Events; recorder: Recorder } }> } };
-type App = { Features: { worker: Worker } };
 
 const worker = createFeature<Worker>({
   programs: {

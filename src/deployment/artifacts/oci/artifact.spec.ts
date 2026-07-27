@@ -118,7 +118,7 @@ describe("OCI Release packaging", () => {
   });
 
   test.skipIf(!process.env.KIT_OCI_RUNTIME)(
-    "loads and runs a compatible Linux Release in an OCI runtime",
+    "loads and runs a supported Linux Release in an OCI runtime",
     { tags: ["production"], timeout: 120_000 },
     async () => {
       const fixture = await linuxOciFixture();

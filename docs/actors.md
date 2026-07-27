@@ -179,7 +179,8 @@ belong to the Dependency runtime and do not change durable Actor semantics.
 - Named reminders are durable, one-shot, replaceable, cancellable, and
   generation-fenced. Recurrence is expressed by scheduling the next typed
   method from the current method.
-- State and method inputs support typed forward migrations.
+- Persisted snapshots, state, command inputs, and reminders must match the
+  current Actor contract. Historical shapes are rejected.
 - At most 1,024 write methods may remain pending for one key. Further admission
   fails with `overloaded`.
 
@@ -227,10 +228,10 @@ health, readiness, active calls, configured capacity, owned partitions, and
 generic routing, admission, retry, rejection, failure, and ownership-move
 counters. These are deployment operations, not Actor methods.
 
-Compatibility is negotiated independently for each compiler-derived
-Dependency operation. A rollout may add unrelated methods without
-disqualifying compatible calls; changing an operation's input, output,
-heartbeat, failures, or mode excludes that replica before execution.
+Every replica advertises the exact compiler-derived Dependency set for its
+Program. Placement admits only replicas with an identical whole-Program
+contract; adding, removing, or changing an operation requires one coordinated
+replacement.
 Membership-renewal or transport-listener loss fails the replica closed.
 Graceful drain stops admission, waits for bounded in-flight work, releases
 ownership, and leaves membership.

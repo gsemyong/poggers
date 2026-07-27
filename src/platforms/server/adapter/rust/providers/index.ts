@@ -5,9 +5,7 @@ import {
   type DependencyIR,
   type DependencyOperationIR,
 } from "@/compiler/ir";
-import type { ServerProviderConfiguration, ServerProviderProduction } from "@/platforms/server";
-
-export type ServerProductionConfiguration = ServerProviderConfiguration;
+import type { ServerProviderProduction } from "@/platforms/server";
 
 /**
  * Production implementation metadata for one semantic server Dependency.

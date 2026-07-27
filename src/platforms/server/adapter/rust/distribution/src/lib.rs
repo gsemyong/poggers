@@ -44,6 +44,7 @@ pub enum DistributionOperationMode {
 #[derive(Clone, Debug)]
 pub struct DistributionContract {
     pub name: &'static str,
+    pub identity: &'static str,
     pub bindings: Vec<&'static str>,
     pub operations: Vec<DistributionOperation>,
 }
@@ -152,7 +153,7 @@ impl NatsDirectory {
             || !configuration.allow_direct
         {
             return Err(invalid(
-                "The existing JetStream stream is incompatible with Process distribution.",
+                "The existing JetStream stream does not match Process distribution.",
             ));
         }
         Ok(Self {
@@ -240,15 +241,12 @@ impl NatsDirectory {
     async fn locate(
         &self,
         partition: &ProcessPartition,
-        operation: &str,
-        contract: &str,
+        contracts: &BTreeMap<String, BTreeMap<String, String>>,
         now: f64,
         lease_duration: f64,
     ) -> NativeResult<ProcessOwnership> {
-        self.update(|state| {
-            state.locate(partition.clone(), operation, contract, now, lease_duration)
-        })
-        .await
+        self.update(|state| state.locate(partition.clone(), contracts, now, lease_duration))
+            .await
     }
 
     async fn assert_authority(&self, authority: &ProcessAuthority, now: f64) -> NativeResult<()> {
@@ -912,8 +910,8 @@ impl ProcessRouter {
             .ok_or_else(|| {
                 protocol("Dependency operation is unavailable on the target Process.")
             })?;
-        if operation.identity != request.contract {
-            return Err(protocol("Dependency operation contract is incompatible."));
+        if contract.identity != request.contract {
+            return Err(protocol("Dependency contract does not match."));
         }
         validate_wire_invocation(&request.invocation)?;
         let input = Value::from_canonical_json(&request.input);
@@ -1241,7 +1239,7 @@ impl ProcessRouter {
             version: 1,
             dependency: contract.name.to_owned(),
             operation: operation.name.to_owned(),
-            contract: operation.identity.to_owned(),
+            contract: contract.identity.to_owned(),
             invocation: WireInvocation {
                 id: invocation.id.clone(),
                 attempt: invocation.attempt,
@@ -1543,13 +1541,7 @@ impl DependencyRouter for ProcessRouter {
                 partition_count,
             )?;
             let ownership = directory
-                .locate(
-                    &partition,
-                    operation.name,
-                    operation.identity,
-                    now_millis(),
-                    ownership_lease,
-                )
+                .locate(&partition, &member.contracts, now_millis(), ownership_lease)
                 .await?;
             let authority = ProcessAuthority {
                 scope: ownership.partition.scope.clone(),
@@ -1743,8 +1735,7 @@ impl DirectoryState {
     fn locate(
         &mut self,
         partition: ProcessPartition,
-        operation: &str,
-        contract: &str,
+        contracts: &BTreeMap<String, BTreeMap<String, String>>,
         now: f64,
         lease_duration: f64,
     ) -> NativeResult<ProcessOwnership> {
@@ -1756,17 +1747,13 @@ impl DirectoryState {
             .filter(|member| {
                 member.program == partition.program
                     && member.status == MemberStatus::Active
-                    && member
-                        .contracts
-                        .get(&partition.dependency)
-                        .and_then(|operations| operations.get(operation))
-                        .is_some_and(|identity| identity == contract)
+                    && &member.contracts == contracts
             })
             .cloned()
             .collect::<Vec<_>>();
         let winner = rendezvous_owner(&partition.scope, &candidates).ok_or_else(|| {
             placement(format!(
-                "No active Process supports {}.{operation}.",
+                "No active Process has the exact contract for {}.",
                 partition.dependency
             ))
         })?;
@@ -2313,6 +2300,7 @@ mod tests {
         };
         DistributionContract {
             name: "service",
+            identity: "service-v1",
             bindings: vec!["key"],
             operations: vec![
                 DistributionOperation {
@@ -2523,7 +2511,6 @@ mod tests {
         });
         engine.provide(
             &["service"],
-            &["service"],
             Value::record([(
                 "service".to_owned(),
                 Value::record([(
@@ -2547,6 +2534,7 @@ mod tests {
     fn matches_the_typescript_utf16_partition_hash() {
         let contract = DistributionContract {
             name: "counter",
+            identity: "counter-v1",
             bindings: vec!["key"],
             operations: Vec::new(),
         };
@@ -2576,7 +2564,7 @@ mod tests {
         assert_eq!(second.failure_epoch, 1);
 
         let located = directory
-            .locate(partition(7), "add", "contract", 1.0, 20.0)
+            .locate(partition(7), &first.contracts, 1.0, 20.0)
             .expect("locate");
         let authority = ProcessAuthority {
             scope: located.partition.scope.clone(),
@@ -2598,7 +2586,7 @@ mod tests {
             "StaleProcessAuthorityError"
         );
         let relocated = directory
-            .locate(partition(7), "add", "contract", 2.0, 20.0)
+            .locate(partition(7), &first.contracts, 2.0, 20.0)
             .expect("relocate");
         assert_ne!(relocated.owner, located.owner);
         assert!(relocated.epoch > located.epoch);
@@ -2624,7 +2612,7 @@ mod tests {
         assert_eq!(renewed.failure_epoch, member.failure_epoch);
         assert_eq!(renewed.expires_at, 15.0);
         let ownership = directory
-            .locate(partition(1), "add", "contract", 5.0, 5.0)
+            .locate(partition(1), &member.contracts, 5.0, 5.0)
             .expect("locate");
         let authority = ProcessAuthority {
             scope: ownership.partition.scope.clone(),
@@ -2643,53 +2631,53 @@ mod tests {
     }
 
     #[test]
-    fn places_only_operation_compatible_versions_and_accepts_additive_rollouts() {
+    fn places_only_members_with_the_exact_whole_program_contract() {
         let mut directory = DirectoryState::default();
-        let compatible = BTreeMap::from([(
+        let contracts = BTreeMap::from([(
             "service".to_owned(),
             BTreeMap::from([("work".to_owned(), "work-v1".to_owned())]),
         )]);
-        let incompatible = BTreeMap::from([(
+        let changed = BTreeMap::from([(
             "service".to_owned(),
             BTreeMap::from([("work".to_owned(), "work-v2".to_owned())]),
         )]);
         let first = directory
             .join(
-                registration_with("first", "first-target", compatible.clone()),
+                registration_with("first", "first-target", contracts.clone()),
                 0.0,
                 100.0,
             )
-            .expect("join compatible member");
+            .expect("join current member");
         directory
             .join(
-                registration_with("second", "second-target", incompatible),
+                registration_with("second", "second-target", changed),
                 0.0,
                 100.0,
             )
-            .expect("join incompatible member");
+            .expect("join changed member");
         let partition = ProcessPartition {
-            scope: "rollout-partition".to_owned(),
+            scope: "contract-partition".to_owned(),
             program: "server".to_owned(),
             dependency: "service".to_owned(),
             partition: 1,
         };
         let placed = directory
-            .locate(partition.clone(), "work", "work-v1", 1.0, 10.0)
-            .expect("place compatible operation");
+            .locate(partition.clone(), &contracts, 1.0, 10.0)
+            .expect("place current contract");
         assert_eq!(placed.owner, first.id);
 
         directory
             .drain(&first.id, first.failure_epoch, 2.0)
-            .expect("drain compatible member");
+            .expect("drain current member");
         assert_eq!(
             directory
-                .locate(partition.clone(), "work", "work-v1", 2.0, 10.0)
-                .expect_err("incompatible member is excluded")
+                .locate(partition.clone(), &contracts, 2.0, 10.0)
+                .expect_err("changed member is excluded")
                 .name,
             "ProcessPlacementError"
         );
 
-        let additive = BTreeMap::from([(
+        let extra_operation = BTreeMap::from([(
             "service".to_owned(),
             BTreeMap::from([
                 ("inspect".to_owned(), "inspect-v1".to_owned()),
@@ -2698,15 +2686,32 @@ mod tests {
         )]);
         let next = directory
             .join(
-                registration_with("next", "next-target", additive),
+                registration_with("next", "next-target", extra_operation),
                 3.0,
                 100.0,
             )
-            .expect("join additive member");
+            .expect("join extra-operation member");
+        assert_eq!(
+            directory
+                .locate(partition.clone(), &contracts, 3.0, 10.0)
+                .expect_err("extra-operation member is excluded")
+                .name,
+            "ProcessPlacementError"
+        );
+        directory
+            .drain(&next.id, next.failure_epoch, 4.0)
+            .expect("drain extra-operation member");
+        let exact = directory
+            .join(
+                registration_with("exact", "exact-target", contracts.clone()),
+                4.0,
+                100.0,
+            )
+            .expect("join exact member");
         let placed = directory
-            .locate(partition, "work", "work-v1", 3.0, 10.0)
-            .expect("place additive compatible operation");
-        assert_eq!(placed.owner, next.id);
+            .locate(partition, &contracts, 4.0, 10.0)
+            .expect("place exact contract");
+        assert_eq!(placed.owner, exact.id);
     }
 
     #[tokio::test]

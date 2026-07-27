@@ -18,10 +18,7 @@ export {
   defineServerProductionDependency,
   jetStreamEventsDependency,
 } from "@/platforms/server/adapter/rust/providers";
-export type {
-  ServerProductionConfiguration,
-  ServerProductionDependency,
-} from "@/platforms/server/adapter/rust/providers";
+export type { ServerProductionDependency } from "@/platforms/server/adapter/rust/providers";
 
 export type ServerPlatformAdapter = PlatformAdapter<ServerPlatform>;
 export type ServerPlatformAdapterOptions = ServerDevelopmentOptions &

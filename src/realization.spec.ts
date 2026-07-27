@@ -694,7 +694,7 @@ type Service = {
   };
 };
 type Web = { Interface: { Platform: { Name: "web" } } };
-type App = {
+type Application = {
   Features: { service: Service };
   Interfaces: { web: Web };
 };
@@ -704,7 +704,7 @@ export const ${name}Service = createFeature<Service>({
 const web = createInterface<Web>({
   presentation: { parameters: {}, create() { return {}; } },
 });
-export const ${name} = createApplication<App>({
+export const ${name} = createApplication<Application>({
   interfaces: { web },
 });
 `;

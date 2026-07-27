@@ -397,66 +397,15 @@ export function createWebHotReplacementManifest(ir: SystemIR): WebHotReplacement
   return { revision: stableWebHash(JSON.stringify(programs)), programs };
 }
 
-/** Applies web Component/state compatibility rules to an otherwise opaque hot update. */
-export function isWebHotReplacementCompatible(
+/** Returns whether two revisions carry exactly the same web-owned structural meaning. */
+export function sameWebHotReplacementManifest(
   previous: WebHotReplacementManifest,
   next: WebHotReplacementManifest,
 ): boolean {
-  const previousPrograms = new Map(previous.programs.map((program) => [program.id, program]));
-  for (const program of next.programs) {
-    const before = previousPrograms.get(program.id);
-    if (!before) continue;
-    if (JSON.stringify(before.environment) !== JSON.stringify(program.environment)) return false;
-    if (before.state && program.state && !compatibleWebType(before.state, program.state)) {
-      return false;
-    }
-    if (Boolean(before.state) !== Boolean(program.state)) return false;
-    const beforeComponents = new Map(
-      before.components.map((component) => [component.name, component]),
-    );
-    for (const component of program.components) {
-      const previousComponent = beforeComponents.get(component.name);
-      if (previousComponent && !compatibleWebComponent(previousComponent, component)) return false;
-    }
-  }
-  return true;
-}
-
-function compatibleWebComponent(
-  previous: WebComponentContractIR,
-  next: WebComponentContractIR,
-): boolean {
   return (
-    JSON.stringify(previous.propCallbacks) === JSON.stringify(next.propCallbacks) &&
-    compatibleWebType(previous.state, next.state) &&
-    JSON.stringify(previous.elements) === JSON.stringify(next.elements)
+    previous.revision === next.revision &&
+    JSON.stringify(previous.programs) === JSON.stringify(next.programs)
   );
-}
-
-function compatibleWebType(previous: TypeIR, next: TypeIR): boolean {
-  if (previous.kind !== next.kind) return false;
-  if (previous.kind === "record" && next.kind === "record") {
-    const fields = new Map(next.fields.map((field) => [field.name, field]));
-    return previous.fields.every((field) => {
-      const candidate = fields.get(field.name);
-      return candidate
-        ? field.optional === candidate.optional && compatibleWebType(field.type, candidate.type)
-        : true;
-    });
-  }
-  if (previous.kind === "array" && next.kind === "array") {
-    return compatibleWebType(previous.element, next.element);
-  }
-  if (previous.kind === "option" && next.kind === "option") {
-    return compatibleWebType(previous.value, next.value);
-  }
-  if (previous.kind === "promise" && next.kind === "promise") {
-    return compatibleWebType(previous.value, next.value);
-  }
-  if (previous.kind === "stream" && next.kind === "stream") {
-    return compatibleWebType(previous.element, next.element);
-  }
-  return JSON.stringify(previous) === JSON.stringify(next);
 }
 
 function stableWebHash(value: string): string {
@@ -1782,19 +1731,13 @@ function validateCompiledRouteIR(value: ExtensionIR, index: number): void {
 
 function validateCompiledDependencyIR(value: ExtensionIR, owner: string): DependencyIR {
   const dependency = extensionRecord(value, owner);
-  assertExtensionKeys(
-    dependency,
-    ["name", "type"],
-    ["binding", "failures", "heartbeats", "reference"],
-    owner,
-  );
+  assertExtensionKeys(dependency, ["name", "type"], ["failures", "heartbeats", "reference"], owner);
   if (
     typeof dependency.name !== "string" ||
     !identifier.test(dependency.name) ||
     !dependency.type ||
     typeof dependency.type !== "object" ||
     Array.isArray(dependency.type) ||
-    (dependency.binding !== undefined && dependency.binding !== "envelope") ||
     (dependency.failures !== undefined &&
       (typeof dependency.failures !== "object" || Array.isArray(dependency.failures))) ||
     (dependency.heartbeats !== undefined && !Array.isArray(dependency.heartbeats))

@@ -375,7 +375,7 @@ describe("Deployment planning", () => {
     expect(adapter.removes).toBe(1);
   });
 
-  test("rejects incompatible, unsafe, and unknown bindings", () => {
+  test("rejects mismatched, unsafe, and unknown bindings", () => {
     const adapter = memoryAdapter();
     const release = deploymentRelease("release-1", "program-1", false);
 

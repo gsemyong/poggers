@@ -4,6 +4,7 @@ import { expect, test } from "vitest";
 import {
   SYSTEM_IR_VERSION,
   assertSystemIRVersion,
+  dependencyContractIdentity,
   dependencyOperationIdentity,
   selectDependencyProviders,
   serializeSystemIR,
@@ -154,7 +155,7 @@ const repository: DependencyIR = {
 
 test("links internal providers and external Dependencies in dependency order", () => {
   const program = fixtureProgram([
-    contribution("consumer", [repository, { name: "clock", type: numberType }]),
+    contribution("consumer", [repository, dependency("clock", numberType)]),
     contribution("provider", [], [repository]),
   ]);
 
@@ -165,9 +166,9 @@ test("links internal providers and external Dependencies in dependency order", (
     "consumer",
   ]);
   expect(linked.contributions[1]?.dependencies).toEqual(["provider"]);
-  expect(linked.external).toEqual([{ name: "clock", type: numberType }]);
+  expect(linked.external).toEqual([dependency("clock", numberType)]);
   expect(linked.dependencies).toEqual([
-    { name: "clock", type: numberType, consumers: ["consumer"] },
+    { ...dependency("clock", numberType), consumers: ["consumer"] },
     {
       name: "repository",
       type: repository.type,
@@ -181,7 +182,7 @@ test("links the same Program identically for every contribution permutation", ()
   const values = [
     contribution("projection", [repository]),
     contribution("repository", [], [repository]),
-    contribution("telemetry", [{ name: "clock", type: numberType }]),
+    contribution("telemetry", [dependency("clock", numberType)]),
   ];
   const expected = linkProgram(fixtureProgram(values));
 
@@ -199,7 +200,7 @@ test("links the same Program identically for every contribution permutation", ()
   );
 });
 
-test("rejects duplicate providers and incompatible contracts while linking provider cycles", () => {
+test("rejects duplicate providers and different contracts while linking provider cycles", () => {
   expect(() =>
     linkProgram(
       fixtureProgram([
@@ -216,7 +217,7 @@ test("rejects duplicate providers and incompatible contracts while linking provi
         contribution("provider", [], [repository]),
       ]),
     ),
-  ).toThrow(/incompatible contracts/);
+  ).toThrow(/different contracts/);
   expect(() =>
     linkProgram(
       fixtureProgram([
@@ -232,20 +233,12 @@ test("rejects duplicate providers and incompatible contracts while linking provi
         contribution("provider", [], [repository]),
       ]),
     ),
-  ).toThrow(/incompatible contracts/);
+  ).toThrow(/different contracts/);
 
   const linked = linkProgram(
     fixtureProgram([
-      contribution(
-        "left",
-        [{ name: "right", type: numberType }],
-        [{ name: "left", type: numberType }],
-      ),
-      contribution(
-        "right",
-        [{ name: "left", type: numberType }],
-        [{ name: "right", type: numberType }],
-      ),
+      contribution("left", [dependency("right", numberType)], [dependency("left", numberType)]),
+      contribution("right", [dependency("left", numberType)], [dependency("right", numberType)]),
     ]),
   );
   expect(linked.contributions.map(({ contribution }) => contribution.feature)).toEqual([
@@ -253,6 +246,10 @@ test("rejects duplicate providers and incompatible contracts while linking provi
     "right",
   ]);
 });
+
+function dependency(name: string, type: TypeIR): DependencyIR {
+  return { name, type };
+}
 
 test("derives collision-free Dependency operation identities from canonical meaning", () => {
   const first: TypeIR = {
@@ -291,6 +288,20 @@ test("derives collision-free Dependency operation identities from canonical mean
       heartbeat: { kind: "record", fields: [] },
     }),
   ).not.toBe(dependencyOperationIdentity(operation));
+
+  const contract = {
+    name: "records",
+    operations: [operation],
+  };
+  expect(dependencyContractIdentity(contract)).toBe(
+    dependencyContractIdentity({ ...contract, operations: [...contract.operations].reverse() }),
+  );
+  expect(
+    dependencyContractIdentity({
+      ...contract,
+      operations: [...contract.operations, { ...operation, name: "inspect" }],
+    }),
+  ).not.toBe(dependencyContractIdentity(contract));
 });
 
 test("treats function parameter names as documentation rather than contract identity", () => {

@@ -112,8 +112,11 @@ export function createFeature<Contract extends FeatureContract>(
 
 type RuntimeFeatureProviderOwner = Readonly<{
   features?: Readonly<Record<string, RuntimeFeatureProviderOwner>>;
-  applications?: Readonly<Record<string, RuntimeFeatureProviderOwner>>;
   providers?: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
+}>;
+
+type RuntimeFeatureProviderSystem = Readonly<{
+  features?: Readonly<Record<string, RuntimeFeatureProviderOwner>>;
 }>;
 
 /**
@@ -123,13 +126,11 @@ type RuntimeFeatureProviderOwner = Readonly<{
  * recovers the corresponding runtime implementation after loading a System.
  */
 export function resolveFeatureProvider<Provider>(
-  system: RuntimeFeatureProviderOwner,
+  system: RuntimeFeatureProviderSystem,
   input: Readonly<{ feature: string; platform: string; dependency: string }>,
 ): Provider {
   const [root, ...path] = input.feature.split(".").filter(Boolean);
-  let owner = root
-    ? (system.applications?.[root] ?? system.features?.[root])
-    : (system as RuntimeFeatureProviderOwner | undefined);
+  let owner = root ? system.features?.[root] : undefined;
   for (const name of path) {
     owner = owner?.features?.[name];
     if (!owner) {

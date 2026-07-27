@@ -81,8 +81,7 @@ export type ProcessDirectory = Readonly<{
   locate(
     input: Readonly<{
       partition: ProcessPartition;
-      operation: string;
-      contract: string;
+      contracts: ProcessContracts;
       now: number;
       leaseDuration: number;
     }>,
@@ -133,6 +132,23 @@ export function processContracts(contracts: readonly DependencyContractIR[]): Pr
       ]),
     ),
   );
+}
+
+function sameProcessContracts(previous: ProcessContracts, next: ProcessContracts): boolean {
+  const previousDependencies = Object.keys(previous);
+  const nextDependencies = Object.keys(next);
+  if (previousDependencies.length !== nextDependencies.length) return false;
+  for (const dependency of previousDependencies) {
+    const previousOperations = previous[dependency];
+    const nextOperations = next[dependency];
+    if (previousOperations === undefined || nextOperations === undefined) return false;
+    const previousNames = Object.keys(previousOperations);
+    if (previousNames.length !== Object.keys(nextOperations).length) return false;
+    for (const operation of previousNames) {
+      if (previousOperations[operation] !== nextOperations[operation]) return false;
+    }
+  }
+  return true;
 }
 
 /** Stable logical partition for one identity-bound Dependency invocation. */
@@ -291,12 +307,12 @@ export function createMemoryProcessDirectory(): ProcessDirectory {
         (member) =>
           member.program === input.partition.program &&
           member.status === "active" &&
-          member.contracts[input.partition.dependency]?.[input.operation] === input.contract,
+          sameProcessContracts(member.contracts, input.contracts),
       );
       const winner = rendezvousOwner(input.partition.scope, candidates);
       if (!winner) {
         throw new ProcessPlacementError(
-          `No active Process supports ${input.partition.dependency}.${input.operation}.`,
+          `No active Process has the exact contract for ${input.partition.dependency}.`,
         );
       }
       const previous = ownership.get(input.partition.scope);
@@ -365,6 +381,7 @@ export function createMemoryProcessDirectory(): ProcessDirectory {
 export type RoutedDependencyOptions = Readonly<{
   program: string;
   member: Readonly<{ id: string; failureEpoch: number }>;
+  contracts: ProcessContracts;
   contract: DependencyContractIR;
   local: object;
   directory: ProcessDirectory;
@@ -414,8 +431,7 @@ export function createRoutedDependency(options: RoutedDependencyOptions): unknow
       );
       const ownership = await options.directory.locate({
         partition,
-        operation: operation.name,
-        contract: dependencyOperationIdentity(operation),
+        contracts: options.contracts,
         now: options.now(),
         leaseDuration: options.ownershipLease,
       });
@@ -632,6 +648,7 @@ export async function startProcessDistribution(
       return createRoutedDependency({
         program,
         member,
+        contracts: processContracts(contracts),
         contract,
         local,
         directory: config.directory,
@@ -697,8 +714,13 @@ export async function startProcessDistribution(
         ({ scope }) => input.scope === undefined || input.scope === scope,
       );
       for (const authority of authorities) {
-        await config.directory.releaseOwnership({ authority, now: config.now() });
-        ownership.delete(authority.scope);
+        try {
+          await config.directory.releaseOwnership({ authority, now: config.now() });
+        } catch (error) {
+          if (!(error instanceof StaleProcessAuthorityError)) throw error;
+        } finally {
+          ownership.delete(authority.scope);
+        }
       }
     },
     drain() {

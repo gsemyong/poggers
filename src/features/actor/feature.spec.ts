@@ -3,7 +3,6 @@ import { resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { dependencyOperationIdentity } from "@/compiler/ir";
 import { collectProgramManifest, linkProgram } from "@/compiler/linker";
 import { compileSystem } from "@/compiler/source";
 import { dependencyInvocation, invokeDependency } from "@/core/dependency";
@@ -323,12 +322,9 @@ describe("Actor", () => {
       replicas.push(replica);
       return replica;
     };
-    const accountContract = collectProgramManifest(server).bindings.find(
-      ({ name }) => name === "account",
-    );
+    const manifest = collectProgramManifest(server);
+    const accountContract = manifest.bindings.find(({ name }) => name === "account");
     if (!accountContract) throw new Error("Actor fixture has no account contract.");
-    const balanceOperation = accountContract.operations.find(({ name }) => name === "balance");
-    if (!balanceOperation) throw new Error("Actor fixture has no account balance operation.");
     type Account = Readonly<{
       get(input: Readonly<{ key: string }>): Readonly<{
         deposit(
@@ -356,6 +352,9 @@ describe("Actor", () => {
 
       await start("two");
       await start("three");
+      const contracts = (await directory.membership({ program: "server", now: 0 })).members[0]
+        ?.contracts;
+      if (!contracts) throw new Error("Actor fixture has no distributed Process contract.");
       const APIs = replicas.map(({ execution }) => execution.dependencies.account as Account);
       for (let index = 0; index < 24; index += 1) {
         await APIs[index % APIs.length]!.get({ key: `partitioned-${index}` }).deposit(
@@ -370,8 +369,7 @@ describe("Actor", () => {
       const partition = processPartition("server", accountContract, { key: "distributed" }, 64);
       const owner = await directory.locate({
         partition,
-        operation: "balance",
-        contract: dependencyOperationIdentity(balanceOperation),
+        contracts,
         now: 0,
         leaseDuration: 100,
       });
@@ -449,17 +447,16 @@ describe("Actor", () => {
       await start("two");
       await start("three");
 
-      const reminderContract = collectProgramManifest(server).bindings.find(
-        ({ name }) => name === "reminder",
-      );
+      const manifest = collectProgramManifest(server);
+      const reminderContract = manifest.bindings.find(({ name }) => name === "reminder");
       if (!reminderContract) throw new Error("Actor fixture has no reminder contract.");
-      const wake = reminderContract.operations.find(({ name }) => name === "$wake");
-      if (!wake) throw new Error("Actor fixture has no internal reminder wake operation.");
+      const contracts = (await directory.membership({ program: "server", now })).members[0]
+        ?.contracts;
+      if (!contracts) throw new Error("Actor fixture has no distributed Process contract.");
       const partition = processPartition("server", reminderContract, { key }, 64);
       const owner = await directory.locate({
         partition,
-        operation: wake.name,
-        contract: dependencyOperationIdentity(wake),
+        contracts,
         now,
         leaseDuration: 100,
       });
@@ -920,14 +917,12 @@ describe("Actor", () => {
           invocation,
           operation: "deposit",
           input: { amount: 1 },
-          commandVersion: 0,
           at: balance * 2 - 1,
         },
         {
           type: "actor.command.completed",
           invocation,
           state: { balance },
-          stateVersion: 0,
           outcome: { status: "succeeded", value: { balance } },
           at: balance * 2,
         },
@@ -1063,14 +1058,12 @@ describe("Actor", () => {
           invocation,
           operation: "deposit",
           input: { amount: 1 },
-          commandVersion: 0,
           at: balance * 2 - 1,
         },
         {
           type: "actor.command.completed",
           invocation,
           state: { balance },
-          stateVersion: 0,
           outcome: { status: "succeeded", value: { balance } },
           at: balance * 2,
         },
@@ -1132,7 +1125,7 @@ describe("Actor", () => {
     await expect(recovered.balance({ key })).resolves.toEqual({ balance: 130 });
   });
 
-  it("recovers and migrates durably accepted work from an old compacted snapshot", async () => {
+  it("rejects a historical compacted snapshot instead of migrating it", async () => {
     const server = actorFixtureServer();
     const events = createMemoryEventStore<object>();
     const key = "snapshot-pending-ledger";
@@ -1181,11 +1174,10 @@ describe("Actor", () => {
         input: { amount: 5, expectedRevision: 0 },
         idempotencyKey: "pending-from-snapshot",
       }),
-    ).resolves.toEqual({
-      status: "succeeded",
-      value: { balance: 5, revision: 1 },
+    ).rejects.toMatchObject({
+      name: "ActorError",
+      failure: { type: "invalid", reason: "actor snapshot contract" },
     });
-    await expect(ledger.snapshot({ key })).resolves.toEqual({ balance: 5, revision: 1 });
   });
 
   it("lets commands carry stable invocation identity into idempotent effects", async () => {
@@ -1707,7 +1699,6 @@ describe("Actor", () => {
           invocation: "idempotency:failed-over-deposit",
           operation: "deposit",
           input: { amount: 11 },
-          commandVersion: 0,
           at: 1,
         },
         {
@@ -1820,7 +1811,6 @@ describe("Actor", () => {
           invocation: "existing-0",
           operation: "deposit",
           input: { amount: 1 },
-          commandVersion: 0,
           at: 1,
         },
         {
@@ -1836,7 +1826,6 @@ describe("Actor", () => {
           invocation: `existing-${index + 1}`,
           operation: "deposit",
           input: { amount: 1 },
-          commandVersion: 0,
           at: 1,
         })),
       ],
@@ -1901,7 +1890,6 @@ describe("Actor", () => {
           invocation: "idempotency:poison",
           operation: "deposit",
           input: { amount: 1 },
-          commandVersion: 0,
           at: 1,
         },
         ...Array.from({ length: 3 }, (_, index) => ({
@@ -2184,7 +2172,6 @@ describe("Actor", () => {
       dueAt: 500,
       operation: "wake",
       input: { generation: 1, at: 500, interval: 0, remaining: 1 },
-      commandVersion: 0,
       at: 100,
     };
     await events.append({ stream, expectedRevision: 0, events: [scheduled] });
@@ -2201,7 +2188,6 @@ describe("Actor", () => {
         format: "kit.actor",
         version: 1,
         state: { due: 500, fired: 0 },
-        stateVersion: 0,
         accepted: [],
         expired: [],
         claims: [],
@@ -2410,7 +2396,7 @@ describe("Actor", () => {
     ).toHaveLength(3);
   });
 
-  it("migrates durable state and accepted command input before execution", async () => {
+  it("rejects historical command journal fields", async () => {
     const server = actorFixtureServer();
     const events = createMemoryEventStore<object>();
     const key = "ledger-1";
@@ -2459,34 +2445,13 @@ describe("Actor", () => {
     });
     const ledger = execution.dependencies.ledger as LedgerApi;
 
-    await expect(
-      ledger.credit({
-        key,
-        input: { amount: 3, expectedRevision: 0 },
-        idempotencyKey: "old-pending",
-      }),
-    ).resolves.toEqual({
-      status: "succeeded",
-      value: { balance: 8, revision: 1 },
+    await expect(ledger.snapshot({ key })).rejects.toMatchObject({
+      name: "ActorError",
+      failure: { type: "invalid", reason: "actor command contract" },
     });
-    await expect(ledger.snapshot({ key })).resolves.toEqual({
-      balance: 8,
-      revision: 1,
-    });
-    await expect(events.read({ stream })).resolves.toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          event: expect.objectContaining({
-            type: "actor.command.completed",
-            invocation: "idempotency:old-pending",
-            stateVersion: 1,
-          }),
-        }),
-      ]),
-    );
   });
 
-  it("fails activation when persisted state is newer than the authored migrations", async () => {
+  it("rejects historical state journal fields", async () => {
     const server = actorFixtureServer();
     const events = createMemoryEventStore<object>();
     const key = "future-account";
@@ -2517,7 +2482,7 @@ describe("Actor", () => {
 
     await expect(account.balance({ key })).rejects.toMatchObject({
       name: "ActorError",
-      failure: { type: "incompatible", schema: "state:1" },
+      failure: { type: "invalid", reason: "actor state contract" },
     });
   });
 });

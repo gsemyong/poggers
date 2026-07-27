@@ -253,18 +253,56 @@ export function invokeDependency(
   invocation: DependencyInvocation,
 ): unknown {
   const invoke = (dependency as Partial<MountedDependency>)[dependencyInvocation];
-  if (typeof invoke === "function") {
-    return invoke.call(dependency, operation, input, invocation);
+  if (typeof invoke !== "function") {
+    throw new Error(
+      `Dependency operation ${JSON.stringify(operation)} is not mounted through the runtime boundary.`,
+    );
   }
-  const method = Reflect.get(dependency, operation);
+  return invoke.call(dependency, operation, input, invocation);
+}
+
+function invokeUncheckedProvider(
+  implementation: object,
+  operation: string,
+  input: unknown,
+  invocation: DependencyInvocation,
+): unknown {
+  const method = Reflect.get(implementation, operation);
   if (typeof method !== "function") {
     throw new Error(`Dependency operation ${JSON.stringify(operation)} is not implemented.`);
   }
-  return Reflect.apply(method, dependency, [input]);
+  const control = invocation[dependencyInvocationControl];
+  const { [dependencyInvocationControl]: _control, ...metadata } = invocation;
+  return Reflect.apply(method, implementation, [
+    {
+      input,
+      invocation: {
+        ...metadata,
+        ...(control?.previousHeartbeat === undefined
+          ? {}
+          : { previousHeartbeat: control.previousHeartbeat }),
+        heartbeat({ details }: Readonly<{ details: unknown }>) {
+          control?.heartbeat(details);
+        },
+        cancellation: {
+          requested: () => control?.cancellation.requested() ?? false,
+          wait: () => control?.cancellation.wait() ?? new Promise<void>(() => undefined),
+        },
+        fail(failure: {
+          type: string;
+          data: unknown;
+          message?: string;
+          retry?: Readonly<{ delay: number }>;
+        }): never {
+          throw new DependencyFailureError(failure);
+        },
+      },
+    },
+  ]);
 }
 
 /**
- * @internal Projects a provider envelope to its consumer API without compiler
+ * @internal Projects a typed provider context to its consumer API without compiler
  * conformance. Focused Feature fixtures use this only after provider typing has
  * already been checked; realized Programs use compiler-derived contracts.
  */
@@ -274,44 +312,34 @@ export function createUncheckedDependencyClient<Api extends DependencyContract>(
   let sequence = 0;
   return new Proxy(Object.create(null) as object, {
     get(_target, property) {
+      if (property === dependencyInvocation) {
+        return (operation: string, input: unknown, invocation: DependencyInvocation) =>
+          invokeUncheckedProvider(implementation, operation, input, invocation);
+      }
       if (typeof property !== "string") return Reflect.get(implementation, property);
       const operation = Reflect.get(implementation, property);
       if (typeof operation !== "function") return operation;
       return (input: unknown) => {
         const now = Date.now();
-        return Reflect.apply(operation, implementation, [
-          {
-            input,
-            invocation: {
-              id: `fixture:${property}:${++sequence}`,
-              attempt: 1,
-              scheduledAt: now,
-              startedAt: now,
-              heartbeat() {},
-              cancellation: {
-                requested: () => false,
-                wait: () => new Promise<void>(() => undefined),
-              },
-              fail(failure: {
-                type: string;
-                data: unknown;
-                message?: string;
-                retry?: Readonly<{ delay: number }>;
-              }): never {
-                throw new DependencyFailureError(failure);
-              },
-            },
-          },
-        ]);
+        return invokeUncheckedProvider(implementation, property, input, {
+          id: `fixture:${property}:${++sequence}`,
+          attempt: 1,
+          scheduledAt: now,
+          startedAt: now,
+        });
       };
     },
     getOwnPropertyDescriptor(_target, property) {
+      if (property === dependencyInvocation) {
+        return { configurable: true, enumerable: false };
+      }
       const descriptor = Reflect.getOwnPropertyDescriptor(implementation, property);
       return descriptor ? { ...descriptor, configurable: true } : undefined;
     },
     getPrototypeOf: () => Reflect.getPrototypeOf(implementation),
-    has: (_target, property) => Reflect.has(implementation, property),
-    ownKeys: () => Reflect.ownKeys(implementation),
+    has: (_target, property) =>
+      property === dependencyInvocation || Reflect.has(implementation, property),
+    ownKeys: () => [...Reflect.ownKeys(implementation), dependencyInvocation],
   }) as Api;
 }
 

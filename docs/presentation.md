@@ -162,7 +162,7 @@ pressure-test both:
 | Editorial grid using logical line and span placement           | Pass             | Pass                                                                         |
 | Editorial grid using reusable named areas                      | Pass             | Fail                                                                         |
 | Vertical typography with logical spacing                       | Pass             | Pass                                                                         |
-| Multi-line text truncation                                     | Pass             | Pass through semantic `maxLines` and adapter-owned compatibility lowering    |
+| Multi-line text truncation                                     | Pass             | Pass through semantic `maxLines` and adapter-owned browser lowering          |
 | Snapping collection with logical container/item alignment      | Pass             | Pass                                                                         |
 | Scrollbar size, visibility, and theme                          | Pass             | Pass                                                                         |
 | Touch-driven virtual scroller                                  | Pass             | Delegated to Component behavior                                              |
@@ -205,8 +205,8 @@ Style queries are an artifact mechanism unless a future fixture proves a
 semantic condition that parameters, Component state, and typed environment
 conditions cannot express.
 
-Compatibility artifacts such as the currently necessary prefixed multi-line
-clamp mechanism are adapter output. They are not additional public spellings.
+Browser-specific artifacts such as the prefixed multi-line clamp mechanism are
+adapter output. They are not additional public spellings.
 
 CSS is a family of evolving modules, not one closed property list. The
 [CSS Snapshot 2026](https://www.w3.org/TR/css-2026/) is the standards-level overview.
@@ -245,7 +245,7 @@ Do not add:
 - framework-specific theme or recipe primitives;
 - runtime browser objects in authored Presentation.
 
-Those options would make translation, optimization, compatibility analysis, and
+Those options would make translation, optimization, conformance analysis, and
 the single-way invariant unverifiable.
 
 ## Coverage Contract

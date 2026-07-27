@@ -130,9 +130,9 @@ type NormalizedDeclaredSystemContract<Contract extends SystemDefinitionContract>
   Applications: SystemApplicationSpecifications<Contract>;
 }>;
 type SystemFeatureRoot<Contract> = Readonly<{ Features: FeaturesOf<Contract> }>;
-type DeclaredSystemConflict<Contract extends SystemDefinitionContract> =
-  | Extract<keyof FeaturesOf<Contract>, keyof SystemApplicationSpecifications<Contract>>
-  | FeatureEnvironmentConflict<SystemFeatureRoot<Contract>>;
+type DeclaredSystemConflict<Contract extends SystemDefinitionContract> = FeatureEnvironmentConflict<
+  SystemFeatureRoot<Contract>
+>;
 
 /** Type-level declaration for one company System before adapter meaning is projected. */
 export type SystemDefinitionContract = Readonly<{
@@ -216,10 +216,7 @@ export function createSystem<
     features?: Features;
     applications?: Applications;
   }> &
-    ([
-      | Extract<keyof Features, keyof Applications>
-      | FeatureEnvironmentConflict<{ Features: FeatureContracts<Features> }>,
-    ] extends [never]
+    ([FeatureEnvironmentConflict<{ Features: FeatureContracts<Features> }>] extends [never]
       ? unknown
       : never),
 ): System<NormalizedSystemContract<Features, Applications>>;

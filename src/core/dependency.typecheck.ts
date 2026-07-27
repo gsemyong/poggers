@@ -26,23 +26,23 @@ type Consumer = Readonly<{
   };
 }>;
 
-type App = Readonly<{ Features: { provider: Provider; consumer: Consumer } }>;
+type Root = Readonly<{ Features: { provider: Provider; consumer: Consumer } }>;
 
-const required: ProgramRequiredDependencies<App, "browser"> = {
+const required: ProgramRequiredDependencies<Root, "browser"> = {
   reader: { read: () => "value" },
   clock: { now: () => 0 },
 };
-const provided: ProgramProvidedDependencies<App, "browser"> = {
+const provided: ProgramProvidedDependencies<Root, "browser"> = {
   reader: { read: () => "value" },
 };
-const external: ProgramExternalDependencies<App, "browser"> = {
+const external: ProgramExternalDependencies<Root, "browser"> = {
   clock: { now: () => 0 },
 };
 void required;
 void provided;
 void external;
 
-const unexpectedExternal: ProgramExternalDependencies<App, "browser"> = {
+const unexpectedExternal: ProgramExternalDependencies<Root, "browser"> = {
   clock: { now: () => 0 },
   // @ts-expect-error externally supplied Dependencies exclude Feature-provided reader.
   reader: { read: () => "value" },
@@ -50,7 +50,7 @@ const unexpectedExternal: ProgramExternalDependencies<App, "browser"> = {
 void unexpectedExternal;
 
 // @ts-expect-error clock is required by the complete System contract.
-const missingExternal: ProgramExternalDependencies<App, "browser"> = {};
+const missingExternal: ProgramExternalDependencies<Root, "browser"> = {};
 void missingExternal;
 
 type MailDefinition = Readonly<{
@@ -160,7 +160,7 @@ void mailFeature;
 const invalidMailFeature = {
   programs: {
     browser: {
-      // @ts-expect-error Feature providers implement the envelope, not the consumer call.
+      // @ts-expect-error Feature providers implement the provider context, not the consumer call.
       start() {
         return {
           mail: {

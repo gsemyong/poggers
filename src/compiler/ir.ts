@@ -1,4 +1,4 @@
-export const SYSTEM_IR_VERSION = 32 as const;
+export const SYSTEM_IR_VERSION = 33 as const;
 
 /** Maps semantic source files to the generated outputs affected by each source. */
 export type SystemOutputSources = Readonly<Record<string, readonly string[]>>;
@@ -326,8 +326,6 @@ export type DependencyIR = Readonly<{
   type: TypeIR;
   failures?: TypeIR;
   heartbeats?: readonly Readonly<{ operation: string; type: TypeIR }>[];
-  /** Absent only for pre-migration input-shaped providers. */
-  binding?: "envelope";
   reference?: DependencyReferenceIR;
 }>;
 
@@ -352,8 +350,6 @@ export type DependencyOperationIR = Readonly<{
 export type DependencyContractIR = Readonly<{
   name: string;
   operations: readonly DependencyOperationIR[];
-  /** Absent only for pre-migration input-shaped providers. */
-  binding?: "envelope";
   reference?: DependencyReferenceIR;
 }>;
 
@@ -388,8 +384,6 @@ export type LinkedDependencyIR = Readonly<{
   type: TypeIR;
   failures?: TypeIR;
   heartbeats?: readonly Readonly<{ operation: string; type: TypeIR }>[];
-  /** Absent only for pre-migration input-shaped providers. */
-  binding?: "envelope";
   reference?: DependencyReferenceIR;
   consumers: readonly string[];
   provider?: string;
@@ -474,12 +468,11 @@ export function projectDependencyContracts(
   return dependencies.map((dependency) => ({
     name: dependency.name,
     operations: collectDependencyOperations(dependency),
-    ...(dependency.binding ? { binding: dependency.binding } : {}),
     ...(dependency.reference ? { reference: dependency.reference } : {}),
   }));
 }
 
-/** Stable semantic identity used to negotiate one Dependency operation. */
+/** Stable semantic identity for one exact Dependency operation contract. */
 export function dependencyOperationIdentity(operation: DependencyOperationIR): string {
   return JSON.stringify([
     "kit.dependency.operation",
@@ -489,6 +482,27 @@ export function dependencyOperationIdentity(operation: DependencyOperationIR): s
     typeIdentity(operation.output),
     operation.failures ? typeIdentity(operation.failures) : null,
     operation.heartbeat ? typeIdentity(operation.heartbeat) : null,
+  ]);
+}
+
+/** Stable semantic identity for one exact Dependency contract. */
+export function dependencyContractIdentity(contract: DependencyContractIR): string {
+  const operations = contract.operations
+    .map((operation) => [operation.name, dependencyOperationIdentity(operation)] as const)
+    .sort(([left], [right]) => left.localeCompare(right));
+  return JSON.stringify([
+    "kit.dependency",
+    1,
+    contract.name,
+    contract.reference
+      ? [
+          contract.reference.name,
+          contract.reference.argument,
+          [...contract.reference.bindings],
+          [...contract.reference.inputs],
+        ]
+      : null,
+    operations,
   ]);
 }
 

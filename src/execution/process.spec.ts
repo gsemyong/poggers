@@ -27,7 +27,7 @@ import {
 import type { ServerPlatform } from "@/platforms/server";
 import type { BrowserMainThread } from "@/platforms/web";
 import {
-  createWebUIContributionInstance as createUIContributionInstance,
+  createWebUIContributionInstance,
   type WebProgramDefinition,
   webContributionRuntime,
   webProgramLanguageRuntime,
@@ -121,7 +121,11 @@ describe("Program runtime", () => {
           },
         }),
       },
+      undeclared: {
+        read: () => "must not be visible",
+      },
     });
+    expect(Object.keys(dependencies)).toEqual(["service"]);
     const service = dependencies.service as {
       now(input: {}): number;
       read(input: {}): Promise<string>;
@@ -146,7 +150,7 @@ describe("Program runtime", () => {
     expect(() => invalid.changes({})).toThrow("must return an AsyncIterable");
   });
 
-  test("mounts one provider envelope for direct and runtime-owned invocations", async () => {
+  test("mounts one provider context for direct and runtime-owned invocations", async () => {
     const invocations: Array<
       Readonly<{ input: { value: number }; invocation: DependencyInvocation }>
     > = [];
@@ -154,7 +158,6 @@ describe("Program runtime", () => {
       [
         {
           name: "service",
-          binding: "envelope",
           operations: [
             {
               name: "double",
@@ -188,6 +191,19 @@ describe("Program runtime", () => {
     };
 
     expect(dependencyInvocation in service).toBe(true);
+    expect(() =>
+      invokeDependency(
+        { double: ({ input }: { input: { value: number } }) => input.value * 2 },
+        "double",
+        { value: 2 },
+        {
+          id: "unmounted",
+          attempt: 1,
+          scheduledAt: 10,
+          startedAt: 20,
+        },
+      ),
+    ).toThrow("is not mounted through the runtime boundary");
     await expect(service.double({ value: 2 })).resolves.toBe(4);
     await expect(
       invokeDependency(
@@ -226,7 +242,6 @@ describe("Program runtime", () => {
       [
         {
           name: "counter",
-          binding: "envelope",
           reference: {
             name: "get",
             argument: "input",
@@ -319,13 +334,12 @@ describe("Program runtime", () => {
     );
   });
 
-  test("projects runtime heartbeat and cancellation controls into one provider envelope", async () => {
+  test("projects runtime heartbeat and cancellation controls into one provider context", async () => {
     const heartbeats: unknown[] = [];
     const dependencies = conformExternalDependencies(
       [
         {
           name: "service",
-          binding: "envelope",
           operations: [
             {
               name: "work",
@@ -394,7 +408,6 @@ describe("Program runtime", () => {
   test("enforces declared provider failures and heartbeat payloads at the generic boundary", async () => {
     const contract = {
       name: "service",
-      binding: "envelope" as const,
       operations: [
         {
           name: "work",
@@ -502,7 +515,7 @@ describe("Program runtime", () => {
   });
 
   test("creates an isolated reactive UI state and action surface", async () => {
-    const first = createUIContributionInstance({
+    const first = createWebUIContributionInstance({
       state: { count: 0 },
       actions: {
         add({ state }, value) {
@@ -511,7 +524,7 @@ describe("Program runtime", () => {
         },
       },
     });
-    const second = createUIContributionInstance({ state: { count: 0 } });
+    const second = createWebUIContributionInstance({ state: { count: 0 } });
 
     expect(first.actions.add?.(2)).toBe(2);
     expect(first.api.count).toBe(2);
@@ -523,7 +536,7 @@ describe("Program runtime", () => {
   });
 
   test("restores only declared UI state from a hot snapshot", async () => {
-    const ui = createUIContributionInstance(
+    const ui = createWebUIContributionInstance(
       { state: { count: 0, label: "new" } },
       { initialState: { count: 7, removed: true } },
     );
@@ -533,7 +546,7 @@ describe("Program runtime", () => {
   });
 
   test("batches every synchronous action into one reactive notification", async () => {
-    const ui = createUIContributionInstance({
+    const ui = createWebUIContributionInstance({
       state: { first: 0, second: 0 },
       actions: {
         update({ state }) {
@@ -556,7 +569,7 @@ describe("Program runtime", () => {
 
   test("owns resources returned by standalone UI actions", async () => {
     const events: string[] = [];
-    const ui = createUIContributionInstance({
+    const ui = createWebUIContributionInstance({
       actions: {
         open() {
           return {
@@ -802,7 +815,7 @@ describe("Program runtime", () => {
   test("prevents stale async actions from mutating disposed state", async () => {
     let resume!: () => void;
     const resumed = new Promise<void>((resolve) => (resume = resolve));
-    const ui = createUIContributionInstance({
+    const ui = createWebUIContributionInstance({
       state: { value: "current" },
       actions: {
         async replace({ state }) {
@@ -930,6 +943,36 @@ describe("Program runtime", () => {
     }
   });
 
+  test("assembles Programs only from the System Feature namespace", async () => {
+    const starts: string[] = [];
+    const system = {
+      features: {
+        worker: {
+          programs: {
+            browser: {
+              start() {
+                starts.push("feature");
+              },
+            },
+          },
+        },
+      },
+      applications: {
+        worker: { interfaces: {} },
+      },
+    } as unknown as System;
+
+    const process = await startProcess(
+      system,
+      "browser",
+      {},
+      manifest("browser", { feature: "worker" }),
+    );
+
+    expect(starts).toEqual(["feature"]);
+    await process.dispose();
+  });
+
   test("assembles nested Feature contributions deterministically", async () => {
     type Child = {
       Programs: { cloud: Program<Server, { Provides: { child: { read(): string } } }> };
@@ -940,7 +983,7 @@ describe("Program runtime", () => {
         cloud: Program<Server, { Requires: { child: { read(): string } } }>;
       };
     };
-    type App = { Features: { parent: Parent } };
+    type Root = { Features: { parent: Parent } };
     const starts: string[] = [];
 
     const child: Feature<Child> = {
@@ -963,7 +1006,7 @@ describe("Program runtime", () => {
         },
       },
     };
-    const system: System<App> = { features: { parent } };
+    const system: System<Root> = { features: { parent } };
     const process = await startProcess(
       system,
       "cloud",
@@ -1086,7 +1129,7 @@ describe("Program runtime", () => {
 
   test("validates every external Dependency before user work starts", async () => {
     type Leaf = { Programs: { cloud: Program<Server, { Requires: { value: string } }> } };
-    type App = { Features: { first: Leaf; second: Leaf } };
+    type Root = { Features: { first: Leaf; second: Leaf } };
     const events: string[] = [];
     const feature = (name: string): Feature<Leaf> => ({
       programs: {
@@ -1097,7 +1140,7 @@ describe("Program runtime", () => {
         },
       },
     });
-    const system: System<App> = {
+    const system: System<Root> = {
       features: { first: feature("first"), second: feature("second") },
     };
 
@@ -1122,9 +1165,9 @@ describe("Program runtime", () => {
         cloud: Program<Server, { Requires: { resource: { open(): Disposable } } }>;
       };
     };
-    type App = { Features: { first: Leaf; second: Leaf } };
+    type Root = { Features: { first: Leaf; second: Leaf } };
     const events: string[] = [];
-    const system: System<App> = {
+    const system: System<Root> = {
       features: {
         first: {
           programs: {
@@ -1249,7 +1292,7 @@ describe("Program runtime", () => {
         >;
       };
     };
-    type App = { Features: { consumer: Consumer } };
+    type Root = { Features: { consumer: Consumer } };
     const consumer: Feature<Consumer> = {
       programs: {
         browser: {
@@ -1267,7 +1310,7 @@ describe("Program runtime", () => {
         },
       },
     };
-    const system: System<App> = { features: { consumer } };
+    const system: System<Root> = { features: { consumer } };
     const implementations = [
       { reader: { read: () => "local" } },
       { reader: { read: () => "proxy" } },
@@ -1548,7 +1591,6 @@ describe("Program runtime", () => {
         bindings: [
           {
             name: "doubler",
-            binding: "envelope",
             operations: [
               {
                 name: "double",

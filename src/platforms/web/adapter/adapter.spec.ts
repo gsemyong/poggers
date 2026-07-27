@@ -155,8 +155,16 @@ type UI = { Name: "web" };
 type Browser = { Name: "browser-main"; Platform: Platform; UI: UI };
 type Worker = { Name: "browser-worker"; Platform: Platform };
 type ServiceWorker = { Name: "browser-service-worker"; Platform: Platform };
-type HttpClient = { request(input: { path: string }): Promise<Response> };
-type DataStore = { query(input: { collection: string }): Promise<string> };
+declare const dependencyDefinition: unique symbol;
+type Dependency<Definition extends { Operations: object }> = Readonly<
+  Definition["Operations"] & { readonly [dependencyDefinition]?: Definition }
+>;
+type HttpClient = Dependency<{
+  Operations: { request(input: { path: string }): Promise<Response> };
+}>;
+type DataStore = Dependency<{
+  Operations: { query(input: { collection: string }): Promise<string> };
+}>;
 type Program<Environment, Contract extends object = {}> = Contract & { Environment: Environment };
 declare const featureContract: unique symbol;
 declare const applicationContract: unique symbol;

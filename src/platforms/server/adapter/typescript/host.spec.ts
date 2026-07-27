@@ -34,7 +34,6 @@ identifiersConformance.test(
 timerConformance.test(
   nodeHostTarget("timer", {
     name: "timer",
-    binding: "envelope",
     operations: [
       {
         name: "sleep",
@@ -70,7 +69,9 @@ describe("server Platform host", () => {
 
   test("rejects requirements the Platform cannot supply", async () => {
     await expect(
-      createNodeHost({ dependencies: [{ name: "unknown", operations: [] }] }),
+      createNodeHost({
+        dependencies: [{ name: "unknown", operations: [] }],
+      }),
     ).rejects.toThrow('Server Platform does not implement host Dependency "unknown".');
   });
 
@@ -388,7 +389,6 @@ const httpDependency = dependency("http", "route", {
 });
 const alarmDependency = {
   name: "alarm",
-  binding: "envelope",
   operations: ["schedule", "cancel"].map((name) => ({
     name,
     mode: "asynchronous" as const,
@@ -398,7 +398,6 @@ const alarmDependency = {
 } as const satisfies DependencyContractIR;
 const executionContextDependency = {
   name: "executionContext",
-  binding: "envelope",
   operations: [
     {
       name: "current",
@@ -416,7 +415,6 @@ const executionContextDependency = {
 } as const satisfies DependencyContractIR;
 const synchronizationDependency = {
   name: "synchronization",
-  binding: "envelope",
   operations: [
     {
       name: "exclusive",
@@ -438,7 +436,6 @@ function dependency<const Name extends string>(
 ): DependencyContractIR & Readonly<{ name: Name }> {
   return {
     name,
-    binding: "envelope",
     operations: [
       {
         name: operation,

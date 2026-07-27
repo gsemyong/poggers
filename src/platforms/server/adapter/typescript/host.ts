@@ -361,10 +361,7 @@ export async function createNodeHost<Event = unknown>(
         allowedOrigins,
       });
     }
-    const dependencies = conformExternalDependencies(
-      input.dependencies.map((contract) => ({ ...contract, binding: "envelope" as const })),
-      result,
-    );
+    const dependencies = conformExternalDependencies(input.dependencies, result);
     if (providerBindings.size) {
       featureProviderScopes.set(dependencies, {
         bindings: providerBindings,
@@ -1158,7 +1155,7 @@ function validateEventStream(
     config.storage !== StorageType.File
   ) {
     throw new TypeError(
-      `JetStream ${JSON.stringify(stream)} is incompatible with the EventStore contract.`,
+      `JetStream ${JSON.stringify(stream)} does not match the EventStore contract.`,
     );
   }
 }
