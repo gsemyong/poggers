@@ -107,16 +107,6 @@
       "types": "./dist/src/features/replica/index.d.ts",
       "default": "./dist/src/features/replica/index.js"
     },
-    "./features/data": {
-      "source": "./dist/source/features/data/index.ts",
-      "types": "./dist/src/features/data/index.d.ts",
-      "default": "./dist/src/features/data/index.js"
-    },
-    "./features/entity": {
-      "source": "./dist/source/features/entity/index.ts",
-      "types": "./dist/src/features/entity/index.d.ts",
-      "default": "./dist/src/features/entity/index.js"
-    },
     "./features/identity": {
       "source": "./dist/source/features/identity/index.ts",
       "types": "./dist/src/features/identity/index.d.ts",
@@ -158,8 +148,6 @@
     "@nats-io/jetstream": "3.4.0",
     "@nats-io/transport-node": "3.4.0",
     "@tanstack/virtual-core": "^3.17.6",
-    "@tursodatabase/database": "0.7.1",
-    "@tursodatabase/database-wasm": "0.7.1",
     "@types/node": "^26.1.1",
     "@typescript/typescript6": "^6.0.2",
     "alien-signals": "^3.2.1",

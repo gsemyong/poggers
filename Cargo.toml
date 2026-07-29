@@ -3,7 +3,6 @@ resolver = "3"
 exclude = ["dist"]
 members = [
   "src/features/model/providers/server/rust",
-  "src/features/data/providers/server/rust",
   "src/features/identity/providers/server/rust",
   "src/compiler/rust/runtime",
   "src/platforms/server/adapter/rust/distribution",

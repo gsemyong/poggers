@@ -55,7 +55,15 @@ describe("architectural ownership", () => {
     const root = await readFile(resolve(sourceRoot, "index.ts"), "utf8");
     expect(root).not.toMatch(/from\s+["']@\/(?:features|platforms)(?:\/|["'])/);
 
-    for (const feature of ["actor", "data", "entity", "identity"]) {
+    for (const feature of [
+      "actor",
+      "aggregate",
+      "identity",
+      "model",
+      "projection",
+      "replica",
+      "workflow",
+    ]) {
       const source = await readFile(resolve(sourceRoot, `features/${feature}/index.ts`), "utf8");
       expect(source, feature).not.toMatch(
         /from\s+["']@\/platforms\/(?:server|web)\/adapter(?:\/|["'])/,

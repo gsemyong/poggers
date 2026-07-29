@@ -645,10 +645,11 @@ kit
 kit/web
 kit/server
 kit/features/actor
-kit/features/data
-kit/features/entity
+kit/features/aggregate
 kit/features/identity
 kit/features/model
+kit/features/projection
+kit/features/replica
 kit/features/workflow
 ```
 

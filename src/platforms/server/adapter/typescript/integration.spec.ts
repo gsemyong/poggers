@@ -1,5 +1,4 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -7,29 +6,7 @@ import { resolve } from "node:path";
 
 import { afterEach, expect, test } from "vitest";
 
-import { createProgramContributionInstance } from "@/execution/process";
-import { createEntity, type EntityEvent, type EntityModel } from "@/features/entity";
-import {
-  createJetStreamEventStore,
-  createNodeHost,
-} from "@/platforms/server/adapter/typescript/host";
-import { serverProgramLanguageRuntime } from "@/platforms/server/adapter/typescript/runtime";
-
-type Note = Readonly<{ id: string; ownerId: string; text: string }>;
-type Notes = EntityModel<{
-  Name: "notes";
-  Principal: Readonly<{ id: string }>;
-  Value: Note;
-  Create: Readonly<{ text: string }>;
-  Update: Readonly<{ text?: string }>;
-  Filter: Readonly<Record<string, never>>;
-}>;
-
-const notes = createEntity<Notes>({
-  create: ({ id, principal, input }) => ({ id, ownerId: principal.id, text: input.text }),
-  update: ({ previous, input }) => ({ ...previous, ...input }),
-  authorize: ({ principal, entity }) => principal.id === entity.ownerId,
-});
+import { createJetStreamEventStore } from "@/platforms/server/adapter/typescript/host";
 
 const available = spawnSync("nats-server", ["--version"], { stdio: "ignore" }).status === 0;
 const directories: string[] = [];
@@ -167,56 +144,6 @@ test.skipIf(!available)(
   },
 );
 
-test.skipIf(!available)(
-  "two isolated Program replicas authorize and catch up through a network authority",
-  async () => {
-    const directory = await mkdtemp(resolve(tmpdir(), "kit-program-replicas-"));
-    directories.push(directory);
-    const natsPort = await availablePort();
-    const server = await startNatsServer(directory, natsPort);
-    processes.push(server);
-    const firstPort = await availablePort();
-    const secondPort = await availablePort();
-    const options = {
-      kind: "jetstream" as const,
-      servers: `nats://127.0.0.1:${natsPort}`,
-      stream: `KIT_PROGRAM_REPLICAS_${natsPort}`,
-    };
-    const first = await startReplica(resolve(directory, "first"), firstPort, options);
-    let second = await startReplica(resolve(directory, "second"), secondPort, options);
-    try {
-      const created = await request<Note>(firstPort, "alice", "/api/notes", {
-        method: "POST",
-        body: JSON.stringify({ text: "Network authority" }),
-        headers: {
-          "content-type": "application/json",
-          "x-kit-command": "create-network-note",
-          "x-kit-entity": "network-note",
-        },
-      });
-      await expect
-        .poll(
-          async () =>
-            (await request<{ entities: readonly Note[] }>(secondPort, "alice", "/api/notes"))
-              .entities,
-        )
-        .toEqual([created]);
-      await expect(request(secondPort, "bob", "/api/notes")).resolves.toMatchObject({
-        entities: [],
-      });
-
-      await second.dispose();
-      second = await startReplica(resolve(directory, "second-restarted"), secondPort, options);
-      await expect(request(secondPort, "alice", "/api/notes")).resolves.toMatchObject({
-        revision: 1,
-        entities: [created],
-      });
-    } finally {
-      await Promise.allSettled([first.dispose(), second.dispose()]);
-    }
-  },
-);
-
 async function availablePort(): Promise<number> {
   const server = createServer();
   await new Promise<void>((resolve, reject) => {
@@ -229,78 +156,6 @@ async function availablePort(): Promise<number> {
   );
   if (!address || typeof address === "string") throw new Error("Unable to allocate NATS port.");
   return address.port;
-}
-
-async function startReplica(
-  directory: string,
-  port: number,
-  eventStore: Parameters<typeof createJetStreamEventStore>[0],
-) {
-  const [events, host] = await Promise.all([
-    createJetStreamEventStore<EntityEvent<Note>>(eventStore),
-    createNodeHost({
-      dependencies: [
-        {
-          name: "http",
-          operations: [
-            {
-              name: "route",
-              mode: "synchronous",
-              input: { kind: "opaque", name: "Input" },
-              output: { kind: "opaque", name: "Disposable" },
-            },
-          ],
-        },
-      ] as const,
-      directory,
-      host: "127.0.0.1",
-      port,
-    }),
-  ]);
-  const process = createProgramContributionInstance(notes.programs.server as never, {
-    address: { program: "api", feature: "notes" },
-    language: serverProgramLanguageRuntime,
-    provides: ["notes"],
-    dependencies: {
-      events,
-      http: host.http,
-      identifiers: { create: randomUUID },
-      clock: { now: Date.now },
-      identity: {
-        authenticate: async ({ cookie }: { cookie: string | undefined }) =>
-          cookie ? { id: cookie } : undefined,
-      },
-    },
-  });
-  try {
-    await process.start();
-  } catch (error) {
-    await Promise.allSettled([events[Symbol.asyncDispose](), host.http[Symbol.asyncDispose]()]);
-    throw error;
-  }
-  let disposed = false;
-  return {
-    async dispose() {
-      if (disposed) return;
-      disposed = true;
-      await process.dispose();
-      await Promise.all([events[Symbol.asyncDispose](), host.http[Symbol.asyncDispose]()]);
-    },
-  };
-}
-
-async function request<Value>(
-  port: number,
-  principal: string,
-  path: string,
-  init: RequestInit = {},
-): Promise<Value> {
-  const response = await fetch(`http://127.0.0.1:${port}${path}`, {
-    ...init,
-    headers: { cookie: principal, ...Object.fromEntries(new Headers(init.headers)) },
-  });
-  if (!response.ok) throw new Error(`Replica request failed with ${response.status}.`);
-  return (await response.json()) as Value;
 }
 
 function startNatsServer(directory: string, port: number): Promise<ChildProcess> {

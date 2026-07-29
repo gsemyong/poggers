@@ -1,9 +1,9 @@
-# Authenticated CRUD
+# Authenticated Workspace
 
-This is the repository's one representative end-to-end System. It proves that
-independently reusable Identity and Entity factories can be mounted directly,
-combined with application-owned UI, and realized by the ordinary web and
-server adapters without System-level transport or provider wiring.
+This is the repository's representative compositional System. Its task domain
+combines the shipped Identity, Aggregate, Projection, and Replica factories
+behind a browser program. The same task Feature instance is mounted into two
+Applications, while the System remains the only compilation root.
 
 ```text
 src/
@@ -30,8 +30,14 @@ While contributing to Kit itself, run the example from the repository root:
 nub src/cli.ts dev --dir examples/authenticated-crud
 ```
 
-The System specification covers authentication, authorization isolation,
-optimistic local-first CRUD, synchronization, persistence across restart,
-validated routing, production rendering, and generated native execution. The
-adjacent task specification tests the Entity semantics directly without HTTP
-or credentials.
+Creating and editing a task is optimistic and local-first. The event-sourced
+Aggregate retains domain decisions; the Projection and Replica deliver each
+result to every live browser and retain it for the next offline or restarted
+session.
+
+The System specification runs the same black-box contract against development
+and generated-Rust production. It covers authentication, authorization
+isolation, optimistic commands, realtime synchronization, restart recovery,
+validated routing, rendering, and packaged assets. The adjacent task
+specification tests domain decisions and replay directly without HTTP or
+credentials.

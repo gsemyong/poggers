@@ -29,13 +29,7 @@ import {
   type RunningSystem,
 } from "@/realization";
 
-export { createEntityBrowserFixture, createEntityFixture } from "@/features/entity";
 export { createMemoryEventStore } from "@/testing/event-store";
-export {
-  createDataBrowserFixture,
-  createDataFixture,
-  createMemoryDataStore,
-} from "@/features/data";
 export { createIdentityFixture } from "@/features/identity";
 export { createWebUIContributionInstance } from "@/platforms/web/adapter/ui/process";
 export { startFeatureFixture } from "@/execution/process";

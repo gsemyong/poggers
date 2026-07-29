@@ -22,7 +22,7 @@ type TaskReplicaCommand = Readonly<{
 }>;
 
 testSystem({
-  name: "authenticated CRUD System",
+  name: "authenticated workspace System",
   directory: new URL("..", import.meta.url),
   async verify({ realization, location, locations, restart }) {
     expect(locations["interface/customer.web"]).toHaveLength(1);

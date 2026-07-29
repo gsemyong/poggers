@@ -85,11 +85,10 @@ src/features/
     index.ts
     feature.spec.ts
     feature.typecheck.ts
-  data/
+  aggregate/
     index.ts
     feature.spec.ts
     feature.typecheck.ts
-    testing.ts
 ```
 
 `index.ts` owns the model, implementation projection, Program contributions,
@@ -103,7 +102,7 @@ semantic owner, first by Platform and then by implementation language:
 
 ```text
 src/features/
-  data/
+  identity/
     index.ts
     providers/
       server/
@@ -199,6 +198,32 @@ Focused tests should:
 
 The repository-wide verification ladder and focused commands are defined once
 in [`architecture.md`](./architecture.md#verification).
+
+## Shipped Factories
+
+The shipped catalogue is deliberately small:
+
+| Factory    | Owns                                                                                  |
+| ---------- | ------------------------------------------------------------------------------------- |
+| Identity   | Authenticated principal and session boundary                                          |
+| Actor      | Durable keyed state authority and typed calls                                         |
+| Aggregate  | Event-sourced domain authority, authorization, and migrations                         |
+| Workflow   | Durable coordination, effects, schedules, and execution control                       |
+| Projection | Rebuildable relational, text, vector, graph, geo, and analytical reads                |
+| Replica    | Authorized local state, optimistic commands, offline persistence, and synchronization |
+| Model      | Typed language-model and realtime-model provider Dependencies                         |
+
+Aggregate, Projection, and Replica are intentionally separate. The Aggregate is
+the write authority, the Projection is a rebuildable read model, and the Replica
+is a client-owned synchronized view. Combining them would couple durable domain
+decisions, query storage, and client lifecycle into one abstraction.
+
+The [`authenticated-crud`](../examples/authenticated-crud) example composes
+Identity, Aggregate, Projection, and Replica into a local-first task domain,
+mounts the same Feature into two Applications, and runs one System contract in
+development and generated-Rust production. Actor and Workflow retain focused
+conformance suites because their durable runtime matrices are substantially
+larger than the everyday application loop.
 
 ## Non-Goals
 

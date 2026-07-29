@@ -1684,7 +1684,7 @@ export default createSystem({ features: { fixture } });
       environment: { name: "browser", platform: "web" },
     });
     expect(contribution).toMatchObject({
-      id: "feature/data/program/browser",
+      id: "feature/dashboard/program/browser",
     });
     expect(contribution && webProgramUI(contribution)).toMatchObject({
       actions: ["create", "synchronize"],
@@ -2877,7 +2877,7 @@ type Environment = { readonly Name: "browser"; readonly Platform: Platform; read
 type Program<E extends Environment, C extends object = {}> = Readonly<C & { Environment: E }>;
 ${compositionTypes()}
 
-type Data = {
+type Dashboard = {
   Programs: {
     browser: Program<
       Environment,
@@ -2888,11 +2888,11 @@ type Data = {
     >;
   };
 };
-declare function createData(): Feature<Data>;
+declare function createDashboard(): Feature<Dashboard>;
 
 export default createSystem({
   metadata: { name: "UI factory fixture" },
-  features: { data: createData() },
+  features: { dashboard: createDashboard() },
 });
 `;
 }
