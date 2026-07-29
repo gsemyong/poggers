@@ -18,9 +18,9 @@ import {
   createRemoteDependency,
 } from "@/execution/transport";
 import { ActorError, createActor, listActorKeys, type Actor } from "@/features/actor";
-import { createMemoryEventStore } from "@/features/entity";
 import { serverCompilerExtension, serverProgramExecution } from "@/platforms/server/adapter";
 import { executeServerLinkedProgramIR as executeLinkedProgramIR } from "@/platforms/server/adapter/typescript/runtime";
+import { createMemoryEventStore } from "@/testing/event-store";
 
 let actorWorkerIdentity = 0;
 let compiledActorFixture: ReturnType<typeof compileSystem> | undefined;

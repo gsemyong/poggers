@@ -5,10 +5,10 @@ import {
   createEntity,
   createEntityBrowserFixture,
   createEntityFixture,
-  createMemoryEventStore,
   type EntityEvent,
   type EntityModel,
 } from "@/features/entity";
+import { createMemoryEventStore } from "@/testing/event-store";
 
 type Note = Readonly<{ id: string; ownerId: string; text: string; archived: boolean }>;
 type Notes = EntityModel<{

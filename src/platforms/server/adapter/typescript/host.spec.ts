@@ -18,6 +18,7 @@ import {
 import {
   calendarConformance,
   clockConformance,
+  eventStoreConformance,
   identifiersConformance,
   timerConformance,
 } from "@/platforms/server/testing";
@@ -46,6 +47,21 @@ timerConformance.test(
     ],
   }),
 );
+eventStoreConformance.test({
+  name: "SQLite",
+  tags: ["provider"],
+  create() {
+    const api = createSqliteEventStore<Readonly<{ id: string; value: number }>>(
+      new DatabaseSync(":memory:"),
+    );
+    return {
+      api,
+      dispose() {
+        api[Symbol.dispose]();
+      },
+    };
+  },
+});
 
 describe("server Platform host", () => {
   test("allocates only the Dependencies required by one Program instance", async () => {
@@ -338,6 +354,89 @@ describe("server Platform host", () => {
     });
     expect(await events.read({ stream: "canonical" })).toEqual(appended);
     expect(await events.read({ stream: "canonical", limit: 1 })).toEqual(appended?.slice(0, 1));
+  });
+
+  test("scans retained SQLite events through opaque global cursors", async () => {
+    using events = createSqliteEventStore<Record<string, unknown>>(new DatabaseSync(":memory:"));
+    await events.append({
+      stream: "orders:one",
+      expectedRevision: 0,
+      events: [{ value: "placed" }, { value: "confirmed" }],
+    });
+    await events.append({
+      stream: "inventory:one",
+      expectedRevision: 0,
+      events: [{ value: "reserved" }],
+    });
+
+    const first = await events.scan({ limit: 2 });
+    expect(first).toEqual([
+      {
+        cursor: "1",
+        stream: "orders:one",
+        revision: 1,
+        event: { value: "placed" },
+      },
+      {
+        cursor: "2",
+        stream: "orders:one",
+        revision: 2,
+        event: { value: "confirmed" },
+      },
+    ]);
+    await expect(events.scan({ after: first[1]!.cursor, limit: 2 })).resolves.toEqual([
+      {
+        cursor: "3",
+        stream: "inventory:one",
+        revision: 1,
+        event: { value: "reserved" },
+      },
+    ]);
+    await expect(events.scan({ after: "not-a-cursor" })).rejects.toThrow("cursor is invalid");
+  });
+
+  test("migrates retained SQLite events created before global cursors", async () => {
+    const database = new DatabaseSync(":memory:");
+    database.exec(`
+      CREATE TABLE kit_events (
+        stream TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        event TEXT NOT NULL,
+        PRIMARY KEY (stream, revision)
+      ) STRICT;
+      INSERT INTO kit_events (stream, revision, event) VALUES
+        ('orders:one', 1, '{"value":"placed"}'),
+        ('inventory:one', 1, '{"value":"reserved"}');
+    `);
+
+    using events = createSqliteEventStore<Record<string, unknown>>(database);
+    await expect(events.scan({})).resolves.toEqual([
+      {
+        cursor: "1",
+        stream: "orders:one",
+        revision: 1,
+        event: { value: "placed" },
+      },
+      {
+        cursor: "2",
+        stream: "inventory:one",
+        revision: 1,
+        event: { value: "reserved" },
+      },
+    ]);
+    await expect(
+      events.append({
+        stream: "orders:one",
+        expectedRevision: 1,
+        events: [{ value: "confirmed" }],
+      }),
+    ).resolves.toEqual([
+      {
+        stream: "orders:one",
+        revision: 2,
+        event: { value: "confirmed" },
+      },
+    ]);
   });
 
   test("snapshots and compacts SQLite streams without resetting their revision", async () => {

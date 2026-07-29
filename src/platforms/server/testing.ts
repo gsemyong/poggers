@@ -1,6 +1,6 @@
 import { expect } from "vitest";
 
-import type { Calendar, Clock, Identifiers, Timer } from "@/platforms/server";
+import type { Calendar, Clock, EventStore, Identifiers, Timer } from "@/platforms/server";
 import { defineDependencyConformance, type DependencyConformance } from "@/testing/dependency";
 
 /** Semantic contract shared by every server civil-calendar provider. */
@@ -176,6 +176,143 @@ export const identifiersConformance: DependencyConformance<Identifiers> =
       },
     ],
   });
+
+/** Semantic contract shared by every durable EventStore provider. */
+export const eventStoreConformance: DependencyConformance<
+  EventStore<Readonly<{ id: string; value: number }>>
+> = defineDependencyConformance({
+  name: "EventStore",
+  scenarios: [
+    {
+      name: "appends atomically at one expected revision and preserves stream order",
+      async verify({ api }) {
+        await expect(
+          api.append({
+            stream: "orders",
+            expectedRevision: 0,
+            events: [
+              { id: "event-1", value: 1 },
+              { id: "event-2", value: 2 },
+            ],
+          }),
+        ).resolves.toEqual([
+          {
+            stream: "orders",
+            revision: 1,
+            event: { id: "event-1", value: 1 },
+          },
+          {
+            stream: "orders",
+            revision: 2,
+            event: { id: "event-2", value: 2 },
+          },
+        ]);
+        await expect(
+          api.append({
+            stream: "orders",
+            expectedRevision: 0,
+            events: [{ id: "conflict", value: 3 }],
+          }),
+        ).resolves.toBeUndefined();
+        await expect(api.read({ stream: "orders", after: 1, limit: 1 })).resolves.toEqual([
+          {
+            stream: "orders",
+            revision: 2,
+            event: { id: "event-2", value: 2 },
+          },
+        ]);
+      },
+    },
+    {
+      name: "exposes one opaque provider-ordered global cursor without duplication",
+      async verify({ api }) {
+        await api.append({
+          stream: "first",
+          expectedRevision: 0,
+          events: [{ id: "event-1", value: 1 }],
+        });
+        await api.append({
+          stream: "second",
+          expectedRevision: 0,
+          events: [{ id: "event-2", value: 2 }],
+        });
+        const first = await api.scan({ limit: 1 });
+        expect(first).toHaveLength(1);
+        expect(first[0]?.cursor).toBeTruthy();
+        const second = await api.scan({ after: first[0]?.cursor, limit: 1 });
+        expect(second).toHaveLength(1);
+        expect(second[0]?.event.id).not.toBe(first[0]?.event.id);
+        await expect(api.scan({ after: second[0]?.cursor, limit: 1 })).resolves.toEqual([]);
+      },
+    },
+    {
+      name: "streams retained and future events from the requested revision",
+      async verify({ api }) {
+        await api.append({
+          stream: "live",
+          expectedRevision: 0,
+          events: [{ id: "event-1", value: 1 }],
+        });
+        const iterator = api.subscribe({ stream: "live" })[Symbol.asyncIterator]();
+        await expect(iterator.next()).resolves.toEqual({
+          done: false,
+          value: {
+            stream: "live",
+            revision: 1,
+            event: { id: "event-1", value: 1 },
+          },
+        });
+        const next = iterator.next();
+        await api.append({
+          stream: "live",
+          expectedRevision: 1,
+          events: [{ id: "event-2", value: 2 }],
+        });
+        await expect(next).resolves.toMatchObject({
+          done: false,
+          value: { revision: 2, event: { id: "event-2" } },
+        });
+        await iterator.return?.();
+      },
+    },
+    {
+      name: "treats snapshots as revision-fenced disposable caches before compaction",
+      async verify({ api }) {
+        await api.append({
+          stream: "snapshotted",
+          expectedRevision: 0,
+          events: [
+            { id: "event-1", value: 1 },
+            { id: "event-2", value: 2 },
+          ],
+        });
+        await expect(
+          api.saveSnapshot({
+            stream: "snapshotted",
+            expectedRevision: 0,
+            revision: 2,
+            snapshot: { total: 3 },
+          }),
+        ).resolves.toBe(true);
+        await expect(
+          api.saveSnapshot({
+            stream: "snapshotted",
+            expectedRevision: 0,
+            revision: 2,
+            snapshot: { total: 99 },
+          }),
+        ).resolves.toBe(false);
+        await expect(api.loadSnapshot({ stream: "snapshotted" })).resolves.toEqual({
+          stream: "snapshotted",
+          revision: 2,
+          snapshot: { total: 3 },
+        });
+        await api.compact({ stream: "snapshotted", through: 2 });
+        await expect(api.read({ stream: "snapshotted" })).resolves.toEqual([]);
+      },
+    },
+  ],
+});
 
 /** Semantic contract shared by every server Timer provider. */
 export const timerConformance: DependencyConformance<Timer> = defineDependencyConformance<Timer>({

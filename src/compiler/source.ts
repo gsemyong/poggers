@@ -2160,6 +2160,7 @@ function validatePortableLocals(
         return;
       case "dependency-reference-call":
         expression(value.reference, names);
+        if (typeof value.operation !== "string") expression(value.operation, names);
         if (value.input) expression(value.input, names);
         if (value.options) expression(value.options, names);
         return;
@@ -2366,7 +2367,7 @@ function lowerType(
   substitutions: ReadonlyMap<ts.Type, ts.Type> = new Map(),
   allowCallbackCycle = false,
 ): TypeIR {
-  const substituted = substitutedType(type, substitutions);
+  const substituted = resolvedSubstitutedType(checker, type, at, substitutions);
   if (substituted !== type) {
     return lowerType(checker, substituted, at, active, path, substitutions, allowCallbackCycle);
   }
@@ -2534,9 +2535,7 @@ function lowerType(
           type: lowerType(
             checker,
             fieldValueType(
-              parameter.valueDeclaration
-                ? checker.getTypeAtLocation(parameter.valueDeclaration)
-                : checker.getTypeOfSymbolAtLocation(parameter, at),
+              instantiatedSignatureParameterType(checker, parameter, at),
               Boolean(parameter.flags & ts.SymbolFlags.Optional),
             ),
             at,
@@ -2584,6 +2583,57 @@ function lowerType(
     return { kind: "record", fields };
   } finally {
     active.delete(type);
+  }
+}
+
+function instantiatedSignatureParameterType(
+  checker: ts.TypeChecker,
+  parameter: ts.Symbol,
+  at: ts.Node,
+): ts.Type {
+  const declared = parameter.valueDeclaration
+    ? checker.getTypeAtLocation(parameter.valueDeclaration)
+    : checker.getTypeOfSymbolAtLocation(parameter, at);
+  return declared.flags & (ts.TypeFlags.IndexedAccess | ts.TypeFlags.TypeParameter)
+    ? checker.getTypeOfSymbolAtLocation(parameter, at)
+    : declared;
+}
+
+function resolvedSubstitutedType(
+  checker: ts.TypeChecker,
+  type: ts.Type,
+  at: ts.Node,
+  substitutions: ReadonlyMap<ts.Type, ts.Type>,
+  active: Set<ts.Type> = new Set(),
+): ts.Type {
+  const substituted = substitutedType(type, substitutions);
+  if (active.has(substituted) || !(substituted.flags & ts.TypeFlags.IndexedAccess)) {
+    return substituted;
+  }
+  active.add(substituted);
+  try {
+    const indexed = substituted as ts.IndexedAccessType;
+    const owner = resolvedSubstitutedType(checker, indexed.objectType, at, substitutions, active);
+    const index = resolvedSubstitutedType(checker, indexed.indexType, at, substitutions, active);
+    if (owner === indexed.objectType && index === indexed.indexType) return substituted;
+    const propertyName =
+      index.flags & ts.TypeFlags.StringLiteral
+        ? (index as ts.StringLiteralType).value
+        : index.flags & ts.TypeFlags.NumberLiteral
+          ? String((index as ts.NumberLiteralType).value)
+          : undefined;
+    const property = propertyName === undefined ? undefined : owner.getProperty(propertyName);
+    return property
+      ? resolvedSubstitutedType(
+          checker,
+          checker.getTypeOfSymbolAtLocation(property, property.valueDeclaration ?? at),
+          at,
+          substitutions,
+          active,
+        )
+      : substituted;
+  } finally {
+    active.delete(substituted);
   }
 }
 
@@ -4122,6 +4172,34 @@ function lowerPortableCall(
       span: spanOf(typeNode),
     };
   }
+  if (intrinsic === "dependency-reference-dispatch") {
+    if (!awaited || call.arguments.length < 3 || call.arguments.length > 4) {
+      throw diagnostic(
+        call,
+        "dispatchDependencyReference requires a reference, operation, input, optional call options, and must be awaited.",
+      );
+    }
+    const definition = dependencyReferenceExpressionType(lowering.checker, call.arguments[0]!);
+    if (!definition) {
+      throw diagnostic(
+        call.arguments[0]!,
+        "dispatchDependencyReference requires a typed Dependency reference.",
+      );
+    }
+    return {
+      kind: "dependency-reference-call",
+      reference: lowerExpression(lowering, call.arguments[0]!, dependenciesName),
+      operation: lowerExpression(lowering, call.arguments[1]!, dependenciesName),
+      input: lowerExpression(lowering, call.arguments[2]!, dependenciesName),
+      ...(call.arguments[3]
+        ? { options: lowerExpression(lowering, call.arguments[3], dependenciesName) }
+        : {}),
+      argument: definition.argument,
+      awaited: true,
+      type: lowerPortableType(lowering, lowering.checker.getTypeAtLocation(typeNode), typeNode),
+      span: spanOf(typeNode),
+    };
+  }
   if (intrinsic === "dependency-intercept") {
     if (awaited || call.arguments.length !== 2) {
       throw diagnostic(
@@ -4627,6 +4705,7 @@ function portableIntrinsic(
   expression: ts.Expression,
 ):
   | "dependency-dispatch"
+  | "dependency-reference-dispatch"
   | "dependency-intercept"
   | "data-kind"
   | "stream-distinct"
@@ -4640,6 +4719,12 @@ function portableIntrinsic(
   const file = direct.functionLike.getSourceFile().fileName.replaceAll("\\", "/");
   if (file.endsWith("/core/dependency.ts") && direct.symbol.getName() === "dispatchDependency") {
     return "dependency-dispatch";
+  }
+  if (
+    file.endsWith("/core/dependency.ts") &&
+    direct.symbol.getName() === "dispatchDependencyReference"
+  ) {
+    return "dependency-reference-dispatch";
   }
   if (file.endsWith("/core/dependency.ts") && direct.symbol.getName() === "interceptDependency") {
     return "dependency-intercept";
@@ -5889,7 +5974,8 @@ function unwrapExpression(expression: ts.Expression): ts.Expression {
   while (
     ts.isParenthesizedExpression(current) ||
     ts.isAsExpression(current) ||
-    ts.isSatisfiesExpression(current)
+    ts.isSatisfiesExpression(current) ||
+    ts.isNonNullExpression(current)
   ) {
     current = current.expression;
   }

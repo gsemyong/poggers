@@ -8,7 +8,6 @@ import { createFeature, type Feature } from "@/core/feature";
 import { distinctStream, mapStream } from "@/core/stream";
 import {
   createEntity,
-  createMemoryEventStore,
   type EntityActions,
   type EntityAuthorization,
   type EntityApi,
@@ -28,6 +27,7 @@ import type {
   ServerProcess,
 } from "@/platforms/server";
 import type { BrowserMainThread, WebDependencyProvider } from "@/platforms/web";
+import { createMemoryEventStore } from "@/testing/event-store";
 
 type MaybePromise<Value> = Value | PromiseLike<Value>;
 type FieldOf<Model extends DataModelDefinition> = Extract<keyof Model["Record"], string>;

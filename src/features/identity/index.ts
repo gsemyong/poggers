@@ -94,6 +94,33 @@ export type DefinedIdentity<Model extends IdentityModelDefinition> = Feature<
 > &
   Readonly<{ readonly [identityModel]?: Model }>;
 
+type IdentityModelOf<Definition> = Definition extends IdentityModelDefinition
+  ? Definition
+  : Definition extends Readonly<{
+        readonly [identityModel]?: infer Model extends IdentityModelDefinition;
+      }>
+    ? Model
+    : never;
+
+export namespace Identity {
+  export type Name<Definition> =
+    IdentityModelOf<Definition> extends infer Model extends IdentityModelDefinition
+      ? Model["Name"]
+      : never;
+  export type Principal<Definition> =
+    IdentityModelOf<Definition> extends infer Model extends IdentityModelDefinition
+      ? Model["Principal"]
+      : never;
+  export type Service<Definition> =
+    IdentityModelOf<Definition> extends infer Model extends IdentityModelDefinition
+      ? IdentityService<Model>
+      : never;
+  export type Client<Definition> =
+    IdentityModelOf<Definition> extends infer Model extends IdentityModelDefinition
+      ? IdentityClient<Model>
+      : never;
+}
+
 export type IdentityImplementation<Model extends IdentityModelDefinition> = Readonly<{
   principal(user: AuthenticatedUser): PrincipalOf<Model>;
 }>;

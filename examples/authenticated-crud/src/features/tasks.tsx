@@ -1,14 +1,17 @@
 import { createFeature, type FeatureContractOf } from "kit";
-import { createEntity, type EntityModel } from "kit/features/entity";
+import { createAggregate, type Aggregate } from "kit/features/aggregate";
+import { createProjection, type Projection } from "kit/features/projection";
+import { createReplica, type Replica } from "kit/features/replica";
 import {
   For,
   type BrowserMainThread,
+  type Identifiers,
   type Navigation,
   type UUID,
   type WebDestination,
 } from "kit/web";
 
-import type { User } from "@/features/identity";
+import type { Identity, User } from "@/features/identity";
 
 export type Task = Readonly<{
   id: string;
@@ -17,14 +20,282 @@ export type Task = Readonly<{
   completed: boolean;
 }>;
 
-export type Tasks = EntityModel<{
+type TaskAggregate = Aggregate<{
   Name: "tasks";
+  Key: string;
+  State: Readonly<
+    Task & {
+      exists: boolean;
+      deleted: boolean;
+    }
+  >;
   Principal: User;
-  Value: Task;
-  Create: Readonly<{ title: string }>;
-  Update: Readonly<{ title?: string; completed?: boolean }>;
-  Filter: Readonly<{ completed?: boolean }>;
+  Commands: {
+    create: Aggregate.Command<
+      Readonly<{ title: string }>,
+      Readonly<{ id: string }>,
+      { exists: Record<never, never> }
+    >;
+    update: Aggregate.Command<
+      Readonly<{ title?: string; completed?: boolean }>,
+      Record<never, never>,
+      { missing: Record<never, never> }
+    >;
+    remove: Aggregate.Command<undefined, Record<never, never>, { missing: Record<never, never> }>;
+  };
+  Events: {
+    created: Aggregate.Event<1, Readonly<{ ownerId: string; title: string }>>;
+    updated: Aggregate.Event<1, Readonly<{ title?: string; completed?: boolean }>>;
+    removed: Aggregate.Event<1, Record<never, never>>;
+  };
 }>;
+
+export const taskAggregateDefinition = {
+  state: ({ key }) => ({
+    id: key,
+    ownerId: "",
+    title: "",
+    completed: false,
+    exists: false,
+    deleted: false,
+  }),
+  commands: {
+    create({ key, state, principal, input, fail }) {
+      if (state.exists && !state.deleted) fail({ type: "exists", data: {} });
+      return {
+        events: [
+          {
+            created: {
+              ownerId: principal.id,
+              title: input.title,
+            },
+          },
+        ],
+        result: { id: key },
+      };
+    },
+    update({ state, input, fail }) {
+      if (!state.exists || state.deleted) fail({ type: "missing", data: {} });
+      return {
+        events: [{ updated: input }],
+        result: {},
+      };
+    },
+    remove({ state, fail }) {
+      if (!state.exists || state.deleted) fail({ type: "missing", data: {} });
+      return {
+        events: [{ removed: {} }],
+        result: {},
+      };
+    },
+  },
+  events: {
+    created: {
+      apply({ state, event }) {
+        return {
+          id: state.id,
+          ownerId: event.ownerId,
+          title: event.title,
+          completed: false,
+          exists: true,
+          deleted: false,
+        };
+      },
+    },
+    updated: {
+      apply({ state, event }) {
+        return {
+          id: state.id,
+          ownerId: state.ownerId,
+          title: event.title ?? state.title,
+          completed: event.completed ?? state.completed,
+          exists: state.exists,
+          deleted: state.deleted,
+        };
+      },
+    },
+    removed: {
+      apply({ state }) {
+        return {
+          id: state.id,
+          ownerId: state.ownerId,
+          title: state.title,
+          completed: state.completed,
+          exists: state.exists,
+          deleted: true,
+        };
+      },
+    },
+  },
+  authorize: {
+    read({ state, principal }) {
+      return state.exists && !state.deleted && state.ownerId === principal.id;
+    },
+    create({ state }) {
+      return !state.exists || state.deleted;
+    },
+    update({ state, principal }) {
+      return state.exists && !state.deleted && state.ownerId === principal.id;
+    },
+    remove({ state, principal }) {
+      return state.exists && !state.deleted && state.ownerId === principal.id;
+    },
+  },
+} satisfies Aggregate.Definition<TaskAggregate>;
+
+export const taskAggregate = createAggregate<TaskAggregate>(taskAggregateDefinition);
+
+type TaskProjection = Projection<{
+  Name: "taskList";
+  Version: 1;
+  Principal: User;
+  Sources: {
+    tasks: Aggregate.Events<typeof taskAggregate>;
+  };
+  Rows: {
+    tasks: Task;
+  };
+  Queries: {
+    Text: { tasks: "title" };
+    Analytics: { tasks: true };
+  };
+}>;
+
+export const taskProjectionDefinition = {
+  reduce({ event, rows }) {
+    if (event.type === "created") {
+      return [
+        {
+          upsert: {
+            tasks: {
+              id: event.key,
+              ownerId: event.data.ownerId,
+              title: event.data.title,
+              completed: false,
+            },
+          },
+        },
+      ];
+    }
+    if (event.type === "removed") {
+      return [{ remove: { tasks: { id: event.key } } }];
+    }
+    const current = rows.tasks.find(({ id }) => id === event.key);
+    if (!current) return [];
+    return [
+      {
+        upsert: {
+          tasks: {
+            id: current.id,
+            ownerId: current.ownerId,
+            title: event.data.title ?? current.title,
+            completed: event.data.completed ?? current.completed,
+          },
+        },
+      },
+    ];
+  },
+  authorize: {
+    tasks({ principal, row }) {
+      return principal.id === row.ownerId;
+    },
+  },
+} satisfies Projection.Definition<TaskProjection>;
+
+export const taskProjection = createProjection<TaskProjection>(taskProjectionDefinition);
+
+type TaskReplica = Replica<{
+  Name: "taskReplica";
+  Version: 1;
+  Identity: Identity;
+  Projection: typeof taskProjection;
+  Rows: "tasks";
+  Dependencies: {
+    tasks: Aggregate.Reference<typeof taskAggregate>;
+  };
+  Commands: {
+    create: Replica.Command<Readonly<{ id: string; title: string }>>;
+    update: Replica.Command<Readonly<{ id: string; title?: string; completed?: boolean }>>;
+    remove: Replica.Command<Readonly<{ id: string }>>;
+  };
+}>;
+
+export const taskReplicaDefinition = {
+  commands: {
+    create: {
+      async commit({ principal, dependencies, input, idempotencyKey }) {
+        const outcome = await dependencies.tasks
+          .get({ key: input.id, principal })
+          .create({ title: input.title }, { idempotencyKey });
+        if (outcome.status === "failed") throw new Error(outcome.failure.type);
+        return {};
+      },
+    },
+    update: {
+      async commit({ principal, dependencies, input, idempotencyKey }) {
+        const outcome = await dependencies.tasks
+          .get({ key: input.id, principal })
+          .update({ title: input.title, completed: input.completed }, { idempotencyKey });
+        if (outcome.status === "failed") throw new Error(outcome.failure.type);
+        return {};
+      },
+    },
+    remove: {
+      async commit({ principal, dependencies, input, idempotencyKey }) {
+        const outcome = await dependencies.tasks
+          .get({ key: input.id, principal })
+          .remove({ idempotencyKey });
+        if (outcome.status === "failed") throw new Error(outcome.failure.type);
+        return {};
+      },
+    },
+  },
+  optimistic: {
+    create({ state, input }) {
+      const next = [];
+      for (const task of state.tasks) next.push(task);
+      next.push({
+        id: input.id,
+        ownerId: "",
+        title: input.title,
+        completed: false,
+      });
+      return {
+        tasks: next,
+      };
+    },
+    update({ state, input }) {
+      const next = [];
+      for (const task of state.tasks) {
+        next.push(
+          task.id === input.id
+            ? {
+                id: task.id,
+                ownerId: task.ownerId,
+                title: input.title ?? task.title,
+                completed: input.completed ?? task.completed,
+              }
+            : task,
+        );
+      }
+      return {
+        tasks: next,
+      };
+    },
+    remove({ state, input }) {
+      const next = [];
+      for (const task of state.tasks) {
+        if (task.id !== input.id) next.push(task);
+      }
+      return {
+        tasks: next,
+      };
+    },
+  },
+  migrate: {},
+} satisfies Replica.Definition<TaskReplica>;
+
+export const taskReplica = createReplica<TaskReplica>(taskReplicaDefinition);
 
 type TaskRoutes = {
   root: {
@@ -56,11 +327,17 @@ export type TaskDestination = WebDestination<TaskRoutes>;
 
 type TasksBrowser = {
   Environment: BrowserMainThread;
-  Requires: { navigation: Navigation<TaskRoutes> };
+  Requires: {
+    navigation: Navigation<TaskRoutes>;
+    identifiers: Identifiers;
+    taskReplica: Replica.Client<typeof taskReplica>;
+  };
   State: {
     error: string | undefined;
+    replica: Replica.State<typeof taskReplica>;
   };
   Actions: {
+    receive(input: { replica: Replica.State<typeof taskReplica> }): void;
     create(): void;
     edit(input: { id: string }): void;
     back(): void;
@@ -109,34 +386,36 @@ type TasksBrowser = {
 };
 
 type TasksFeatureDefinition = Readonly<{
-  Features: { tasks: FeatureContractOf<typeof taskEntity> };
+  Features: {
+    aggregate: FeatureContractOf<typeof taskAggregate>;
+    projection: FeatureContractOf<typeof taskProjection>;
+    replica: FeatureContractOf<typeof taskReplica>;
+  };
   Programs: { browser: TasksBrowser };
 }>;
 
 export type TasksFeature = TasksFeatureDefinition;
 
-export const taskEntity = createEntity<Tasks>({
-  create: (value) => ({
-    id: value.id,
-    ownerId: value.principal.id,
-    title: value.input.title,
-    completed: false,
-  }),
-  update: (value) => ({
-    id: value.previous.id,
-    ownerId: value.previous.ownerId,
-    title: value.input.title ?? value.previous.title,
-    completed: value.input.completed ?? value.previous.completed,
-  }),
-  authorize: (value) => value.principal.id === value.entity.ownerId,
-});
-
 export const tasks = createFeature<TasksFeatureDefinition>({
-  features: { tasks: taskEntity },
+  features: {
+    aggregate: taskAggregate,
+    projection: taskProjection,
+    replica: taskReplica,
+  },
   programs: {
     browser: {
-      state: { error: undefined },
+      state: {
+        error: undefined,
+        replica: {
+          status: "signed-out",
+          pending: [],
+          rejected: [],
+        },
+      },
       actions: {
+        receive({ state }, { replica }) {
+          state.replica = replica;
+        },
         create({ dependencies }) {
           dependencies.navigation.navigate({ route: "create" });
         },
@@ -146,35 +425,44 @@ export const tasks = createFeature<TasksFeatureDefinition>({
         back({ dependencies }) {
           dependencies.navigation.navigate({ route: "list" });
         },
-        save({ dependencies, features, state }, { destination, title: inputTitle }) {
+        async save({ dependencies, state }, { destination, title: inputTitle }) {
           const title = inputTitle.trim();
           if (!title) return;
           state.error = undefined;
           try {
             if (destination.route === "edit") {
-              features.tasks.update({ id: destination.params.id, changes: { title } });
+              await dependencies.taskReplica.update({
+                id: destination.params.id,
+                title,
+              });
             } else {
-              features.tasks.create({ title });
+              await dependencies.taskReplica.create({
+                id: dependencies.identifiers.create({}),
+                title,
+              });
             }
             dependencies.navigation.navigate({ route: "list" });
           } catch (error) {
             state.error = message(error);
           }
         },
-        toggle({ features, state }, { id, completed }) {
+        async toggle({ dependencies, state }, { id, completed }) {
           try {
-            features.tasks.update({ id, changes: { completed } });
+            await dependencies.taskReplica.update({ id, completed });
           } catch (error) {
             state.error = message(error);
           }
         },
-        remove({ features, state }, { id }) {
+        async remove({ dependencies, state }, { id }) {
           try {
-            features.tasks.remove({ id });
+            await dependencies.taskReplica.remove({ id });
           } catch (error) {
             state.error = message(error);
           }
         },
+      },
+      start({ dependencies, actions }) {
+        return dependencies.taskReplica.subscribe((replica) => actions.receive({ replica }));
       },
       components: {
         Admin: {
@@ -184,7 +472,7 @@ export const tasks = createFeature<TasksFeatureDefinition>({
               state.title = title;
             },
           },
-          view({ feature, features: { tasks }, elements, props, state, actions }) {
+          view({ feature, elements, props, state, actions }) {
             const {
               Root,
               Header,
@@ -215,6 +503,7 @@ export const tasks = createFeature<TasksFeatureDefinition>({
               Save,
               Back,
             } = elements;
+            const tasks = () => feature.replica.data?.tasks ?? [];
             const title = () => {
               const destination = props.destination;
               return (
@@ -224,7 +513,7 @@ export const tasks = createFeature<TasksFeatureDefinition>({
             const editingTask = () => {
               const destination = props.destination;
               return destination.route === "edit"
-                ? tasks.entities.find((task) => task.id === destination.params.id)
+                ? tasks().find((task) => task.id === destination.params.id)
                 : undefined;
             };
             return (
@@ -246,21 +535,23 @@ export const tasks = createFeature<TasksFeatureDefinition>({
                 <Status role="status">
                   {() =>
                     feature.error ??
-                    tasks.mutations.find(({ status }) => status === "rejected")?.error ??
-                    (tasks.synchronization === "loading"
+                    feature.replica.rejected[0]?.message ??
+                    (feature.replica.status === "loading"
                       ? "Restoring tasks"
-                      : tasks.synchronization === "offline"
-                        ? `Offline · ${tasks.mutations.filter(({ status }) => status === "pending").length} queued`
-                        : tasks.synchronization === "synchronizing"
+                      : feature.replica.status === "offline"
+                        ? `Offline · ${feature.replica.pending.length} queued`
+                        : feature.replica.status === "synchronizing"
                           ? "Synchronizing changes"
-                          : `${tasks.entities.length} ${tasks.entities.length === 1 ? "task" : "tasks"}`)
+                          : feature.replica.status === "upgrade-required"
+                            ? "Update required"
+                            : `${tasks().length} ${tasks().length === 1 ? "task" : "tasks"}`)
                   }
                 </Status>
                 {() =>
                   props.destination.route === "list" ? (
-                    tasks.entities.length ? (
+                    tasks().length ? (
                       <List>
-                        <For each={() => tasks.entities} by="id">
+                        <For each={() => tasks()} by="id">
                           {(task) => (
                             <Row>
                               <TaskBody>
@@ -299,7 +590,7 @@ export const tasks = createFeature<TasksFeatureDefinition>({
                       </Empty>
                     )
                   ) : props.destination.route === "edit" &&
-                    tasks.synchronization === "synchronized" &&
+                    feature.replica.status === "synchronized" &&
                     !editingTask() ? (
                     <Empty>
                       <EmptyTitle>Task not found</EmptyTitle>

@@ -1,13 +1,28 @@
-import type { EntitySnapshot } from "kit/features/entity";
 import { createHttpTestSession, HttpTestResponseError, testSystem } from "kit/testing";
 import { expect } from "vitest";
 
 import type { Task } from "@/features/tasks";
 
+type TaskReplicaPull = Readonly<{
+  version: 1;
+  schema: string;
+  cursor: string;
+  snapshot?: Readonly<{ tasks: readonly Task[] }>;
+  changes: readonly Readonly<{
+    cursor: string;
+    replace: Readonly<{ tasks: readonly Task[] }>;
+  }>[];
+}>;
+
+type TaskReplicaCommand = Readonly<{
+  result: Record<never, never>;
+  pull: TaskReplicaPull;
+}>;
+
 testSystem({
   name: "authenticated CRUD System",
   directory: new URL("..", import.meta.url),
-  async verify({ location, locations, restart }) {
+  async verify({ realization, location, locations, restart }) {
     expect(locations["interface/customer.web"]).toHaveLength(1);
     expect(locations["interface/operations.web"]).toHaveLength(1);
     expect(locations["interface/customer.web"]).not.toEqual(locations["interface/operations.web"]);
@@ -41,9 +56,10 @@ testSystem({
     expect(asset.status).toBe(200);
     expect(asset.headers.get("content-type")).toContain("javascript");
 
-    const origin = locations["program/server"]?.[0] ?? location;
-    const alice = createHttpTestSession(origin);
-    const bob = createHttpTestSession(origin);
+    const api =
+      realization === "production" ? location : (locations["program/server"]?.[0] ?? location);
+    const alice = createHttpTestSession(api);
+    const bob = createHttpTestSession(api);
 
     await expect(
       alice.post("/api/identity/sign-up/email", {
@@ -63,43 +79,70 @@ testSystem({
       password: "password1234",
     });
 
-    const subscription = await alice.subscribe<EntitySnapshot<Task>>("/api/tasks/changes");
-    expect(await subscription.next()).toEqual({ revision: 0, entities: [] });
-    const commandHeaders = {
+    const initial = await alice.get<TaskReplicaPull>("/api/replicas/taskReplica");
+    expect(initial).toMatchObject({
+      version: 1,
+      snapshot: { tasks: [] },
+      changes: [],
+    });
+    expect(initial.schema).toContain('"create"');
+    expect(initial.schema).toContain('"title"');
+    const createHeaders = {
       "x-kit-command": "create-durable-task",
-      "x-kit-entity": "durable-task",
     };
-    const created = await alice.post<Task>(
-      "/api/tasks",
-      { title: "Durable task" },
-      { headers: commandHeaders },
+    const created = await alice.post<TaskReplicaCommand>(
+      "/api/replicas/taskReplica/create",
+      { id: "durable-task", title: "Durable task" },
+      { headers: createHeaders },
     );
-    expect(
-      await alice.post<Task>("/api/tasks", { title: "Durable task" }, { headers: commandHeaders }),
-    ).toEqual(created);
-    expect(await subscription.next()).toEqual({
-      revision: 1,
-      entities: [created],
+    const retried = await alice.post<TaskReplicaCommand>(
+      "/api/replicas/taskReplica/create",
+      { id: "durable-task", title: "Durable task" },
+      { headers: createHeaders },
+    );
+    expect(retried.result).toEqual(created.result);
+    expect(retried.pull.snapshot).toEqual(created.pull.snapshot);
+    expect(created.pull.snapshot).toEqual({
+      tasks: [
+        {
+          id: "durable-task",
+          ownerId: expect.any(String),
+          title: "Durable task",
+          completed: false,
+        },
+      ],
     });
-    expect((await bob.get<EntitySnapshot<Task>>("/api/tasks")).entities).toEqual([]);
-    await expect(bob.patch(`/api/tasks/${created.id}`, { completed: true })).rejects.toMatchObject({
-      status: 404,
+    expect((await bob.get<TaskReplicaPull>("/api/replicas/taskReplica")).snapshot).toEqual({
+      tasks: [],
     });
-    const updated = await alice.patch<Task>(`/api/tasks/${created.id}`, {
-      completed: true,
+    await expect(
+      bob.post(
+        "/api/replicas/taskReplica/update",
+        { id: "durable-task", completed: true },
+        { headers: { "x-kit-command": "bob-update" } },
+      ),
+    ).rejects.toMatchObject({ status: 409 });
+    const updated = await alice.post<TaskReplicaCommand>(
+      "/api/replicas/taskReplica/update",
+      { id: "durable-task", completed: true },
+      { headers: { "x-kit-command": "complete-durable-task" } },
+    );
+    expect(updated.pull.snapshot).toMatchObject({
+      tasks: [{ id: "durable-task", completed: true }],
     });
-    expect(await subscription.next()).toEqual({
-      revision: 2,
-      entities: [updated],
+    await alice.post<TaskReplicaCommand>(
+      "/api/replicas/taskReplica/create",
+      { id: "removed-task", title: "Remove me" },
+      { headers: { "x-kit-command": "create-removed-task" } },
+    );
+    const removed = await alice.post<TaskReplicaCommand>(
+      "/api/replicas/taskReplica/remove",
+      { id: "removed-task" },
+      { headers: { "x-kit-command": "remove-task" } },
+    );
+    expect(removed.pull.snapshot).toMatchObject({
+      tasks: [{ id: "durable-task", completed: true }],
     });
-    const removed = await alice.post<Task>("/api/tasks", { title: "Remove me" });
-    expect((await subscription.next()).revision).toBe(3);
-    await alice.delete(`/api/tasks/${removed.id}`);
-    expect(await subscription.next()).toEqual({
-      revision: 4,
-      entities: [updated],
-    });
-    await subscription.close();
 
     await restart();
     await expect(
@@ -112,16 +155,11 @@ testSystem({
       email: "alice@example.com",
       password: "password1234",
     });
-    expect(await alice.get<EntitySnapshot<Task>>("/api/tasks")).toEqual({
-      revision: 4,
-      entities: [updated],
+    expect((await alice.get<TaskReplicaPull>("/api/replicas/taskReplica")).snapshot).toMatchObject({
+      tasks: [{ id: "durable-task", completed: true }],
     });
-    const draining = await alice.subscribe<EntitySnapshot<Task>>("/api/tasks/changes");
-    expect((await draining.next()).revision).toBe(4);
-    await restart();
-    await draining.close();
     await alice.post("/api/identity/sign-out", {});
-    await expect(alice.get("/api/tasks")).rejects.toMatchObject({ status: 401 });
+    await expect(alice.get("/api/replicas/taskReplica")).rejects.toMatchObject({ status: 401 });
   },
 });
 

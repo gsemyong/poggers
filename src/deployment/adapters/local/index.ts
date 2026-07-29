@@ -66,7 +66,7 @@ type PreparedLocalGateway = Omit<LocalGatewayState, "pid" | "targets"> &
     targets: readonly string[];
   }>;
 
-const LOCAL_GATEWAY_VERSION = 3;
+const LOCAL_GATEWAY_VERSION = 4;
 
 export type LocalDeploymentState = DeploymentState &
   Readonly<{
@@ -814,7 +814,7 @@ async function prepareGateways(
             ? current
             : undefined;
         const location =
-          reusable?.location ??
+          current?.location ??
           `http://${hosts[0] ?? `web-${index + 1}.localhost`}:${await availablePort()}`;
         const directory = resolve(stateDirectory, "gateways", readableIdentity(artifact.identity));
         return Object.freeze({
@@ -1000,13 +1000,26 @@ async function refreshState(
       })),
   );
   const gateways = Object.freeze(state.gateways ?? []);
-  const gatewayFailures = gateways
-    .filter(({ pid }) => !processAlive(pid))
-    .map(({ identity }) => ({
-      operation: identity,
-      code: "GatewayUnavailable",
-      message: `Local gateway for ${JSON.stringify(identity)} is unavailable.`,
-    }));
+  const gatewayFailures = gateways.flatMap(({ identity, pid, version }) => {
+    if (!processAlive(pid)) {
+      return [
+        {
+          operation: identity,
+          code: "GatewayUnavailable",
+          message: `Local gateway for ${JSON.stringify(identity)} is unavailable.`,
+        },
+      ];
+    }
+    return version === LOCAL_GATEWAY_VERSION
+      ? []
+      : [
+          {
+            operation: identity,
+            code: "GatewayOutdated",
+            message: `Local gateway for ${JSON.stringify(identity)} must be replaced.`,
+          },
+        ];
+  });
   const expectedGateways = artifacts
     .filter(({ kind }) => kind === "interface")
     .map(({ identity }) => identity);
@@ -1297,7 +1310,6 @@ const server = createServer(async (incoming, outgoing) => {
     if (current.targets.length) {
       const target = new URL(current.targets[cursor++ % current.targets.length]);
       const headers = { ...incoming.headers };
-      headers.host = target.host;
       headers["x-forwarded-host"] = incoming.headers.host || "";
       headers["x-forwarded-proto"] = "http";
       const upstream = createRequest(

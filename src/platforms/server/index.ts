@@ -125,6 +125,12 @@ export type StoredEvent<Event = object> = Readonly<{
   event: Event;
 }>;
 
+/** An event in a provider-ordered retained feed; cursors are opaque outside its EventStore. */
+export type PositionedStoredEvent<Event = object> = StoredEvent<Event> &
+  Readonly<{
+    cursor: string;
+  }>;
+
 export type StoredSnapshot<Snapshot = object> = Readonly<{
   stream: string;
   revision: number;
@@ -138,6 +144,7 @@ export type EventStore<Event = object, Snapshot = object> = ServerDependency<{
     after?: number;
     limit?: number;
   }): Promise<readonly StoredEvent<Event>[]>;
+  scan(input: { after?: string; limit?: number }): Promise<readonly PositionedStoredEvent<Event>[]>;
   append(input: {
     stream: string;
     expectedRevision: number;

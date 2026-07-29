@@ -222,7 +222,7 @@ export type ExpressionValueIR =
   | Readonly<{
       kind: "dependency-reference-call";
       reference: ExpressionIR;
-      operation: string;
+      operation: string | ExpressionIR;
       input?: ExpressionIR;
       options?: ExpressionIR;
       argument: string;

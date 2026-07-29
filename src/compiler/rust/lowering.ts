@@ -470,12 +470,16 @@ ${expression.entries
         const reference = this.#temporaryName("reference");
         const request = this.#temporaryName("request");
         const dependency = this.#temporaryName("dependency");
+        const operation =
+          typeof expression.operation === "string"
+            ? rustString(expression.operation)
+            : `&${this.#expression(contribution, expression.operation)}.string()?`;
         return `{
             let ${reference} = ${this.#expression(contribution, expression.reference)};
             let ${dependency} = ${reference}.property("__kit_dependency", false)?.string()?;
             let mut ${request} = BTreeMap::new();
 ${expression.options ? `            ${request}.extend(${this.#expression(contribution, expression.options)}.as_record()?.iter().map(|(name, value)| (name.clone(), value.clone())));\n` : ""}            ${request}.extend(${reference}.property("__kit_binding", false)?.as_record()?.iter().map(|(name, value)| (name.clone(), value.clone())));
-${expression.input ? `            ${request}.insert(${rustString(expression.argument)}.to_owned(), ${this.#expression(contribution, expression.input)});\n` : ""}            engine.call_dependency_scoped(${rustString(contribution)}, &${dependency}, ${rustString(expression.operation)}, Value::mutable_record(${request})).await?
+${expression.input ? `            ${request}.insert(${rustString(expression.argument)}.to_owned(), ${this.#expression(contribution, expression.input)});\n` : ""}            engine.call_dependency_scoped(${rustString(contribution)}, &${dependency}, ${operation}, Value::mutable_record(${request})).await?
         }`;
       }
       case "conditional":
@@ -565,7 +569,9 @@ ${declarations}            Value::Function(${function_})
         }`;
       }
       case "error-match":
-        return `Value::Boolean(matches!(${this.#expression(contribution, expression.value)}, Value::Error(error) if error.name == ${rustString(expression.name)}))`;
+        return expression.name === "Error"
+          ? `Value::Boolean(matches!(${this.#expression(contribution, expression.value)}, Value::Error(_)))`
+          : `Value::Boolean(matches!(${this.#expression(contribution, expression.value)}, Value::Error(error) if error.name == ${rustString(expression.name)}))`;
     }
   }
 
@@ -615,14 +621,16 @@ ${declarations}            Value::Function(${function_})
       const engine = this.#temporaryName("engine");
       const reference = this.#temporaryName("reference");
       const request = this.#temporaryName("request");
+      const operation = this.#temporaryName("operation");
       future = `{
             let ${engine} = engine.clone();
             let ${reference} = ${this.#expression(contribution, expression.reference)};
             let mut ${request} = BTreeMap::new();
 ${expression.options ? `            ${request}.extend(${this.#expression(contribution, expression.options)}.as_record()?.iter().map(|(name, value)| (name.clone(), value.clone())));\n` : ""}            ${request}.extend(${reference}.property("__kit_binding", false)?.as_record()?.iter().map(|(name, value)| (name.clone(), value.clone())));
 ${expression.input ? `            ${request}.insert(${rustString(expression.argument)}.to_owned(), ${this.#expression(contribution, expression.input)});\n` : ""}            let dependency = ${reference}.property("__kit_dependency", false)?.string()?;
+            let ${operation} = ${typeof expression.operation === "string" ? `${rustString(expression.operation)}.to_owned()` : `${this.#expression(contribution, expression.operation)}.string()?`};
             Box::pin(async move {
-                ${engine}.call_dependency_scoped(${rustString(contribution)}, &dependency, ${rustString(expression.operation)}, Value::mutable_record(${request})).await
+                ${engine}.call_dependency_scoped(${rustString(contribution)}, &dependency, &${operation}, Value::mutable_record(${request})).await
             })
         }`;
     } else if (expression.kind === "method-call") {

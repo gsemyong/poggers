@@ -9,7 +9,17 @@ import { fileURLToPath } from "node:url";
 import { describe, test } from "vitest";
 
 import type { PlatformAdapterImplementation, ProductionConfiguration } from "@/adapter";
-import type { ReleaseArtifact } from "@/deployment";
+import type { System, SystemContract } from "@/core/system";
+import {
+  applyDeployment,
+  createDeployment,
+  removeDeployment,
+  type ReleaseArtifact,
+} from "@/deployment";
+import {
+  createLocalDeploymentAdapter,
+  type LocalDeploymentState,
+} from "@/deployment/adapters/local";
 import { createPlatformAdapters, platformAdapters } from "@/platforms";
 import {
   buildSystem,
@@ -19,11 +29,8 @@ import {
   type RunningSystem,
 } from "@/realization";
 
-export {
-  createEntityBrowserFixture,
-  createEntityFixture,
-  createMemoryEventStore,
-} from "@/features/entity";
+export { createEntityBrowserFixture, createEntityFixture } from "@/features/entity";
+export { createMemoryEventStore } from "@/testing/event-store";
 export {
   createDataBrowserFixture,
   createDataFixture,
@@ -43,6 +50,7 @@ export {
 } from "@/testing/dependency";
 export {
   clockConformance,
+  eventStoreConformance,
   identifiersConformance,
   timerConformance,
 } from "@/platforms/server/testing";
@@ -305,7 +313,9 @@ async function verifyProduction(definition: SystemTestDefinition): Promise<void>
     const ports = await availablePortRange(Math.max(portCount, 1));
     const start = async () => {
       const started = performance.now();
-      running = await startProductionSystem(built, directory, temporary, ports);
+      running = built.release.artifacts.some(({ services }) => services?.length)
+        ? await startDeployedProductionSystem(built, temporary)
+        : await startProductionSystem(built, directory, temporary, ports);
       await ready(running.location, () => running?.diagnostics?.());
       return { location: running.location, startupMs: performance.now() - started };
     };
@@ -319,6 +329,10 @@ async function verifyProduction(definition: SystemTestDefinition): Promise<void>
         locations: active.locations,
         metrics: testMetrics({ artifactBytes, buildMs, startupMs }),
         async restart() {
+          if (running?.restart) {
+            await running.restart();
+            return;
+          }
           await running?.dispose();
           running = undefined;
           await start();
@@ -402,8 +416,94 @@ type ProductionSystem = Readonly<{
   location: string;
   locations: Readonly<Record<string, readonly string[]>>;
   diagnostics?(): string;
+  restart?(): Promise<void>;
   dispose(): Promise<void>;
 }>;
+
+async function startDeployedProductionSystem(
+  built: BuiltSystem,
+  temporary: string,
+): Promise<ProductionSystem> {
+  const adapter = createLocalDeploymentAdapter({
+    artifacts: built.directory,
+    state: resolve(temporary, "deployment"),
+    startupTimeoutMs: 15_000,
+    shutdownTimeoutMs: 5_000,
+  });
+  const deployment = createDeployment({} as System<SystemContract>, { adapter });
+  let state: LocalDeploymentState;
+  try {
+    state = (await applyDeployment(deployment, built.release)).state;
+  } catch (error) {
+    await removeDeployment(deployment).catch(() => undefined);
+    throw error;
+  }
+
+  const locations = () => productionDeploymentLocations(state);
+  return {
+    get location() {
+      return publicLocation(locations());
+    },
+    get locations() {
+      return locations();
+    },
+    diagnostics: () => state.failures.map(({ code, message }) => `[${code}] ${message}`).join("\n"),
+    async restart() {
+      const pids = state.artifacts.flatMap(({ processes = [] }) =>
+        processes.flatMap(({ pid }) => (pid === undefined ? [] : [pid])),
+      );
+      for (const pid of pids) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch (error) {
+          if (!hasErrorCode(error, "ESRCH")) throw error;
+        }
+      }
+      await waitForProcessExit(pids);
+      state = (await applyDeployment(deployment, built.release)).state;
+    },
+    async dispose() {
+      state = (await removeDeployment(deployment)) as LocalDeploymentState;
+    },
+  };
+}
+
+function productionDeploymentLocations(
+  state: LocalDeploymentState,
+): Readonly<Record<string, readonly string[]>> {
+  return Object.freeze(
+    Object.fromEntries(
+      state.artifacts.flatMap((artifact) => {
+        const locations = [
+          ...(artifact.locations ?? []),
+          ...(artifact.processes ?? []).flatMap(({ locations = [] }) => locations),
+        ];
+        return locations.length ? [[artifact.identity, Object.freeze(locations)] as const] : [];
+      }),
+    ),
+  );
+}
+
+async function waitForProcessExit(pids: readonly number[]): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    if (
+      pids.every((pid) => {
+        try {
+          process.kill(pid, 0);
+          return false;
+        } catch (error) {
+          if (hasErrorCode(error, "ESRCH")) return true;
+          throw error;
+        }
+      })
+    ) {
+      return;
+    }
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+  }
+  throw new Error("Production Processes did not stop during the restart test.");
+}
 
 async function startProductionSystem(
   built: BuiltSystem,

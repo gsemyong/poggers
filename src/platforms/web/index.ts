@@ -101,7 +101,7 @@ export type Navigation<
   Owner extends FeatureContract | undefined = undefined,
 > = Dependency<
   {
-    Operations: WebNavigation<Routes & (Owner extends FeatureContract ? WebRoutes<Owner> : {})>;
+    Operations: WebNavigation<Readonly<Record<string, WebRouteContract>>>;
   },
   WebNavigation<Routes & (Owner extends FeatureContract ? WebRoutes<Owner> : {})>
 >;

@@ -34,23 +34,27 @@ import {
   createDeferredDependencyBinding,
   type DeferredDependencyBinding,
 } from "@/execution/process";
-import type { Clock, EventStore, Identifiers, StoredEvent } from "@/features/entity";
 import type {
   Alarm,
   Calendar,
   CalendarField,
   CalendarPattern,
   CalendarRange,
+  Clock,
+  EventStore,
   ExecutionContext,
   HttpField,
   HttpRequest,
   HttpResponse,
   HttpServer,
-  Telemetry,
-  Synchronization,
-  Timer,
+  Identifiers,
+  PositionedStoredEvent,
   ScheduledDependencyTarget,
   ServerDependencyProvider,
+  StoredEvent,
+  Synchronization,
+  Telemetry,
+  Timer,
 } from "@/platforms/server";
 
 export type NodeHostOptions = Readonly<{
@@ -1152,6 +1156,8 @@ function eventStoreClient<Event>(
   return Object.freeze({
     read: async (input) =>
       await implementation.read({ input, invocation: directProviderInvocation() }),
+    scan: async (input) =>
+      await implementation.scan({ input, invocation: directProviderInvocation() }),
     append: async (input) =>
       await implementation.append({ input, invocation: directProviderInvocation() }),
     subscribe: (input) =>
@@ -1189,12 +1195,14 @@ function createSqliteEventStoreImplementation<Event>(
   database: DatabaseSync,
   close: () => void = () => undefined,
 ): SqliteEventStore<Event> {
+  migrateSqliteEventStore(database);
   database.exec(`
     CREATE TABLE IF NOT EXISTS kit_events (
+      position INTEGER PRIMARY KEY AUTOINCREMENT,
       stream TEXT NOT NULL,
       revision INTEGER NOT NULL,
       event TEXT NOT NULL,
-      PRIMARY KEY (stream, revision)
+      UNIQUE (stream, revision)
     ) STRICT;
     CREATE TABLE IF NOT EXISTS kit_event_streams (
       stream TEXT PRIMARY KEY,
@@ -1210,6 +1218,9 @@ function createSqliteEventStoreImplementation<Event>(
   `);
   const read = database.prepare(
     "SELECT revision, event FROM kit_events WHERE stream = ? AND revision > ? ORDER BY revision LIMIT ?",
+  );
+  const scan = database.prepare(
+    "SELECT position, stream, revision, event FROM kit_events WHERE position > ? ORDER BY position LIMIT ?",
   );
   const revision = database.prepare(
     "SELECT COALESCE((SELECT revision FROM kit_event_streams WHERE stream = ?), 0) AS revision",
@@ -1254,6 +1265,23 @@ function createSqliteEventStoreImplementation<Event>(
   return {
     read: async ({ input: { stream, after = 0, limit = Number.MAX_SAFE_INTEGER } }) =>
       readEvents(stream, after, limit),
+    async scan({ input: { after, limit = Number.MAX_SAFE_INTEGER } }) {
+      assertLive();
+      const position = sqliteEventCursor(after);
+      return (
+        scan.all(position, limit) as Array<{
+          position: number;
+          stream: string;
+          revision: number;
+          event: string;
+        }>
+      ).map((row) => ({
+        cursor: String(row.position),
+        stream: row.stream,
+        revision: row.revision,
+        event: JSON.parse(row.event) as Event,
+      }));
+    },
     async append({ input: { stream, expectedRevision, events } }) {
       assertLive();
       database.exec("BEGIN IMMEDIATE");
@@ -1346,6 +1374,39 @@ function createSqliteEventStoreImplementation<Event>(
   };
 }
 
+function migrateSqliteEventStore(database: DatabaseSync): void {
+  const columns = database
+    .prepare("PRAGMA table_info(kit_events)")
+    .all() as unknown as readonly Readonly<{ name: string }>[];
+  if (columns.length === 0 || columns.some(({ name }) => name === "position")) return;
+  database.exec(`
+    BEGIN IMMEDIATE;
+    ALTER TABLE kit_events RENAME TO kit_events_without_position;
+    CREATE TABLE kit_events (
+      position INTEGER PRIMARY KEY AUTOINCREMENT,
+      stream TEXT NOT NULL,
+      revision INTEGER NOT NULL,
+      event TEXT NOT NULL,
+      UNIQUE (stream, revision)
+    ) STRICT;
+    INSERT INTO kit_events (stream, revision, event)
+      SELECT stream, revision, event
+      FROM kit_events_without_position
+      ORDER BY rowid;
+    DROP TABLE kit_events_without_position;
+    COMMIT
+  `);
+}
+
+function sqliteEventCursor(cursor: string | undefined): number {
+  if (cursor === undefined) return 0;
+  const position = Number(cursor);
+  if (!Number.isSafeInteger(position) || position < 0 || String(position) !== cursor) {
+    throw new TypeError("SQLite EventStore cursor is invalid.");
+  }
+  return position;
+}
+
 type JetStreamBatch<Event> = Readonly<{
   stream: string;
   expectedRevision: number;
@@ -1392,6 +1453,10 @@ async function createJetStreamEventStoreImplementation<Event>(
         after,
         limit,
       );
+    },
+    async scan({ input: { after, limit = Number.MAX_SAFE_INTEGER } }) {
+      assertLive();
+      return scanJetStreamEvents<Event>(client, streamName, `${prefix}.*`, after, limit);
     },
     async append({ input: { stream, expectedRevision, events } }) {
       assertLive();
@@ -1669,6 +1734,71 @@ async function readJetStreamEvents<Event>(
   } finally {
     await consumer.delete();
   }
+}
+
+async function scanJetStreamEvents<Event>(
+  client: JetStreamClient,
+  streamName: string,
+  subject: string,
+  after: string | undefined,
+  limit: number,
+): Promise<readonly PositionedStoredEvent<Event>[]> {
+  if (!Number.isSafeInteger(limit) || limit < 1) {
+    throw new TypeError("JetStream EventStore scan limit must be a positive safe integer.");
+  }
+  const cursor = jetStreamEventCursor(after);
+  const consumer = await client.consumers.get(streamName, {
+    filter_subjects: subject,
+    deliver_policy: DeliverPolicy.All,
+  });
+  const result: PositionedStoredEvent<Event>[] = [];
+  try {
+    let pending = (await consumer.info()).num_pending;
+    while (pending > 0) {
+      const messages = await consumer.fetch({
+        max_messages: Math.min(pending, 1_000),
+        expires: 1_000,
+      });
+      let received = 0;
+      for await (const message of messages) {
+        received += 1;
+        const sequence = message.info.streamSequence;
+        const batch = decodeBatch<Event>(message.data);
+        const stored = storedBatch(batch.stream, batch.expectedRevision, batch.events);
+        for (let index = 0; index < stored.length; index += 1) {
+          if (
+            sequence < cursor.sequence ||
+            (sequence === cursor.sequence && index <= cursor.index)
+          ) {
+            continue;
+          }
+          result.push({
+            ...stored[index]!,
+            cursor: `${sequence}:${index}`,
+          });
+          if (result.length >= limit) return result;
+        }
+      }
+      if (!received) throw new Error("JetStream EventStore timed out while scanning events.");
+      pending -= received;
+    }
+    return result;
+  } finally {
+    await consumer.delete();
+  }
+}
+
+function jetStreamEventCursor(
+  cursor: string | undefined,
+): Readonly<{ sequence: number; index: number }> {
+  if (cursor === undefined) return { sequence: 0, index: -1 };
+  const match = /^([1-9]\d*):(\d+)$/.exec(cursor);
+  const sequence = Number(match?.[1]);
+  const index = Number(match?.[2]);
+  if (!match || !Number.isSafeInteger(sequence) || !Number.isSafeInteger(index)) {
+    throw new TypeError("JetStream EventStore cursor is invalid.");
+  }
+  return { sequence, index };
 }
 
 function subscribeJetStreamEvents<Event>(

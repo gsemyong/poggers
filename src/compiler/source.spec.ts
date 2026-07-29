@@ -1442,8 +1442,16 @@ export default createSystem({ features: { fixture } });
     expect(
       expressions
         .filter((expression) => expression.kind === "dependency-reference-call")
+        .filter(({ operation }) => typeof operation === "string")
         .map(({ operation }) => operation),
-    ).toEqual(["add", "read"]);
+    ).toEqual(["read"]);
+    expect(
+      expressions.filter(
+        (expression) =>
+          expression.kind === "dependency-reference-call" &&
+          typeof expression.operation !== "string",
+      ),
+    ).toHaveLength(1);
 
     const requests: unknown[] = [];
     await executeProgramIR(ir, "feature/worker/program/server", {
@@ -1544,6 +1552,27 @@ export default createSystem({ features: { fixture } });
     ].filter((expression) => expression.kind === "literal");
 
     expect(contribution?.provides.map(({ name }) => name)).toEqual(["catalog"]);
+    expect(literals).toContainEqual(
+      expect.objectContaining({
+        kind: "literal",
+        value: "catalog",
+        type: { kind: "literal", value: "catalog" },
+      }),
+    );
+  });
+
+  test("materializes nested indexed literals after generic factory substitution", async () => {
+    const ir = compileSystem(await projectFixture(nestedTypeLiteralFactorySystemSource()));
+    const contribution = programContribution(ir, "feature/catalog/program/server");
+    const implementation = serverExecution(contribution);
+    if (implementation?.kind !== "portable") {
+      throw new Error("Expected portable nested named-provider factory.");
+    }
+    const literals = [
+      ...collectExpressions(implementation.entry.body),
+      ...implementation.functions.flatMap(({ body }) => collectExpressions(body)),
+    ].filter((expression) => expression.kind === "literal");
+
     expect(literals).toContainEqual(
       expect.objectContaining({
         kind: "literal",
@@ -2167,6 +2196,16 @@ const catalog = createNamedFeature<Catalog>("ready");
 
 export default createSystem({ features: { catalog } });
 `;
+}
+
+function nestedTypeLiteralFactorySystemSource(): string {
+  return typeLiteralFactorySystemSource()
+    .replace("type Model = { Name: string };", "type Model = { Identity: { Name: string } };")
+    .replaceAll('Definition["Name"]', 'Definition["Identity"]["Name"]')
+    .replace(
+      'type Catalog = { Name: "catalog" };',
+      'type Catalog = { Identity: { Name: "catalog" } };',
+    );
 }
 
 function typeSchemaFactorySystemSource(): string {
@@ -2983,6 +3022,7 @@ import {
   type Dependency,
   type DependencyReference,
 } from "@/index";
+import { dispatchDependencyReference } from "@/core/dependency";
 import { typeLiteral } from "@/core/intrinsic";
 import type { ServerPlatform } from "@/platforms/server";
 
@@ -3021,7 +3061,13 @@ type Worker = {
 };
 
 async function update(counter: CounterInstance) {
-  await counter.add({ value: 2 }, { idempotencyKey: "add-1" });
+  const operation: string = "add";
+  await dispatchDependencyReference<number>(
+    counter,
+    operation,
+    { value: 2 },
+    { idempotencyKey: "add-1" },
+  );
   await counter.read();
 }
 

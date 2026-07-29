@@ -92,6 +92,21 @@
       "types": "./dist/src/features/actor/public.d.ts",
       "default": "./dist/src/features/actor/public.js"
     },
+    "./features/aggregate": {
+      "source": "./dist/source/features/aggregate/index.ts",
+      "types": "./dist/src/features/aggregate/index.d.ts",
+      "default": "./dist/src/features/aggregate/index.js"
+    },
+    "./features/projection": {
+      "source": "./dist/source/features/projection/index.ts",
+      "types": "./dist/src/features/projection/index.d.ts",
+      "default": "./dist/src/features/projection/index.js"
+    },
+    "./features/replica": {
+      "source": "./dist/source/features/replica/index.ts",
+      "types": "./dist/src/features/replica/index.d.ts",
+      "default": "./dist/src/features/replica/index.js"
+    },
     "./features/data": {
       "source": "./dist/source/features/data/index.ts",
       "types": "./dist/src/features/data/index.d.ts",

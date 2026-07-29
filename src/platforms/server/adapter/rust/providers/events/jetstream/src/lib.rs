@@ -93,6 +93,18 @@ impl Dependency for Events {
                     let events = read(&stream, stream_name, after, limit as usize).await?;
                     Ok(Value::from_json(&JsonValue::Array(events)))
                 }
+                "scan" => {
+                    let limit = optional_integer(&input, "limit")?.unwrap_or(i64::MAX);
+                    if limit < 1 {
+                        return Err(NativeError::new(
+                            "InvalidInput",
+                            "EventStore scan limit must be positive.",
+                        ));
+                    }
+                    let events =
+                        scan(&stream, optional_cursor(&input, "after")?, limit as usize).await?;
+                    Ok(Value::from_json(&JsonValue::Array(events)))
+                }
                 "append" => append(&context, &stream, &input).await.map(|events| {
                     events.map_or(Value::Undefined, |events| {
                         Value::from_json(&JsonValue::Array(events))
@@ -128,6 +140,7 @@ impl Dependency for Events {
 
 kit_server_runtime::dependency_operations!(Events {
     operation_read => "read",
+    operation_scan => "scan",
     operation_append => "append",
     operation_subscribe => "subscribe",
     operation_load_snapshot => "loadSnapshot",
@@ -347,6 +360,49 @@ async fn read(
     Ok(result)
 }
 
+async fn scan(
+    stream: &Stream,
+    after: Option<(u64, usize)>,
+    limit: usize,
+) -> NativeResult<Vec<JsonValue>> {
+    let subject = format!("{PREFIX}.*");
+    let mut sequence = after.map(|(sequence, _)| sequence);
+    let mut result = Vec::new();
+    loop {
+        let message = match stream.direct_get_next_for_subject(&subject, sequence).await {
+            Ok(message) => message,
+            Err(error) if matches!(error.kind(), DirectGetErrorKind::NotFound) => break,
+            Err(error) => return Err(failure(error)),
+        };
+        sequence = Some(message.sequence.saturating_add(1));
+        let batch = decode(&message.payload)?;
+        let stream_name = string(&batch, "stream")?;
+        let expected = integer(&batch, "expectedRevision")?;
+        let events = batch
+            .get("events")
+            .and_then(JsonValue::as_array)
+            .ok_or_else(|| NativeError::new("InvalidEventStore", "Invalid event batch."))?;
+        for (index, event) in events.iter().enumerate() {
+            if after.is_some_and(|(cursor_sequence, cursor_index)| {
+                message.sequence < cursor_sequence
+                    || (message.sequence == cursor_sequence && index <= cursor_index)
+            }) {
+                continue;
+            }
+            result.push(json!({
+                "cursor": format!("{}:{index}", message.sequence),
+                "stream": stream_name,
+                "revision": expected + index as i64 + 1,
+                "event": event,
+            }));
+            if result.len() >= limit {
+                return Ok(result);
+            }
+        }
+    }
+    Ok(result)
+}
+
 async fn subscribe(client: Client, stream: Stream, input: JsonValue) -> NativeResult<Value> {
     let name = string(&input, "stream")?.to_owned();
     let after = optional_integer(&input, "after")?.unwrap_or(0);
@@ -465,6 +521,34 @@ fn optional_integer(value: &JsonValue, name: &str) -> NativeResult<Option<i64>> 
             .map(Some)
             .ok_or_else(|| NativeError::new("InvalidInput", format!("{name} must be an integer."))),
     }
+}
+
+fn optional_cursor(value: &JsonValue, name: &str) -> NativeResult<Option<(u64, usize)>> {
+    let Some(value) = value.get(name) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let cursor = value
+        .as_str()
+        .ok_or_else(|| NativeError::new("InvalidInput", format!("{name} must be a cursor.")))?;
+    let (sequence, index) = cursor
+        .split_once(':')
+        .ok_or_else(|| NativeError::new("InvalidInput", format!("{name} must be a cursor.")))?;
+    let sequence = sequence
+        .parse::<u64>()
+        .map_err(|_| NativeError::new("InvalidInput", format!("{name} must be a cursor.")))?;
+    let index = index
+        .parse::<usize>()
+        .map_err(|_| NativeError::new("InvalidInput", format!("{name} must be a cursor.")))?;
+    if sequence == 0 || format!("{sequence}:{index}") != cursor {
+        return Err(NativeError::new(
+            "InvalidInput",
+            format!("{name} must be a cursor."),
+        ));
+    }
+    Ok(Some((sequence, index)))
 }
 
 fn failure(error: impl std::fmt::Display) -> NativeError {

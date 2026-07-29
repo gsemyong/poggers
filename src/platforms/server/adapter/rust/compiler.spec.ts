@@ -12,7 +12,6 @@ import type { ProgramIR, SourceSpan } from "@/compiler/ir";
 import { linkProgram } from "@/compiler/linker";
 import { compileSystem } from "@/compiler/source";
 import { dependencyInvocation } from "@/core/dependency";
-import { createMemoryEventStore } from "@/features/entity";
 import { SERVER_COMPILER_IR_VERSION, serverCompilerExtension } from "@/platforms/server/adapter";
 import { buildServerProgram, rustNumber } from "@/platforms/server/adapter/rust/compiler";
 import {
@@ -20,6 +19,7 @@ import {
   jetStreamEventsDependency,
 } from "@/platforms/server/adapter/rust/providers";
 import { executeServerLinkedProgramIR as executeLinkedProgramIR } from "@/platforms/server/adapter/typescript/runtime";
+import { createMemoryEventStore } from "@/testing/event-store";
 
 const directories: string[] = [];
 const processes: ChildProcess[] = [];
@@ -967,6 +967,7 @@ import {
   type Dependency,
   type Feature,
 } from "@/index";
+import { dispatchDependencyReference } from "@/core/dependency";
 import { createActor, type Actor } from "@/features/actor";
 import type {
   Clock,
@@ -1230,7 +1231,11 @@ const probe = createFeature<Probe>({
       }) {
         const input = await dependencies.recorder.read({});
         const counter = dependencies.counter.get({ key: input.key });
-        const first = await counter.add(
+        const first = await dispatchDependencyReference<
+          Actor.Outcome<{ value: number }, { negative: { amount: number } }>
+        >(
+          counter,
+          "add",
           { amount: input.amount },
           {
             idempotencyKey: "same",
@@ -1284,7 +1289,10 @@ const probe = createFeature<Probe>({
             idempotencyKey: "cycle-failure",
           });
         } catch (error) {
-          cycleFailure = (error as Actor.Error).failure;
+          cycleFailure = {
+            error: error instanceof Error,
+            failure: (error as Actor.Error).failure,
+          };
         }
         const acceptedCycle = await dependencies.cycleA.get({ key: "accepted-cycle" }).pingAccepted({
           idempotencyKey: "cycle-accepted",

@@ -1180,6 +1180,13 @@ async function evaluate(
       const options = expression.options
         ? await evaluate(expression.options, locals, dependencies, calls, functions)
         : undefined;
+      const operation =
+        typeof expression.operation === "string"
+          ? expression.operation
+          : await evaluate(expression.operation, locals, dependencies, calls, functions);
+      if (typeof operation !== "string") {
+        throw new TypeError("Referenced Dependency operation must be a string.");
+      }
       if (input !== undefined && !isRecord(input)) {
         throw new TypeError("Referenced Dependency product input must be an object.");
       }
@@ -1187,11 +1194,9 @@ async function evaluate(
         throw new TypeError("Referenced Dependency call options must be an object.");
       }
       if (isRuntimeDependencyReference(reference)) {
-        const method = Reflect.get(reference, expression.operation);
+        const method = Reflect.get(reference, operation);
         if (typeof method !== "function") {
-          throw new TypeError(
-            `Runtime Dependency reference has no method ${expression.operation}.`,
-          );
+          throw new TypeError(`Runtime Dependency reference has no method ${operation}.`);
         }
         const arguments_ =
           input === undefined
@@ -1214,7 +1219,7 @@ async function evaluate(
             ? Reflect.ownKeys(reference).map(String).join(", ")
             : typeof reference;
         throw new TypeError(
-          `Referenced Dependency method ${expression.operation} requires a Dependency reference; ` +
+          `Referenced Dependency method ${operation} requires a Dependency reference; ` +
             `received ${received || "an empty object"}.`,
         );
       }
@@ -1225,22 +1230,20 @@ async function evaluate(
       };
       const dependency = dependencies[reference.dependency];
       if (!dependency) {
-        throw new Error(
-          `Missing Dependency operation ${reference.dependency}.${expression.operation}.`,
-        );
+        throw new Error(`Missing Dependency operation ${reference.dependency}.${operation}.`);
       }
       calls.push({
         dependency: reference.dependency,
-        operation: expression.operation,
+        operation,
         input: request,
       });
       const now = Date.now();
       const result = invokeDependency(
         dependency,
-        expression.operation,
+        operation,
         materializeDependencyValue(request, dependencies, calls, functions),
         {
-          id: directInvocationId(calls, reference.dependency, expression.operation),
+          id: directInvocationId(calls, reference.dependency, operation),
           attempt: 1,
           scheduledAt: now,
           startedAt: now,

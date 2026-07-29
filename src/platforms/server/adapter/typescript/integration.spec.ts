@@ -72,6 +72,21 @@ test.skipIf(!available)(
         { stream: "orders:one", revision: 1, event: { value: "created" } },
         { stream: "orders:one", revision: 2, event: { value: "confirmed" } },
       ]);
+      const firstScan = await second.scan({ limit: 1 });
+      expect(firstScan).toHaveLength(1);
+      expect(firstScan[0]).toMatchObject({
+        stream: "orders:one",
+        revision: 1,
+        event: { value: "created" },
+      });
+      await expect(second.scan({ after: firstScan[0]!.cursor, limit: 2 })).resolves.toEqual([
+        {
+          cursor: expect.any(String),
+          stream: "orders:one",
+          revision: 2,
+          event: { value: "confirmed" },
+        },
+      ]);
 
       const contenders = await Promise.all([
         first.append({

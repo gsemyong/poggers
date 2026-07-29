@@ -1,21 +1,59 @@
-import { createEntityFixture } from "kit/testing";
+import { createAggregateFixture } from "kit/features/aggregate";
 import { describe, expect, test } from "vitest";
 
-import { taskEntity } from "@/features/tasks";
+import { taskAggregate, taskAggregateDefinition } from "@/features/tasks";
 
 describe("tasks Feature", () => {
-  test("exposes the generated semantic API without infrastructure", async () => {
-    await using fixture = await createEntityFixture(taskEntity, {
-      principal: { id: "alice", name: "Alice", email: "alice@example.com" },
+  test("decides and replays its domain without infrastructure", async () => {
+    const fixture = createAggregateFixture(taskAggregate, taskAggregateDefinition, {
+      dependencies: {},
+    });
+    const principal = { id: "alice", name: "Alice", email: "alice@example.com" };
+    const initial = fixture.initial({ key: "task-1" });
+
+    const created = await fixture.execute({
+      command: "create",
+      key: "task-1",
+      principal,
+      state: initial,
+      input: { title: "Verify the feature" },
+    });
+    const completed = await fixture.execute({
+      command: "update",
+      key: "task-1",
+      principal,
+      state: created.snapshot,
+      input: { completed: true },
     });
 
-    const created = await fixture.api.create({ title: "Verify the feature" });
-    const completed = await fixture.api.update({
-      id: created.id,
-      changes: { completed: true },
+    expect(created.outcome).toEqual({
+      status: "succeeded",
+      value: { id: "task-1" },
     });
+    expect(completed.snapshot.state).toMatchObject({
+      id: "task-1",
+      ownerId: "alice",
+      title: "Verify the feature",
+      completed: true,
+    });
+    expect(
+      fixture.replay({
+        key: "task-1",
+        events: [...created.events, ...completed.events],
+      }),
+    ).toEqual(completed.snapshot);
 
-    expect(completed).toEqual({ ...created, completed: true });
-    expect((await fixture.api.list()).entities).toEqual([completed]);
+    await expect(
+      fixture.execute({
+        command: "update",
+        key: "task-1",
+        principal: { ...principal, id: "mallory" },
+        state: completed.snapshot,
+        input: { title: "Unauthorized" },
+      }),
+    ).resolves.toMatchObject({
+      outcome: { status: "failed", failure: { type: "forbidden" } },
+      events: [],
+    });
   });
 });

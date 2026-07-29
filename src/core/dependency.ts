@@ -365,6 +365,25 @@ export function dispatchDependency<Result>(
   );
 }
 
+/**
+ * @internal Invokes a validated operation selected by a reusable semantic
+ * runtime on an already-bound Dependency reference.
+ */
+export function dispatchDependencyReference<Result>(
+  reference: object,
+  operation: string,
+  input: object,
+  options?: DependencyCallOptions,
+): Promise<Result> {
+  const method = Reflect.get(reference, operation);
+  if (typeof method !== "function") {
+    throw new TypeError(`Dependency reference has no operation ${JSON.stringify(operation)}.`);
+  }
+  return Promise.resolve(
+    Reflect.apply(method, reference, options === undefined ? [input] : [input, options]) as Result,
+  );
+}
+
 /** @internal Creates one mutable cancellation source for adapter-owned delivery. */
 export function createDependencyCancellation(): DependencyCancellation &
   Readonly<{ request(): void }> {

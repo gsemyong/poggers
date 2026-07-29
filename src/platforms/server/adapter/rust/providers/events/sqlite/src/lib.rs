@@ -32,15 +32,18 @@ pub async fn create(context: DependencyContext) -> NativeResult<Events> {
     }
     let database = Connection::open(path)
         .map_err(|error| NativeError::new("EventStoreFailure", error.to_string()))?;
+    migrate_event_store(&database)
+        .map_err(|error| NativeError::new("EventStoreFailure", error.to_string()))?;
     database
         .execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
              CREATE TABLE IF NOT EXISTS kit_events (
+               position INTEGER PRIMARY KEY AUTOINCREMENT,
                stream TEXT NOT NULL,
                revision INTEGER NOT NULL,
                event TEXT NOT NULL,
-               PRIMARY KEY (stream, revision)
+               UNIQUE (stream, revision)
              ) STRICT;
              CREATE TABLE IF NOT EXISTS kit_event_streams (
                stream TEXT PRIMARY KEY,
@@ -61,6 +64,33 @@ pub async fn create(context: DependencyContext) -> NativeResult<Events> {
             channels: Mutex::new(HashMap::new()),
         }),
     })
+}
+
+fn migrate_event_store(database: &Connection) -> rusqlite::Result<()> {
+    let columns = database
+        .prepare("PRAGMA table_info(kit_events)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if columns.is_empty() || columns.iter().any(|column| column == "position") {
+        return Ok(());
+    }
+    database.execute_batch(
+        "BEGIN IMMEDIATE;
+         ALTER TABLE kit_events RENAME TO kit_events_without_position;
+         CREATE TABLE kit_events (
+           position INTEGER PRIMARY KEY AUTOINCREMENT,
+           stream TEXT NOT NULL,
+           revision INTEGER NOT NULL,
+           event TEXT NOT NULL,
+           UNIQUE (stream, revision)
+         ) STRICT;
+         INSERT INTO kit_events (stream, revision, event)
+           SELECT stream, revision, event
+           FROM kit_events_without_position
+           ORDER BY rowid;
+         DROP TABLE kit_events_without_position;
+         COMMIT;",
+    )
 }
 
 impl Dependency for Events {
@@ -89,6 +119,18 @@ impl Dependency for Events {
                     let events = read_events(&state, stream, after, limit)?;
                     Ok(Value::from_json(&JsonValue::Array(events)))
                 }
+                "scan" => {
+                    let after = optional_cursor(&input, "after")?.unwrap_or(0);
+                    let limit = optional_integer(&input, "limit")?.unwrap_or(i64::MAX);
+                    if limit < 1 {
+                        return Err(NativeError::new(
+                            "InvalidInput",
+                            "EventStore scan limit must be positive.",
+                        ));
+                    }
+                    let events = scan_events(&state, after, limit)?;
+                    Ok(Value::from_json(&JsonValue::Array(events)))
+                }
                 "append" => append(&state, &input).map(|value| match value {
                     Some(events) => Value::from_json(&JsonValue::Array(events)),
                     None => Value::Undefined,
@@ -113,6 +155,7 @@ impl Dependency for Events {
 
 kit_server_runtime::dependency_operations!(Events {
     operation_read => "read",
+    operation_scan => "scan",
     operation_append => "append",
     operation_subscribe => "subscribe",
     operation_load_snapshot => "loadSnapshot",
@@ -340,6 +383,39 @@ fn read_events(
     .collect()
 }
 
+fn scan_events(state: &State, after: i64, limit: i64) -> NativeResult<Vec<JsonValue>> {
+    let database = lock(&state.database);
+    let mut statement = database
+        .prepare(
+            "SELECT position, stream, revision, event FROM kit_events
+             WHERE position > ?1 ORDER BY position LIMIT ?2",
+        )
+        .map_err(|error| NativeError::new("EventStoreFailure", error.to_string()))?;
+    let rows = statement
+        .query_map(params![after, limit], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(|error| NativeError::new("EventStoreFailure", error.to_string()))?;
+    rows.map(|row| {
+        let (position, stream, revision, event) =
+            row.map_err(|error| NativeError::new("EventStoreFailure", error.to_string()))?;
+        let event = serde_json::from_str::<JsonValue>(&event)
+            .map_err(|error| NativeError::new("EventStoreFailure", error.to_string()))?;
+        Ok(json!({
+            "cursor": position.to_string(),
+            "stream": stream,
+            "revision": revision,
+            "event": event
+        }))
+    })
+    .collect()
+}
+
 fn channel(state: &State, stream: &str) -> broadcast::Sender<JsonValue> {
     lock(&state.channels)
         .entry(stream.to_owned())
@@ -367,6 +443,31 @@ fn optional_integer(value: &JsonValue, name: &str) -> NativeResult<Option<i64>> 
         Some(value) => json_integer(value)
             .map(Some)
             .ok_or_else(|| NativeError::new("InvalidInput", format!("{name} must be an integer."))),
+    }
+}
+
+fn optional_cursor(value: &JsonValue, name: &str) -> NativeResult<Option<i64>> {
+    match value.get(name) {
+        None | Some(JsonValue::Null) => Ok(None),
+        Some(JsonValue::String(value)) => {
+            let parsed = value.parse::<i64>().map_err(|_| {
+                NativeError::new(
+                    "InvalidInput",
+                    format!("{name} must be an EventStore cursor."),
+                )
+            })?;
+            if parsed < 0 || parsed.to_string() != *value {
+                return Err(NativeError::new(
+                    "InvalidInput",
+                    format!("{name} must be an EventStore cursor."),
+                ));
+            }
+            Ok(Some(parsed))
+        }
+        Some(_) => Err(NativeError::new(
+            "InvalidInput",
+            format!("{name} must be an EventStore cursor."),
+        )),
     }
 }
 
@@ -482,6 +583,48 @@ mod tests {
             .expect("serialize read");
         assert_eq!(read.as_array().expect("event array").len(), 1);
         assert_eq!(read[0]["event"]["type"], "Renamed");
+    }
+
+    #[tokio::test]
+    async fn scans_retained_events_with_opaque_global_cursors() {
+        let events = create(context(":memory:")).await.expect("create events");
+        call(
+            &events,
+            "append",
+            json!({
+                "stream": "order/1",
+                "expectedRevision": 0,
+                "events": [{ "type": "Placed" }, { "type": "Confirmed" }]
+            }),
+        )
+        .await
+        .expect("append orders");
+        call(
+            &events,
+            "append",
+            json!({
+                "stream": "inventory/1",
+                "expectedRevision": 0,
+                "events": [{ "type": "Reserved" }]
+            }),
+        )
+        .await
+        .expect("append inventory");
+
+        let first = call(&events, "scan", json!({ "limit": 2 }))
+            .await
+            .expect("first scan")
+            .to_json()
+            .expect("serialize first scan");
+        assert_eq!(first[0]["cursor"], "1");
+        assert_eq!(first[1]["cursor"], "2");
+        let remaining = call(&events, "scan", json!({ "after": "2", "limit": 2 }))
+            .await
+            .expect("remaining scan")
+            .to_json()
+            .expect("serialize remaining scan");
+        assert_eq!(remaining[0]["cursor"], "3");
+        assert_eq!(remaining[0]["stream"], "inventory/1");
     }
 
     #[tokio::test]
@@ -603,6 +746,65 @@ mod tests {
             .expect("serialize read");
         assert_eq!(read[0]["event"], 42);
         drop(restarted);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+    }
+
+    #[tokio::test]
+    async fn migrates_events_created_before_global_cursors() {
+        let path = std::env::temp_dir().join(format!(
+            "kit-events-migration-{}-{}.sqlite",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        {
+            let database = Connection::open(&path).expect("open legacy database");
+            database
+                .execute_batch(
+                    "CREATE TABLE kit_events (
+                       stream TEXT NOT NULL,
+                       revision INTEGER NOT NULL,
+                       event TEXT NOT NULL,
+                       PRIMARY KEY (stream, revision)
+                     ) STRICT;
+                     INSERT INTO kit_events (stream, revision, event) VALUES
+                       ('orders/legacy', 1, '{\"type\":\"Placed\"}'),
+                       ('inventory/legacy', 1, '{\"type\":\"Reserved\"}');",
+                )
+                .expect("seed legacy events");
+        }
+
+        let path_text = path.to_string_lossy();
+        let events = create(context(&path_text)).await.expect("migrate events");
+        let scanned = call(&events, "scan", json!({}))
+            .await
+            .expect("scan migrated events")
+            .to_json()
+            .expect("serialize migrated events");
+        assert_eq!(scanned[0]["cursor"], "1");
+        assert_eq!(scanned[0]["stream"], "orders/legacy");
+        assert_eq!(scanned[1]["cursor"], "2");
+        assert_eq!(scanned[1]["stream"], "inventory/legacy");
+
+        let appended = call(
+            &events,
+            "append",
+            json!({
+                "stream": "orders/legacy",
+                "expectedRevision": 1,
+                "events": [{ "type": "Confirmed" }]
+            }),
+        )
+        .await
+        .expect("append after migration")
+        .to_json()
+        .expect("serialize append");
+        assert_eq!(appended[0]["revision"], 2);
+        drop(events);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
         let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));

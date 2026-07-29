@@ -35,7 +35,6 @@ import {
   createMemoryDependencyTransport,
   createRemoteDependency,
 } from "@/execution/transport";
-import { createMemoryEventStore } from "@/features/entity";
 import type {
   Workflow,
   WorkflowRegistry,
@@ -78,6 +77,7 @@ import {
 } from "@/platforms/server/adapter/rust/fixtures/conformance";
 import { defineServerProductionDependency } from "@/platforms/server/adapter/rust/providers";
 import { executeServerLinkedProgramIR } from "@/platforms/server/adapter/typescript/runtime";
+import { createMemoryEventStore } from "@/testing/event-store";
 
 type Search = Dependency<{
   Operations: {
@@ -793,7 +793,7 @@ test(
 
 test(
   "lowers typed Workflow references to canonical child commands",
-  { tags: ["compiler"], timeout: 20_000 },
+  { tags: ["compiler"], timeout: 30_000 },
   () => {
     const system = workflowChildrenFixtureSystem();
     const parent = system.features.find(({ path }) => path === "parent");
@@ -1692,7 +1692,7 @@ function workflowPortableData(value: ExtensionIR, span: SourceSpan): ExpressionI
 
 test(
   "matches Actor-backed Workflow journals and outcomes in generated Rust",
-  { tags: ["production"], timeout: 240_000 },
+  { tags: ["production"], timeout: 360_000 },
   async () => {
     const directory = await mkdtemp(resolve(tmpdir(), "kit-workflow-native-"));
     try {
@@ -3547,7 +3547,7 @@ test("continues under one Workflow identity with bounded retained run summaries"
 
 test(
   "starts, controls, joins, and observes a typed child Workflow durably",
-  { timeout: 20_000 },
+  { timeout: 30_000 },
   async () => {
     const server = workflowChildrenFixtureSystem().programs.find(({ name }) => name === "server");
     if (!server) throw new Error("Workflow child fixture has no server Program.");

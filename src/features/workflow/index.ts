@@ -2250,6 +2250,7 @@ function createWorkflowExecutionActor<Model extends WorkflowModelDefinition>(
         };
       },
     }),
+    () => undefined,
   );
 }
 
@@ -2437,6 +2438,7 @@ export function createWorkflowRegistry<
     () => ({}),
     () => 1,
     () => ({}),
+    () => undefined,
   );
 
   return createFeature<WorkflowRegistryFeatureContract<Model>>({
@@ -3442,6 +3444,7 @@ function createWorkflowScheduleRuntime<Model extends WorkflowModelDefinition>():
         };
       },
     }),
+    () => undefined,
   );
 }
 
@@ -7727,13 +7730,18 @@ async function dispatchWorkflowOperation<Model extends WorkflowModelDefinition>(
 ): Promise<object> {
   const idempotencyKey = request.idempotencyKey ?? invocation.id;
   if (operation === "start") {
+    const input = request.input as StartInput<Model> | undefined;
     return actorValue(
       await dispatchDependency<Actor.Outcome<WorkflowStartResult>>(
         runtime,
         "$start",
         {
           key: request.id,
-          input: request.input,
+          input: {
+            input: input?.input,
+            conflict: input?.conflict ?? "reject",
+            reuse: input?.reuse ?? "reject",
+          },
           idempotencyKey,
         },
         { idempotencyKey },

@@ -214,7 +214,13 @@ type ActorImplementation<Model extends ActorModelDefinition> = Readonly<{
 type ValidActorImplementation<Model extends ActorModelDefinition> =
   Extract<
     keyof Model["Methods"],
-    "then" | "$keys" | "$wake" | "$claimOutbound" | "$heartbeatOutbound" | "$completeOutbound"
+    | "then"
+    | "$keys"
+    | "$records"
+    | "$wake"
+    | "$claimOutbound"
+    | "$heartbeatOutbound"
+    | "$completeOutbound"
   > extends never
     ? ActorImplementation<Model>
     : never;
@@ -233,6 +239,7 @@ type ReadMethodName<Model extends ActorReferenceDefinition> = {
 }[keyof Model["Methods"]];
 
 const actorKeysOperation = "$keys";
+const actorRecordsOperation = "$records";
 const actorWakeOperation = "$wake";
 const actorOutboundClaimOperation = "$claimOutbound";
 const actorOutboundHeartbeatOperation = "$heartbeatOutbound";
@@ -262,6 +269,9 @@ type ActorWireOperations<Model extends ActorReferenceDefinition> = Readonly<
     readonly $keys: (
       request: Readonly<{ after?: number; limit?: number }>,
     ) => Promise<ActorKeyPage<Model["Key"]>>;
+    readonly $records: (
+      request: Readonly<{ key: Model["Key"]; after?: number; limit?: number }>,
+    ) => Promise<ActorFactoryRecordPage>;
     readonly $wake: (
       request: Readonly<{ key: Model["Key"]; dueAt: number }>,
     ) => Promise<Record<never, never>>;
@@ -450,8 +460,15 @@ export function createActor<const Model extends ActorModelDefinition>(
     () => ({}),
     () => typeLiteral<Model["Version"]>(),
     () => ({}),
+    () => undefined,
   );
 }
+
+/** @internal Semantic records retained by a Feature factory on the Actor journal. */
+export type ActorFactoryJournal = Readonly<{
+  kind: string;
+  retain: boolean;
+}>;
 
 /** @internal Compiler hooks used by Feature factories built directly on Actor. */
 export function createActorFactory<Model extends ActorModelDefinition>(
@@ -461,13 +478,29 @@ export function createActorFactory<Model extends ActorModelDefinition>(
   factory: () => object,
   version: () => number,
   outbounds: () => RuntimeActorOutboundTargets<Model>,
+  journal: () => ActorFactoryJournal | undefined = () => undefined,
 ): DefinedActor<Model> {
-  return createActorFeature(definition, identify, methods, factory, version, outbounds);
+  return createActorFeature(definition, identify, methods, factory, version, outbounds, journal);
 }
 
 /** @internal One bounded page of durable Actor identities. */
 export type ActorKeyPage<Key extends string> = Readonly<{
   entries: readonly Readonly<{ cursor: number; key: Key }>[];
+  done: boolean;
+}>;
+
+/** @internal One factory-owned semantic record committed in an Actor turn. */
+export type ActorFactoryRecord = Readonly<{
+  cursor: number;
+  invocation: string;
+  kind: string;
+  record: object;
+  at: number;
+}>;
+
+/** @internal One bounded page of retained factory-owned semantic records. */
+export type ActorFactoryRecordPage = Readonly<{
+  entries: readonly ActorFactoryRecord[];
   done: boolean;
 }>;
 
@@ -477,6 +510,14 @@ export async function listActorKeys<Key extends string>(
   request: Readonly<{ after?: number; limit?: number }> = {},
 ): Promise<ActorKeyPage<Key>> {
   return await dispatchDependency<ActorKeyPage<Key>>(actor, actorKeysOperation, request);
+}
+
+/** @internal Reads factory-owned semantic records without exposing Actor journal details. */
+export async function readActorFactoryRecords<Key extends string>(
+  actor: object,
+  request: Readonly<{ key: Key; after?: number; limit?: number }>,
+): Promise<ActorFactoryRecordPage> {
+  return await dispatchDependency<ActorFactoryRecordPage>(actor, actorRecordsOperation, request);
 }
 
 /** @internal Durable outbound claim used only by Feature factories built on Actor. */
@@ -613,6 +654,9 @@ type RuntimeCommandContext<Model extends ActorModelDefinition> = Readonly<{
   factory: object;
   invocation: Readonly<{ id: string; at: number }>;
   fail(failure: object): never;
+  journal: Readonly<{
+    record(value: object): void;
+  }>;
   reminders: Readonly<{
     schedule(request: Readonly<{ id: string; at: number; method: Procedure; input: object }>): void;
     cancel(request: Readonly<{ id: string }>): void;
@@ -637,6 +681,7 @@ type RuntimeQueryContext<Model extends ActorModelDefinition> = Readonly<{
   key: Model["Key"];
   state: Readonly<Model["State"]>;
   input?: object;
+  dependencies: DependenciesOf<Model>;
   factory: object;
 }>;
 
@@ -668,6 +713,14 @@ type ActorJournalCompleted<Model extends ActorModelDefinition> = Readonly<{
   stateVersion: number;
   state: Model["State"];
   outcome: ActorOutcome<object, object>;
+  at: number;
+}>;
+
+type ActorJournalFactoryRecord = Readonly<{
+  type: "actor.factory.recorded";
+  invocation: string;
+  kind: string;
+  record: object;
   at: number;
 }>;
 
@@ -791,6 +844,7 @@ type ActorJournalEvent<Model extends ActorModelDefinition> =
   | ActorJournalPoisoned
   | ActorJournalTimerEvent
   | ActorJournalOutboundEvent
+  | ActorJournalFactoryRecord
   | ActorStateEvolved<Model>
   | ActorJournalCompleted<Model>;
 
@@ -917,6 +971,7 @@ function actorCacheMetrics<Model extends ActorModelDefinition>(
 type ActorCommandExecution<Model extends ActorModelDefinition> = Readonly<{
   state: Model["State"];
   outcome: ActorOutcome<object, object>;
+  records: readonly object[];
   timers: readonly ActorTimerIntent[];
   outbounds: readonly ActorOutboundIntent[];
 }>;
@@ -1446,6 +1501,13 @@ function assertActorJournalEvent<Model extends ActorModelDefinition>(
       ["type", "stateVersion", "state", "at"],
       [],
       "actor state evolution contract",
+    );
+  } else if (event.type === "actor.factory.recorded") {
+    assertActorRecord(
+      event,
+      ["type", "invocation", "kind", "record", "at"],
+      [],
+      "actor factory record contract",
     );
   } else if (event.type === "actor.command.completed") {
     assertActorRecord(
@@ -2421,6 +2483,7 @@ async function executeActorCommandInScope<Model extends ActorModelDefinition>(
     throw new ActorError({ type: "invalid", reason: `unknown Actor method ${accepted.operation}` });
   }
   const next = cloneActorState(state);
+  const records: object[] = [];
   const timers: ActorTimerIntent[] = [];
   const outbounds: ActorOutboundIntent[] = [];
   try {
@@ -2433,6 +2496,11 @@ async function executeActorCommandInScope<Model extends ActorModelDefinition>(
       invocation: { id: accepted.invocation, at: accepted.at },
       fail(failure: object): never {
         throw new ActorCommandFailure(failure);
+      },
+      journal: {
+        record(value): void {
+          records.push(cloneActorState(value));
+        },
       },
       reminders: {
         schedule(request): void {
@@ -2471,6 +2539,7 @@ async function executeActorCommandInScope<Model extends ActorModelDefinition>(
     return {
       state: next,
       outcome: { status: "succeeded", value },
+      records,
       timers,
       outbounds,
     };
@@ -2479,6 +2548,7 @@ async function executeActorCommandInScope<Model extends ActorModelDefinition>(
       return {
         state,
         outcome: { status: "failed", failure: error.failure },
+        records: [],
         timers: [],
         outbounds: [],
       };
@@ -2706,6 +2776,7 @@ async function snapshotActorHistory<Model extends ActorModelDefinition>(
   key: Model["Key"],
   actorState: RuntimeActorState<Model>,
   cache: ActorActivationCache<Model>,
+  retainJournal: boolean,
 ): Promise<void> {
   const journal = await readActorJournal(
     dependencies.events,
@@ -2728,6 +2799,10 @@ async function snapshotActorHistory<Model extends ActorModelDefinition>(
     if (current === undefined || current.revision <= journal.snapshotRevision) return;
     through = current.revision;
   }
+  if (retainJournal) {
+    cache.entries[stream] = undefined;
+    return;
+  }
   await dependencies.events.compact({ stream, through });
   cache.entries[stream] = undefined;
 }
@@ -2744,6 +2819,7 @@ async function drainActorCommands<Model extends ActorModelDefinition>(
   outboundTargets: RuntimeActorOutboundTargets<Model>,
   modelDependencies: DependenciesOf<Model>,
   factory: object,
+  factoryJournal: ActorFactoryJournal | undefined,
   owner: string,
   requestedInvocation: string | undefined,
   authority?: DependencyInvocationAuthority,
@@ -2897,6 +2973,23 @@ async function drainActorCommands<Model extends ActorModelDefinition>(
                   at: completedAt,
                 },
               ];
+              if (execution.records.length > 0 && factoryJournal === undefined) {
+                throw new ActorError({
+                  type: "invalid",
+                  reason: "Actor factory records require a journal contract",
+                });
+              }
+              if (factoryJournal !== undefined) {
+                for (const record of execution.records) {
+                  completionEvents.push({
+                    type: "actor.factory.recorded",
+                    invocation: pending.invocation,
+                    kind: factoryJournal.kind,
+                    record,
+                    at: completedAt,
+                  });
+                }
+              }
               const timerEvents = actorTimerEvents(
                 completionJournal,
                 execution.timers,
@@ -2923,7 +3016,14 @@ async function drainActorCommands<Model extends ActorModelDefinition>(
               if (appended !== undefined) {
                 committed = true;
                 try {
-                  await snapshotActorHistory(dependencies, stream, key, actorState, cache);
+                  await snapshotActorHistory(
+                    dependencies,
+                    stream,
+                    key,
+                    actorState,
+                    cache,
+                    factoryJournal?.retain ?? false,
+                  );
                 } catch {
                   // Snapshotting is retried after later commits; journal state is authoritative.
                 }
@@ -3006,6 +3106,7 @@ function createActorFeature<Model extends ActorModelDefinition>(
   resolveFactory: () => object,
   resolveVersion: () => number,
   resolveOutbounds: () => RuntimeActorOutboundTargets<Model>,
+  resolveJournal: () => ActorFactoryJournal | undefined,
 ): DefinedActor<Model> {
   return createFeature<ActorFeatureContract<Model>>({
     programs: {
@@ -3031,6 +3132,7 @@ function createActorFeature<Model extends ActorModelDefinition>(
           const methodModes = resolveMethods();
           const factory = resolveFactory();
           const outboundTargets = resolveOutbounds();
+          const factoryJournal = resolveJournal();
           const commands: Partial<Record<string, RuntimeCommandHandler<Model>>> = {};
           const queries: Partial<Record<string, RuntimeQueryHandler<Model>>> = {};
           for (const methodName of Object.keys(methods)) {
@@ -3079,6 +3181,39 @@ function createActorFeature<Model extends ActorModelDefinition>(
                 const request = received as RuntimeRequest<Model>;
                 const query = queries[operation];
                 const stream = actorStream(name, request.key);
+                if (operation === actorRecordsOperation) {
+                  await assertActorAuthority(invocation.authority);
+                  const recordsRequest = received as Readonly<{
+                    key: Model["Key"];
+                    after?: number;
+                    limit?: number;
+                  }>;
+                  const limit = recordsRequest.limit ?? actorRegistryBatchSize;
+                  const stored = await runtimeDependencies.events.read({
+                    stream,
+                    after: recordsRequest.after ?? 0,
+                  });
+                  const entries: ActorFactoryRecord[] = [];
+                  let matched = 0;
+                  for (const entry of stored) {
+                    if (entry.event.type === "actor.factory.recorded") {
+                      matched += 1;
+                      if (entries.length < limit) {
+                        entries.push({
+                          cursor: entry.revision,
+                          invocation: entry.event.invocation,
+                          kind: entry.event.kind,
+                          record: entry.event.record,
+                          at: entry.event.at,
+                        });
+                      }
+                    }
+                  }
+                  return {
+                    entries,
+                    done: matched <= limit,
+                  } satisfies ActorFactoryRecordPage;
+                }
                 recordActorMetric(
                   runtimeDependencies.telemetry,
                   name,
@@ -3238,6 +3373,7 @@ function createActorFeature<Model extends ActorModelDefinition>(
                               outboundTargets,
                               modelDependencies,
                               factory,
+                              factoryJournal,
                               owner,
                               undefined,
                               invocation.authority,
@@ -3277,6 +3413,7 @@ function createActorFeature<Model extends ActorModelDefinition>(
                             outboundTargets,
                             modelDependencies,
                             factory,
+                            factoryJournal,
                             owner,
                             undefined,
                             invocation.authority,
@@ -3349,6 +3486,7 @@ function createActorFeature<Model extends ActorModelDefinition>(
                               outboundTargets,
                               modelDependencies,
                               factory,
+                              factoryJournal,
                               owner,
                               invocationId,
                               invocation.authority,
@@ -3391,6 +3529,7 @@ function createActorFeature<Model extends ActorModelDefinition>(
                       key: request.key,
                       state: committedJournal.state,
                       input: request.input,
+                      dependencies: modelDependencies,
                       factory,
                     });
                   }
@@ -3411,6 +3550,7 @@ function createActorFeature<Model extends ActorModelDefinition>(
                           outboundTargets,
                           modelDependencies,
                           factory,
+                          factoryJournal,
                           owner,
                           undefined,
                           invocation.authority,
@@ -3428,6 +3568,7 @@ function createActorFeature<Model extends ActorModelDefinition>(
                           key: request.key,
                           state: queryJournal.state,
                           input: request.input,
+                          dependencies: modelDependencies,
                           factory,
                         });
                       } finally {

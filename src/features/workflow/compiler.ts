@@ -1593,6 +1593,12 @@ class WorkflowRunLowering {
         "Workflow referenced Dependency calls require a statically bound reference.",
       );
     }
+    if (typeof expression.operation !== "string") {
+      throw workflowLoweringError(
+        expression.span,
+        "Workflow referenced Dependency operations must be statically selected.",
+      );
+    }
     const entries: Array<
       | Readonly<{ kind: "field"; name: string; value: WorkflowIRExpression }>
       | Readonly<{ kind: "spread"; value: WorkflowIRExpression }>
