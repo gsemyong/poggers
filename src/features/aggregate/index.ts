@@ -940,6 +940,12 @@ function aggregateHasCommand(commands: readonly string[], operation: string): bo
   return false;
 }
 
+/** @internal Durable EventStore stream prefix for one Aggregate's Actor-backed event feed. */
+export function aggregateEventStreamPrefix(name: string): string {
+  const runtime = `${name}:aggregate`;
+  return `actor:${runtime.length}:${runtime}:`;
+}
+
 async function scanAggregateEvents<Model extends AggregateModelDefinition>(
   events: EventStore<object>,
   name: string,

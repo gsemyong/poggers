@@ -14,6 +14,7 @@ export function createMemoryEventStore<Event>(): EventStore<Event> {
   const positioned: PositionedStoredEvent<Event>[] = [];
   let nextPosition = 0;
   const subscribers = new Map<string, Set<(event: StoredEvent<Event>) => void>>();
+  const allSubscribers = new Set<(event: PositionedStoredEvent<Event>) => void>();
   return {
     async read({ stream, after = 0, limit = Number.MAX_SAFE_INTEGER }) {
       return (streams.get(stream)?.events ?? [])
@@ -45,7 +46,9 @@ export function createMemoryEventStore<Event>(): EventStore<Event> {
         events: [...current.events, ...appended],
       });
       for (const stored of appended) {
-        positioned.push({ ...stored, cursor: String(++nextPosition) });
+        const event = { ...stored, cursor: String(++nextPosition) };
+        positioned.push(event);
+        for (const publish of allSubscribers) publish(event);
       }
       for (const stored of appended) {
         for (const publish of subscribers.get(stream) ?? []) publish(stored);
@@ -57,6 +60,13 @@ export function createMemoryEventStore<Event>(): EventStore<Event> {
         (streams.get(stream)?.events ?? []).filter(({ revision }) => revision > after),
         subscribers,
         stream,
+      );
+    },
+    subscribeAll({ streams: filters }) {
+      return memoryPositionedEventStream(
+        positioned.filter((event) => memorySubscriptionIncludes(event, filters)),
+        allSubscribers,
+        filters,
       );
     },
     async loadSnapshot({ stream }) {
@@ -97,6 +107,62 @@ export function createMemoryEventStore<Event>(): EventStore<Event> {
         (event) => event.stream !== stream || event.revision > through,
       );
       positioned.splice(0, positioned.length, ...retained);
+    },
+  };
+}
+
+function memorySubscriptionIncludes<Event>(
+  event: PositionedStoredEvent<Event>,
+  streams: readonly Readonly<{ prefix: string; after?: string }>[],
+): boolean {
+  const cursor = Number(event.cursor);
+  for (const stream of streams) {
+    if (
+      event.stream.startsWith(stream.prefix) &&
+      cursor > (stream.after === undefined ? 0 : Number(stream.after))
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function memoryPositionedEventStream<Event>(
+  initial: readonly PositionedStoredEvent<Event>[],
+  subscribers: Set<(event: PositionedStoredEvent<Event>) => void>,
+  streams: readonly Readonly<{ prefix: string; after?: string }>[],
+): AsyncIterable<PositionedStoredEvent<Event>> {
+  return {
+    [Symbol.asyncIterator]() {
+      const queued = [...initial];
+      let waiting: ((value: IteratorResult<PositionedStoredEvent<Event>>) => void) | undefined;
+      let active = true;
+      const publish = (event: PositionedStoredEvent<Event>) => {
+        if (!active || !memorySubscriptionIncludes(event, streams)) return;
+        if (waiting) {
+          const resolve = waiting;
+          waiting = undefined;
+          resolve({ done: false, value: event });
+        } else queued.push(event);
+      };
+      subscribers.add(publish);
+      return {
+        next() {
+          const event = queued.shift();
+          if (event) return Promise.resolve({ done: false as const, value: event });
+          if (!active) return Promise.resolve({ done: true as const, value: undefined });
+          return new Promise<IteratorResult<PositionedStoredEvent<Event>>>(
+            (resolve) => (waiting = resolve),
+          );
+        },
+        return() {
+          active = false;
+          subscribers.delete(publish);
+          waiting?.({ done: true, value: undefined });
+          waiting = undefined;
+          return Promise.resolve({ done: true as const, value: undefined });
+        },
+      };
     },
   };
 }

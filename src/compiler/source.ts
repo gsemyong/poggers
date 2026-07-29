@@ -4017,6 +4017,8 @@ function dependencyContractReferenceType(
     checker.getTypeOfSymbolAtLocation(marker, marker.valueDeclaration ?? at),
   );
   const reference = propertyType(checker, definition, "Reference", at);
+  const name = reference && propertyType(checker, reference, "Name", at);
+  if (!name || !(name.flags & ts.TypeFlags.StringLiteral)) return undefined;
   return reference ? dependencyReferenceDefinitionType(checker, reference, at) : undefined;
 }
 

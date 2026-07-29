@@ -38,6 +38,7 @@ export type ShellFeature<Name extends string = string> = Readonly<{
       };
       Actions: {
         refresh(): Promise<void>;
+        receiveSession(input: { session: Session | undefined }): void;
         changeName(input: { value: string }): void;
         changeEmail(input: { value: string }): void;
         changePassword(input: { value: string }): void;
@@ -93,6 +94,12 @@ export function createShell<const Name extends string>(input: Readonly<{ name: N
           error: undefined,
         },
         actions: {
+          receiveSession({ dependencies, state }, { session }) {
+            state.session = session;
+            state.phase = session ? "signed-in" : "signed-out";
+            state.error = undefined;
+            redirectForSession(dependencies.navigation, Boolean(session));
+          },
           async refresh({ dependencies, state }) {
             try {
               const session = await dependencies.identity.session();
@@ -161,11 +168,17 @@ export function createShell<const Name extends string>(input: Readonly<{ name: N
             }
           },
         },
+        start({ dependencies, actions }) {
+          const current = dependencies.identity.current();
+          if (current) actions.receiveSession({ session: current });
+          const subscription = dependencies.identity.subscribe((session) =>
+            actions.receiveSession({ session }),
+          );
+          void actions.refresh();
+          return subscription;
+        },
         components: {
           Layout: {
-            mount({ feature }) {
-              void feature.refresh();
-            },
             view({ elements, feature, slots }) {
               const {
                 Root,

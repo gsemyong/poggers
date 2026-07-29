@@ -14,7 +14,7 @@ use async_nats::jetstream::{
     message::PublishMessage,
     stream::{DiscardPolicy, RawMessageErrorKind, RetentionPolicy, StorageType, Stream},
 };
-use async_nats::{Client, Subscriber};
+use async_nats::{Client, StatusCode, Subscriber};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -338,6 +338,7 @@ struct WireFrame {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 enum WireFramePayload {
+    Accepted,
     Heartbeat { details: serde_json::Value },
     Result { value: serde_json::Value },
     Item { value: serde_json::Value },
@@ -985,6 +986,13 @@ impl ProcessRouter {
                 Box::pin(async move { directory.assert_authority(&authority, now_millis()).await })
             }),
         );
+        self.emit(
+            reply,
+            &request.invocation.id,
+            sequence,
+            WireFramePayload::Accepted,
+        )
+        .await?;
         let called = engine.call_provided_with_invocation(
             &request.dependency,
             &request.operation,
@@ -1280,6 +1288,8 @@ impl ProcessRouter {
             sequence: 0,
             terminal: false,
         };
+        let mut session = session;
+        session.accepted().await?;
         if operation.mode == DistributionOperationMode::Stream {
             Ok(session.stream())
         } else {
@@ -1299,9 +1309,38 @@ struct RemoteSession {
 }
 
 impl RemoteSession {
+    async fn accepted(&mut self) -> NativeResult<()> {
+        match self.next_frame().await?.payload {
+            WireFramePayload::Accepted => Ok(()),
+            WireFramePayload::Failure { failure } => {
+                self.terminal = true;
+                Err(wire_failure(failure, &self.operation)?)
+            }
+            WireFramePayload::Error { error } => {
+                self.terminal = true;
+                Err(remote_error(error.code, error.message, error.uncertain))
+            }
+            _ => {
+                self.terminal = true;
+                Err(remote_error(
+                    "invalid-response",
+                    "Remote Process did not acknowledge Dependency admission.",
+                    true,
+                ))
+            }
+        }
+    }
+
     async fn result(mut self) -> NativeResult<Value> {
         loop {
             match self.next_frame().await?.payload {
+                WireFramePayload::Accepted => {
+                    return Err(remote_error(
+                        "invalid-response",
+                        "Remote asynchronous Dependency acknowledged admission more than once.",
+                        true,
+                    ));
+                }
                 WireFramePayload::Heartbeat { details } => {
                     let details = Value::from_canonical_json(&details);
                     validate_heartbeat(&self.operation, &details, "remote")?;
@@ -1336,6 +1375,13 @@ impl RemoteSession {
         Value::stream(Box::pin(async_stream::try_stream! {
             loop {
                 match self.next_frame().await?.payload {
+                    WireFramePayload::Accepted => {
+                        Err(remote_error(
+                            "invalid-response",
+                            "Remote stream Dependency acknowledged admission more than once.",
+                            true,
+                        ))?;
+                    }
                     WireFramePayload::Heartbeat { details } => {
                         let details = Value::from_canonical_json(&details);
                         validate_heartbeat(&self.operation, &details, "remote")?;
@@ -1416,6 +1462,26 @@ impl RemoteSession {
                 ));
             }
         };
+        if message.status == Some(StatusCode::NO_RESPONDERS) {
+            self.terminal = true;
+            return Err(not_admitted(
+                "The selected Process has no active transport responder.",
+            ));
+        }
+        if let Some(status) = message.status {
+            self.terminal = true;
+            return Err(remote_error(
+                "transport-status",
+                format!(
+                    "Remote Process transport returned status {status}{}.",
+                    message
+                        .description
+                        .as_deref()
+                        .map_or_else(String::new, |description| format!(" ({description})")),
+                ),
+                false,
+            ));
+        }
         let frame: WireFrame =
             serde_json::from_slice(&message.payload).map_err(distribution_failure)?;
         self.sequence += 1;
@@ -1544,17 +1610,6 @@ impl DependencyRouter for ProcessRouter {
                 &input.canonical_json()?,
                 partition_count,
             )?;
-            let ownership = directory
-                .locate(&partition, &member.contracts, now_millis(), ownership_lease)
-                .await?;
-            let authority = ProcessAuthority {
-                scope: ownership.partition.scope.clone(),
-                owner: ownership.owner.clone(),
-                failure_epoch: ownership.failure_epoch,
-                epoch: ownership.epoch,
-            };
-            let asserted_directory = directory.clone();
-            let asserted_authority = authority.clone();
             invocation.id = if invocation.id.starts_with("direct:") {
                 format!(
                     "process:{}:{}:{}",
@@ -1563,49 +1618,85 @@ impl DependencyRouter for ProcessRouter {
             } else {
                 invocation.id
             };
-            invocation = invocation.with_authority(
-                DependencyAuthority::new(
-                    authority.scope.clone(),
-                    authority.owner.clone(),
-                    authority.failure_epoch,
-                    authority.epoch,
-                    ownership.expires_at,
-                )
-                .with_assertion(move || {
-                    let directory = asserted_directory.clone();
-                    let authority = asserted_authority.clone();
-                    Box::pin(
-                        async move { directory.assert_authority(&authority, now_millis()).await },
+            for routing_attempt in 0..2 {
+                let ownership = directory
+                    .locate(&partition, &member.contracts, now_millis(), ownership_lease)
+                    .await?;
+                let authority = ProcessAuthority {
+                    scope: ownership.partition.scope.clone(),
+                    owner: ownership.owner.clone(),
+                    failure_epoch: ownership.failure_epoch,
+                    epoch: ownership.epoch,
+                };
+                let asserted_directory = directory.clone();
+                let asserted_authority = authority.clone();
+                let routed_invocation = invocation.clone().with_authority(
+                    DependencyAuthority::new(
+                        authority.scope.clone(),
+                        authority.owner.clone(),
+                        authority.failure_epoch,
+                        authority.epoch,
+                        ownership.expires_at,
                     )
-                }),
-            );
-            let result = if ownership.owner == member.id
-                && ownership.failure_epoch == member.failure_epoch
-            {
-                router.metrics.local_calls.fetch_add(1, Ordering::Relaxed);
-                directory.assert_authority(&authority, now_millis()).await?;
-                let moved = lock(&router.owned)
-                    .insert(authority.scope.clone(), authority.clone())
-                    .is_none_or(|previous| previous.epoch != authority.epoch);
-                if moved {
+                    .with_assertion(move || {
+                        let directory = asserted_directory.clone();
+                        let authority = asserted_authority.clone();
+                        Box::pin(async move {
+                            directory.assert_authority(&authority, now_millis()).await
+                        })
+                    }),
+                );
+                let local =
+                    ownership.owner == member.id && ownership.failure_epoch == member.failure_epoch;
+                let result = if local {
+                    router.metrics.local_calls.fetch_add(1, Ordering::Relaxed);
+                    directory.assert_authority(&authority, now_millis()).await?;
+                    let moved = lock(&router.owned)
+                        .insert(authority.scope.clone(), authority.clone())
+                        .is_none_or(|previous| previous.epoch != authority.epoch);
+                    if moved {
+                        router
+                            .metrics
+                            .ownership_moves
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                    engine
+                        .call_provided_with_invocation(
+                            &name,
+                            &operation_name,
+                            input.clone(),
+                            routed_invocation,
+                        )
+                        .await
+                } else {
+                    router.metrics.remote_calls.fetch_add(1, Ordering::Relaxed);
                     router
-                        .metrics
-                        .ownership_moves
-                        .fetch_add(1, Ordering::Relaxed);
+                        .remote(
+                            &ownership,
+                            &contract,
+                            &operation,
+                            input.clone(),
+                            routed_invocation,
+                        )
+                        .await
+                };
+                match result {
+                    Err(error) if !local && is_not_admitted(&error) && routing_attempt == 0 => {
+                        let _ = directory
+                            .leave(&ownership.owner, ownership.failure_epoch, now_millis())
+                            .await;
+                    }
+                    result => {
+                        if result.is_err() {
+                            router.metrics.failures.fetch_add(1, Ordering::Relaxed);
+                        }
+                        return result;
+                    }
                 }
-                engine
-                    .call_provided_with_invocation(&name, &operation_name, input, invocation)
-                    .await
-            } else {
-                router.metrics.remote_calls.fetch_add(1, Ordering::Relaxed);
-                router
-                    .remote(&ownership, &contract, &operation, input, invocation)
-                    .await
-            };
-            if result.is_err() {
-                router.metrics.failures.fetch_add(1, Ordering::Relaxed);
             }
-            result
+            Err(unavailable(
+                "Process distribution could not admit the invocation.",
+            ))
         })
     }
 
@@ -2068,6 +2159,14 @@ fn protocol(message: impl Into<String>) -> NativeError {
 
 fn unavailable(message: impl Into<String>) -> NativeError {
     remote_error("process-unavailable", message, true)
+}
+
+fn not_admitted(message: impl Into<String>) -> NativeError {
+    NativeError::new("ProcessNotAdmitted", message)
+}
+
+fn is_not_admitted(error: &NativeError) -> bool {
+    error.name == "ProcessNotAdmitted"
 }
 
 fn remote_error(
@@ -2724,13 +2823,11 @@ mod tests {
             return;
         };
         let cluster = format!("distribution-test-{}", std::process::id());
+        let stream_name = format!("KIT_DISTRIBUTION_TEST_{}", std::process::id());
         let environment = TestEnvironment::set(&[
             ("KIT_NATS_URL", url.clone()),
             ("KIT_PROCESS_CLUSTER", cluster.clone()),
-            (
-                "KIT_DISTRIBUTION_STREAM",
-                format!("KIT_DISTRIBUTION_TEST_{}", std::process::id()),
-            ),
+            ("KIT_DISTRIBUTION_STREAM", stream_name.clone()),
             ("KIT_PROCESS_MEMBERSHIP_LEASE_MS", "2000".to_owned()),
             ("KIT_PROCESS_OWNERSHIP_LEASE_MS", "1000".to_owned()),
             ("KIT_PROCESS_MAX_INFLIGHT", "1".to_owned()),
@@ -2753,6 +2850,50 @@ mod tests {
             start(second.clone(), "server", "one", vec![contract.clone()])
                 .await
                 .expect("start second router")
+        );
+
+        let directory = NatsDirectory::connect(
+            async_nats::connect(&url)
+                .await
+                .expect("stale member directory client"),
+            &stream_name,
+            &cluster,
+        )
+        .await
+        .expect("stale member directory");
+        directory
+            .join(
+                &registration_with(
+                    "stale",
+                    "kit.process.stale-with-no-listener",
+                    service_contracts(&contract),
+                ),
+                now_millis(),
+                30_000.0,
+            )
+            .await
+            .expect("register stale member");
+        let stale_key = key_owned_by_among("stale", &["p1", "p2", "stale"], &contract);
+        let recovered_stream = second
+            .call_dependency(
+                "service",
+                "changes",
+                Value::record([
+                    ("key".to_owned(), Value::String(stale_key)),
+                    ("value".to_owned(), Value::Number(0.0)),
+                ]),
+            )
+            .await
+            .expect("reroute stream rejected by stale member");
+        assert_eq!(
+            second
+                .next(recovered_stream)
+                .await
+                .expect("rerouted stream item")
+                .expect("first rerouted item")
+                .number()
+                .expect("rerouted number"),
+            1.0
         );
 
         let key = key_owned_by("p1", &contract);
@@ -3059,17 +3200,32 @@ mod tests {
     }
 
     fn key_owned_by(owner: &str, contract: &DistributionContract) -> String {
-        let contracts = BTreeMap::from([(
+        key_owned_by_among(owner, &["p1", "p2"], contract)
+    }
+
+    fn service_contracts(
+        contract: &DistributionContract,
+    ) -> BTreeMap<String, BTreeMap<String, String>> {
+        BTreeMap::from([(
             "service".to_owned(),
             contract
                 .operations
                 .iter()
                 .map(|operation| (operation.name.to_owned(), operation.identity.to_owned()))
                 .collect(),
-        )]);
-        let members = ["p1", "p2"]
+        )])
+    }
+
+    fn key_owned_by_among(
+        owner: &str,
+        member_ids: &[&str],
+        contract: &DistributionContract,
+    ) -> String {
+        let contracts = service_contracts(contract);
+        let members = member_ids
+            .iter()
             .map(|id| ProcessMember {
-                id: id.to_owned(),
+                id: (*id).to_owned(),
                 target: format!("target-{id}"),
                 program: "server".to_owned(),
                 version: "one".to_owned(),
@@ -3078,7 +3234,7 @@ mod tests {
                 contracts: contracts.clone(),
                 expires_at: f64::MAX,
             })
-            .to_vec();
+            .collect::<Vec<_>>();
         for index in 0..10_000 {
             let key = format!("key-{index}");
             let partition =

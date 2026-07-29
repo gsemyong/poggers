@@ -1162,6 +1162,8 @@ function eventStoreClient<Event>(
       await implementation.append({ input, invocation: directProviderInvocation() }),
     subscribe: (input) =>
       implementation.subscribe({ input, invocation: directProviderInvocation() }),
+    subscribeAll: (input) =>
+      implementation.subscribeAll({ input, invocation: directProviderInvocation() }),
     loadSnapshot: async (input) =>
       await implementation.loadSnapshot({ input, invocation: directProviderInvocation() }),
     saveSnapshot: async (input) =>
@@ -1243,6 +1245,7 @@ function createSqliteEventStoreImplementation<Event>(
   );
   const compact = database.prepare("DELETE FROM kit_events WHERE stream = ? AND revision <= ?");
   const subscribers = new Map<string, Set<(event: StoredEvent<Event>) => void>>();
+  const allSubscribers = new Set<(event: PositionedStoredEvent<Event>) => void>();
   let disposed = false;
   const assertLive = () => {
     if (disposed) throw new Error("The event store is disposed.");
@@ -1291,19 +1294,27 @@ function createSqliteEventStoreImplementation<Event>(
           database.exec("ROLLBACK");
           return undefined;
         }
+        const positioned: PositionedStoredEvent<Event>[] = [];
         const appended = events.map((event, index) => {
           const stored = {
             stream,
             revision: expectedRevision + index + 1,
             event: cloneData(event, "EventStore event"),
           };
-          insert.run(stream, stored.revision, JSON.stringify(stored.event));
+          const result = insert.run(stream, stored.revision, JSON.stringify(stored.event));
+          positioned.push({
+            ...stored,
+            cursor: String(result.lastInsertRowid),
+          });
           return stored;
         });
         advance.run(stream, expectedRevision + appended.length);
         database.exec("COMMIT");
         for (const event of appended) {
           for (const publish of subscribers.get(stream) ?? []) publish(event);
+        }
+        for (const event of positioned) {
+          for (const publish of allSubscribers) publish(event);
         }
         return appended;
       } catch (error) {
@@ -1313,6 +1324,36 @@ function createSqliteEventStoreImplementation<Event>(
     },
     subscribe({ input: { stream, after = 0 } }) {
       return eventStream(readEvents(stream, after, Number.MAX_SAFE_INTEGER), subscribers, stream);
+    },
+    subscribeAll({ input: { streams } }) {
+      assertLive();
+      return positionedEventStream(
+        () => {
+          let earliest = Number.MAX_SAFE_INTEGER;
+          for (const stream of streams) {
+            const cursor = sqliteEventCursor(stream.after);
+            if (cursor < earliest) earliest = cursor;
+          }
+          if (earliest === Number.MAX_SAFE_INTEGER) return [];
+          return (
+            scan.all(earliest, Number.MAX_SAFE_INTEGER) as Array<{
+              position: number;
+              stream: string;
+              revision: number;
+              event: string;
+            }>
+          )
+            .map((row) => ({
+              cursor: String(row.position),
+              stream: row.stream,
+              revision: row.revision,
+              event: JSON.parse(row.event) as Event,
+            }))
+            .filter((event) => sqliteSubscriptionIncludes(event, streams));
+        },
+        allSubscribers,
+        (event) => sqliteSubscriptionIncludes(event, streams),
+      );
     },
     async loadSnapshot({ input: { stream } }) {
       assertLive();
@@ -1369,6 +1410,7 @@ function createSqliteEventStoreImplementation<Event>(
       if (disposed) return;
       disposed = true;
       subscribers.clear();
+      allSubscribers.clear();
       close();
     },
   };
@@ -1405,6 +1447,19 @@ function sqliteEventCursor(cursor: string | undefined): number {
     throw new TypeError("SQLite EventStore cursor is invalid.");
   }
   return position;
+}
+
+function sqliteSubscriptionIncludes<Event>(
+  event: PositionedStoredEvent<Event>,
+  streams: readonly Readonly<{ prefix: string; after?: string }>[],
+): boolean {
+  const cursor = sqliteEventCursor(event.cursor);
+  for (const stream of streams) {
+    if (event.stream.startsWith(stream.prefix) && cursor > sqliteEventCursor(stream.after)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 type JetStreamBatch<Event> = Readonly<{
@@ -1504,6 +1559,10 @@ async function createJetStreamEventStoreImplementation<Event>(
         stream,
         after,
       );
+    },
+    subscribeAll({ input: { streams } }) {
+      assertLive();
+      return subscribeAllJetStreamEvents<Event>(client, streamName, `${prefix}.*`, streams);
     },
     async loadSnapshot({ input: { stream } }) {
       assertLive();
@@ -1836,6 +1895,58 @@ function subscribeJetStreamEvents<Event>(
   };
 }
 
+function subscribeAllJetStreamEvents<Event>(
+  client: JetStreamClient,
+  streamName: string,
+  subject: string,
+  streams: readonly Readonly<{ prefix: string; after?: string }>[],
+): AsyncIterable<PositionedStoredEvent<Event>> {
+  return {
+    async *[Symbol.asyncIterator]() {
+      const consumer = await client.consumers.get(streamName, {
+        filter_subjects: subject,
+        deliver_policy: DeliverPolicy.All,
+      });
+      const messages = await consumer.consume();
+      try {
+        for await (const message of messages) {
+          const sequence = message.info.streamSequence;
+          const batch = decodeBatch<Event>(message.data);
+          const stored = storedBatch(batch.stream, batch.expectedRevision, batch.events);
+          for (let index = 0; index < stored.length; index += 1) {
+            const event = {
+              ...stored[index]!,
+              cursor: `${sequence}:${index}`,
+            };
+            if (jetStreamSubscriptionIncludes(event, streams)) yield event;
+          }
+        }
+      } finally {
+        await messages.close();
+        await consumer.delete();
+      }
+    },
+  };
+}
+
+function jetStreamSubscriptionIncludes<Event>(
+  event: PositionedStoredEvent<Event>,
+  streams: readonly Readonly<{ prefix: string; after?: string }>[],
+): boolean {
+  const cursor = jetStreamEventCursor(event.cursor);
+  for (const stream of streams) {
+    if (!event.stream.startsWith(stream.prefix)) continue;
+    const after = jetStreamEventCursor(stream.after);
+    if (
+      cursor.sequence > after.sequence ||
+      (cursor.sequence === after.sequence && cursor.index > after.index)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function decodeBatch<Event>(data: Uint8Array): JetStreamBatch<Event> {
   const value = JSON.parse(new TextDecoder().decode(data)) as Partial<JetStreamBatch<Event>>;
   if (
@@ -2043,6 +2154,46 @@ function eventStream<Event>(
         },
       };
     },
+  };
+}
+
+function positionedEventStream<Event>(
+  initial: () => readonly PositionedStoredEvent<Event>[],
+  subscribers: Set<(event: PositionedStoredEvent<Event>) => void>,
+  accepts: (event: PositionedStoredEvent<Event>) => boolean,
+): AsyncIterable<PositionedStoredEvent<Event>> {
+  const queued: PositionedStoredEvent<Event>[] = [];
+  let waiting: ((event: IteratorResult<PositionedStoredEvent<Event>>) => void) | undefined;
+  let active = true;
+  const publish = (event: PositionedStoredEvent<Event>) => {
+    if (!active || !accepts(event)) return;
+    if (waiting) {
+      const resolve = waiting;
+      waiting = undefined;
+      resolve({ done: false, value: event });
+    } else queued.push(event);
+  };
+  subscribers.add(publish);
+  queued.push(...initial());
+  const iterator: AsyncIterator<PositionedStoredEvent<Event>> = {
+    next() {
+      const event = queued.shift();
+      if (event) return Promise.resolve({ done: false as const, value: event });
+      if (!active) return Promise.resolve({ done: true as const, value: undefined });
+      return new Promise<IteratorResult<PositionedStoredEvent<Event>>>(
+        (resolve) => (waiting = resolve),
+      );
+    },
+    return() {
+      active = false;
+      subscribers.delete(publish);
+      waiting?.({ done: true, value: undefined });
+      waiting = undefined;
+      return Promise.resolve({ done: true as const, value: undefined });
+    },
+  };
+  return {
+    [Symbol.asyncIterator]: () => iterator,
   };
 }
 

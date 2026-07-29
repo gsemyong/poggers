@@ -6,6 +6,8 @@ import type { Task } from "@/features/tasks";
 type TaskReplicaPull = Readonly<{
   version: 1;
   schema: string;
+  sequence: number;
+  observations: Readonly<Record<string, string>>;
   cursor: string;
   snapshot?: Readonly<{ tasks: readonly Task[] }>;
   changes: readonly Readonly<{
@@ -87,6 +89,11 @@ testSystem({
     });
     expect(initial.schema).toContain('"create"');
     expect(initial.schema).toContain('"title"');
+    const subscribing = alice.subscribe<Readonly<{ cursor: string }>>(
+      `/api/replicas/taskReplica/changes?after=${encodeURIComponent(
+        JSON.stringify(initial.observations),
+      )}`,
+    );
     const createHeaders = {
       "x-kit-command": "create-durable-task",
     };
@@ -95,6 +102,10 @@ testSystem({
       { id: "durable-task", title: "Durable task" },
       { headers: createHeaders },
     );
+    {
+      await using changes = await subscribing;
+      await expect(changes.next()).resolves.toEqual({ cursor: expect.any(String) });
+    }
     const retried = await alice.post<TaskReplicaCommand>(
       "/api/replicas/taskReplica/create",
       { id: "durable-task", title: "Durable task" },

@@ -2,6 +2,7 @@ use async_nats::{
     Client,
     jetstream::{
         self,
+        consumer::{AckPolicy, DeliverPolicy, pull},
         context::{PublishErrorKind, traits::Publisher},
         message::PublishMessage,
         stream::{
@@ -111,6 +112,7 @@ impl Dependency for Events {
                     })
                 }),
                 "subscribe" => subscribe(client, stream, input).await,
+                "subscribeAll" => subscribe_all(stream, input).await,
                 "loadSnapshot" => load_snapshot(&stream, &input).await.map(|snapshot| {
                     snapshot.map_or(Value::Undefined, |snapshot| Value::from_json(&snapshot))
                 }),
@@ -143,6 +145,7 @@ kit_server_runtime::dependency_operations!(Events {
     operation_scan => "scan",
     operation_append => "append",
     operation_subscribe => "subscribe",
+    operation_subscribe_all => "subscribeAll",
     operation_load_snapshot => "loadSnapshot",
     operation_save_snapshot => "saveSnapshot",
     operation_compact => "compact",
@@ -433,6 +436,89 @@ async fn subscribe(client: Client, stream: Stream, input: JsonValue) -> NativeRe
             }
         }
     })))
+}
+
+#[derive(Clone)]
+struct StreamFilter {
+    prefix: String,
+    after: Option<(u64, usize)>,
+}
+
+async fn subscribe_all(stream: Stream, input: JsonValue) -> NativeResult<Value> {
+    let filters = stream_filters(&input)?;
+    let earliest = filters
+        .iter()
+        .filter_map(|filter| filter.after.map(|(sequence, _)| sequence))
+        .min();
+    let consumer = stream
+        .create_consumer(pull::Config {
+            deliver_policy: earliest.map_or(DeliverPolicy::All, |start_sequence| {
+                DeliverPolicy::ByStartSequence { start_sequence }
+            }),
+            ack_policy: AckPolicy::None,
+            filter_subject: format!("{PREFIX}.*"),
+            ..Default::default()
+        })
+        .await
+        .map_err(failure)?;
+    let mut messages = consumer.messages().await.map_err(failure)?;
+    Ok(Value::stream(Box::pin(async_stream::try_stream! {
+        while let Some(message) = messages.next().await {
+            let message = message.map_err(failure)?;
+            let sequence = message.info().map_err(failure)?.stream_sequence;
+            let batch = decode(&message.payload)?;
+            let stream_name = string(&batch, "stream")?;
+            let expected = integer(&batch, "expectedRevision")?;
+            let events = batch
+                .get("events")
+                .and_then(JsonValue::as_array)
+                .ok_or_else(|| NativeError::new("InvalidEventStore", "Invalid event batch."))?;
+            for (index, event) in events.iter().enumerate() {
+                if stream_filter_includes(stream_name, sequence, index, &filters) {
+                    yield Value::from_json(&json!({
+                        "cursor": format!("{sequence}:{index}"),
+                        "stream": stream_name,
+                        "revision": expected + index as i64 + 1,
+                        "event": event,
+                    }));
+                }
+            }
+        }
+    })))
+}
+
+fn stream_filters(input: &JsonValue) -> NativeResult<Vec<StreamFilter>> {
+    input
+        .get("streams")
+        .and_then(JsonValue::as_array)
+        .ok_or_else(|| NativeError::new("InvalidInput", "streams must be an array."))?
+        .iter()
+        .map(|value| {
+            Ok(StreamFilter {
+                prefix: string(value, "prefix")?.to_owned(),
+                after: optional_cursor(value, "after")?,
+            })
+        })
+        .collect()
+}
+
+fn stream_filter_includes(
+    stream: &str,
+    sequence: u64,
+    index: usize,
+    filters: &[StreamFilter],
+) -> bool {
+    filters.iter().any(|filter| {
+        if !stream.starts_with(&filter.prefix) {
+            return false;
+        }
+        match filter.after {
+            None => true,
+            Some((after_sequence, after_index)) => {
+                sequence > after_sequence || (sequence == after_sequence && index > after_index)
+            }
+        }
+    })
 }
 
 fn decode(payload: &[u8]) -> NativeResult<JsonValue> {

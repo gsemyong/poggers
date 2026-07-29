@@ -229,6 +229,71 @@ describe("Replica", () => {
     }
   });
 
+  it("converges independent live clients without an explicit pull", async () => {
+    const projection = compileSystem(
+      resolve(import.meta.dirname, "../projection/feature.typecheck.ts"),
+      [serverCompilerExtension],
+    ).programs.find(({ name }) => name === "server");
+    if (!projection) throw new Error("Projection fixture has no server Program.");
+    const linked = linkProgram(projection);
+    const host = await createNodeHost({
+      dependencies: projectDependencyContracts(linked.external),
+      database: ":memory:",
+    });
+    const principal = {
+      id: "member-live",
+      organization: "company-live",
+      roles: ["operator"],
+    } as const;
+
+    try {
+      await using execution = await executeServerLinkedProgramIR(
+        linked,
+        host as Parameters<typeof executeServerLinkedProgramIR>[1],
+      );
+      const dependencies = {
+        operations: execution.dependencies.operations as Projection.Reference<typeof operations>,
+        orders: execution.dependencies.orders as Aggregate.Reference<typeof orders>,
+      };
+      await using first = await createReplicaFixture(localOperations, localOperationsDefinition, {
+        principal,
+        projection: dependencies.operations,
+        rows: ["orders"],
+        dependencies: { orders: dependencies.orders },
+        name: "localOperations",
+        version: 2,
+      });
+      await using second = await createReplicaFixture(localOperations, localOperationsDefinition, {
+        principal,
+        projection: dependencies.operations,
+        rows: ["orders"],
+        dependencies: { orders: dependencies.orders },
+        name: "localOperations",
+        version: 2,
+      });
+
+      await first.client.placeOrder({
+        id: "order-live",
+        product: "product-live",
+        quantity: 2,
+        note: "Created elsewhere",
+      });
+      await expect
+        .poll(async () => (await second.state()).data?.orders)
+        .toMatchObject([{ id: "order-live", status: "placed" }]);
+
+      await first.client.cancelOrder({
+        id: "order-live",
+        reason: "Updated elsewhere",
+      });
+      await expect
+        .poll(async () => (await second.state()).data?.orders)
+        .toMatchObject([{ id: "order-live", status: "cancelled" }]);
+    } finally {
+      await disposeHost(host);
+    }
+  });
+
   it("upgrades a persisted previous-version projection before connecting", async () => {
     const principal = {
       id: "member-1",

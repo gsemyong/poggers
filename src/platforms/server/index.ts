@@ -151,6 +151,9 @@ export type EventStore<Event = object, Snapshot = object> = ServerDependency<{
     events: readonly Event[];
   }): Promise<readonly StoredEvent<Event>[] | undefined>;
   subscribe(input: { stream: string; after?: number }): AsyncIterable<StoredEvent<Event>>;
+  subscribeAll(input: {
+    streams: readonly Readonly<{ prefix: string; after?: string }>[];
+  }): AsyncIterable<PositionedStoredEvent<Event>>;
   loadSnapshot(input: { stream: string }): Promise<StoredSnapshot<Snapshot> | undefined>;
   saveSnapshot(input: {
     stream: string;

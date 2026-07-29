@@ -120,4 +120,40 @@ describe("semantic identity Feature", () => {
     ]);
     expect(requests).toBe(1);
   });
+
+  test("restores a cached principal before background authority revalidation", async () => {
+    const storage = new Map<string, unknown>();
+    {
+      await using fixture = await createIdentityFixture(identity, {
+        user: { id: "alice", name: "Alice", email: "alice@example.com" },
+        storage,
+      });
+      await fixture.client.signIn({ email: "alice@example.com", password: "secret" });
+    }
+
+    let requests = 0;
+    await using restored = await createIdentityFixture(identity, {
+      storage,
+      authentication: {
+        authenticate: async () => undefined,
+        async handle() {
+          requests += 1;
+          return {
+            status: 503,
+            headers: [{ name: "content-type", value: "application/json" }],
+            body: JSON.stringify({ message: "Authority is temporarily unavailable." }),
+            stream: undefined,
+          };
+        },
+      },
+    });
+
+    expect(restored.client.current()).toEqual({
+      user: { id: "alice", role: "member" },
+    });
+    await expect(restored.client.session()).resolves.toEqual({
+      user: { id: "alice", role: "member" },
+    });
+    await expect.poll(() => requests).toBe(1);
+  });
 });

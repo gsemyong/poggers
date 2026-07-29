@@ -8,7 +8,8 @@ import {
 } from "@/core/dependency";
 import { createFeature, type Feature } from "@/core/feature";
 import { typeKeys, typeLiteral } from "@/core/intrinsic";
-import type { Aggregate } from "@/features/aggregate";
+import { mapStream } from "@/core/stream";
+import { aggregateEventStreamPrefix, type Aggregate } from "@/features/aggregate";
 import type { EventStore, ServerProcess, Synchronization } from "@/platforms/server";
 
 type Empty = Record<never, never>;
@@ -289,20 +290,31 @@ export type ProjectionGroup = Readonly<{
 export type ProjectionResult<Row extends ProjectionRow> =
   | Readonly<{
       kind: "rows";
+      revision?: number;
       cursor?: string;
+      observations: Readonly<Record<string, string>>;
       matches: readonly ProjectionMatch<Row>[];
     }>
   | Readonly<{
       kind: "analytics";
+      revision?: number;
       cursor?: string;
+      observations: Readonly<Record<string, string>>;
       groups: readonly ProjectionGroup[];
     }>;
 
-type ProjectionWireOperations<Model extends ProjectionModelDefinition> = Readonly<{
-  [Name in keyof Model["Rows"]]: (
-    input: RuntimeProjectionRequest<Model>,
-  ) => Promise<ProjectionResult<Model["Rows"][Name]>>;
-}>;
+type ProjectionWireOperations<Model extends ProjectionModelDefinition> = Readonly<
+  {
+    observe(input: {
+      principal: Model["Principal"];
+      after: Readonly<Record<string, string>>;
+    }): Promise<AsyncIterable<Readonly<{ cursor: string }>>>;
+  } & {
+    [Name in keyof Model["Rows"]]: (
+      input: RuntimeProjectionRequest<Model>,
+    ) => Promise<ProjectionResult<Model["Rows"][Name]>>;
+  }
+>;
 
 type ProjectionReferenceDefinition<Model extends ProjectionModelDefinition> = Readonly<{
   Name: "for";
@@ -926,7 +938,11 @@ async function queryProjection<Model extends ProjectionModelDefinition>(
 export function evaluateProjectionRows<Row extends ProjectionRow>(
   rows: readonly Row[],
   query: object,
-  cursor: Readonly<{ cursor?: string }> = {},
+  cursor: Readonly<{
+    revision?: number;
+    cursor?: string;
+    observations: Readonly<Record<string, string>>;
+  }> = { observations: {} },
 ): ProjectionResult<Row> {
   const request = query as RuntimeProjectionQuery;
   const selection = request.find ?? request.select;
@@ -956,8 +972,18 @@ export function evaluateProjectionRows<Row extends ProjectionRow>(
   } as ProjectionResult<Row>;
 }
 
-function cursorResult(state: RuntimeProjectionState): Readonly<{ cursor?: string }> {
-  return state.revision === 0 ? {} : { cursor: `${state.revision}` };
+function cursorResult(state: RuntimeProjectionState): Readonly<{
+  revision?: number;
+  cursor?: string;
+  observations: Readonly<Record<string, string>>;
+}> {
+  return state.revision === 0
+    ? { observations: state.cursors }
+    : {
+        revision: state.revision,
+        cursor: `${state.revision}`,
+        observations: state.cursors,
+      };
 }
 
 /**
@@ -1028,6 +1054,24 @@ export function createProjection<const Model extends ProjectionModelDefinition>(
           return {
             [name]: {
               async [dependencyInvocation](operation: string, received: object) {
+                if (operation === "observe") {
+                  const request = received as Readonly<{
+                    principal: Model["Principal"];
+                    after: Readonly<Record<string, string>>;
+                  }>;
+                  const streams = [];
+                  for (const source of sourceNames) {
+                    const sourceName: string = source;
+                    const after = request.after[sourceName];
+                    streams.push({
+                      prefix: aggregateEventStreamPrefix(sourceName),
+                      ...(after === undefined ? {} : { after }),
+                    });
+                  }
+                  return mapStream(eventStore.subscribeAll({ streams }), ({ cursor }) => ({
+                    cursor,
+                  }));
+                }
                 if (!valueIn(rowNames, operation)) {
                   throw new Error(`Unknown Projection row ${operation}.`);
                 }

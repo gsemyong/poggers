@@ -20,6 +20,7 @@ pub struct Events {
 struct State {
     database: Mutex<Connection>,
     channels: Mutex<HashMap<String, broadcast::Sender<JsonValue>>>,
+    all: broadcast::Sender<JsonValue>,
 }
 
 pub async fn create(context: DependencyContext) -> NativeResult<Events> {
@@ -58,10 +59,12 @@ pub async fn create(context: DependencyContext) -> NativeResult<Events> {
              ) STRICT;",
         )
         .map_err(|error| NativeError::new("EventStoreFailure", error.to_string()))?;
+    let (all, _) = broadcast::channel(1_024);
     Ok(Events {
         state: Arc::new(State {
             database: Mutex::new(database),
             channels: Mutex::new(HashMap::new()),
+            all,
         }),
     })
 }
@@ -136,6 +139,7 @@ impl Dependency for Events {
                     None => Value::Undefined,
                 }),
                 "subscribe" => subscribe(state, input),
+                "subscribeAll" => subscribe_all(state, input),
                 "loadSnapshot" => load_snapshot(&state, &input).map(|value| {
                     value.map_or(Value::Undefined, |snapshot| Value::from_json(&snapshot))
                 }),
@@ -158,6 +162,7 @@ kit_server_runtime::dependency_operations!(Events {
     operation_scan => "scan",
     operation_append => "append",
     operation_subscribe => "subscribe",
+    operation_subscribe_all => "subscribeAll",
     operation_load_snapshot => "loadSnapshot",
     operation_save_snapshot => "saveSnapshot",
     operation_compact => "compact",
@@ -188,6 +193,7 @@ fn append(state: &State, input: &JsonValue) -> NativeResult<Option<Vec<JsonValue
         return Ok(None);
     }
     let mut stored = Vec::with_capacity(events.len());
+    let mut positioned = Vec::with_capacity(events.len());
     for (index, event) in events.iter().enumerate() {
         let revision = expected + index as i64 + 1;
         transaction
@@ -196,7 +202,14 @@ fn append(state: &State, input: &JsonValue) -> NativeResult<Option<Vec<JsonValue
                 params![stream, revision, event.to_string()],
             )
             .map_err(|error| NativeError::new("EventStoreFailure", error.to_string()))?;
-        stored.push(json!({ "stream": stream, "revision": revision, "event": event }));
+        let value = json!({ "stream": stream, "revision": revision, "event": event });
+        positioned.push(json!({
+            "cursor": transaction.last_insert_rowid().to_string(),
+            "stream": stream,
+            "revision": revision,
+            "event": event
+        }));
+        stored.push(value);
     }
     transaction
         .execute(
@@ -213,6 +226,9 @@ fn append(state: &State, input: &JsonValue) -> NativeResult<Option<Vec<JsonValue
         for event in &stored {
             let _ = channel.send(event.clone());
         }
+    }
+    for event in positioned {
+        let _ = state.all.send(event);
     }
     Ok(Some(stored))
 }
@@ -353,6 +369,85 @@ fn subscribe(state: Arc<State>, input: JsonValue) -> NativeResult<Value> {
             }
         }
     })))
+}
+
+#[derive(Clone)]
+struct StreamFilter {
+    prefix: String,
+    after: i64,
+}
+
+fn subscribe_all(state: Arc<State>, input: JsonValue) -> NativeResult<Value> {
+    let filters = stream_filters(&input)?;
+    let mut receiver = state.all.subscribe();
+    let earliest = filters.iter().map(|filter| filter.after).min().unwrap_or(0);
+    let initial = scan_events(&state, earliest, i64::MAX)?;
+    Ok(Value::stream(Box::pin(async_stream::try_stream! {
+        let mut position = earliest;
+        for event in initial {
+            let cursor = event_cursor(&event)?;
+            if cursor > position {
+                position = cursor;
+            }
+            if stream_filter_includes(&event, &filters)? {
+                yield Value::from_json(&event);
+            }
+        }
+        loop {
+            match receiver.recv().await {
+                Ok(event) => {
+                    let cursor = event_cursor(&event)?;
+                    if cursor <= position {
+                        continue;
+                    }
+                    position = cursor;
+                    if stream_filter_includes(&event, &filters)? {
+                        yield Value::from_json(&event);
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    for event in scan_events(&state, position, i64::MAX)? {
+                        let cursor = event_cursor(&event)?;
+                        if cursor > position {
+                            position = cursor;
+                        }
+                        if stream_filter_includes(&event, &filters)? {
+                            yield Value::from_json(&event);
+                        }
+                    }
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })))
+}
+
+fn stream_filters(input: &JsonValue) -> NativeResult<Vec<StreamFilter>> {
+    input
+        .get("streams")
+        .and_then(JsonValue::as_array)
+        .ok_or_else(|| NativeError::new("InvalidInput", "streams must be an array."))?
+        .iter()
+        .map(|value| {
+            Ok(StreamFilter {
+                prefix: string(value, "prefix")?.to_owned(),
+                after: optional_cursor(value, "after")?.unwrap_or(0),
+            })
+        })
+        .collect()
+}
+
+fn stream_filter_includes(event: &JsonValue, filters: &[StreamFilter]) -> NativeResult<bool> {
+    let stream = string(event, "stream")?;
+    let cursor = event_cursor(event)?;
+    Ok(filters
+        .iter()
+        .any(|filter| stream.starts_with(&filter.prefix) && cursor > filter.after))
+}
+
+fn event_cursor(event: &JsonValue) -> NativeResult<i64> {
+    optional_cursor(event, "cursor")?
+        .ok_or_else(|| NativeError::new("InvalidInput", "Event has no global cursor."))
 }
 
 fn read_events(
@@ -625,6 +720,90 @@ mod tests {
             .expect("serialize remaining scan");
         assert_eq!(remaining[0]["cursor"], "3");
         assert_eq!(remaining[0]["stream"], "inventory/1");
+    }
+
+    #[tokio::test]
+    async fn subscribes_to_matching_stream_prefixes_after_opaque_cursors() {
+        let events = create(context(":memory:")).await.expect("create events");
+        call(
+            &events,
+            "append",
+            json!({
+                "stream": "orders/1",
+                "expectedRevision": 0,
+                "events": [{ "type": "Placed" }]
+            }),
+        )
+        .await
+        .expect("append retained order");
+        call(
+            &events,
+            "append",
+            json!({
+                "stream": "audit/1",
+                "expectedRevision": 0,
+                "events": [{ "type": "Observed" }]
+            }),
+        )
+        .await
+        .expect("append retained audit");
+
+        let stream = call(
+            &events,
+            "subscribeAll",
+            json!({ "streams": [{ "prefix": "orders/" }] }),
+        )
+        .await
+        .expect("subscribe all");
+        let engine = Engine::new();
+        let retained = engine
+            .next(stream.clone())
+            .await
+            .expect("read retained")
+            .expect("retained event")
+            .to_json()
+            .expect("serialize retained");
+        assert_eq!(retained["stream"], "orders/1");
+        assert_eq!(retained["cursor"], "1");
+
+        let resumed = call(
+            &events,
+            "subscribeAll",
+            json!({ "streams": [{ "prefix": "orders/", "after": retained["cursor"] }] }),
+        )
+        .await
+        .expect("resume all");
+        call(
+            &events,
+            "append",
+            json!({
+                "stream": "audit/2",
+                "expectedRevision": 0,
+                "events": [{ "type": "Ignored" }]
+            }),
+        )
+        .await
+        .expect("append unrelated");
+        call(
+            &events,
+            "append",
+            json!({
+                "stream": "orders/2",
+                "expectedRevision": 0,
+                "events": [{ "type": "Confirmed" }]
+            }),
+        )
+        .await
+        .expect("append live order");
+        let live = engine
+            .next(resumed)
+            .await
+            .expect("read live")
+            .expect("live event")
+            .to_json()
+            .expect("serialize live");
+        assert_eq!(live["stream"], "orders/2");
+        assert_eq!(live["event"]["type"], "Confirmed");
     }
 
     #[tokio::test]

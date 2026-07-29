@@ -276,6 +276,62 @@ export const eventStoreConformance: DependencyConformance<
       },
     },
     {
+      name: "streams matching retained and future events after opaque global cursors",
+      async verify({ api }) {
+        await api.append({
+          stream: "orders:first",
+          expectedRevision: 0,
+          events: [{ id: "order-1", value: 1 }],
+        });
+        await api.append({
+          stream: "audit:first",
+          expectedRevision: 0,
+          events: [{ id: "audit-1", value: 1 }],
+        });
+        const retained = api
+          .subscribeAll({
+            streams: [{ prefix: "orders:" }],
+          })
+          [Symbol.asyncIterator]();
+        const first = await retained.next();
+        expect(first).toMatchObject({
+          done: false,
+          value: {
+            stream: "orders:first",
+            event: { id: "order-1" },
+            cursor: expect.any(String),
+          },
+        });
+        await retained.return?.();
+
+        const resumed = api
+          .subscribeAll({
+            streams: [{ prefix: "orders:", after: first.value?.cursor }],
+          })
+          [Symbol.asyncIterator]();
+        const next = resumed.next();
+        await api.append({
+          stream: "audit:second",
+          expectedRevision: 0,
+          events: [{ id: "audit-2", value: 2 }],
+        });
+        await api.append({
+          stream: "orders:second",
+          expectedRevision: 0,
+          events: [{ id: "order-2", value: 2 }],
+        });
+        await expect(next).resolves.toMatchObject({
+          done: false,
+          value: {
+            stream: "orders:second",
+            event: { id: "order-2" },
+            cursor: expect.any(String),
+          },
+        });
+        await resumed.return?.();
+      },
+    },
+    {
       name: "treats snapshots as revision-fenced disposable caches before compaction",
       async verify({ api }) {
         await api.append({

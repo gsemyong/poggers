@@ -13,7 +13,7 @@ import type {
   ServerDependencyProvider,
   ServerProcess,
 } from "@/platforms/server";
-import type { BrowserMainThread, HttpClient } from "@/platforms/web";
+import type { BrowserMainThread, HttpClient, LocalStore } from "@/platforms/web";
 
 declare const identityModel: unique symbol;
 
@@ -51,6 +51,7 @@ export type AuthenticationBackend = Dependency<{
 /** Browser-side semantic identity API. */
 export type IdentityClient<Model extends IdentityModelDefinition> = Dependency<{
   Operations: {
+    current(input?: never): IdentitySession<Model> | undefined;
     session(input?: never): Promise<IdentitySession<Model> | undefined>;
     signIn(input: { email: string; password: string }): Promise<IdentitySession<Model>>;
     signUp(input: {
@@ -80,7 +81,7 @@ export type IdentityFeature<Model extends IdentityModelDefinition> = Readonly<{
     };
     browser: {
       Environment: BrowserMainThread;
-      Requires: { http: HttpClient };
+      Requires: { http: HttpClient; storage: LocalStore };
       Provides: BrowserProvision<Model>;
     };
   };
@@ -159,15 +160,23 @@ export function createIdentity<const Model extends IdentityModelDefinition>(
         },
       },
       browser: {
-        start({ dependencies, provides }) {
+        async start({ dependencies, provides }) {
           const name = provides[0] as Model["Name"];
+          const storageKey = `identity:${name}:session`;
+          const cached = await dependencies.storage.read<CachedIdentitySession<Model>>({
+            key: storageKey,
+          });
           const client = createIdentityClient<Model>(
             dependencies.http,
+            dependencies.storage,
+            storageKey,
             `/api/${name}`,
             implementation.principal,
+            cached,
           );
           return {
             [name]: Object.freeze({
+              current: () => client.current(),
               session: () => client.session(),
               signIn: ({ input }) => client.signIn(input),
               signUp: ({ input }) => client.signUp(input),
@@ -181,14 +190,33 @@ export function createIdentity<const Model extends IdentityModelDefinition>(
   }) as DefinedIdentity<Model>;
 }
 
+type CachedIdentitySession<Model extends IdentityModelDefinition> = Readonly<{
+  version: 1;
+  session?: IdentitySession<Model>;
+}>;
+
 function createIdentityClient<Model extends IdentityModelDefinition>(
   http: HttpClient,
+  storage: LocalStore,
+  storageKey: string,
   path: string,
   principal: (user: AuthenticatedUser) => PrincipalOf<Model>,
+  cached: CachedIdentitySession<Model> | undefined,
 ): IdentityClient<Model> {
   const listeners = new Set<(session: IdentitySession<Model> | undefined) => void>();
   let pendingSession: Promise<IdentitySession<Model> | undefined> | undefined;
-  const publish = (value: IdentitySession<Model> | undefined) => {
+  let current = cached?.session;
+  let restored = cached?.version === 1;
+  const publish = async (value: IdentitySession<Model> | undefined) => {
+    current = value;
+    restored = true;
+    await storage.write<CachedIdentitySession<Model>>({
+      key: storageKey,
+      value: {
+        version: 1,
+        ...(value === undefined ? {} : { session: value }),
+      },
+    });
     for (const receive of listeners) receive(value);
   };
   const request = async <Value>(endpoint: string, body?: unknown): Promise<Value> => {
@@ -213,32 +241,41 @@ function createIdentityClient<Model extends IdentityModelDefinition>(
     return { user: principal(record.user) };
   };
 
+  const refresh = () => {
+    pendingSession ??= request<Readonly<{ user?: AuthenticatedUser }> | null>("get-session")
+      .then(async (value) => {
+        const next = value?.user ? session(value) : undefined;
+        await publish(next);
+        return next;
+      })
+      .finally(() => {
+        pendingSession = undefined;
+      });
+    return pendingSession;
+  };
+
   return Object.freeze({
+    current() {
+      return current;
+    },
     session() {
-      pendingSession ??= request<Readonly<{ user?: AuthenticatedUser }> | null>("get-session")
-        .then((value) => {
-          const current = value?.user ? session(value) : undefined;
-          publish(current);
-          return current;
-        })
-        .finally(() => {
-          pendingSession = undefined;
-        });
-      return pendingSession;
+      if (!restored) return refresh();
+      void refresh().catch(() => undefined);
+      return Promise.resolve(current);
     },
     async signIn(input) {
-      const current = session(await request("sign-in/email", input));
-      publish(current);
-      return current;
+      const next = session(await request("sign-in/email", input));
+      await publish(next);
+      return next;
     },
     async signUp(input) {
-      const current = session(await request("sign-up/email", input));
-      publish(current);
-      return current;
+      const next = session(await request("sign-up/email", input));
+      await publish(next);
+      return next;
     },
     async signOut() {
       await request("sign-out", {});
-      publish(undefined);
+      await publish(undefined);
     },
     subscribe(receive) {
       listeners.add(receive);
@@ -253,6 +290,7 @@ export async function createIdentityFixture<Model extends IdentityModelDefinitio
   input: Readonly<{
     user?: AuthenticatedUser;
     authentication?: AuthenticationBackend;
+    storage?: Map<string, unknown>;
   }> = {},
 ): Promise<
   AsyncDisposable &
@@ -271,6 +309,7 @@ export async function createIdentityFixture<Model extends IdentityModelDefinitio
   const name = "identity" as Model["Name"];
   const user = input.user;
   const requests: string[] = [];
+  const storage = input.storage ?? new Map<string, unknown>();
   const authentication: AuthenticationBackend = input.authentication ?? {
     authenticate: async ({ cookie }) => (cookie && user ? user : undefined),
     handle: async ({ request }) => {
@@ -303,7 +342,7 @@ export async function createIdentityFixture<Model extends IdentityModelDefinitio
     feature: identity,
     program: "browser",
     language: webProgramLanguageRuntime,
-    contributions: [{ feature: "", requires: ["http"], provides: [name] }],
+    contributions: [{ feature: "", requires: ["http", "storage"], provides: [name] }],
     dependencies: {
       http: {
         async request({ path }: { path: string }) {
@@ -321,6 +360,17 @@ export async function createIdentityFixture<Model extends IdentityModelDefinitio
           const headers = new Headers();
           for (const field of response.headers) headers.append(field.name, field.value);
           return new Response(response.body, { status: response.status, headers });
+        },
+      },
+      storage: {
+        async read<Value>({ key }: { key: string }) {
+          return storage.get(key) as Value | undefined;
+        },
+        async write<Value>({ key, value }: { key: string; value: Value }) {
+          storage.set(key, structuredClone(value));
+        },
+        async remove({ key }: { key: string }) {
+          storage.delete(key);
         },
       },
     },
