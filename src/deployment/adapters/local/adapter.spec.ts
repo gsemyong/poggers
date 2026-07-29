@@ -35,6 +35,96 @@ afterEach(async () => {
 });
 
 describe("local Deployment adapter", { tags: ["production"] }, () => {
+  test("realizes, wires, retains, and removes provider-owned services", async () => {
+    const fixture = await localFixture();
+    const source = resolve(fixture.artifacts, "service.mjs");
+    await writeFile(
+      source,
+      `import { createServer } from "node:net";
+const server = createServer();
+server.listen(Number(process.argv[2]), "127.0.0.1");
+const close = () => server.close(() => process.exit(0));
+process.on("SIGINT", close);
+process.on("SIGTERM", close);
+`,
+    );
+    const release = {
+      ...fixture.release,
+      digest: "release-with-service",
+      artifacts: fixture.release.artifacts.map((artifact) =>
+        artifact.identity === "program/server"
+          ? {
+              ...artifact,
+              digest: "program-with-service",
+              services: [
+                {
+                  service: "probe",
+                  features: ["durable"],
+                  endpoints: [{ name: "client", transport: "tcp" as const, scheme: "probe" }],
+                },
+              ],
+              configuration: [
+                ...artifact.configuration,
+                {
+                  dependency: "http",
+                  implementation: "http",
+                  name: "service",
+                  binding: { kind: "environment" as const, name: "TEST_SERVICE" },
+                  required: false,
+                  source: {
+                    kind: "service-location" as const,
+                    service: "probe",
+                    endpoint: "client",
+                  },
+                },
+              ],
+            }
+          : artifact,
+      ),
+    } satisfies Release;
+    const adapter = createLocalDeploymentAdapter({
+      artifacts: fixture.artifacts,
+      state: fixture.state,
+      startupTimeoutMs: 2_000,
+      shutdownTimeoutMs: 1_000,
+      services: {
+        probe: {
+          executable: process.execPath,
+          arguments({ endpoints }) {
+            return [source, String(endpoints.client!.port)];
+          },
+        },
+      },
+    });
+    const deployment = createDeployment({} as System<Record<never, never>>, { adapter });
+
+    const first = await applyDeployment(deployment, release);
+    const service = first.state.services[0]!;
+    pids.add(service.pid);
+    expect(service).toMatchObject({
+      service: "probe",
+      endpoints: [{ name: "client", location: expect.stringMatching(/^probe:\/\//) }],
+    });
+    await expect(readFile(onlyProcess(first.state).logs!.stdout, "utf8")).resolves.toContain(
+      service.endpoints[0]!.location,
+    );
+    const retained = await applyDeployment(deployment, release);
+    expect(retained.state.services[0]?.pid).toBe(service.pid);
+    const retainedProcess = onlyProcess(retained.state);
+    process.kill(service.pid, "SIGKILL");
+    await expect.poll(async () => (await adapter.inspect())?.converged).toBe(false);
+    const recovered = await applyDeployment(deployment, release);
+    const recoveredService = recovered.state.services[0]!;
+    pids.add(recoveredService.pid);
+    expect(recoveredService.pid).not.toBe(service.pid);
+    expect(onlyProcess(recovered.state).id).not.toBe(retainedProcess.id);
+    await expect(readFile(onlyProcess(recovered.state).logs!.stdout, "utf8")).resolves.toContain(
+      recoveredService.endpoints[0]!.location,
+    );
+    await removeDeployment(deployment);
+    await expect.poll(() => processAlive(recoveredService.pid)).toBe(false);
+  });
+
   test("fences concurrent applies against one atomically persisted revision", async () => {
     const fixture = await localFixture();
     const adapter = createLocalDeploymentAdapter({
@@ -421,6 +511,7 @@ write_status() {
   printf '{"status":"%s","pid":%s}\\n' "$1" "$$" > "$temporary"
   mv "$temporary" "$status"
 }
+
 shutdown() {
   write_status draining
   write_status stopped
@@ -429,6 +520,7 @@ shutdown() {
 trap shutdown INT TERM
 ${withSecret ? '[ "$TOKEN" = "plain-secret-value" ] || exit 12' : ""}
 printf '%s|%s\\n' "$KIT_WEB_ROOT" "$KIT_WEB_ORIGIN"
+printf '%s\\n' "$TEST_SERVICE"
 printf '%s\\n' "$KIT_PROCESS_ID" >> "$KIT_DATABASE"
 write_status ready
 while true; do sleep 1; done
@@ -439,7 +531,7 @@ while true; do sleep 1; done
     artifacts,
     state,
     release: {
-      version: 1,
+      version: 2,
       system: "local-test",
       digest: "release-v1",
       files: [],
@@ -585,4 +677,13 @@ function onlyProcess(state: {
   const processes = state.artifacts.flatMap(({ processes = [] }) => processes);
   expect(processes).toHaveLength(1);
   return processes[0]!;
+}
+
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }

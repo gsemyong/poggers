@@ -9,7 +9,17 @@ import {
   type ProgramContributionIR,
   type StatementIR,
 } from "@/compiler/ir";
-import { dependencyInvocation, invokeDependency } from "@/core/dependency";
+import { dataKind } from "@/core/data";
+import {
+  dependencyInvocation,
+  dependencyInvocationControl,
+  dependencyReferenceInstance,
+  forwardDependencyCancellation,
+  invokeDependency,
+  type DependencyCancellation,
+  type DependencyInvocationControl,
+  type DependencyInvocation,
+} from "@/core/dependency";
 import {
   activateProgramDistribution,
   conformExternalDependencies,
@@ -67,6 +77,7 @@ const stablePortableClosures = new WeakMap<
   ReadonlyMap<string, FunctionIR>,
   Map<string, (...arguments_: readonly unknown[]) => Promise<unknown>>
 >();
+const directInvocationScopes = new WeakMap<DependencyCallTrace[], string>();
 
 /** Executes the portable process body represented by the typed IR. */
 export async function executeProgramIR(
@@ -626,7 +637,9 @@ async function evaluate(
       });
     case "error-match": {
       const value = await evaluate(expression.value, locals, dependencies, calls, functions);
-      return value instanceof Error && value.name === expression.name;
+      return (
+        value instanceof Error && (expression.name === "Error" || value.name === expression.name)
+      );
     }
     case "local":
       if (!locals.has(expression.name))
@@ -779,8 +792,64 @@ async function evaluate(
           evaluate(argument, locals, dependencies, calls, functions),
         ),
       );
-      if (expression.method === "find") {
-        if (!Array.isArray(receiver)) throw new Error("find requires an array.");
+      const invokeCallback = async (
+        callback: unknown,
+        values: readonly unknown[],
+      ): Promise<unknown> => {
+        if (typeof callback === "function") {
+          return await Reflect.apply(callback, undefined, values);
+        }
+        if (!isPortableClosure(callback)) {
+          throw new Error(`Array.${expression.method} requires a portable closure.`);
+        }
+        const function_ = functions.get(callback.function);
+        if (!function_) throw new Error(`Unknown portable function ${callback.function}.`);
+        return await executePortableFunction(
+          function_,
+          callback.captures,
+          values,
+          dependencies,
+          calls,
+          functions,
+        );
+      };
+      if (expression.method === "filter" && Array.isArray(receiver)) {
+        const filtered: unknown[] = [];
+        for (const value of receiver) {
+          if (boolean(await invokeCallback(arguments_[0], [value]))) filtered.push(value);
+        }
+        return filtered;
+      }
+      if (expression.method === "findIndex" && Array.isArray(receiver)) {
+        for (let index = 0; index < receiver.length; index += 1) {
+          if (boolean(await invokeCallback(arguments_[0], [receiver[index]]))) return index;
+        }
+        return -1;
+      }
+      if (expression.method === "some" && Array.isArray(receiver)) {
+        for (const value of receiver) {
+          if (boolean(await invokeCallback(arguments_[0], [value]))) return true;
+        }
+        return false;
+      }
+      if (expression.method === "sort" && Array.isArray(receiver)) {
+        const compare = arguments_[0];
+        if (compare === undefined) return receiver.sort();
+        for (let end = receiver.length - 1; end > 0; end -= 1) {
+          for (let index = 0; index < end; index += 1) {
+            const order = Number(
+              await invokeCallback(compare, [receiver[index], receiver[index + 1]]),
+            );
+            if (order > 0) {
+              const value = receiver[index];
+              receiver[index] = receiver[index + 1];
+              receiver[index + 1] = value;
+            }
+          }
+        }
+        return receiver;
+      }
+      if (expression.method === "find" && Array.isArray(receiver)) {
         const predicate = arguments_[0];
         if (typeof predicate === "function") {
           for (const value of receiver) {
@@ -810,8 +879,7 @@ async function evaluate(
         }
         return undefined;
       }
-      if (expression.method === "map") {
-        if (!Array.isArray(receiver)) throw new Error("map requires an array.");
+      if (expression.method === "map" && Array.isArray(receiver)) {
         const transform = arguments_[0];
         if (typeof transform === "function") {
           return Promise.all(receiver.map((value) => Reflect.apply(transform, undefined, [value])));
@@ -874,6 +942,8 @@ async function evaluate(
       }
       return Object.keys(value);
     }
+    case "data-kind":
+      return dataKind(await evaluate(expression.value, locals, dependencies, calls, functions));
     case "to-string":
       return String(await evaluate(expression.value, locals, dependencies, calls, functions));
     case "stream-map": {
@@ -967,6 +1037,13 @@ async function evaluate(
           evaluate(argument, locals, dependencies, calls, functions),
         ),
       );
+      const options = expression.options
+        ? await evaluate(expression.options, locals, dependencies, calls, functions)
+        : undefined;
+      const idempotencyKey = dependencyIdempotencyKey(
+        options,
+        `${expression.dependency}.${expression.operation}`,
+      );
       calls.push({
         dependency: expression.dependency,
         operation: expression.operation,
@@ -979,8 +1056,9 @@ async function evaluate(
         materializeDependencyValue(arguments_[0], dependencies, calls, functions),
         {
           id:
-            `direct:${expression.dependency}:${expression.operation}:` +
-            calls.filter(({ dependency: name }) => name === expression.dependency).length,
+            idempotencyKey === undefined
+              ? directInvocationId(calls, expression.dependency, expression.operation)
+              : `idempotency:${idempotencyKey}`,
           attempt: 1,
           scheduledAt: now,
           startedAt: now,
@@ -988,6 +1066,94 @@ async function evaluate(
       );
       if (expression.awaited) return await result;
       return result;
+    }
+    case "dependency-dispatch": {
+      const dependency = await evaluate(
+        expression.dependency,
+        locals,
+        dependencies,
+        calls,
+        functions,
+      );
+      const operation = await evaluate(
+        expression.operation,
+        locals,
+        dependencies,
+        calls,
+        functions,
+      );
+      const input = await evaluate(expression.input, locals, dependencies, calls, functions);
+      const options = expression.options
+        ? await evaluate(expression.options, locals, dependencies, calls, functions)
+        : undefined;
+      if (
+        dependency === null ||
+        (typeof dependency !== "object" && typeof dependency !== "function") ||
+        typeof operation !== "string"
+      ) {
+        throw new TypeError("Dynamic Dependency dispatch requires a Dependency and operation.");
+      }
+      calls.push({ dependency: "<dynamic>", operation, input });
+      const result = invokeDependency(
+        dependency,
+        operation,
+        materializeDependencyValue(input, dependencies, calls, functions),
+        dependencyDispatchInvocation(options, operation, calls),
+      );
+      if (expression.awaited) return await result;
+      return result;
+    }
+    case "dependency-intercept": {
+      const dependency = await evaluate(
+        expression.dependency,
+        locals,
+        dependencies,
+        calls,
+        functions,
+      );
+      const intercept = await evaluate(
+        expression.intercept,
+        locals,
+        dependencies,
+        calls,
+        functions,
+      );
+      if (
+        dependency === null ||
+        (typeof dependency !== "object" && typeof dependency !== "function")
+      ) {
+        throw new TypeError("Dependency interception requires a Dependency.");
+      }
+      const invoke = (operation: string, input: unknown, options: unknown) => {
+        if (typeof intercept === "function") {
+          return Reflect.apply(intercept, undefined, [operation, input, options]);
+        }
+        if (!isPortableClosure(intercept)) {
+          throw new TypeError("Dependency interception requires a portable interceptor.");
+        }
+        const function_ = functions.get(intercept.function);
+        if (!function_) throw new Error(`Unknown portable function ${intercept.function}.`);
+        return executePortableFunction(
+          function_,
+          intercept.captures,
+          [operation, input, options],
+          dependencies,
+          calls,
+          functions,
+        );
+      };
+      const operationCache = new Map<string, (input: unknown, options?: unknown) => unknown>();
+      return new Proxy(dependency, {
+        get(target, property, receiver) {
+          if (property === "then") return undefined;
+          if (typeof property !== "string") return Reflect.get(target, property, receiver);
+          const existing = operationCache.get(property);
+          if (existing) return existing;
+          const operation = (input: unknown, options?: unknown) => invoke(property, input, options);
+          operationCache.set(property, operation);
+          return operation;
+        },
+      });
     }
     case "dependency-reference": {
       const binding = await evaluate(expression.binding, locals, dependencies, calls, functions);
@@ -1008,9 +1174,6 @@ async function evaluate(
         calls,
         functions,
       );
-      if (!isPortableDependencyReference(reference)) {
-        throw new TypeError("Referenced Dependency method requires a Dependency reference.");
-      }
       const input = expression.input
         ? await evaluate(expression.input, locals, dependencies, calls, functions)
         : undefined;
@@ -1022,6 +1185,38 @@ async function evaluate(
       }
       if (options !== undefined && !isRecord(options)) {
         throw new TypeError("Referenced Dependency call options must be an object.");
+      }
+      if (isRuntimeDependencyReference(reference)) {
+        const method = Reflect.get(reference, expression.operation);
+        if (typeof method !== "function") {
+          throw new TypeError(
+            `Runtime Dependency reference has no method ${expression.operation}.`,
+          );
+        }
+        const arguments_ =
+          input === undefined
+            ? options === undefined
+              ? []
+              : [materializeDependencyValue(options, dependencies, calls, functions)]
+            : [
+                materializeDependencyValue(input, dependencies, calls, functions),
+                ...(options === undefined
+                  ? []
+                  : [materializeDependencyValue(options, dependencies, calls, functions)]),
+              ];
+        const result = Reflect.apply(method, reference, arguments_);
+        if (expression.awaited) return await result;
+        return result;
+      }
+      if (!isPortableDependencyReference(reference)) {
+        const received =
+          reference !== null && typeof reference === "object"
+            ? Reflect.ownKeys(reference).map(String).join(", ")
+            : typeof reference;
+        throw new TypeError(
+          `Referenced Dependency method ${expression.operation} requires a Dependency reference; ` +
+            `received ${received || "an empty object"}.`,
+        );
       }
       const request = {
         ...options,
@@ -1045,9 +1240,7 @@ async function evaluate(
         expression.operation,
         materializeDependencyValue(request, dependencies, calls, functions),
         {
-          id:
-            `direct:${reference.dependency}:${expression.operation}:` +
-            calls.filter(({ dependency: name }) => name === reference.dependency).length,
+          id: directInvocationId(calls, reference.dependency, expression.operation),
           attempt: 1,
           scheduledAt: now,
           startedAt: now,
@@ -1059,6 +1252,130 @@ async function evaluate(
   }
 }
 
+function dependencyIdempotencyKey(value: unknown, operation: string): string | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) {
+    throw new TypeError(`Dependency ${operation} call options must be an object.`);
+  }
+  const unknown = Reflect.ownKeys(value).find((name) => name !== "idempotencyKey");
+  if (unknown !== undefined) {
+    throw new TypeError(
+      `Dependency ${operation} has unknown call option ${JSON.stringify(String(unknown))}.`,
+    );
+  }
+  const key = value.idempotencyKey;
+  if (key !== undefined && (typeof key !== "string" || !key)) {
+    throw new TypeError(`Dependency ${operation} idempotencyKey must be a non-empty string.`);
+  }
+  return key;
+}
+
+function dependencyDispatchInvocation(
+  value: unknown,
+  operation: string,
+  calls: DependencyCallTrace[],
+): DependencyInvocation {
+  if (value !== undefined && !isRecord(value)) {
+    throw new TypeError(`Dependency ${operation} dispatch options must be an object.`);
+  }
+  const options = value as Readonly<Record<string, unknown>> | undefined;
+  const allowed = new Set([
+    "attempt",
+    "cancellation",
+    "deadline",
+    "heartbeat",
+    "idempotencyKey",
+    "previousHeartbeat",
+    "scheduledAt",
+    "startedAt",
+  ]);
+  const unknown = Reflect.ownKeys(options ?? {}).find(
+    (name) => typeof name !== "string" || !allowed.has(name),
+  );
+  if (unknown !== undefined) {
+    throw new TypeError(
+      `Dependency ${operation} has unknown dispatch option ${JSON.stringify(String(unknown))}.`,
+    );
+  }
+  const idempotencyKey = options?.idempotencyKey;
+  if (idempotencyKey !== undefined && (typeof idempotencyKey !== "string" || !idempotencyKey)) {
+    throw new TypeError(`Dependency ${operation} idempotencyKey must be a non-empty string.`);
+  }
+  const now = Date.now();
+  const attempt = options?.attempt ?? 1;
+  const scheduledAt = options?.scheduledAt ?? now;
+  const startedAt = options?.startedAt ?? now;
+  const deadline = options?.deadline;
+  const heartbeat = options?.heartbeat;
+  const cancellation = options?.cancellation;
+  if (heartbeat !== undefined && typeof heartbeat !== "function") {
+    throw new TypeError(`Dependency ${operation} heartbeat must be a function.`);
+  }
+  if (
+    cancellation !== undefined &&
+    (!isRecord(cancellation) ||
+      typeof cancellation.requested !== "function" ||
+      typeof cancellation.wait !== "function")
+  ) {
+    throw new TypeError(`Dependency ${operation} cancellation must be a cancellation signal.`);
+  }
+  if (typeof attempt !== "number" || !Number.isSafeInteger(attempt) || attempt < 1) {
+    throw new TypeError(`Dependency ${operation} attempt must be a positive safe integer.`);
+  }
+  if (
+    typeof scheduledAt !== "number" ||
+    !Number.isFinite(scheduledAt) ||
+    typeof startedAt !== "number" ||
+    !Number.isFinite(startedAt) ||
+    (deadline !== undefined && (typeof deadline !== "number" || !Number.isFinite(deadline)))
+  ) {
+    throw new TypeError(`Dependency ${operation} dispatch time metadata must be finite.`);
+  }
+  const control: DependencyInvocationControl | undefined =
+    options?.previousHeartbeat === undefined &&
+    heartbeat === undefined &&
+    cancellation === undefined
+      ? undefined
+      : {
+          ...(options?.previousHeartbeat === undefined
+            ? {}
+            : { previousHeartbeat: options.previousHeartbeat }),
+          async heartbeat(details) {
+            if (typeof heartbeat === "function") {
+              await Reflect.apply(heartbeat, undefined, [details]);
+            }
+          },
+          cancellation: forwardDependencyCancellation(
+            cancellation as DependencyCancellation | undefined,
+          ),
+        };
+  return {
+    id:
+      idempotencyKey === undefined
+        ? directInvocationId(calls, "<dynamic>", operation)
+        : `idempotency:${idempotencyKey}`,
+    attempt,
+    scheduledAt,
+    startedAt,
+    ...(deadline === undefined ? {} : { deadline }),
+    ...(control === undefined ? {} : { [dependencyInvocationControl]: control }),
+  };
+}
+
+function directInvocationId(
+  calls: DependencyCallTrace[],
+  dependency: string,
+  operation: string,
+): string {
+  let scope = directInvocationScopes.get(calls);
+  if (scope === undefined) {
+    scope = crypto.randomUUID();
+    directInvocationScopes.set(calls, scope);
+  }
+  const sequence = calls.filter(({ dependency: name }) => name === dependency).length;
+  return `direct:${scope}:${dependency}:${operation}:${sequence}`;
+}
+
 function isPortableDependencyReference(value: unknown): value is PortableDependencyReference {
   return Boolean(
     value &&
@@ -1066,6 +1383,16 @@ function isPortableDependencyReference(value: unknown): value is PortableDepende
     portableDependencyReference in value &&
     typeof (value as Partial<PortableDependencyReference>).dependency === "string" &&
     isRecord((value as Partial<PortableDependencyReference>).binding),
+  );
+}
+
+function isRuntimeDependencyReference(
+  value: unknown,
+): value is Readonly<Record<PropertyKey, unknown>> {
+  return (
+    value !== null &&
+    (typeof value === "object" || typeof value === "function") &&
+    Reflect.get(value, dependencyReferenceInstance) === true
   );
 }
 

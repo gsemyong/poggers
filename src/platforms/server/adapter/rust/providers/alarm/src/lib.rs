@@ -1,5 +1,7 @@
 use std::{
     collections::BTreeMap,
+    future::Future,
+    pin::Pin,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -18,10 +20,10 @@ use async_nats::{
     },
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use futures_util::StreamExt;
+use futures_util::{StreamExt, stream::FuturesUnordered};
 use kit_server_runtime::{
-    Dependency, DependencyContext, DependencyInvocation, Engine, NativeError, NativeFuture,
-    NativeResult, Record, Value,
+    Dependency, DependencyCancellation, DependencyContext, DependencyInvocation, Engine,
+    NativeError, NativeFuture, NativeResult, Record, Value,
 };
 use serde::{Deserialize, Serialize};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -43,6 +45,8 @@ struct ScheduledTarget {
     dependency: String,
     operation: String,
     input: Value,
+    cancellation: DependencyCancellation,
+    abort: DependencyCancellation,
 }
 
 #[derive(Default)]
@@ -50,6 +54,7 @@ struct LocalState {
     generation: u64,
     stopping: bool,
     scheduled: BTreeMap<String, ScheduledTarget>,
+    active: BTreeMap<String, (u64, DependencyCancellation, DependencyCancellation)>,
 }
 
 struct LocalAlarm {
@@ -66,6 +71,7 @@ struct SharedAlarm {
     consumer: PullConsumer,
     stopping: Arc<AtomicBool>,
     worker: Arc<Mutex<Option<JoinHandle<()>>>>,
+    active: Arc<Mutex<BTreeMap<String, (u64, DependencyCancellation)>>>,
 }
 
 enum AlarmMode {
@@ -93,6 +99,7 @@ struct DurableAlarm {
 #[serde(rename_all = "camelCase")]
 enum DurableAlarmStatus {
     Scheduled,
+    CancellationRequested,
     Cancelled,
     Delivered,
 }
@@ -198,6 +205,7 @@ pub async fn create(context: DependencyContext) -> NativeResult<Alarm> {
             consumer,
             stopping: Arc::new(AtomicBool::new(false)),
             worker: Arc::new(Mutex::new(None)),
+            active: Arc::new(Mutex::new(BTreeMap::new())),
         })),
     })
 }
@@ -239,9 +247,26 @@ impl Dependency for Alarm {
                         "cancel" => {
                             let mut state = lock(&state);
                             state.generation += 1;
-                            state.scheduled.remove(&id);
+                            if let Some((_, cancellation, abort)) = state.active.get(&id) {
+                                cancellation.request();
+                                abort.request();
+                            }
+                            if let Some(target) = state.scheduled.remove(&id) {
+                                target.cancellation.request();
+                                target.abort.request();
+                            }
                             drop(state);
                             notify.notify_one();
+                            Ok(Value::Undefined)
+                        }
+                        "requestCancellation" => {
+                            let state = lock(&state);
+                            if let Some((_, cancellation, _)) = state.active.get(&id) {
+                                cancellation.request();
+                            }
+                            if let Some(target) = state.scheduled.get(&id) {
+                                target.cancellation.request();
+                            }
                             Ok(Value::Undefined)
                         }
                         operation => Err(unknown(operation)),
@@ -264,6 +289,10 @@ impl Dependency for Alarm {
                             shared.cancel(id).await?;
                             Ok(Value::Undefined)
                         }
+                        "requestCancellation" => {
+                            shared.request_cancellation(id).await?;
+                            Ok(Value::Undefined)
+                        }
                         operation => Err(unknown(operation)),
                     }
                 })
@@ -278,13 +307,25 @@ impl Dependency for Alarm {
                 let notify = local.notify.clone();
                 let worker = local.worker.clone();
                 Box::pin(async move {
-                    lock(&state).stopping = true;
+                    {
+                        let mut current = lock(&state);
+                        current.stopping = true;
+                        for target in current.scheduled.values() {
+                            target.cancellation.request();
+                            target.abort.request();
+                        }
+                        for (_, cancellation, abort) in current.active.values() {
+                            cancellation.request();
+                            abort.request();
+                        }
+                    }
                     notify.notify_waiters();
                     let task = lock(&worker).take();
                     if let Some(task) = task {
                         let _ = task.await;
                     }
                     lock(&state).scheduled.clear();
+                    lock(&state).active.clear();
                     Ok(())
                 })
             }
@@ -292,6 +333,9 @@ impl Dependency for Alarm {
                 let shared = shared.clone();
                 Box::pin(async move {
                     shared.stopping.store(true, Ordering::Release);
+                    for (_, cancellation) in lock(&shared.active).values() {
+                        cancellation.request();
+                    }
                     let task = lock(&shared.worker).take();
                     if let Some(task) = task {
                         task.abort();
@@ -307,6 +351,7 @@ impl Dependency for Alarm {
 kit_server_runtime::dependency_operations!(Alarm {
     operation_schedule => "schedule",
     operation_cancel => "cancel",
+    operation_request_cancellation => "requestCancellation",
 });
 
 impl SharedAlarm {
@@ -340,6 +385,9 @@ impl SharedAlarm {
     }
 
     async fn cancel(&self, id: String) -> NativeResult<()> {
+        if let Some((_, cancellation)) = lock(&self.active).get(&id) {
+            cancellation.request();
+        }
         let key = alarm_key(&id);
         replace_state(&self.state, &key, |previous| DurableAlarm {
             id: id.clone(),
@@ -354,6 +402,34 @@ impl SharedAlarm {
         self.reconcile(&key).await
     }
 
+    async fn request_cancellation(&self, id: String) -> NativeResult<()> {
+        if let Some((_, cancellation)) = lock(&self.active).get(&id) {
+            cancellation.request();
+        }
+        let key = alarm_key(&id);
+        for _ in 0..128 {
+            let Some(entry) = self.state.entry(&key).await.map_err(failure)? else {
+                return Ok(());
+            };
+            let mut state = decode_state(&entry.value)?;
+            if state.status != DurableAlarmStatus::Scheduled {
+                return Ok(());
+            }
+            state.status = DurableAlarmStatus::CancellationRequested;
+            let payload = serde_json::to_vec(&state).map_err(failure)?;
+            match self
+                .state
+                .update(&key, payload.into(), entry.revision)
+                .await
+            {
+                Ok(_) => return self.reconcile(&key).await,
+                Err(error) if error.kind() == UpdateErrorKind::WrongLastRevision => continue,
+                Err(error) => return Err(failure(error)),
+            }
+        }
+        Err(conflict("Alarm cancellation request remained contended."))
+    }
+
     async fn reconcile(&self, key: &str) -> NativeResult<()> {
         for _ in 0..128 {
             let Some(entry) = self.state.entry(key).await.map_err(failure)? else {
@@ -361,7 +437,7 @@ impl SharedAlarm {
             };
             let state = decode_state(&entry.value)?;
             match state.status {
-                DurableAlarmStatus::Scheduled => {
+                DurableAlarmStatus::Scheduled | DurableAlarmStatus::CancellationRequested => {
                     let mut headers = HeaderMap::new();
                     headers.insert(NATS_SCHEDULE, schedule_at(state.scheduled_at)?);
                     headers.insert(NATS_SCHEDULE_TARGET, DELIVERY_SUBJECT);
@@ -397,6 +473,8 @@ impl SharedAlarm {
     }
 
     async fn run(self, engine: Engine) {
+        let mut deliveries =
+            FuturesUnordered::<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>::new();
         while !self.stopping.load(Ordering::Acquire) {
             let mut messages = match self.consumer.messages().await {
                 Ok(messages) => messages,
@@ -405,13 +483,47 @@ impl SharedAlarm {
                     continue;
                 }
             };
-            while let Some(message) = messages.next().await {
+            loop {
                 if self.stopping.load(Ordering::Acquire) {
                     return;
                 }
-                match message {
-                    Ok(message) => self.deliver(&engine, message).await,
-                    Err(_) => break,
+                if deliveries.len() >= DISPATCH_BATCH_SIZE {
+                    let _ = deliveries.next().await;
+                    continue;
+                }
+                if deliveries.is_empty() {
+                    let Some(message) = messages.next().await else {
+                        break;
+                    };
+                    match message {
+                        Ok(message) => {
+                            let shared = self.clone();
+                            let delivery_engine = engine.clone();
+                            deliveries.push(Box::pin(async move {
+                                shared.deliver(&delivery_engine, message).await;
+                            }));
+                        }
+                        Err(_) => break,
+                    }
+                    continue;
+                }
+                tokio::select! {
+                    _ = deliveries.next() => {}
+                    message = messages.next() => {
+                        let Some(message) = message else {
+                            break;
+                        };
+                        match message {
+                            Ok(message) => {
+                                let shared = self.clone();
+                                let delivery_engine = engine.clone();
+                                deliveries.push(Box::pin(async move {
+                                    shared.deliver(&delivery_engine, message).await;
+                                }));
+                            }
+                            Err(_) => break,
+                        }
+                    }
                 }
             }
         }
@@ -431,7 +543,8 @@ impl SharedAlarm {
             Ok(None) | Err(_) => None,
         };
         if current.as_ref().is_none_or(|current| {
-            current.status != DurableAlarmStatus::Scheduled
+            (current.status != DurableAlarmStatus::Scheduled
+                && current.status != DurableAlarmStatus::CancellationRequested)
                 || current.generation != scheduled.generation
         }) {
             let _ = message.double_ack().await;
@@ -441,13 +554,37 @@ impl SharedAlarm {
             .info()
             .map(|info| info.delivered.max(1) as u64)
             .unwrap_or(1);
-        let invocation = DependencyInvocation::new(
+        let cancellation = DependencyCancellation::default();
+        let occupied = {
+            let mut active = lock(&self.active);
+            if active.contains_key(&scheduled.id) {
+                true
+            } else {
+                active.insert(
+                    scheduled.id.clone(),
+                    (scheduled.generation, cancellation.clone()),
+                );
+                false
+            }
+        };
+        if occupied {
+            let _ = message.ack_with(AckKind::Nak(Some(RETRY_DELAY))).await;
+            return;
+        }
+        let mut invocation = DependencyInvocation::new(
             format!("alarm:{}:{}", scheduled.id, scheduled.generation),
             attempt,
             scheduled.scheduled_at,
             now_millis(),
             None,
         );
+        invocation.cancellation = cancellation.clone();
+        if current
+            .as_ref()
+            .is_some_and(|current| current.status == DurableAlarmStatus::CancellationRequested)
+        {
+            cancellation.request();
+        }
         let call = engine.call_dependency_with_invocation(
             &scheduled.dependency,
             &scheduled.operation,
@@ -461,14 +598,45 @@ impl SharedAlarm {
             invocation,
         );
         tokio::pin!(call);
+        let mut cancelled = false;
         let result = loop {
             tokio::select! {
                 result = &mut call => break result,
                 _ = tokio::time::sleep(ACK_WAIT / 2) => {
                     let _ = message.ack_with(AckKind::Progress).await;
                 }
+                _ = tokio::time::sleep(RETRY_DELAY) => {
+                    let current = self.state.entry(&key).await.ok().flatten()
+                        .and_then(|entry| decode_state(&entry.value).ok());
+                    if current.as_ref().is_some_and(|current| {
+                        current.status == DurableAlarmStatus::CancellationRequested
+                            && current.generation == scheduled.generation
+                    }) {
+                        cancellation.request();
+                    } else if current.as_ref().is_none_or(|current| {
+                        current.status != DurableAlarmStatus::Scheduled
+                            || current.generation != scheduled.generation
+                    }) {
+                        cancellation.request();
+                        cancelled = true;
+                        break Err(NativeError::new("AlarmCancelled", "Alarm delivery was cancelled."));
+                    }
+                }
             }
         };
+        {
+            let mut active = lock(&self.active);
+            if active
+                .get(&scheduled.id)
+                .is_some_and(|(generation, _)| *generation == scheduled.generation)
+            {
+                active.remove(&scheduled.id);
+            }
+        }
+        if cancelled {
+            let _ = message.double_ack().await;
+            return;
+        }
         if result.is_err() {
             let _ = message.ack_with(AckKind::Nak(Some(RETRY_DELAY))).await;
             return;
@@ -547,7 +715,10 @@ async fn complete_state(store: &Store, key: &str, generation: u64) -> NativeResu
             return Ok(false);
         };
         let mut state = decode_state(&entry.value)?;
-        if state.status != DurableAlarmStatus::Scheduled || state.generation != generation {
+        if (state.status != DurableAlarmStatus::Scheduled
+            && state.status != DurableAlarmStatus::CancellationRequested)
+            || state.generation != generation
+        {
             return Ok(false);
         }
         state.status = DurableAlarmStatus::Delivered;
@@ -585,6 +756,8 @@ fn schedule_local(
                 dependency: target.dependency,
                 operation: target.operation,
                 input: target.input,
+                cancellation: DependencyCancellation::default(),
+                abort: DependencyCancellation::default(),
             },
         );
     }
@@ -596,6 +769,8 @@ fn schedule_local(
 }
 
 async fn run_local(engine: Engine, state: Arc<Mutex<LocalState>>, notify: Arc<Notify>) {
+    let mut deliveries =
+        FuturesUnordered::<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>::new();
     loop {
         let now = now_millis();
         let (stopping, due, next_attempt_at) = {
@@ -603,7 +778,9 @@ async fn run_local(engine: Engine, state: Arc<Mutex<LocalState>>, notify: Arc<No
             let mut due = state
                 .scheduled
                 .iter()
-                .filter(|(_, target)| target.next_attempt_at <= now)
+                .filter(|(id, target)| {
+                    target.next_attempt_at <= now && !state.active.contains_key(*id)
+                })
                 .map(|(id, target)| (id.clone(), target.clone()))
                 .collect::<Vec<_>>();
             due.sort_by(|(left_id, left), (right_id, right)| {
@@ -614,57 +791,110 @@ async fn run_local(engine: Engine, state: Arc<Mutex<LocalState>>, notify: Arc<No
             due.truncate(DISPATCH_BATCH_SIZE);
             let next_attempt_at = state
                 .scheduled
-                .values()
-                .map(|target| target.next_attempt_at)
+                .iter()
+                .filter(|(id, _)| !state.active.contains_key(*id))
+                .map(|(_, target)| target.next_attempt_at)
                 .min_by(f64::total_cmp);
             (state.stopping, due, next_attempt_at)
         };
         if stopping {
+            while deliveries.next().await.is_some() {}
             return;
         }
         if !due.is_empty() {
             for (id, target) in due {
-                let invocation = DependencyInvocation::new(
-                    format!("alarm:{id}:{}", target.generation),
-                    target.attempt,
-                    target.scheduled_at,
-                    now_millis(),
-                    None,
+                lock(&state).active.insert(
+                    id.clone(),
+                    (
+                        target.generation,
+                        target.cancellation.clone(),
+                        target.abort.clone(),
+                    ),
                 );
-                let result = engine
-                    .call_dependency_with_invocation(
-                        &target.dependency,
-                        &target.operation,
-                        target.input.clone(),
-                        invocation,
-                    )
-                    .await;
-                let mut state = lock(&state);
-                if state.scheduled.get(&id).map(|current| current.generation)
-                    != Some(target.generation)
-                {
-                    continue;
-                }
-                if result.is_ok() {
-                    state.scheduled.remove(&id);
-                } else if let Some(current) = state.scheduled.get_mut(&id) {
-                    current.attempt += 1;
-                    current.next_attempt_at = now_millis() + RETRY_DELAY.as_millis() as f64;
-                }
+                deliveries.push(Box::pin(deliver_local(
+                    engine.clone(),
+                    state.clone(),
+                    id,
+                    target,
+                )));
             }
             continue;
         }
-        match next_attempt_at {
-            Some(at) if at > now => {
+        if let Some(at) = next_attempt_at {
+            if at > now {
                 let delay = Duration::from_secs_f64((at - now) / 1_000.0);
-                tokio::select! {
-                    _ = tokio::time::sleep(delay) => {}
-                    _ = notify.notified() => {}
+                if deliveries.is_empty() {
+                    tokio::select! {
+                        _ = tokio::time::sleep(delay) => {}
+                        _ = notify.notified() => {}
+                    }
+                } else {
+                    tokio::select! {
+                        _ = tokio::time::sleep(delay) => {}
+                        _ = notify.notified() => {}
+                        _ = deliveries.next() => {}
+                    }
                 }
+            } else {
+                tokio::task::yield_now().await;
             }
-            Some(_) => tokio::task::yield_now().await,
-            None => notify.notified().await,
+        } else if deliveries.is_empty() {
+            notify.notified().await;
+        } else {
+            tokio::select! {
+                _ = notify.notified() => {}
+                _ = deliveries.next() => {}
+            }
         }
+    }
+}
+
+async fn deliver_local(
+    engine: Engine,
+    state: Arc<Mutex<LocalState>>,
+    id: String,
+    target: ScheduledTarget,
+) {
+    let mut invocation = DependencyInvocation::new(
+        format!("alarm:{id}:{}", target.generation),
+        target.attempt,
+        target.scheduled_at,
+        now_millis(),
+        None,
+    );
+    invocation.cancellation = target.cancellation.clone();
+    let call = engine.call_dependency_with_invocation(
+        &target.dependency,
+        &target.operation,
+        target.input.clone(),
+        invocation,
+    );
+    tokio::pin!(call);
+    let aborted = target.abort.wait();
+    tokio::pin!(aborted);
+    let result = tokio::select! {
+        result = &mut call => Some(result),
+        _ = &mut aborted => None,
+    };
+    let mut state = lock(&state);
+    if state
+        .active
+        .get(&id)
+        .is_some_and(|(generation, _, _)| *generation == target.generation)
+    {
+        state.active.remove(&id);
+    }
+    if state.scheduled.get(&id).map(|current| current.generation) != Some(target.generation) {
+        return;
+    }
+    let Some(result) = result else {
+        return;
+    };
+    if result.is_ok() {
+        state.scheduled.remove(&id);
+    } else if let Some(current) = state.scheduled.get_mut(&id) {
+        current.attempt += 1;
+        current.next_attempt_at = now_millis() + RETRY_DELAY.as_millis() as f64;
     }
 }
 
@@ -808,6 +1038,103 @@ mod tests {
         }
     }
 
+    struct CancellationRecorder {
+        started: Arc<tokio::sync::Notify>,
+        cancelled: Arc<tokio::sync::Notify>,
+    }
+
+    impl Dependency for CancellationRecorder {
+        fn call(
+            &self,
+            _engine: Engine,
+            _operation: &str,
+            _input: Value,
+            invocation: DependencyInvocation,
+        ) -> NativeFuture<Value> {
+            let started = self.started.clone();
+            let cancelled = self.cancelled.clone();
+            Box::pin(async move {
+                started.notify_one();
+                invocation.cancellation.wait().await;
+                cancelled.notify_one();
+                Ok(Value::Undefined)
+            })
+        }
+    }
+
+    struct ConcurrentRecorder {
+        blocked_started: Arc<tokio::sync::Notify>,
+        release_blocked: Arc<tokio::sync::Notify>,
+        fast_completed: Arc<tokio::sync::Notify>,
+    }
+
+    impl Dependency for ConcurrentRecorder {
+        fn call(
+            &self,
+            _engine: Engine,
+            operation: &str,
+            _input: Value,
+            _invocation: DependencyInvocation,
+        ) -> NativeFuture<Value> {
+            let operation = operation.to_owned();
+            let blocked_started = self.blocked_started.clone();
+            let release_blocked = self.release_blocked.clone();
+            let fast_completed = self.fast_completed.clone();
+            Box::pin(async move {
+                if operation == "blocked" {
+                    blocked_started.notify_one();
+                    release_blocked.notified().await;
+                } else {
+                    fast_completed.notify_one();
+                }
+                Ok(Value::Undefined)
+            })
+        }
+    }
+
+    struct GenerationRecorder {
+        started: Arc<AtomicUsize>,
+        cancelled: Arc<AtomicUsize>,
+        changed: Arc<tokio::sync::Notify>,
+    }
+
+    impl Dependency for GenerationRecorder {
+        fn call(
+            &self,
+            _engine: Engine,
+            operation: &str,
+            _input: Value,
+            invocation: DependencyInvocation,
+        ) -> NativeFuture<Value> {
+            let bit = if operation == "first" { 1 } else { 2 };
+            let started = self.started.clone();
+            let cancelled = self.cancelled.clone();
+            let changed = self.changed.clone();
+            Box::pin(async move {
+                started.fetch_or(bit, Ordering::SeqCst);
+                changed.notify_waiters();
+                invocation.cancellation.wait().await;
+                cancelled.fetch_or(bit, Ordering::SeqCst);
+                changed.notify_waiters();
+                Ok(Value::Undefined)
+            })
+        }
+    }
+
+    async fn wait_for_mask(value: &AtomicUsize, expected: usize, changed: &tokio::sync::Notify) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let notified = changed.notified();
+                if value.load(Ordering::SeqCst) == expected {
+                    return;
+                }
+                notified.await;
+            }
+        })
+        .await
+        .expect("Alarm state did not reach the expected mask.");
+    }
+
     fn local_context() -> DependencyContext {
         DependencyContext {
             name: "alarm".to_owned(),
@@ -944,6 +1271,251 @@ mod tests {
             .expect("cancel");
         tokio::time::sleep(Duration::from_millis(40)).await;
         assert_eq!(calls.load(Ordering::SeqCst), 0);
+        alarm.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn cancellation_request_reaches_an_active_dependency_target() {
+        let alarm = create(local_context()).await.expect("create alarm");
+        let engine = Engine::new();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let cancelled = Arc::new(tokio::sync::Notify::new());
+        engine
+            .register(
+                "recorder",
+                Arc::new(CancellationRecorder {
+                    started: started.clone(),
+                    cancelled: cancelled.clone(),
+                }),
+            )
+            .expect("register recorder");
+        alarm
+            .call(
+                engine.clone(),
+                "schedule",
+                scheduled("active", 0.0, "blocked"),
+                DependencyInvocation::direct("alarm", "schedule", 1).expect("invocation"),
+            )
+            .await
+            .expect("schedule");
+        tokio::time::timeout(Duration::from_secs(1), started.notified())
+            .await
+            .expect("dependency delivery did not start");
+
+        alarm
+            .call(
+                engine,
+                "requestCancellation",
+                Value::record([("id".to_owned(), Value::String("active".to_owned()))]),
+                DependencyInvocation::direct("alarm", "requestCancellation", 1)
+                    .expect("invocation"),
+            )
+            .await
+            .expect("request cancellation");
+        tokio::time::timeout(Duration::from_secs(1), cancelled.notified())
+            .await
+            .expect("active dependency did not observe cancellation");
+        alarm.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn one_blocked_local_delivery_does_not_delay_an_unrelated_target() {
+        let alarm = create(local_context()).await.expect("create alarm");
+        let engine = Engine::new();
+        let blocked_started = Arc::new(tokio::sync::Notify::new());
+        let release_blocked = Arc::new(tokio::sync::Notify::new());
+        let fast_completed = Arc::new(tokio::sync::Notify::new());
+        engine
+            .register(
+                "recorder",
+                Arc::new(ConcurrentRecorder {
+                    blocked_started: blocked_started.clone(),
+                    release_blocked: release_blocked.clone(),
+                    fast_completed: fast_completed.clone(),
+                }),
+            )
+            .expect("register recorder");
+        alarm
+            .call(
+                engine.clone(),
+                "schedule",
+                scheduled("blocked", 0.0, "blocked"),
+                DependencyInvocation::direct("alarm", "schedule", 1).expect("invocation"),
+            )
+            .await
+            .expect("schedule blocked");
+        tokio::time::timeout(Duration::from_secs(1), blocked_started.notified())
+            .await
+            .expect("blocked delivery did not start");
+        alarm
+            .call(
+                engine,
+                "schedule",
+                scheduled("fast", 0.0, "fast"),
+                DependencyInvocation::direct("alarm", "schedule", 2).expect("invocation"),
+            )
+            .await
+            .expect("schedule fast");
+        tokio::time::timeout(Duration::from_secs(1), fast_completed.notified())
+            .await
+            .expect("unrelated delivery was blocked");
+        release_blocked.notify_one();
+        alarm.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn replacement_waits_for_active_generation_and_preserves_cancellation() {
+        let alarm = create(local_context()).await.expect("create alarm");
+        let engine = Engine::new();
+        let started = Arc::new(AtomicUsize::new(0));
+        let cancelled = Arc::new(AtomicUsize::new(0));
+        let changed = Arc::new(tokio::sync::Notify::new());
+        engine
+            .register(
+                "recorder",
+                Arc::new(GenerationRecorder {
+                    started: started.clone(),
+                    cancelled: cancelled.clone(),
+                    changed: changed.clone(),
+                }),
+            )
+            .expect("register recorder");
+        alarm
+            .call(
+                engine.clone(),
+                "schedule",
+                scheduled("same-active", 0.0, "first"),
+                DependencyInvocation::direct("alarm", "schedule", 1).expect("invocation"),
+            )
+            .await
+            .expect("schedule first");
+        wait_for_mask(&started, 1, &changed).await;
+        alarm
+            .call(
+                engine.clone(),
+                "schedule",
+                scheduled("same-active", 0.0, "second"),
+                DependencyInvocation::direct("alarm", "schedule", 2).expect("invocation"),
+            )
+            .await
+            .expect("schedule replacement");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert_eq!(started.load(Ordering::SeqCst), 1);
+
+        alarm
+            .call(
+                engine,
+                "requestCancellation",
+                Value::record([("id".to_owned(), Value::String("same-active".to_owned()))]),
+                DependencyInvocation::direct("alarm", "requestCancellation", 1)
+                    .expect("invocation"),
+            )
+            .await
+            .expect("request cancellation");
+        wait_for_mask(&started, 3, &changed).await;
+        wait_for_mask(&cancelled, 3, &changed).await;
+        alarm.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn one_blocked_shared_delivery_does_not_delay_an_unrelated_target() {
+        let Some((_nats, servers)) = start_test_nats() else {
+            return;
+        };
+        let suffix = format!("concurrent-{}", now_millis() as u64);
+        let alarm = create(shared_context(&servers, &suffix))
+            .await
+            .expect("create alarm");
+        let engine = Engine::new();
+        let blocked_started = Arc::new(tokio::sync::Notify::new());
+        let release_blocked = Arc::new(tokio::sync::Notify::new());
+        let fast_completed = Arc::new(tokio::sync::Notify::new());
+        engine
+            .register(
+                "recorder",
+                Arc::new(ConcurrentRecorder {
+                    blocked_started: blocked_started.clone(),
+                    release_blocked: release_blocked.clone(),
+                    fast_completed: fast_completed.clone(),
+                }),
+            )
+            .expect("register recorder");
+        alarm.start(engine.clone()).await.expect("start alarm");
+        alarm
+            .call(
+                engine.clone(),
+                "schedule",
+                scheduled("blocked", now_millis() + 10.0, "blocked"),
+                DependencyInvocation::direct("alarm", "schedule", 1).expect("invocation"),
+            )
+            .await
+            .expect("schedule blocked");
+        tokio::time::timeout(Duration::from_secs(2), blocked_started.notified())
+            .await
+            .expect("blocked shared delivery did not start");
+        alarm
+            .call(
+                engine,
+                "schedule",
+                scheduled("fast", now_millis() + 10.0, "fast"),
+                DependencyInvocation::direct("alarm", "schedule", 2).expect("invocation"),
+            )
+            .await
+            .expect("schedule fast");
+        tokio::time::timeout(Duration::from_secs(2), fast_completed.notified())
+            .await
+            .expect("unrelated shared delivery was blocked");
+        release_blocked.notify_one();
+        alarm.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn shared_cancellation_request_reaches_an_active_dependency_target() {
+        let Some((_nats, servers)) = start_test_nats() else {
+            return;
+        };
+        let suffix = format!("cancellation-{}", now_millis() as u64);
+        let alarm = create(shared_context(&servers, &suffix))
+            .await
+            .expect("create alarm");
+        let engine = Engine::new();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let cancelled = Arc::new(tokio::sync::Notify::new());
+        engine
+            .register(
+                "recorder",
+                Arc::new(CancellationRecorder {
+                    started: started.clone(),
+                    cancelled: cancelled.clone(),
+                }),
+            )
+            .expect("register recorder");
+        alarm.start(engine.clone()).await.expect("start alarm");
+        alarm
+            .call(
+                engine.clone(),
+                "schedule",
+                scheduled("active", now_millis() + 10.0, "blocked"),
+                DependencyInvocation::direct("alarm", "schedule", 1).expect("invocation"),
+            )
+            .await
+            .expect("schedule active");
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .expect("shared delivery did not start");
+        alarm
+            .call(
+                engine,
+                "requestCancellation",
+                Value::record([("id".to_owned(), Value::String("active".to_owned()))]),
+                DependencyInvocation::direct("alarm", "requestCancellation", 1)
+                    .expect("invocation"),
+            )
+            .await
+            .expect("request cancellation");
+        tokio::time::timeout(Duration::from_secs(2), cancelled.notified())
+            .await
+            .expect("shared delivery did not observe cancellation");
         alarm.shutdown().await.expect("shutdown");
     }
 

@@ -30,7 +30,7 @@ type RustVerificationSource = Readonly<{
 
 type RustVerificationProfile = "debug" | "release";
 
-const VERIFICATION_CACHE_VERSION = 1;
+const VERIFICATION_CACHE_VERSION = 2;
 const VERIFICATION_CACHE_ENTRIES = 8;
 const VERIFICATION_CACHE_HARD_LIMIT = 32;
 const VERIFICATION_CACHE_GRACE_MS = 5 * 60 * 1000;
@@ -56,6 +56,7 @@ export async function buildRustProgram(
         version: VERIFICATION_CACHE_VERSION,
         target: `${process.platform}-${process.arch}`,
         toolchain: await rustToolchain(),
+        runtime: await sourceDigest(verificationRuntime()),
         generated: { ...generated, program: canonicalRustSource(generated.program) },
       }),
     )
@@ -194,10 +195,7 @@ function generateVerificationSource(contribution: ProgramContributionIR): RustVe
     .update(canonicalRustSource(source))
     .digest("hex")
     .slice(0, 16)}`;
-  const runtime = resolve(import.meta.dirname, "../../../../../compiler/rust/runtime").replaceAll(
-    "\\",
-    "/",
-  );
+  const runtime = verificationRuntime().replaceAll("\\", "/");
   return {
     name,
     manifest: `[package]
@@ -374,6 +372,31 @@ function rustString(value: string): string {
 
 function canonicalRustSource(source: string): string {
   return source.replaceAll(/^\s*\/\/ TypeScript: .+:\d+:\d+\s*$/gm, "");
+}
+
+function verificationRuntime(): string {
+  return resolve(import.meta.dirname, "../../../../../compiler/rust/runtime");
+}
+
+async function sourceDigest(directory: string): Promise<string> {
+  const hash = createHash("sha256");
+  for (const path of await sourceFiles(directory)) {
+    hash.update(path.slice(directory.length));
+    hash.update(await readFile(path));
+  }
+  return hash.digest("hex");
+}
+
+async function sourceFiles(directory: string): Promise<string[]> {
+  const files: string[] = [];
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const path = resolve(directory, entry.name);
+    if (entry.isDirectory() && entry.name !== "target") files.push(...(await sourceFiles(path)));
+    else if (entry.isFile() && (entry.name === "Cargo.toml" || entry.name.endsWith(".rs"))) {
+      files.push(path);
+    }
+  }
+  return files.sort();
 }
 
 let rustToolchainResult: Promise<string> | undefined;

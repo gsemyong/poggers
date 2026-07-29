@@ -1,5 +1,6 @@
 export type {
   Dependency,
+  DependencyCallOptions,
   DependencyContract,
   DependencyDefinition,
   DependencyDefinitionOf,

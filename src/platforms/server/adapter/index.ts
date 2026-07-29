@@ -195,6 +195,9 @@ export function createServerPlatformAdapter(
               })),
             ),
           ),
+          services: Object.freeze(
+            result.requirements.flatMap((requirement) => requirement.services),
+          ),
           lifecycle: {
             shutdown: { kind: "signal" as const, signal: "SIGINT" as const },
             status: {

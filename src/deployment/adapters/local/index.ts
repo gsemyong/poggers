@@ -10,7 +10,7 @@ import {
   writeFile,
   type FileHandle,
 } from "node:fs/promises";
-import { createServer } from "node:net";
+import { createConnection, createServer } from "node:net";
 import { dirname, resolve } from "node:path";
 
 import type {
@@ -39,6 +39,25 @@ type LocalGatewayState = Readonly<{
   logs: Readonly<{ stdout: string; stderr: string }>;
 }>;
 
+export type LocalServiceImplementation = Readonly<{
+  executable: string;
+  arguments(
+    input: Readonly<{
+      directory: string;
+      features: readonly string[];
+      endpoints: Readonly<Record<string, Readonly<{ host: string; port: number }>>>;
+    }>,
+  ): readonly string[];
+}>;
+
+type LocalServiceState = Readonly<{
+  service: string;
+  pid: number;
+  version: string;
+  endpoints: readonly Readonly<{ name: string; location: string; port: number }>[];
+  logs: Readonly<{ stdout: string; stderr: string }>;
+}>;
+
 type PreparedLocalGateway = Omit<LocalGatewayState, "pid" | "targets"> &
   Readonly<{
     exposure?: ReleaseArtifact["exposure"];
@@ -52,6 +71,7 @@ const LOCAL_GATEWAY_VERSION = 3;
 export type LocalDeploymentState = DeploymentState &
   Readonly<{
     gateways: readonly LocalGatewayState[];
+    services: readonly LocalServiceState[];
   }>;
 
 export type LocalDeploymentAdapterOptions = Readonly<{
@@ -60,6 +80,7 @@ export type LocalDeploymentAdapterOptions = Readonly<{
   startupTimeoutMs?: number;
   shutdownTimeoutMs?: number;
   resolveSecret?(name: string): string | undefined | Promise<string | undefined>;
+  services?: Readonly<Record<string, LocalServiceImplementation>>;
 }>;
 
 /** Realizes one Deployment as independent operating-system Processes. */
@@ -92,11 +113,25 @@ export function createLocalDeploymentAdapter(
         const observed = current ? await refreshState(current, stateDirectory) : undefined;
         const nextRevision = plan.expectedRevision + 1;
         let candidates: readonly DeploymentProcessState[] = [];
+        let serviceCandidates: readonly LocalServiceState[] = [];
         try {
+          const services = await realizeServices({
+            plan,
+            observed,
+            stateDirectory,
+            implementations: {
+              nats: natsServiceImplementation,
+              ...options.services,
+            },
+            startupTimeoutMs: configuration.startupTimeoutMs,
+          });
+          serviceCandidates = services.started;
           const gatewayPlan = await prepareGateways(plan, observed, artifacts, stateDirectory);
           const realization = await realizePlan({
             artifacts,
             gateways: gatewayPlan.desired,
+            services: services.desired,
+            changedServices: services.changed,
             stateDirectory,
             plan,
             observed,
@@ -116,6 +151,9 @@ export function createLocalDeploymentAdapter(
             ...gatewayPlan.retired.map((gateway) =>
               stopGateway(gateway, configuration.shutdownTimeoutMs),
             ),
+            ...services.retired.map((service) =>
+              stopService(service, configuration.shutdownTimeoutMs),
+            ),
           ]);
           const nextArtifacts = publicArtifactLocations(realization.artifacts, activeGateways);
           const state = deploymentState({
@@ -125,13 +163,17 @@ export function createLocalDeploymentAdapter(
             runtime: plan.runtime,
             artifacts: nextArtifacts,
             gateways: activeGateways,
+            services: services.desired,
           });
           await writeState(stateFile, state);
           return state;
         } catch (error) {
-          await Promise.allSettled(
-            candidates.map((process) => stopProcess(process, configuration.shutdownTimeoutMs)),
-          );
+          await Promise.allSettled([
+            ...candidates.map((process) => stopProcess(process, configuration.shutdownTimeoutMs)),
+            ...serviceCandidates.map((service) =>
+              stopService(service, configuration.shutdownTimeoutMs),
+            ),
+          ]);
           const state = deploymentState({
             revision: nextRevision,
             release: observed?.release,
@@ -142,6 +184,7 @@ export function createLocalDeploymentAdapter(
               ({ processes }) => !processes || processes.some(({ healthy }) => healthy),
             ),
             gateways: observed?.gateways ?? [],
+            services: observed?.services ?? [],
             failures: [
               {
                 code: "ApplyFailed",
@@ -164,10 +207,14 @@ export function createLocalDeploymentAdapter(
         for (const process of current?.artifacts.flatMap(({ processes = [] }) => processes) ?? []) {
           await stopProcess(process, configuration.shutdownTimeoutMs);
         }
+        for (const service of current?.services ?? []) {
+          await stopService(service, configuration.shutdownTimeoutMs);
+        }
         const state = deploymentState({
           revision: expectedRevision + 1,
           artifacts: [],
           gateways: [],
+          services: [],
         });
         await writeState(stateFile, state);
         return state;
@@ -176,9 +223,241 @@ export function createLocalDeploymentAdapter(
   };
 }
 
+const natsServiceImplementation: LocalServiceImplementation = Object.freeze({
+  executable: "nats-server",
+  arguments({ directory, endpoints }) {
+    const client = endpoints.client;
+    if (!client) throw new Error("The local NATS service requires a client endpoint.");
+    return ["-js", "-sd", resolve(directory, "data"), "-a", client.host, "-p", String(client.port)];
+  },
+});
+
+async function realizeServices(input: {
+  plan: DeploymentPlan;
+  observed?: LocalDeploymentState;
+  stateDirectory: string;
+  implementations: Readonly<Record<string, LocalServiceImplementation>>;
+  startupTimeoutMs: number;
+}): Promise<
+  Readonly<{
+    desired: readonly LocalServiceState[];
+    retired: readonly LocalServiceState[];
+    started: readonly LocalServiceState[];
+    changed: ReadonlySet<string>;
+  }>
+> {
+  const previous = new Map(
+    (input.observed?.services ?? []).map((service) => [service.service, service]),
+  );
+  const desired: LocalServiceState[] = [];
+  const started: LocalServiceState[] = [];
+  const retired: LocalServiceState[] = [];
+  const changed = new Set<string>();
+  try {
+    for (const requirement of input.plan.services) {
+      const current = previous.get(requirement.service);
+      previous.delete(requirement.service);
+      const version = JSON.stringify(requirement);
+      if (current?.version === version && (await serviceAvailable(current))) {
+        desired.push(current);
+        continue;
+      }
+      changed.add(requirement.service);
+      if (current) retired.push(current);
+      const implementation = input.implementations[requirement.service];
+      if (!implementation) {
+        throw new Error(
+          `Local Deployment has no implementation for required service ${JSON.stringify(requirement.service)}.`,
+        );
+      }
+      const service = await startService({
+        requirement,
+        implementation,
+        stateDirectory: input.stateDirectory,
+        startupTimeoutMs: input.startupTimeoutMs,
+        version,
+      });
+      desired.push(service);
+      started.push(service);
+    }
+  } catch (error) {
+    await Promise.allSettled(started.map((service) => stopService(service, 1_000)));
+    throw error;
+  }
+  for (const service of previous.values()) {
+    changed.add(service.service);
+    retired.push(service);
+  }
+  return Object.freeze({
+    desired: Object.freeze(
+      desired.sort((left, right) => left.service.localeCompare(right.service)),
+    ),
+    retired: Object.freeze(retired),
+    started: Object.freeze(started),
+    changed,
+  });
+}
+
+async function startService(input: {
+  requirement: DeploymentPlan["services"][number];
+  implementation: LocalServiceImplementation;
+  stateDirectory: string;
+  startupTimeoutMs: number;
+  version: string;
+}): Promise<LocalServiceState> {
+  const directory = resolve(
+    input.stateDirectory,
+    "services",
+    readableIdentity(input.requirement.service),
+  );
+  const stdoutPath = resolve(directory, "stdout.log");
+  const stderrPath = resolve(directory, "stderr.log");
+  await mkdir(directory, { recursive: true });
+  const endpointValues = await Promise.all(
+    input.requirement.endpoints.map(
+      async ({ name }) =>
+        [name, Object.freeze({ host: "127.0.0.1", port: await availablePort() })] as const,
+    ),
+  );
+  const endpoints = Object.freeze(Object.fromEntries(endpointValues));
+  const stdout = await open(stdoutPath, "a");
+  const stderr = await open(stderrPath, "a");
+  let child;
+  try {
+    child = spawn(
+      input.implementation.executable,
+      input.implementation.arguments({
+        directory,
+        features: input.requirement.features,
+        endpoints,
+      }),
+      {
+        cwd: directory,
+        detached: true,
+        env: process.env,
+        stdio: ["ignore", stdout.fd, stderr.fd],
+      },
+    );
+    await waitForSpawn(child);
+  } finally {
+    await Promise.all([close(stdout), close(stderr)]);
+  }
+  if (!child.pid) {
+    throw new Error(
+      `Local service ${JSON.stringify(input.requirement.service)} did not expose a pid.`,
+    );
+  }
+  child.unref();
+  try {
+    await Promise.all(
+      Object.values(endpoints).map(({ host, port }) =>
+        waitForTcp(host, port, child.pid!, input.startupTimeoutMs),
+      ),
+    );
+  } catch (error) {
+    await stopService(
+      {
+        service: input.requirement.service,
+        pid: child.pid,
+        version: input.version,
+        endpoints: [],
+        logs: { stdout: stdoutPath, stderr: stderrPath },
+      },
+      1_000,
+    );
+    throw error;
+  }
+  return Object.freeze({
+    service: input.requirement.service,
+    pid: child.pid,
+    version: input.version,
+    endpoints: Object.freeze(
+      input.requirement.endpoints.map(({ name, scheme }) => {
+        const endpoint = endpoints[name]!;
+        return Object.freeze({
+          name,
+          port: endpoint.port,
+          location: `${scheme}://${endpoint.host}:${endpoint.port}`,
+        });
+      }),
+    ),
+    logs: Object.freeze({ stdout: stdoutPath, stderr: stderrPath }),
+  });
+}
+
+async function waitForTcp(
+  host: string,
+  port: number,
+  pid: number,
+  timeoutMs: number,
+): Promise<void> {
+  const started = performance.now();
+  while (performance.now() - started <= timeoutMs) {
+    if (!processAlive(pid)) throw new Error(`Service process ${pid} exited before becoming ready.`);
+    const connected = await new Promise<boolean>((resolve) => {
+      const socket = createConnection({ host, port });
+      socket.once("connect", () => {
+        socket.destroy();
+        resolve(true);
+      });
+      socket.once("error", () => {
+        socket.destroy();
+        resolve(false);
+      });
+    });
+    if (connected) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Service endpoint ${host}:${port} did not become ready.`);
+}
+
+async function stopService(service: LocalServiceState, timeoutMs: number): Promise<void> {
+  await stopProcess(
+    {
+      id: `service/${service.service}`,
+      pid: service.pid,
+      status: "ready",
+      healthy: true,
+      ready: true,
+      version: service.version,
+      shutdown: "SIGTERM",
+    },
+    timeoutMs,
+  );
+}
+
+async function serviceAvailable(service: LocalServiceState): Promise<boolean> {
+  if (!processAlive(service.pid)) return false;
+  const endpoints = await Promise.all(
+    service.endpoints.map(
+      ({ port }) =>
+        new Promise<boolean>((resolve) => {
+          const socket = createConnection({ host: "127.0.0.1", port });
+          const timeout = setTimeout(() => {
+            socket.destroy();
+            resolve(false);
+          }, 100);
+          socket.once("connect", () => {
+            clearTimeout(timeout);
+            socket.destroy();
+            resolve(true);
+          });
+          socket.once("error", () => {
+            clearTimeout(timeout);
+            socket.destroy();
+            resolve(false);
+          });
+        }),
+    ),
+  );
+  return endpoints.every(Boolean);
+}
+
 async function realizePlan(input: {
   artifacts: string;
   gateways: readonly PreparedLocalGateway[];
+  services: readonly LocalServiceState[];
+  changedServices: ReadonlySet<string>;
   stateDirectory: string;
   plan: DeploymentPlan;
   observed?: DeploymentState;
@@ -219,12 +498,20 @@ async function realizePlan(input: {
       }
       assertLocalTarget(artifact);
       const previous = observed.get(artifact.identity);
+      const serviceChanged = artifact.configuration.some(
+        ({ source }) =>
+          source?.kind === "service-location" && input.changedServices.has(source.service),
+      );
       const replacing = Boolean(
         previous &&
-        (previous.digest !== artifact.digest || input.observed?.runtime !== input.plan.runtime),
+        (previous.digest !== artifact.digest ||
+          input.observed?.runtime !== input.plan.runtime ||
+          serviceChanged),
       );
       const retained =
-        previous?.digest === artifact.digest && input.observed?.runtime === input.plan.runtime
+        previous?.digest === artifact.digest &&
+        input.observed?.runtime === input.plan.runtime &&
+        !serviceChanged
           ? (previous.processes ?? []).filter(({ healthy }) => healthy)
           : [];
       let processes = retained;
@@ -239,6 +526,7 @@ async function realizePlan(input: {
           artifact,
           artifacts: input.artifacts,
           gateways: input.gateways,
+          services: input.services,
           release: input.plan.release.artifacts,
           dependencies: input.plan.dependencies,
           stateDirectory: input.stateDirectory,
@@ -273,6 +561,7 @@ async function startProcess(input: {
   artifact: ReleaseArtifact;
   artifacts: string;
   gateways: readonly PreparedLocalGateway[];
+  services: readonly LocalServiceState[];
   release: readonly ReleaseArtifact[];
   dependencies: DeploymentPlan["dependencies"];
   stateDirectory: string;
@@ -306,6 +595,7 @@ async function startProcess(input: {
     directory,
     input.stateDirectory,
     input.gateways,
+    input.services,
   );
   const stdout = await open(stdoutPath, "a");
   const stderr = await open(stderrPath, "a");
@@ -359,6 +649,7 @@ async function processEnvironment(
   processDirectory: string,
   stateDirectory: string,
   gateways: readonly PreparedLocalGateway[],
+  services: readonly LocalServiceState[],
 ): Promise<
   Readonly<{
     environment: Readonly<Record<string, string>>;
@@ -436,6 +727,16 @@ async function processEnvironment(
     let value: string | undefined;
     if (source.kind === "process-location") {
       value = gateways[0]?.location ?? locations[0];
+    } else if (source.kind === "service-location") {
+      value = services
+        .find(({ service }) => service === source.service)
+        ?.endpoints.find(({ name }) => name === source.endpoint)?.location;
+      if (!value) {
+        throw new Error(
+          `Process ${JSON.stringify(artifact.identity)} requires unavailable service endpoint ` +
+            `${JSON.stringify(`${source.service}.${source.endpoint}`)}.`,
+        );
+      }
     } else {
       const selected = release.filter(
         ({ deployment, kind, platform }) =>
@@ -716,12 +1017,32 @@ async function refreshState(
       code: "GatewayMissing",
       message: `Local gateway for ${JSON.stringify(identity)} has not been realized.`,
     }));
-  const unavailable = [...processFailures, ...gatewayFailures, ...missingGateways];
+  const services = Object.freeze(state.services ?? []);
+  const serviceHealth = await Promise.all(
+    services.map(async (service) => ({
+      service: service.service,
+      available: await serviceAvailable(service),
+    })),
+  );
+  const serviceFailures = serviceHealth
+    .filter(({ available }) => !available)
+    .map(({ service }) => ({
+      operation: service,
+      code: "ServiceUnavailable",
+      message: `Local service ${JSON.stringify(service)} is unavailable.`,
+    }));
+  const unavailable = [
+    ...processFailures,
+    ...gatewayFailures,
+    ...missingGateways,
+    ...serviceFailures,
+  ];
   return Object.freeze({
     ...state,
     converged: state.converged && unavailable.length === 0,
     artifacts,
     gateways,
+    services,
     failures: unavailable.length ? Object.freeze(unavailable) : state.failures,
   });
 }
@@ -841,6 +1162,7 @@ async function readState(path: string): Promise<LocalDeploymentState | undefined
   return Object.freeze({
     ...state,
     gateways: Object.freeze(state.gateways ?? []),
+    services: Object.freeze(state.services ?? []),
   });
 }
 
@@ -907,6 +1229,7 @@ function deploymentState(input: {
   converged?: boolean;
   artifacts: readonly DeploymentArtifactState[];
   gateways: readonly LocalGatewayState[];
+  services: readonly LocalServiceState[];
   failures?: DeploymentState["failures"];
 }): LocalDeploymentState {
   return Object.freeze({
@@ -917,6 +1240,7 @@ function deploymentState(input: {
     converged: input.converged ?? true,
     artifacts: Object.freeze(input.artifacts),
     gateways: Object.freeze(input.gateways),
+    services: Object.freeze(input.services),
     failures: Object.freeze(input.failures ?? []),
   });
 }

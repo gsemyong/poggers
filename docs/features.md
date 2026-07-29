@@ -24,6 +24,8 @@ they are not another composition tree.
 A reusable Feature factory is an ordinary TypeScript function built from these
 concepts. It may implement a complete programming model, such as durable
 Actors, without adding another compiler, runtime, or composition tree.
+Higher-level factories such as Agents may keep Actor Features internal while
+exposing only their own domain Dependency.
 
 ## Authoring
 
@@ -164,6 +166,11 @@ contract. Plain operation records are rejected instead of being interpreted as
 Dependencies. Generated native Programs call the exact required provider
 methods; a missing method fails native compilation. No Feature-specific Rust
 lowering is allowed.
+
+Calls with a product input also accept optional `{ idempotencyKey }` runtime
+metadata. It does not alter or duplicate the operation input contract.
+TypeScript and native realizations deliver the same stable invocation identity
+to providers, which may deduplicate unsafe external effects across retries.
 
 Development executes authored TypeScript when a provided Dependency promises a
 truly synchronous operation. Async-only portable Programs may execute through

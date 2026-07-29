@@ -1,0 +1,10 @@
+[package]
+name = "kit-server-model"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+base64 = "0.22.1"
+kit-server-runtime = { path = "../../../../../compiler/rust/runtime" }
+reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls"] }
+serde_json = "1.0.145"

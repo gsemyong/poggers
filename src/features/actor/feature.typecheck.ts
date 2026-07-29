@@ -35,6 +35,37 @@ const inventory = createActor<InventoryModel>({
   },
 });
 
+type ProfileModel = Actor<{
+  Name: "profile";
+  Key: string;
+  Version: 2;
+  History: {
+    1: { name: string };
+  };
+  State: { displayName: string; visits: number };
+  Methods: {
+    visit: Actor.Method<undefined, Readonly<{ visits: number }>>;
+    profile: Actor.Read<undefined, Readonly<{ displayName: string; visits: number }>>;
+  };
+}>;
+
+const profile = createActor<ProfileModel>({
+  state: () => ({ displayName: "", visits: 0 }),
+  evolve({ version, state }) {
+    version satisfies 1;
+    return { displayName: state.name, visits: 0 };
+  },
+  methods: {
+    visit({ state }) {
+      state.visits += 1;
+      return { visits: state.visits };
+    },
+    profile({ state }) {
+      return { displayName: state.displayName, visits: state.visits };
+    },
+  },
+});
+
 type Payments = Dependency<{
   Operations: {
     charge(
@@ -501,6 +532,7 @@ const actorSystem = createSystem({
     document,
     inventory,
     ledger,
+    profile,
     reminder,
   },
 });

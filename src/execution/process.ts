@@ -8,9 +8,11 @@ import {
 } from "@/compiler/ir";
 import {
   createUncheckedDependencyClient,
+  dependencyCallOptions,
   DependencyFailureError,
   dependencyInvocation,
   dependencyInvocationControl,
+  dependencyReferenceInstance,
   invokeDependency,
   type DependencyInvocation,
   type DependencyInvocationControl,
@@ -168,6 +170,7 @@ function conformDependency(
   }
   const wrappers = new Map<string, (...arguments_: unknown[]) => unknown>();
   const facade = Object.create(null) as Readonly<Record<string | symbol, unknown>>;
+  const directInvocationIdentity = crypto.randomUUID();
   let directInvocation = 0;
   const invoke = (operation: string, input: unknown, invocation: DependencyInvocation): unknown => {
     const contractOperation = operations.get(operation);
@@ -210,15 +213,19 @@ function conformDependency(
     let wrapper = wrappers.get(operation.name);
     if (wrapper) return wrapper;
     wrapper = (...arguments_: unknown[]) => {
-      if (arguments_.length > 1) {
+      if (arguments_.length > 2) {
         throw new TypeError(
-          `Dependency ${contract.name}.${operation.name} accepts one input object.`,
+          `Dependency ${contract.name}.${operation.name} accepts one input object and optional call options.`,
         );
       }
       const input = arguments_[0];
+      const options = dependencyCallOptions(arguments_[1], `${contract.name}.${operation.name}`);
       const now = Date.now();
       return invoke(operation.name, input, {
-        id: `direct:${contract.name}:${operation.name}:${++directInvocation}`,
+        id:
+          options?.idempotencyKey === undefined
+            ? `direct:${directInvocationIdentity}:${contract.name}:${operation.name}:${++directInvocation}`
+            : `idempotency:${options.idempotencyKey}`,
         attempt: 1,
         scheduledAt: now,
         startedAt: now,
@@ -240,6 +247,7 @@ function conformDependency(
         const bound: Readonly<Record<string, unknown>> = new Proxy(methods, {
           get(_target, property) {
             if (property === "then") return undefined;
+            if (property === dependencyReferenceInstance) return true;
             if (typeof property !== "string") return undefined;
             const operation = operations.get(property);
             if (!operation) return undefined;
@@ -280,7 +288,9 @@ function conformDependency(
               writable: false,
             };
           },
-          has: (_target, property) => typeof property === "string" && operations.has(property),
+          has: (_target, property) =>
+            property === dependencyReferenceInstance ||
+            (typeof property === "string" && operations.has(property)),
           ownKeys: () => [...operations.keys()],
         });
         return bound;
@@ -377,7 +387,7 @@ function providerInvocation(
     heartbeat: {
       configurable: false,
       enumerable: false,
-      value({ details }: Readonly<{ details: unknown }>): void {
+      async value({ details }: Readonly<{ details: unknown }>): Promise<void> {
         if (!operation.heartbeat) {
           throw new TypeError(
             `Dependency ${dependency}.${operation.name} does not declare heartbeat data.`,
@@ -388,7 +398,7 @@ function providerInvocation(
           operation.heartbeat,
           `${dependency}.${operation.name} heartbeat`,
         );
-        control.heartbeat(details);
+        await control.heartbeat(details);
       },
       writable: false,
     },
@@ -462,6 +472,13 @@ function conformDependencyOutput(
     });
   }
   if (operation.mode === "stream") {
+    if (isPromiseLike(output)) {
+      return conformDeferredStream(
+        output,
+        operation.output,
+        `${dependency}.${operation.name} output`,
+      );
+    }
     if (!isAsyncIterable(output)) {
       throw new TypeError(
         `Dependency ${dependency}.${operation.name} must return an AsyncIterable.`,
@@ -504,6 +521,22 @@ function conformStream(
         assertRuntimeType(value, contract, `${path}[${index++}]`);
         yield value;
       }
+    },
+  };
+}
+
+function conformDeferredStream(
+  pending: PromiseLike<unknown>,
+  contract: TypeIR,
+  path: string,
+): AsyncIterable<unknown> {
+  return {
+    async *[Symbol.asyncIterator]() {
+      const source = await pending;
+      if (!isAsyncIterable(source)) {
+        throw new TypeError(`${path} must be an AsyncIterable.`);
+      }
+      yield* conformStream(source, contract, path);
     },
   };
 }

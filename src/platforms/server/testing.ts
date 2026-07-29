@@ -1,7 +1,146 @@
 import { expect } from "vitest";
 
-import type { Clock, Identifiers, Timer } from "@/platforms/server";
+import type { Calendar, Clock, Identifiers, Timer } from "@/platforms/server";
 import { defineDependencyConformance, type DependencyConformance } from "@/testing/dependency";
+
+/** Semantic contract shared by every server civil-calendar provider. */
+export const calendarConformance: DependencyConformance<Calendar> =
+  defineDependencyConformance<Calendar>({
+    name: "Calendar",
+    scenarios: [
+      {
+        name: "resolves calendar fields, cron aliases, and IANA daylight-saving transitions",
+        async verify({ api }) {
+          await expect(
+            api.next({
+              after: Date.UTC(2026, 6, 25, 10),
+              through: Date.UTC(2026, 6, 27),
+              timeZone: "UTC",
+              pattern: { cron: "0 9 * * 5-7" },
+            }),
+          ).resolves.toEqual({ at: Date.UTC(2026, 6, 26, 9) });
+          await expect(
+            api.next({
+              after: Date.UTC(2026, 0, 1),
+              through: Date.UTC(2026, 11, 31),
+              timeZone: "UTC",
+              pattern: {
+                calendar: {
+                  month: "FEB",
+                  dayOfMonth: { start: 10, end: 14, step: 2 },
+                  hour: 12,
+                  minute: 30,
+                },
+              },
+            }),
+          ).resolves.toEqual({ at: Date.UTC(2026, 1, 10, 12, 30) });
+          await expect(
+            api.next({
+              after: Date.UTC(2026, 6, 25, 10),
+              through: Date.UTC(2026, 6, 27),
+              timeZone: "UTC",
+              pattern: {
+                calendar: {
+                  dayOfWeek: { start: 5, end: 7 },
+                  hour: 9,
+                },
+              },
+            }),
+          ).resolves.toEqual({ at: Date.UTC(2026, 6, 26, 9) });
+
+          const spring = await api.next({
+            after: Date.UTC(2026, 2, 28, 23),
+            through: Date.UTC(2026, 2, 30, 2),
+            timeZone: "Europe/Bratislava",
+            pattern: {
+              calendar: {
+                year: 2026,
+                month: 3,
+                dayOfMonth: [29, 30],
+                hour: 2,
+                minute: 30,
+              },
+            },
+          });
+          expect(spring).toEqual({ at: Date.UTC(2026, 2, 30, 0, 30) });
+
+          const firstFold = await api.next({
+            after: Date.UTC(2026, 9, 24, 23),
+            through: Date.UTC(2026, 9, 25, 2),
+            timeZone: "Europe/Bratislava",
+            pattern: {
+              calendar: {
+                year: 2026,
+                month: 10,
+                dayOfMonth: 25,
+                hour: 2,
+                minute: 30,
+              },
+            },
+          });
+          expect(firstFold).toEqual({ at: Date.UTC(2026, 9, 25, 0, 30) });
+          await expect(
+            api.next({
+              after: firstFold!.at,
+              through: Date.UTC(2026, 9, 25, 2),
+              timeZone: "Europe/Bratislava",
+              pattern: {
+                calendar: {
+                  year: 2026,
+                  month: 10,
+                  dayOfMonth: 25,
+                  hour: 2,
+                  minute: 30,
+                },
+              },
+            }),
+          ).resolves.toEqual({ at: Date.UTC(2026, 9, 25, 1, 30) });
+        },
+      },
+      {
+        name: "uses exclusive lower and inclusive upper bounds and rejects invalid input",
+        async verify({ api }) {
+          const at = Date.UTC(2026, 0, 1, 12);
+          await expect(
+            api.next({
+              after: at - 1,
+              through: at,
+              timeZone: "UTC",
+              pattern: {
+                calendar: { year: 2026, month: 1, dayOfMonth: 1, hour: 12 },
+              },
+            }),
+          ).resolves.toEqual({ at });
+          await expect(
+            api.next({
+              after: at,
+              through: at,
+              timeZone: "UTC",
+              pattern: {
+                calendar: { year: 2026, month: 1, dayOfMonth: 1, hour: 12 },
+              },
+            }),
+          ).resolves.toBeUndefined();
+          await expect(
+            api.next({
+              after: at,
+              through: at - 1,
+              timeZone: "UTC",
+              pattern: { cron: "@every 1h" },
+            }),
+          ).rejects.toThrow();
+          await expect(
+            api.next({
+              after: at,
+              through: at + 1,
+              timeZone: "Not/A_Zone",
+              pattern: { cron: "@every 1h" },
+            }),
+          ).rejects.toThrow();
+        },
+      },
+    ],
+  });
 
 /** Semantic contract shared by every server Clock provider. */
 export const clockConformance: DependencyConformance<Clock> = defineDependencyConformance<Clock>({

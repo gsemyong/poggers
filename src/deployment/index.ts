@@ -8,6 +8,7 @@ import type {
   ProductionConfiguration,
   ProductionExposure,
   ProductionLifecycle,
+  ProductionServiceRequirement,
   ProductionTarget,
 } from "@/adapter";
 import type { ProgramExternalDependencies, ProgramName } from "@/core/dependency";
@@ -54,7 +55,7 @@ type ExternalDependencies<Contract extends FeatureContract> = [
         : Empty
     >;
 
-export const RELEASE_MANIFEST_VERSION = 1 as const;
+export const RELEASE_MANIFEST_VERSION = 2 as const;
 
 export type ReleaseFile = Readonly<{
   path: string;
@@ -78,6 +79,7 @@ export type ReleaseArtifact = Readonly<{
   lifecycle?: ProductionLifecycle;
   target?: ProductionTarget;
   exposure?: ProductionExposure;
+  services?: readonly ProductionServiceRequirement[];
 }>;
 
 /** Immutable, content-addressed production output for one selected System/Application. */
@@ -200,6 +202,7 @@ export type DeploymentPlan = Readonly<{
   operations: readonly DeploymentOperation[];
   dependencies: readonly DeploymentDependencyPlan[];
   interfaces: readonly DeploymentInterfacePlan[];
+  services: readonly ProductionServiceRequirement[];
 }>;
 
 /** One configured implementation of the Deployment lifecycle. */
@@ -438,6 +441,7 @@ export function planDeployment<
 
   const dependencies = deploymentDependencyPlan(deployment, release);
   const interfaces = deploymentInterfacePlan(deployment, release);
+  const services = productionServices(release.artifacts);
   const target = Object.freeze({
     adapter: deployment.adapter.name,
     configuration: canonicalDeploymentObject(
@@ -449,6 +453,7 @@ export function planDeployment<
     target,
     dependencies,
     interfaces,
+    services,
   });
   const desired = digest({
     release: release.digest,
@@ -465,6 +470,7 @@ export function planDeployment<
     operations: Object.freeze(operations),
     dependencies,
     interfaces,
+    services,
   };
   return Object.freeze({ ...meaning, digest: digest(meaning) });
 }
@@ -921,6 +927,7 @@ export async function createRelease(input: {
           ? canonicalLifecycle(artifact.lifecycle)
           : undefined;
       const exposure = artifact.exposure ? canonicalExposure(artifact.exposure) : undefined;
+      const services = productionServices([{ services: artifact.services ?? [] }]);
       const meaning = {
         identity: artifact.identity,
         kind: artifact.kind,
@@ -932,6 +939,7 @@ export async function createRelease(input: {
         ...(entrypoint ? { entrypoint } : {}),
         dependencies,
         configuration,
+        services,
         ...(lifecycle ? { lifecycle } : {}),
         ...(target ? { target } : {}),
         ...(exposure ? { exposure } : {}),
@@ -1034,23 +1042,104 @@ function canonicalConfiguration(configuration: ProductionConfiguration): Product
       : {}),
     ...(configuration.source
       ? {
-          source: Object.freeze(
-            configuration.source.kind === "process-location"
-              ? { kind: configuration.source.kind }
-              : {
-                  kind: configuration.source.kind,
-                  format: configuration.source.format,
-                  ...(configuration.source.artifact
-                    ? { artifact: configuration.source.artifact }
-                    : {}),
-                  ...(configuration.source.platform
-                    ? { platform: configuration.source.platform }
-                    : {}),
-                },
-          ),
+          source: Object.freeze(canonicalConfigurationSource(configuration.source)),
         }
       : {}),
   });
+}
+
+function canonicalConfigurationSource(
+  source: NonNullable<ProductionConfiguration["source"]>,
+): NonNullable<ProductionConfiguration["source"]> {
+  if (source.kind === "process-location") return { kind: source.kind };
+  if (source.kind === "service-location") {
+    identifier(source.service, "Production service source");
+    identifier(source.endpoint, "Production service endpoint");
+    return {
+      kind: source.kind,
+      service: source.service,
+      endpoint: source.endpoint,
+    };
+  }
+  return {
+    kind: source.kind,
+    format: source.format,
+    ...(source.artifact ? { artifact: source.artifact } : {}),
+    ...(source.platform ? { platform: source.platform } : {}),
+  };
+}
+
+function productionServices(
+  artifacts: readonly Pick<ReleaseArtifact, "services">[],
+): readonly ProductionServiceRequirement[] {
+  const services = new Map<
+    string,
+    {
+      features: Set<string>;
+      endpoints: Map<string, ProductionServiceRequirement["endpoints"][number]>;
+    }
+  >();
+  for (const artifact of artifacts) {
+    for (const requirement of artifact.services ?? []) {
+      identifier(requirement.service, "Production service");
+      const service = services.get(requirement.service) ?? {
+        features: new Set<string>(),
+        endpoints: new Map(),
+      };
+      for (const feature of requirement.features) {
+        identifier(feature, `Production service ${JSON.stringify(requirement.service)} feature`);
+        service.features.add(feature);
+      }
+      for (const endpoint of requirement.endpoints) {
+        identifier(
+          endpoint.name,
+          `Production service ${JSON.stringify(requirement.service)} endpoint`,
+        );
+        identifier(
+          endpoint.scheme,
+          `Production service ${JSON.stringify(requirement.service)} endpoint scheme`,
+        );
+        const current = service.endpoints.get(endpoint.name);
+        if (
+          current &&
+          (current.transport !== endpoint.transport || current.scheme !== endpoint.scheme)
+        ) {
+          throw new Error(
+            `Production service ${JSON.stringify(requirement.service)} endpoint ` +
+              `${JSON.stringify(endpoint.name)} has conflicting definitions.`,
+          );
+        }
+        service.endpoints.set(endpoint.name, endpoint);
+      }
+      services.set(requirement.service, service);
+    }
+  }
+  return Object.freeze(
+    [...services]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([service, requirement]) =>
+        Object.freeze({
+          service,
+          features: Object.freeze([...requirement.features].sort()),
+          endpoints: Object.freeze(
+            [...requirement.endpoints.values()]
+              .sort((left, right) => left.name.localeCompare(right.name))
+              .map((endpoint) => Object.freeze({ ...endpoint })),
+          ),
+        }),
+      ),
+  );
+}
+
+function identifier(value: string, label: string): void {
+  if (
+    typeof value !== "string" ||
+    !value ||
+    value !== value.trim() ||
+    !/^[A-Za-z][A-Za-z0-9_-]*$/.test(value)
+  ) {
+    throw new TypeError(`${label} ${JSON.stringify(value)} is not a canonical identifier.`);
+  }
 }
 
 function canonicalAllocation(

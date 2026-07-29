@@ -32,6 +32,11 @@ export type ProductionConfiguration = Readonly<{
   source?:
     | Readonly<{ kind: "process-location" }>
     | Readonly<{
+        kind: "service-location";
+        service: string;
+        endpoint: string;
+      }>
+    | Readonly<{
         kind: "assets";
         artifact?: "interface" | "program";
         platform?: string;
@@ -47,6 +52,17 @@ export type ProductionLifecycle = Readonly<{
 export type ProductionTarget = Readonly<{
   operatingSystem: string;
   architecture: string;
+}>;
+
+/** One auxiliary service requirement attached to a production artifact. */
+export type ProductionServiceRequirement = Readonly<{
+  service: string;
+  features: readonly string[];
+  endpoints: readonly Readonly<{
+    name: string;
+    transport: "tcp";
+    scheme: string;
+  }>[];
 }>;
 
 export type HttpAssetExposure = Readonly<{
@@ -311,6 +327,7 @@ export type ProductionArtifact = Readonly<{
   lifecycle?: ProductionLifecycle;
   target?: ProductionTarget;
   exposure?: ProductionExposure;
+  services?: readonly ProductionServiceRequirement[];
 }>;
 
 /** Deterministic files emitted by one Platform Adapter. */

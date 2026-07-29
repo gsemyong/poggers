@@ -1,5 +1,19 @@
 const omitted = Symbol("kit.data.omitted");
 
+export type DataKind = "undefined" | "null" | "boolean" | "number" | "string" | "array" | "record";
+
+/** Returns the canonical portable-data kind shared by development and production. */
+export function dataKind(value: unknown): DataKind {
+  if (value === undefined) return "undefined";
+  if (value === null) return "null";
+  if (typeof value === "boolean") return "boolean";
+  if (typeof value === "number") return "number";
+  if (typeof value === "string") return "string";
+  if (Array.isArray(value)) return "array";
+  if (typeof value === "object") return "record";
+  throw new TypeError(`Value contains unsupported ${typeof value} data.`);
+}
+
 /**
  * Clones one value into the canonical data shape accepted by durable
  * Dependencies. Records preserve insertion order, undefined record fields are

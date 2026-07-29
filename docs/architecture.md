@@ -648,6 +648,8 @@ kit/features/actor
 kit/features/data
 kit/features/entity
 kit/features/identity
+kit/features/model
+kit/features/workflow
 ```
 
 Feature-factory authors, tests, and deployment definitions use explicit
@@ -713,6 +715,7 @@ Use the validation ladder while editing:
 nub exec vitest run path/to/feature.spec.ts -t "changed behavior"
 nub run typecheck
 nub run check:source
+nub run check:workflow
 nub run check:compiler
 nub run check:providers
 nub run check:presentation
@@ -721,14 +724,18 @@ nub run check:production
 
 The targeted test and incremental typecheck are the application and
 Feature-factory inner loop. They never invoke Cargo. `check:source` is the
-complete TypeScript milestone: typecheck, lint, formatting, and source tests,
-without compiling generated Programs. Compiler, provider, adapter, browser, and
-production gates run only for changes to their owned surfaces. `check` remains
-the complete repository acceptance gate and builds the package at most once.
-It runs `check:source`, compiler differential conformance, provider/native
-conformance, one package build, examples/package consumption, distribution
-typing, and focused release-mode production smoke in that order. It is not an
-edit-loop command.
+routine TypeScript milestone: typecheck, lint, formatting, and source tests
+whose fixtures do not perform semantic System compilation. `check:workflow`
+owns the compiler-backed Workflow conformance matrix and its focused debug
+TypeScript/Rust differential evidence. It isolates runtime, compiler-backed,
+and canonical-IR groups in separate Vitest processes so TypeScript compiler
+graphs are released between them. Compiler, provider, adapter, browser, and
+production gates run only for changes to their owned surfaces. `check`
+remains the complete repository acceptance gate and builds the package at most
+once. It runs `check:source`, Workflow conformance, generic compiler
+differential conformance, provider/native conformance, one package build,
+examples/package consumption, distribution typing, and focused release-mode
+production smoke in that order. It is not an edit-loop command.
 
 `kit dev` does not run `tsc`, package builds, or native compilation. It retains
 one TypeScript semantic graph, ignores duplicate file notifications, computes

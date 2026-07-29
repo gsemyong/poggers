@@ -345,7 +345,7 @@ export function createRemoteDependency(
         },
         input,
       };
-      if (invocation.deadline !== undefined && invocation.deadline <= Date.now()) {
+      if (invocation.deadline !== undefined && invocation.deadline <= invocation.startedAt) {
         throw new RemoteDependencyError(
           "deadline-exceeded",
           `Dependency ${contract.name}.${operation.name} deadline elapsed before dispatch.`,
@@ -481,7 +481,10 @@ function validateRequest(
       false,
     );
   }
-  if (request.invocation.deadline !== undefined && request.invocation.deadline <= Date.now()) {
+  if (
+    request.invocation.deadline !== undefined &&
+    request.invocation.deadline <= request.invocation.startedAt
+  ) {
     throw new RemoteDependencyError(
       "deadline-exceeded",
       `Dependency ${dependency.name}.${operation.name} deadline elapsed before execution.`,
@@ -648,7 +651,7 @@ function monitorControls(
           `Dependency operation ${operation.name} exceeded its remote deadline.`,
           true,
         ),
-      Math.max(0, invocation.deadline - Date.now()),
+      Math.max(0, invocation.deadline - invocation.startedAt),
     );
   }
   return {

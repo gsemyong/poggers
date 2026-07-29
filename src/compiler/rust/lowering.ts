@@ -445,7 +445,22 @@ ${expression.entries
       case "method-call":
         return `engine.method(${this.#expression(contribution, expression.receiver)}, ${rustString(expression.method)}, vec![${expression.arguments.map((argument) => this.#expression(contribution, argument)).join(", ")}]).await?`;
       case "dependency-call":
-        return `engine.call_dependency_scoped(${rustString(contribution)}, ${rustString(expression.dependency)}, ${rustString(expression.operation)}, ${expression.arguments[0] ? this.#expression(contribution, expression.arguments[0]) : "Value::Undefined"}).await?`;
+        return `engine.call_dependency_scoped_with_options(${rustString(contribution)}, ${rustString(expression.dependency)}, ${rustString(expression.operation)}, ${expression.arguments[0] ? this.#expression(contribution, expression.arguments[0]) : "Value::Undefined"}, ${expression.options ? this.#expression(contribution, expression.options) : "Value::Undefined"}).await?`;
+      case "dependency-dispatch":
+        return `engine.method(${this.#expression(contribution, expression.dependency)}, &${this.#expression(contribution, expression.operation)}.string()?, vec![${this.#expression(contribution, expression.input)}, ${expression.options ? this.#expression(contribution, expression.options) : "Value::Undefined"}]).await?`;
+      case "dependency-intercept": {
+        const dependency = this.#temporaryName("dependency");
+        const intercept = this.#temporaryName("intercept");
+        return `{
+            let ${dependency} = ${this.#expression(contribution, expression.dependency)};
+            let ${intercept} = ${this.#expression(contribution, expression.intercept)};
+            let _ = ${dependency};
+            match ${intercept} {
+                Value::Function(function) => Value::intercepted_dependency(function),
+                value => return Err(NativeError::new("TypeError", format!("Dependency interception requires a function, received {value:?}."))),
+            }
+        }`;
+      }
       case "dependency-reference":
         return `Value::mutable_record([
             ("__kit_dependency".to_owned(), Value::String(${rustString(expression.dependency)}.to_owned())),
@@ -482,6 +497,22 @@ ${expression.input ? `            ${request}.insert(${rustString(expression.argu
         return `Value::String(${this.#expression(contribution, expression.value)}.to_json()?.to_string())`;
       case "object-keys":
         return `engine.object_keys(${this.#expression(contribution, expression.value)})?`;
+      case "data-kind": {
+        const value = this.#temporaryName("data_kind");
+        return `{
+            let ${value} = ${this.#expression(contribution, expression.value)};
+            Value::String(match ${value} {
+                Value::Undefined => "undefined",
+                Value::Null => "null",
+                Value::Boolean(_) => "boolean",
+                Value::Number(_) => "number",
+                Value::String(_) => "string",
+                Value::Array(_) => "array",
+                Value::Record(_) | Value::MutableRecord(_) => "record",
+                _ => return Err(NativeError::new("TypeError", "Value is not portable data.")),
+            }.to_owned())
+        }`;
+      }
       case "to-string":
         return `Value::String(${this.#expression(contribution, expression.value)}.to_text())`;
       case "stream-map":
@@ -555,11 +586,29 @@ ${declarations}            Value::Function(${function_})
     } else if (expression.kind === "dependency-call") {
       const engine = this.#temporaryName("engine");
       const input = this.#temporaryName("input");
+      const options = this.#temporaryName("options");
       future = `{
             let ${engine} = engine.clone();
             let ${input} = ${expression.arguments[0] ? this.#expression(contribution, expression.arguments[0]) : "Value::Undefined"};
+            let ${options} = ${expression.options ? this.#expression(contribution, expression.options) : "Value::Undefined"};
             Box::pin(async move {
-                ${engine}.call_dependency_scoped(${rustString(contribution)}, ${rustString(expression.dependency)}, ${rustString(expression.operation)}, ${input}).await
+                ${engine}.call_dependency_scoped_with_options(${rustString(contribution)}, ${rustString(expression.dependency)}, ${rustString(expression.operation)}, ${input}, ${options}).await
+            })
+        }`;
+    } else if (expression.kind === "dependency-dispatch") {
+      const engine = this.#temporaryName("engine");
+      const dependency = this.#temporaryName("dependency");
+      const operation = this.#temporaryName("operation");
+      const input = this.#temporaryName("input");
+      const options = this.#temporaryName("options");
+      future = `{
+            let ${engine} = engine.clone();
+            let ${dependency} = ${this.#expression(contribution, expression.dependency)};
+            let ${operation} = ${this.#expression(contribution, expression.operation)}.string()?;
+            let ${input} = ${this.#expression(contribution, expression.input)};
+            let ${options} = ${expression.options ? this.#expression(contribution, expression.options) : "Value::Undefined"};
+            Box::pin(async move {
+                ${engine}.method(${dependency}, &${operation}, vec![${input}, ${options}]).await
             })
         }`;
     } else if (expression.kind === "dependency-reference-call") {

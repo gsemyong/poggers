@@ -6,7 +6,11 @@ import {
   type SystemIR,
 } from "@/compiler/ir";
 import { collectProgramManifest, linkProgram } from "@/compiler/linker";
-import { invokeDependency } from "@/core/dependency";
+import {
+  dependencyInvocationControl,
+  forwardDependencyCancellation,
+  invokeDependency,
+} from "@/core/dependency";
 import type { System, SystemContract } from "@/core/system";
 import {
   executeLinkedProgramIR,
@@ -101,20 +105,27 @@ export async function startServerProgramInstance<Contract extends SystemContract
       dependencies as DependencyImplementations,
       { distribute },
     );
-    const alarm = bindNodeAlarmDispatcher(dependencies, async ({ id, at, attempt, target }) => {
-      const dependency = execution.dependencies[target.dependency];
-      if (!dependency || (typeof dependency !== "object" && typeof dependency !== "function")) {
-        throw new Error(
-          `Alarm ${JSON.stringify(id)} targets unavailable Dependency ${JSON.stringify(target.dependency)}.`,
-        );
-      }
-      await invokeDependency(dependency as object, target.operation, target.input, {
-        id: `alarm:${id}`,
-        attempt,
-        scheduledAt: at,
-        startedAt: Date.now(),
-      });
-    });
+    const alarm = bindNodeAlarmDispatcher(
+      dependencies,
+      async ({ id, at, attempt, target, cancellation }) => {
+        const dependency = execution.dependencies[target.dependency];
+        if (!dependency || (typeof dependency !== "object" && typeof dependency !== "function")) {
+          throw new Error(
+            `Alarm ${JSON.stringify(id)} targets unavailable Dependency ${JSON.stringify(target.dependency)}.`,
+          );
+        }
+        await invokeDependency(dependency as object, target.operation, target.input, {
+          id: `alarm:${id}`,
+          attempt,
+          scheduledAt: at,
+          startedAt: Date.now(),
+          [dependencyInvocationControl]: {
+            heartbeat() {},
+            cancellation: forwardDependencyCancellation(cancellation),
+          },
+        });
+      },
+    );
     let disposed = false;
     return {
       name: program.name,
@@ -138,20 +149,27 @@ export async function startServerProgramInstance<Contract extends SystemContract
     ownDependencies: false,
     distribute,
   });
-  const alarm = bindNodeAlarmDispatcher(dependencies, async ({ id, at, attempt, target }) => {
-    const dependency = process.dependencies[target.dependency];
-    if (!dependency || (typeof dependency !== "object" && typeof dependency !== "function")) {
-      throw new Error(
-        `Alarm ${JSON.stringify(id)} targets unavailable Dependency ${JSON.stringify(target.dependency)}.`,
-      );
-    }
-    await invokeDependency(dependency as object, target.operation, target.input, {
-      id: `alarm:${id}`,
-      attempt,
-      scheduledAt: at,
-      startedAt: Date.now(),
-    });
-  });
+  const alarm = bindNodeAlarmDispatcher(
+    dependencies,
+    async ({ id, at, attempt, target, cancellation }) => {
+      const dependency = process.dependencies[target.dependency];
+      if (!dependency || (typeof dependency !== "object" && typeof dependency !== "function")) {
+        throw new Error(
+          `Alarm ${JSON.stringify(id)} targets unavailable Dependency ${JSON.stringify(target.dependency)}.`,
+        );
+      }
+      await invokeDependency(dependency as object, target.operation, target.input, {
+        id: `alarm:${id}`,
+        attempt,
+        scheduledAt: at,
+        startedAt: Date.now(),
+        [dependencyInvocationControl]: {
+          heartbeat() {},
+          cancellation: forwardDependencyCancellation(cancellation),
+        },
+      });
+    },
+  );
   let disposed = false;
   return {
     name: program.name,

@@ -16,7 +16,7 @@ import { resolve } from "node:path";
 
 import { afterEach, describe, expect, test, vi } from "vitest";
 
-import { createProject, runCli } from "@/cli";
+import { createProject, formatCliError, runCli } from "@/cli";
 import type { SourceCompilerExtension } from "@/compiler/extension";
 import { SYSTEM_IR_VERSION } from "@/compiler/ir";
 import { compileSystem } from "@/compiler/source";
@@ -27,6 +27,18 @@ import { validateUIProgramRoot } from "@/platforms/web/adapter/pipeline";
 const directories: string[] = [];
 afterEach(async () => {
   await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true })));
+});
+
+test("CLI diagnostics retain nested platform startup causes", () => {
+  const collision = new Error("listen EADDRINUSE: address already in use :::3010");
+  const server = new Error("server development startup failed.", { cause: collision });
+  const web = new Error("Port 3000 is already in use");
+
+  expect(formatCliError(new AggregateError([server, web], "System development startup failed.")))
+    .toBe(`System development startup failed.
+  - server development startup failed.
+    - listen EADDRINUSE: address already in use :::3010
+  - Port 3000 is already in use`);
 });
 
 describe("project template", () => {

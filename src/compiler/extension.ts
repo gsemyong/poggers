@@ -3,6 +3,7 @@ import type * as ts from "@typescript/typescript6";
 import type {
   DependencyIR,
   ExtensionIR,
+  ExpressionIR,
   FunctionIR,
   SourceSpan,
   SystemIR,
@@ -83,6 +84,29 @@ export type SystemSourceContext = Readonly<{
   root: string;
 }>;
 
+/** One extension-owned compile-time constant encountered inside portable code. */
+export type PortableConstantSourceContext = Readonly<{
+  checker: ts.TypeChecker;
+  source: SourceCompilerAPI;
+  call: ts.CallExpression;
+  awaited: boolean;
+  root: string;
+  resolve(type: ts.Type): ts.Type;
+}>;
+
+/** One extension-owned portable call lowered into ordinary generic Function IR. */
+export type PortableCallSourceContext = PortableConstantSourceContext &
+  Readonly<{
+    type: TypeIR;
+    span: SourceSpan;
+    lower(expression: ts.Expression): ExpressionIR;
+  }>;
+
+export type PortableCallCompilation = Readonly<{
+  expression: ExpressionIR;
+  functions?: readonly FunctionIR[];
+}>;
+
 /** Serializable, independently versioned meaning owned by one Platform dialect. */
 export type VersionedExtensionIR = object & Readonly<{ version: number }>;
 
@@ -99,6 +123,18 @@ export type SourceCompilerExtension = Readonly<{
   cacheSources?: readonly string[];
   system?(context: SystemSourceContext): ExtensionIR | undefined;
   feature?(context: FeatureSourceContext): ExtensionIR | undefined;
+  /**
+   * Materializes extension-owned JSON inside portable code.
+   *
+   * Returning undefined means the call does not belong to this extension.
+   * Core validates and embeds the result without interpreting its meaning.
+   */
+  constant?(context: PortableConstantSourceContext): ExtensionIR | undefined;
+  /**
+   * Lowers one extension intrinsic into ordinary portable expression/function
+   * meaning. Returning undefined leaves the call to the normal frontend.
+   */
+  call?(context: PortableCallSourceContext): PortableCallCompilation | undefined;
   interface?(context: InterfaceSourceContext): SourceDialectCompilation;
   program?(context: ProgramSourceContext): SourceDialectCompilation;
   validate?(ir: SystemIR): void;

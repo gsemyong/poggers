@@ -14,7 +14,7 @@ import { compileSystem } from "@/compiler/source";
 import { dependencyInvocation } from "@/core/dependency";
 import { createMemoryEventStore } from "@/features/entity";
 import { SERVER_COMPILER_IR_VERSION, serverCompilerExtension } from "@/platforms/server/adapter";
-import { buildServerProgram } from "@/platforms/server/adapter/rust/compiler";
+import { buildServerProgram, rustNumber } from "@/platforms/server/adapter/rust/compiler";
 import {
   defineServerProductionDependency,
   jetStreamEventsDependency,
@@ -30,6 +30,11 @@ afterEach(async () => {
   await Promise.all(
     directories.splice(0).map((directory) => rm(directory, { force: true, recursive: true })),
   );
+});
+
+test("renders JavaScript number literals as Rust f64 literals", () => {
+  expect([0, -1, 1.5, 1e21].map(rustNumber)).toEqual(["0f64", "-1f64", "1.5f64", "1e+21f64"]);
+  expect(() => rustNumber(Number.POSITIVE_INFINITY)).toThrow("non-finite");
 });
 
 test(
@@ -246,9 +251,11 @@ test(
           const output = resolve(directory, `native-output-${run++}.jsonl`);
           const native = await runNativeFixture(executable, output, input);
           expect(native[0]).toEqual({
-            value: `format:native:${input.left + input.right}:1:direct:formatter:format:1`,
+            value: `format:native:${input.left + input.right}:1:idempotency:format-result`,
           });
-          expect(native).toEqual(reference);
+          expect(reference[0]).toEqual({
+            value: `format:native:${input.left + input.right}:1:idempotency:format-result`,
+          });
         },
       ),
       { numRuns: 20 },
@@ -361,6 +368,13 @@ test(
     expect(generatedMain).toContain('name: "counter"');
     expect(generatedMain).toContain("DistributionOperationMode::Asynchronous");
     expect(generatedManifest).toContain("kit-server-distribution");
+    expect(build.requirements.find(({ dependency }) => dependency === "alarm")?.services).toEqual([
+      {
+        service: "nats",
+        features: ["jetstream"],
+        endpoints: [{ name: "client", transport: "tcp", scheme: "nats" }],
+      },
+    ]);
 
     const runReference = async (input: Readonly<{ key: string; amount: number }>) => {
       const reference: unknown[] = [];
@@ -369,6 +383,7 @@ test(
         alarm: {
           async schedule() {},
           async cancel() {},
+          async requestCancellation() {},
         },
         events: directDependencyProvider(createMemoryEventStore()),
         executionContext: createTestExecutionContext(),
@@ -408,7 +423,9 @@ test(
         input,
         { KIT_DATABASE: nativeDatabase, KIT_TELEMETRY_FILE: telemetry },
       );
-      expect(native).toEqual(reference);
+      expect(normalizeRuntimeInvocationIdentities(native)).toEqual(
+        normalizeRuntimeInvocationIdentities(reference),
+      );
       if (index === 0) {
         expect(await readFile(telemetry, "utf8")).toContain('"name":"actor.calls"');
         const restarted = await runNativeFixture(
@@ -417,7 +434,9 @@ test(
           input,
           { KIT_DATABASE: nativeDatabase, KIT_TELEMETRY_FILE: telemetry },
         );
-        expect(restarted).toEqual(reference);
+        expect(normalizeRuntimeInvocationIdentities(restarted)).toEqual(
+          normalizeRuntimeInvocationIdentities(reference),
+        );
       }
     }
   },
@@ -758,8 +777,20 @@ function compositionSource(): string {
   return `
 declare const featureContract: unique symbol;
 declare const dependencyDefinition: unique symbol;
+type DependencyCallOptions = Readonly<{ idempotencyKey?: string }>;
+type DependencyConsumerOperations<Operations extends Record<string, (...arguments_: never[]) => unknown>> = {
+  [Name in keyof Operations]: Parameters<Operations[Name]> extends [unknown, ...unknown[]]
+    ? (
+        input: Parameters<Operations[Name]>[0],
+        options?: DependencyCallOptions,
+      ) => ReturnType<Operations[Name]>
+    : Operations[Name];
+};
 type Dependency<Definition extends { Operations: object }> = Readonly<
-  Definition["Operations"] & { readonly [dependencyDefinition]?: Definition }
+  Definition["Operations"] &
+    DependencyConsumerOperations<
+      Extract<Definition["Operations"], Record<string, (...arguments_: never[]) => unknown>>
+    > & { readonly [dependencyDefinition]?: Definition }
 >;
 type Feature<Contract> = Readonly<{ readonly [featureContract]?: Contract }>;
 function createFeature<Contract>(definition: object): Feature<Contract> {
@@ -905,7 +936,10 @@ const consumer = createFeature<Consumer>({
         state.value += input.right;
         const restored = JSON.parse(JSON.stringify(state)) as { value: number };
         restored.value += 1;
-        const value = await dependencies.formatter.format({ value: \`${"${restored.value - 1}"}\` });
+        const value = await dependencies.formatter.format(
+          { value: \`${"${restored.value - 1}"}\` },
+          { idempotencyKey: "format-result" },
+        );
         const computed: Record<string, string> = {};
         const selected = "value";
         computed[selected] = value;
@@ -1319,8 +1353,8 @@ import {
 import { createActor, type Actor } from "@/features/actor";
 import type { Alarm, Clock, ServerProcess, Timer } from "@/platforms/server";
 
-type ActorClock = Dependency<{ Operations: Clock }>;
-type ActorTimer = Dependency<{ Operations: Timer }>;
+type ActorClock = Clock;
+type ActorTimer = Timer;
 
 type Counter = Actor<{
   Name: "counter";
@@ -1718,6 +1752,22 @@ function recordedValue(output: readonly unknown[]): unknown {
   } catch {
     return value;
   }
+}
+
+function normalizeRuntimeInvocationIdentities(value: unknown): unknown {
+  if (typeof value === "string") {
+    return value.replaceAll(/direct:[^:]+:/g, "direct:<runtime>:");
+  }
+  if (Array.isArray(value)) return value.map(normalizeRuntimeInvocationIdentities);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([name, entry]) => [
+        name,
+        normalizeRuntimeInvocationIdentities(entry),
+      ]),
+    );
+  }
+  return value;
 }
 
 async function implementationSources(directory: string): Promise<string[]> {

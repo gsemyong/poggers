@@ -7,6 +7,7 @@ import * as ts from "@typescript/typescript6";
 import type {
   FeatureSourceContext,
   InterfaceSourceContext,
+  PortableCallCompilation,
   ProgramSourceContext,
   SourceCompilerAPI,
   SourceCompilerExtension,
@@ -109,6 +110,74 @@ export function compileSystem(
   return compileSystemProgram(file, program, undefined, extensions).ir;
 }
 
+/** Compiles an in-memory source overlay without changing module resolution. */
+export function compileSystemSources(
+  entry: string,
+  sources: Readonly<Record<string, string>>,
+  extensions: readonly SourceCompilerExtension[] = [],
+): SystemIR {
+  const file = resolve(entry);
+  const options = compilerOptions(file);
+  const overlay = new Map(
+    Object.entries(sources).map(([path, source]) => [resolve(path), source] as const),
+  );
+  const overlayDirectories = new Set<string>();
+  for (const path of overlay.keys()) {
+    let directory = dirname(path);
+    while (!overlayDirectories.has(directory)) {
+      overlayDirectories.add(directory);
+      const parent = dirname(directory);
+      if (parent === directory) break;
+      directory = parent;
+    }
+  }
+  if (!overlay.has(file)) {
+    throw new Error(`In-memory System source ${file} is missing.`);
+  }
+  const fallback = ts.createCompilerHost(options);
+  const host: ts.CompilerHost = {
+    ...fallback,
+    fileExists(path) {
+      return overlay.has(resolve(path)) || fallback.fileExists(path);
+    },
+    readFile(path) {
+      return overlay.get(resolve(path)) ?? fallback.readFile(path);
+    },
+    directoryExists(path) {
+      return overlayDirectories.has(resolve(path)) || fallback.directoryExists?.(path) === true;
+    },
+    getDirectories(path) {
+      const directory = resolve(path);
+      return [
+        ...new Set([
+          ...(fallback.getDirectories?.(path) ?? []),
+          ...[...overlayDirectories].filter(
+            (candidate) => candidate !== directory && dirname(candidate) === directory,
+          ),
+        ]),
+      ];
+    },
+    realpath(path) {
+      const absolute = resolve(path);
+      return overlay.has(absolute) || overlayDirectories.has(absolute)
+        ? absolute
+        : (fallback.realpath?.(path) ?? absolute);
+    },
+    getSourceFile(path, languageVersion, onError, shouldCreateNewSourceFile) {
+      const source = overlay.get(resolve(path));
+      return source === undefined
+        ? fallback.getSourceFile(path, languageVersion, onError, shouldCreateNewSourceFile)
+        : ts.createSourceFile(path, source, languageVersion, true);
+    },
+  };
+  const program = ts.createProgram({
+    rootNames: [file],
+    options,
+    host,
+  });
+  return compileSystemProgram(file, program, undefined, extensions).ir;
+}
+
 /** Retains TypeScript's semantic graph across development compilations. */
 export function createSystemCompiler(
   entry: string,
@@ -200,6 +269,8 @@ export function systemCompilerIdentity(
     for (const hook of [
       compiler.system,
       compiler.feature,
+      compiler.constant,
+      compiler.call,
       compiler.interface,
       compiler.program,
       compiler.validate,
@@ -229,6 +300,7 @@ function sourceCompilerAPI(
   checker: ts.TypeChecker,
   scope?: StaticValue,
   root?: string,
+  extensions: readonly SourceCompilerExtension[] = [],
 ): SourceCompilerAPI {
   return Object.freeze({
     properties: (type) => sortedSymbols(type?.getProperties() ?? []),
@@ -341,6 +413,22 @@ function sourceCompilerAPI(
         scope?.bindings,
         scope?.types,
         options.provides,
+        (call, awaited, bindings, types) =>
+          extensionConstant(program, checker, call, awaited, bindings, types, root, extensions),
+        (call, awaited, bindings, types, type, span, lower) =>
+          extensionPortableCall(
+            program,
+            checker,
+            call,
+            awaited,
+            bindings,
+            types,
+            type,
+            span,
+            lower,
+            root,
+            extensions,
+          ),
       );
       const entry = lowerFunction(
         {
@@ -383,6 +471,96 @@ function sourceCompilerAPI(
       throw diagnostic(node, message);
     },
   });
+}
+
+function extensionPortableCall(
+  program: ts.Program,
+  checker: ts.TypeChecker,
+  call: ts.CallExpression,
+  awaited: boolean,
+  bindings: ReadonlyMap<ts.Symbol, StaticValue>,
+  types: ReadonlyMap<ts.Type, ts.Type>,
+  type: TypeIR,
+  span: SourceSpan,
+  lower: (expression: ts.Expression) => ExpressionIR,
+  root: string | undefined,
+  extensions: readonly SourceCompilerExtension[],
+): PortableCallCompilation | undefined {
+  const values: Readonly<{ name: string; value: PortableCallCompilation }>[] = extensions.flatMap(
+    (extension) => {
+      if (!extension.call) return [];
+      const value = extension.call({
+        checker,
+        source: sourceCompilerAPI(
+          program,
+          checker,
+          { node: call, bindings, types },
+          root,
+          extensions,
+        ),
+        call,
+        awaited,
+        type,
+        span,
+        lower,
+        root: root ?? dirname(call.getSourceFile().fileName),
+        resolve: (source) => substitutedType(source, types),
+      });
+      return value === undefined ? [] : [{ name: extension.name, value }];
+    },
+  );
+  if (values.length > 1) {
+    throw diagnostic(
+      call,
+      `Portable call is lowered by multiple compiler extensions: ${values
+        .map(({ name }) => JSON.stringify(name))
+        .join(", ")}.`,
+    );
+  }
+  return values[0]?.value;
+}
+
+function extensionConstant(
+  program: ts.Program,
+  checker: ts.TypeChecker,
+  call: ts.CallExpression,
+  awaited: boolean,
+  bindings: ReadonlyMap<ts.Symbol, StaticValue>,
+  types: ReadonlyMap<ts.Type, ts.Type>,
+  root: string | undefined,
+  extensions: readonly SourceCompilerExtension[],
+): ExtensionIR | undefined {
+  const values: Readonly<{ name: string; value: ExtensionIR }>[] = extensions.flatMap(
+    (extension) => {
+      if (!extension.constant) return [];
+      const value = extension.constant({
+        checker,
+        source: sourceCompilerAPI(
+          program,
+          checker,
+          { node: call, bindings, types },
+          root,
+          extensions,
+        ),
+        call,
+        awaited,
+        root: root ?? dirname(call.getSourceFile().fileName),
+        resolve: (type) => substitutedType(type, types),
+      });
+      if (value === undefined) return [];
+      assertExtensionIR(value, extension.name, new Set());
+      return [{ name: extension.name, value }];
+    },
+  );
+  if (values.length > 1) {
+    throw diagnostic(
+      call,
+      `Portable call is claimed by multiple compiler extensions: ${values
+        .map(({ name }) => JSON.stringify(name))
+        .join(", ")}.`,
+    );
+  }
+  return values[0]?.value;
 }
 
 function extensionField(
@@ -558,7 +736,7 @@ function compileSystemProgram(
   const root = dirname(file);
   const systemExtensions = extensionField(extensions, "system", {
     checker,
-    source: sourceCompilerAPI(program, checker),
+    source: sourceCompilerAPI(program, checker, undefined, undefined, extensions),
     contract,
     implementation: systemObject,
     location: exported,
@@ -1263,7 +1441,7 @@ function extractApplicationInterfaces(input: {
     owners.push(owner);
     const dialect = dialectField(extensions, "interface", platform, {
       checker,
-      source: sourceCompilerAPI(program, checker, staticInterface, root),
+      source: sourceCompilerAPI(program, checker, staticInterface, root, extensions),
       contract: interfaceContract,
       implementation: interfaceValue,
       location: value ?? interfaceLocation,
@@ -1557,7 +1735,7 @@ function extractFeatures(
       ...(providers.length ? { providers } : {}),
       ...extensionField(extensions, "feature", {
         checker,
-        source: sourceCompilerAPI(program, checker, staticFeature),
+        source: sourceCompilerAPI(program, checker, staticFeature, root, extensions),
         contract,
         implementation: featureValue,
         location: featureLocation,
@@ -1873,7 +2051,7 @@ function extractProgram(
     provides,
     ...dialectField(extensions, "program", platform, {
       checker,
-      source: sourceCompilerAPI(program, checker, expandedProgram, sourceRoot),
+      source: sourceCompilerAPI(program, checker, expandedProgram, sourceRoot, extensions),
       contract,
       implementation: readableValue,
       location,
@@ -1961,8 +2139,21 @@ function validatePortableLocals(
         value.values.forEach((item) => expression(item, names));
         return;
       case "call":
+        value.arguments.forEach((argument) => expression(argument, names));
+        return;
       case "dependency-call":
         value.arguments.forEach((argument) => expression(argument, names));
+        if (value.options) expression(value.options, names);
+        return;
+      case "dependency-dispatch":
+        expression(value.dependency, names);
+        expression(value.operation, names);
+        expression(value.input, names);
+        if (value.options) expression(value.options, names);
+        return;
+      case "dependency-intercept":
+        expression(value.dependency, names);
+        expression(value.intercept, names);
         return;
       case "dependency-reference":
         expression(value.binding, names);
@@ -2204,6 +2395,12 @@ function lowerType(
   if (type.flags & ts.TypeFlags.Unknown) {
     throw diagnostic(at, `Portable contract ${path} cannot contain unresolved unknown.`);
   }
+  if (type.flags & ts.TypeFlags.TypeParameter) {
+    const constraint = checker.getBaseConstraintOfType(type);
+    if (constraint && constraint !== type) {
+      return lowerType(checker, constraint, at, active, path, substitutions, allowCallbackCycle);
+    }
+  }
   if (type.flags & ts.TypeFlags.StringLiteral) {
     return { kind: "literal", value: (type as ts.StringLiteralType).value };
   }
@@ -2212,6 +2409,24 @@ function lowerType(
   }
   if (type.flags & ts.TypeFlags.BooleanLiteral) {
     return { kind: "literal", value: checker.typeToString(type) === "true" };
+  }
+  if (type.flags & ts.TypeFlags.TemplateLiteral) {
+    const template = type as ts.TemplateLiteralType;
+    let value = template.texts[0] ?? "";
+    for (const [index, substitution] of template.types.entries()) {
+      const lowered = lowerType(
+        checker,
+        substitution,
+        at,
+        active,
+        `${path}.template[${index}]`,
+        substitutions,
+      );
+      if (lowered.kind !== "literal") return primitive("string");
+      value += String(lowered.value);
+      value += template.texts[index + 1] ?? "";
+    }
+    return { kind: "literal", value };
   }
   if (type.flags & ts.TypeFlags.Null) return primitive("null");
   if (type.flags & ts.TypeFlags.StringLike) return primitive("string");
@@ -2463,6 +2678,21 @@ type PortableLowering = Readonly<{
   staticBindings: Map<ts.Symbol, StaticValue>;
   providedNames: readonly string[];
   providedBinding?: ts.Symbol;
+  constant?: (
+    call: ts.CallExpression,
+    awaited: boolean,
+    bindings: ReadonlyMap<ts.Symbol, StaticValue>,
+    types: ReadonlyMap<ts.Type, ts.Type>,
+  ) => ExtensionIR | undefined;
+  extensionCall?: (
+    call: ts.CallExpression,
+    awaited: boolean,
+    bindings: ReadonlyMap<ts.Symbol, StaticValue>,
+    types: ReadonlyMap<ts.Type, ts.Type>,
+    type: TypeIR,
+    span: SourceSpan,
+    lower: (expression: ts.Expression) => ExpressionIR,
+  ) => PortableCallCompilation | undefined;
 }>;
 
 function lowerPortableType(lowering: PortableLowering, type: ts.Type, at: ts.Node): TypeIR {
@@ -2474,6 +2704,8 @@ function createPortableLowering(
   staticBindings: ReadonlyMap<ts.Symbol, StaticValue> = new Map(),
   typeSubstitutions: ReadonlyMap<ts.Type, ts.Type> = new Map(),
   providedNames: readonly string[] = [],
+  constant?: PortableLowering["constant"],
+  extensionCall?: PortableLowering["extensionCall"],
 ): PortableLowering {
   return {
     checker,
@@ -2485,6 +2717,8 @@ function createPortableLowering(
     typeSubstitutions: new Map(typeSubstitutions),
     staticBindings: flattenStaticBindings(staticBindings),
     providedNames,
+    ...(constant ? { constant } : {}),
+    ...(extensionCall ? { extensionCall } : {}),
   };
 }
 
@@ -3504,14 +3738,27 @@ function lowerDependencyCall(
     return undefined;
   const operation = node.expression.name.text;
   const owner = node.expression.expression;
-  if (!ts.isPropertyAccessExpression(owner) || !ts.isIdentifier(owner.expression)) return undefined;
-  if (owner.expression.text !== dependenciesName) return undefined;
+  const dependency = dependencyAccessName(lowering, owner, dependenciesName);
+  if (dependency === undefined) return undefined;
   const argument = node.arguments[0];
   const argumentType = argument
     ? lowerPortableType(lowering, lowering.checker.getTypeAtLocation(argument), argument)
     : undefined;
-  if (node.arguments.length !== 1 || argumentType?.kind !== "record") {
-    throw diagnostic(node, "Portable Dependency operations require one object argument.");
+  const options = node.arguments[1];
+  const optionsType = options
+    ? lowerPortableType(lowering, lowering.checker.getTypeAtLocation(options), options)
+    : undefined;
+  if (
+    argument === undefined ||
+    node.arguments.length < 1 ||
+    node.arguments.length > 2 ||
+    argumentType?.kind !== "record" ||
+    (options !== undefined && optionsType?.kind !== "record")
+  ) {
+    throw diagnostic(
+      node,
+      "Portable Dependency operations require one object argument and optional call options.",
+    );
   }
   const result = lowering.checker.getTypeAtLocation(node);
   const promise = isPromiseType(lowering.checker, result);
@@ -3520,11 +3767,12 @@ function lowerDependencyCall(
   }
   return {
     kind: "dependency-call",
-    dependency: owner.name.text,
+    dependency,
     operation,
-    arguments: node.arguments.map((argument) =>
-      lowerExpression(lowering, argument, dependenciesName),
-    ),
+    arguments: [lowerExpression(lowering, argument, dependenciesName)],
+    ...(options === undefined
+      ? {}
+      : { options: lowerExpression(lowering, options, dependenciesName) }),
     awaited,
     type: lowerPortableType(lowering, result, node),
     span: spanOf(node),
@@ -3539,13 +3787,15 @@ function lowerDependencyReference(
   if (!ts.isCallExpression(node) || !ts.isPropertyAccessExpression(node.expression))
     return undefined;
   const owner = node.expression.expression;
-  if (!ts.isPropertyAccessExpression(owner) || !ts.isIdentifier(owner.expression)) return undefined;
-  if (owner.expression.text !== dependenciesName) return undefined;
-  const definition = dependencyReferenceType(
-    lowering.checker,
-    lowering.checker.getTypeAtLocation(node),
-    node,
-  );
+  const dependency = dependencyAccessName(lowering, owner, dependenciesName);
+  if (dependency === undefined) return undefined;
+  const definition =
+    dependencyReferenceType(lowering.checker, lowering.checker.getTypeAtLocation(node), node) ??
+    dependencyContractReferenceType(
+      lowering.checker,
+      lowering.checker.getTypeAtLocation(owner),
+      owner,
+    );
   if (!definition || definition.name !== node.expression.name.text) return undefined;
   const binding = node.arguments[0];
   if (
@@ -3558,11 +3808,33 @@ function lowerDependencyReference(
   }
   return {
     kind: "dependency-reference",
-    dependency: owner.name.text,
+    dependency,
     binding: lowerExpression(lowering, binding, dependenciesName),
     type: { kind: "opaque", name: "DependencyReference" },
     span: spanOf(node),
   };
+}
+
+function dependencyAccessName(
+  lowering: PortableLowering,
+  owner: ts.Expression,
+  dependenciesName: string,
+): string | undefined {
+  if (ts.isPropertyAccessExpression(owner) && ts.isIdentifier(owner.expression)) {
+    return owner.expression.text === dependenciesName ? owner.name.text : undefined;
+  }
+  if (!ts.isElementAccessExpression(owner) || !ts.isIdentifier(owner.expression)) {
+    return undefined;
+  }
+  if (owner.expression.text !== dependenciesName) return undefined;
+  const name = portableComputedName(lowering, owner.argumentExpression);
+  if (name === undefined) {
+    throw diagnostic(
+      owner.argumentExpression,
+      "Portable Dependency names must resolve to a compile-time string or number.",
+    );
+  }
+  return name;
 }
 
 function lowerDependencyReferenceCall(
@@ -3575,14 +3847,14 @@ function lowerDependencyReferenceCall(
   if (!ts.isCallExpression(node) || !ts.isPropertyAccessExpression(node.expression))
     return undefined;
   const receiver = node.expression.expression;
-  const definition = dependencyReferenceType(
-    lowering.checker,
-    lowering.checker.getTypeAtLocation(receiver),
-    receiver,
-  );
+  const definition = dependencyReferenceExpressionType(lowering.checker, receiver);
   if (!definition) return undefined;
   const operation = node.expression.name.text;
-  const hasInput = definition.inputs.has(operation);
+  const hasInput =
+    definition.inputs.has(operation) ||
+    (definition.inputs.size === 0 &&
+      lowering.checker.getResolvedSignature(node)?.parameters[0]?.getName() ===
+        definition.argument);
   const minimum = hasInput ? 1 : 0;
   const maximum = hasInput ? 2 : 1;
   if (node.arguments.length < minimum || node.arguments.length > maximum) {
@@ -3645,6 +3917,70 @@ function dependencyReferenceType(
     .find((property) => property.getName().startsWith("__@dependencyReferenceDefinition"));
   if (!marker) return undefined;
   const definition = checker.getTypeOfSymbolAtLocation(marker, marker.valueDeclaration ?? at);
+  return dependencyReferenceDefinitionType(checker, definition, at);
+}
+
+function dependencyReferenceExpressionType(
+  checker: ts.TypeChecker,
+  expression: ts.Expression,
+):
+  | Readonly<{
+      name: string;
+      argument: string;
+      inputs: ReadonlySet<string>;
+    }>
+  | undefined {
+  const direct = dependencyReferenceType(
+    checker,
+    checker.getTypeAtLocation(expression),
+    expression,
+  );
+  if (direct) return direct;
+  const value = unwrapExpression(expression);
+  if (!ts.isCallExpression(value) || !ts.isPropertyAccessExpression(value.expression)) {
+    return undefined;
+  }
+  const definition = dependencyContractReferenceType(
+    checker,
+    checker.getTypeAtLocation(value.expression.expression),
+    value.expression.expression,
+  );
+  return definition?.name === value.expression.name.text ? definition : undefined;
+}
+
+function dependencyContractReferenceType(
+  checker: ts.TypeChecker,
+  type: ts.Type,
+  at: ts.Node,
+):
+  | Readonly<{
+      name: string;
+      argument: string;
+      inputs: ReadonlySet<string>;
+    }>
+  | undefined {
+  const marker = type
+    .getProperties()
+    .find((property) => property.getName().startsWith("__@dependencyDefinition"));
+  if (!marker) return undefined;
+  const definition = checker.getNonNullableType(
+    checker.getTypeOfSymbolAtLocation(marker, marker.valueDeclaration ?? at),
+  );
+  const reference = propertyType(checker, definition, "Reference", at);
+  return reference ? dependencyReferenceDefinitionType(checker, reference, at) : undefined;
+}
+
+function dependencyReferenceDefinitionType(
+  checker: ts.TypeChecker,
+  definition: ts.Type,
+  at: ts.Node,
+):
+  | Readonly<{
+      name: string;
+      argument: string;
+      inputs: ReadonlySet<string>;
+    }>
+  | undefined {
   const name = literalProperty(checker, definition, "Name", at);
   const argument = literalProperty(checker, definition, "Argument", at);
   const inputs = propertyType(checker, definition, "Inputs", at);
@@ -3765,6 +4101,51 @@ function lowerPortableCall(
       span: spanOf(typeNode),
     };
   }
+  const intrinsic = portableIntrinsic(lowering, call.expression);
+  if (intrinsic === "dependency-dispatch") {
+    if (!awaited || call.arguments.length < 3 || call.arguments.length > 4) {
+      throw diagnostic(
+        call,
+        "dispatchDependency requires a Dependency, operation, input, optional call options, and must be awaited.",
+      );
+    }
+    return {
+      kind: "dependency-dispatch",
+      dependency: lowerExpression(lowering, call.arguments[0]!, dependenciesName),
+      operation: lowerExpression(lowering, call.arguments[1]!, dependenciesName),
+      input: lowerExpression(lowering, call.arguments[2]!, dependenciesName),
+      ...(call.arguments[3]
+        ? { options: lowerExpression(lowering, call.arguments[3], dependenciesName) }
+        : {}),
+      awaited: true,
+      type: lowerPortableType(lowering, lowering.checker.getTypeAtLocation(typeNode), typeNode),
+      span: spanOf(typeNode),
+    };
+  }
+  if (intrinsic === "dependency-intercept") {
+    if (awaited || call.arguments.length !== 2) {
+      throw diagnostic(
+        call,
+        "interceptDependency requires a Dependency and interceptor and cannot be awaited.",
+      );
+    }
+    return {
+      kind: "dependency-intercept",
+      dependency: lowerExpression(lowering, call.arguments[0]!, dependenciesName),
+      intercept: lowerExpression(lowering, call.arguments[1]!, dependenciesName),
+      type: lowerPortableType(lowering, lowering.checker.getTypeAtLocation(typeNode), typeNode),
+      span: spanOf(typeNode),
+    };
+  }
+  if (intrinsic === "data-kind") {
+    if (awaited || call.arguments.length !== 1) {
+      throw diagnostic(call, "dataKind requires one value and cannot be awaited.");
+    }
+    return typedExpression(lowering, typeNode, {
+      kind: "data-kind",
+      value: lowerExpression(lowering, call.arguments[0]!, dependenciesName),
+    });
+  }
   if (
     ts.isPropertyAccessExpression(call.expression) &&
     ts.isIdentifier(call.expression.expression) &&
@@ -3804,7 +4185,6 @@ function lowerPortableCall(
       value: lowerExpression(lowering, call.arguments[0]!, dependenciesName),
     });
   }
-  const intrinsic = portableIntrinsic(lowering, call.expression);
   if (intrinsic === "type-literal") {
     if (awaited || call.arguments.length || call.typeArguments?.length !== 1) {
       throw diagnostic(call, "typeLiteral requires one literal type argument and no values.");
@@ -3842,6 +4222,32 @@ function lowerPortableCall(
       spanOf(call),
     );
   }
+  if (intrinsic === "type-keys") {
+    if (awaited || call.arguments.length || call.typeArguments?.length !== 1) {
+      throw diagnostic(call, "typeKeys requires one resolved record type argument and no values.");
+    }
+    const source = lowering.checker.getTypeFromTypeNode(call.typeArguments[0]!);
+    const type = lowerPortableType(lowering, source, call);
+    if (type.kind !== "record") {
+      throw diagnostic(
+        call,
+        `typeKeys requires one resolved record type; received ${lowering.checker.typeToString(
+          source,
+        )}.`,
+      );
+    }
+    return {
+      kind: "array",
+      values: type.fields.map(({ name }) => ({
+        kind: "literal",
+        value: name,
+        type: { kind: "literal", value: name },
+        span: spanOf(call),
+      })),
+      type: { kind: "array", element: primitive("string") },
+      span: spanOf(call),
+    };
+  }
   if (intrinsic === "stream-map") {
     if (call.arguments.length !== 2) {
       throw diagnostic(call, "mapStream requires a source and transform.");
@@ -3862,9 +4268,45 @@ function lowerPortableCall(
       select: lowerExpression(lowering, call.arguments[1]!, dependenciesName),
     });
   }
+  const constant = lowering.constant?.(
+    call,
+    awaited,
+    lowering.staticBindings,
+    lowering.typeSubstitutions,
+  );
+  if (constant !== undefined) {
+    if (awaited) {
+      throw diagnostic(call, "Compiler extension constants cannot be awaited.");
+    }
+    return portableDataExpression(constant, spanOf(typeNode));
+  }
+  const extensionCall = lowering.extensionCall?.(
+    call,
+    awaited,
+    lowering.staticBindings,
+    lowering.typeSubstitutions,
+    lowerPortableType(lowering, lowering.checker.getTypeAtLocation(typeNode), typeNode),
+    spanOf(typeNode),
+    (expression) => lowerExpression(lowering, expression, dependenciesName),
+  );
+  if (extensionCall) {
+    for (const function_ of extensionCall.functions ?? []) {
+      const existing = lowering.functions.get(function_.id);
+      if (existing && JSON.stringify(existing) !== JSON.stringify(function_)) {
+        throw diagnostic(
+          call,
+          `Compiler extension generated conflicting portable function ${JSON.stringify(function_.id)}.`,
+        );
+      }
+      lowering.functions.set(function_.id, function_);
+    }
+    return extensionCall.expression;
+  }
   if (
     ts.isPropertyAccessExpression(call.expression) &&
-    (call.expression.name.text === "find" || call.expression.name.text === "map") &&
+    ["filter", "find", "findIndex", "map", "push", "slice", "some", "sort"].includes(
+      call.expression.name.text,
+    ) &&
     lowering.checker.isArrayLikeType(lowering.checker.getTypeAtLocation(call.expression.expression))
   ) {
     return typedExpression(lowering, typeNode, {
@@ -4061,9 +4503,14 @@ function lowerConcurrentOperation(
   if (
     !operation ||
     operation.type.kind !== "promise" ||
-    !["call", "dependency-call", "dependency-reference-call", "invoke", "method-call"].includes(
-      operation.kind,
-    )
+    ![
+      "call",
+      "dependency-call",
+      "dependency-dispatch",
+      "dependency-reference-call",
+      "invoke",
+      "method-call",
+    ].includes(operation.kind)
   ) {
     throw diagnostic(
       node,
@@ -4150,7 +4597,9 @@ function portableMethod(
 ): boolean {
   const owner = lowering.checker.getTypeAtLocation(expression.expression);
   const category = portableTypeCategory(lowering.checker, owner);
-  if (category === "string") return ["slice", "startsWith"].includes(expression.name.text);
+  if (category === "string") {
+    return ["slice", "startsWith", "trim"].includes(expression.name.text);
+  }
   const member = owner.getProperty(expression.name.text);
   return Boolean(
     member?.declarations?.some((declaration) => {
@@ -4176,13 +4625,32 @@ function dynamicPortableReceiver(lowering: PortableLowering, expression: ts.Expr
 function portableIntrinsic(
   lowering: PortableLowering,
   expression: ts.Expression,
-): "stream-distinct" | "stream-map" | "type-literal" | "type-schema" | undefined {
+):
+  | "dependency-dispatch"
+  | "dependency-intercept"
+  | "data-kind"
+  | "stream-distinct"
+  | "stream-map"
+  | "type-keys"
+  | "type-literal"
+  | "type-schema"
+  | undefined {
   const direct = directFunction(lowering, expression);
   if (!direct) return undefined;
   const file = direct.functionLike.getSourceFile().fileName.replaceAll("\\", "/");
+  if (file.endsWith("/core/dependency.ts") && direct.symbol.getName() === "dispatchDependency") {
+    return "dependency-dispatch";
+  }
+  if (file.endsWith("/core/dependency.ts") && direct.symbol.getName() === "interceptDependency") {
+    return "dependency-intercept";
+  }
+  if (file.endsWith("/core/data.ts") && direct.symbol.getName() === "dataKind") {
+    return "data-kind";
+  }
   if (file.endsWith("/core/intrinsic.ts")) {
     if (direct.symbol.getName() === "typeLiteral") return "type-literal";
     if (direct.symbol.getName() === "typeSchema") return "type-schema";
+    if (direct.symbol.getName() === "typeKeys") return "type-keys";
   }
   if (!["distinctStream", "mapStream"].includes(direct.symbol.getName())) return undefined;
   if (!file.endsWith("/core/stream.ts")) return undefined;
@@ -4290,10 +4758,7 @@ function lowerClosure(
 ): ExpressionIR {
   const signature = lowering.checker.getSignatureFromDeclaration(functionLike);
   if (!signature) throw diagnostic(functionLike, "Cannot resolve portable closure signature.");
-  const localDependenciesName = dependencyContractBinding(
-    lowering.checker,
-    functionLike.parameters[0],
-  );
+  const localDependenciesName = dependencyContractBinding(lowering, functionLike.parameters[0]);
   const scopedDependenciesName =
     localDependenciesName ??
     (ownsBinding(functionLike, dependenciesName) ? "@dependencies" : dependenciesName);
@@ -4462,9 +4927,14 @@ function isValueIdentifier(node: ts.Identifier): boolean {
 }
 
 function valueSymbol(checker: ts.TypeChecker, node: ts.Identifier): ts.Symbol | undefined {
-  return ts.isShorthandPropertyAssignment(node.parent) && node.parent.name === node
-    ? (checker.getShorthandAssignmentValueSymbol(node.parent) ?? checker.getSymbolAtLocation(node))
-    : checker.getSymbolAtLocation(node);
+  const symbol =
+    ts.isShorthandPropertyAssignment(node.parent) && node.parent.name === node
+      ? (checker.getShorthandAssignmentValueSymbol(node.parent) ??
+        checker.getSymbolAtLocation(node))
+      : checker.getSymbolAtLocation(node);
+  return symbol?.flags && symbol.flags & ts.SymbolFlags.Alias
+    ? checker.getAliasedSymbol(symbol)
+    : symbol;
 }
 
 function portableFunctionId(
@@ -4572,7 +5042,7 @@ function contextBindingSymbol(
 }
 
 function dependencyContractBinding(
-  checker: ts.TypeChecker,
+  lowering: PortableLowering,
   parameter: ts.ParameterDeclaration | undefined,
 ): string | undefined {
   const name = dependencyBinding(parameter);
@@ -4583,20 +5053,76 @@ function dependencyContractBinding(
       ts.isIdentifier(element.name),
   );
   if (!binding || !ts.isIdentifier(binding.name)) return undefined;
-  const dependencies = checker.getTypeAtLocation(binding.name);
-  const values = dependencies.getProperties();
-  if (values.length === 0) return undefined;
-  return values.every((property) => {
-    const api = checker.getTypeOfSymbolAtLocation(
-      property,
-      property.valueDeclaration ?? binding.name,
-    );
-    return api
-      .getProperties()
-      .some((candidate) => candidate.getName().startsWith("__@dependencyDefinition"));
-  })
+  return dependencyContractType(
+    lowering,
+    lowering.checker.getTypeAtLocation(binding.name),
+    binding.name,
+  )
     ? name
     : undefined;
+}
+
+type MappedTypeShape = ts.Type &
+  Readonly<{
+    target?: MappedTypeShape;
+    templateType?: ts.Type;
+  }>;
+
+function dependencyContractType(
+  lowering: PortableLowering,
+  source: ts.Type,
+  at: ts.Node,
+  active: Set<ts.Type> = new Set(),
+): boolean {
+  const type = substitutedType(source, lowering.typeSubstitutions);
+  if (active.has(type)) return false;
+  active.add(type);
+  try {
+    const values = type.getProperties();
+    if (values.length > 0) {
+      return values.every((property) =>
+        dependencyAPIType(
+          lowering,
+          lowering.checker.getTypeOfSymbolAtLocation(property, property.valueDeclaration ?? at),
+        ),
+      );
+    }
+    const indexed = [type.getStringIndexType(), type.getNumberIndexType()].filter(
+      (value): value is ts.Type => value !== undefined,
+    );
+    if (indexed.length > 0) {
+      return indexed.every((value) => dependencyAPIType(lowering, value));
+    }
+
+    const mapped = type as MappedTypeShape;
+    const template = mapped.templateType ?? mapped.target?.templateType;
+    if (!template) return false;
+    if (dependencyAPIType(lowering, template)) return true;
+    if (!(template.flags & ts.TypeFlags.IndexedAccess)) return false;
+
+    const owner = (template as ts.IndexedAccessType).objectType;
+    const alias = type.aliasSymbol;
+    const arguments_ = type.aliasTypeArguments;
+    const declaration = alias?.declarations?.find(ts.isTypeAliasDeclaration);
+    if (!arguments_ || !declaration?.typeParameters) return false;
+    const ownerSymbol = owner.symbol;
+    const index = declaration.typeParameters.findIndex(
+      (parameter) =>
+        lowering.checker.getSymbolAtLocation(parameter.name) === ownerSymbol ||
+        parameter.name.text === ownerSymbol?.getName(),
+    );
+    const argument = index >= 0 ? arguments_[index] : undefined;
+    return argument ? dependencyContractType(lowering, argument, at, active) : false;
+  } finally {
+    active.delete(type);
+  }
+}
+
+function dependencyAPIType(lowering: PortableLowering, source: ts.Type): boolean {
+  const type = substitutedType(source, lowering.typeSubstitutions);
+  return type
+    .getProperties()
+    .some((property) => property.getName().startsWith("__@dependencyDefinition"));
 }
 
 function ownsBinding(functionLike: ts.FunctionLikeDeclaration, name: string): boolean {
@@ -4843,9 +5369,11 @@ function resolveSymbol(
     sourceSymbol && sourceSymbol.flags & ts.SymbolFlags.Alias
       ? checker.getAliasedSymbol(sourceSymbol)
       : sourceSymbol;
-  const declaration = symbol?.declarations?.find(ts.isVariableDeclaration);
-  if (!declaration?.initializer) throw diagnostic(identifier, `Cannot resolve ${identifier.text}.`);
-  return unwrapExpression(declaration.initializer);
+  const variable = symbol?.declarations?.find(ts.isVariableDeclaration);
+  if (variable?.initializer) return unwrapExpression(variable.initializer);
+  const exported = symbol?.declarations?.find(ts.isExportAssignment);
+  if (exported) return unwrapExpression(exported.expression);
+  throw diagnostic(identifier, `Cannot resolve ${identifier.text}.`);
 }
 
 type StaticValue = Readonly<{
@@ -5266,7 +5794,7 @@ function staticCallTypes(
   const arguments_ = checker.getTypeArgumentsForResolvedSignature(resolved) ?? [];
   for (const [index, parameter] of declared.typeParameters.entries()) {
     const argument = arguments_[index];
-    if (argument) types.set(parameter, argument);
+    if (argument) types.set(parameter, substitutedType(argument, types));
   }
   return types;
 }
@@ -5429,15 +5957,24 @@ function portableComputedName(
   lowering: PortableLowering,
   expression: ts.Expression,
 ): string | undefined {
-  const value = staticConstant(
-    lowering.checker,
-    {
-      node: expression,
-      bindings: lowering.staticBindings,
-      types: lowering.typeSubstitutions,
-    },
-    new Set(),
-  );
+  const override = portableExpressionTypeOverride(lowering, expression);
+  if (
+    override?.kind === "literal" &&
+    (typeof override.value === "string" || typeof override.value === "number")
+  ) {
+    return String(override.value);
+  }
+  const value = mutableVariableReference(lowering.checker, expression)
+    ? undefined
+    : staticConstant(
+        lowering.checker,
+        {
+          node: expression,
+          bindings: lowering.staticBindings,
+          types: lowering.typeSubstitutions,
+        },
+        new Set(),
+      );
   if (typeof value === "string" || typeof value === "number") return String(value);
   const type = lowerPortableType(
     lowering,
@@ -5448,6 +5985,40 @@ function portableComputedName(
     (typeof type.value === "string" || typeof type.value === "number")
     ? String(type.value)
     : undefined;
+}
+
+function portableExpressionTypeOverride(
+  lowering: PortableLowering,
+  expression: ts.Expression,
+): TypeIR | undefined {
+  const value = unwrapExpression(expression);
+  if (ts.isIdentifier(value)) {
+    const symbol = valueSymbol(lowering.checker, value);
+    return symbol ? lowering.irTypeOverrides.get(symbol) : undefined;
+  }
+  if (ts.isPropertyAccessExpression(value)) {
+    const owner = portableExpressionTypeOverride(lowering, value.expression);
+    if (owner?.kind !== "record") return undefined;
+    return owner.fields.find(({ name }) => name === value.name.text)?.type;
+  }
+  return undefined;
+}
+
+function mutableVariableReference(checker: ts.TypeChecker, expression: ts.Expression): boolean {
+  const value = unwrapExpression(expression);
+  if (!ts.isIdentifier(value)) return false;
+  let symbol = checker.getSymbolAtLocation(value);
+  if (symbol?.flags && symbol.flags & ts.SymbolFlags.Alias) {
+    symbol = checker.getAliasedSymbol(symbol);
+  }
+  return Boolean(
+    symbol?.declarations?.some(
+      (declaration) =>
+        ts.isVariableDeclaration(declaration) &&
+        ts.isVariableDeclarationList(declaration.parent) &&
+        (declaration.parent.flags & ts.NodeFlags.Const) === 0,
+    ),
+  );
 }
 
 function semanticSymbolName(symbol: ts.Symbol): string {

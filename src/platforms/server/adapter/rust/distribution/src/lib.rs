@@ -1528,7 +1528,11 @@ impl DependencyRouter for ProcessRouter {
                 .iter()
                 .find(|operation| operation.name == operation_name)
                 .cloned()
-                .ok_or_else(|| protocol("Distributed Dependency operation is unknown."))?;
+                .ok_or_else(|| {
+                    protocol(format!(
+                        "Distributed Dependency {name:?} operation {operation_name:?} is unknown.",
+                    ))
+                })?;
             validate_value(
                 &input,
                 &operation.input,

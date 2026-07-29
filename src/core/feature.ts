@@ -96,8 +96,8 @@ export type Feature<
   Root extends FeatureContract = Contract,
 > = Readonly<
   DefinitionField<"programs", ProgramDefinitions<Contract, Root>> &
-    DefinitionField<"features", FeatureDefinitions<FeaturesOf<Contract>, Root>> & {
-      readonly providers?: ProvidersOf<Contract>;
+    DefinitionField<"features", FeatureDefinitions<FeaturesOf<Contract>, Root>> &
+    DefinitionField<"providers", ProvidersOf<Contract>> & {
       readonly [featureContract]?: Contract;
     }
 >;

@@ -12,6 +12,29 @@ createActor(definition)
   -> generic Rust production compilation
 ```
 
+## Ownership
+
+Kit's universal substrate remains only Program, Dependency, and Feature.
+Actor is an optional reusable Feature factory implemented with that substrate.
+It is not a core type, a compiler intrinsic, or a server-adapter special case.
+The generic TypeScript-to-Rust compiler must remain unaware of Actor journals,
+reminders, placement, and outbound work.
+
+The selected Actor profile is deliberately a durable virtual Actor:
+
+- stable Actor type and key identity;
+- one durable state authority and one total write order per key;
+- strict non-reentrant write transitions;
+- typed calls with durable admission and retained outcomes;
+- activation, passivation, recovery, reminders, placement, and fencing;
+- typed durable outbound invocation intent for Feature factories built on
+  Actor.
+
+Broad Akka or Erlang parity is not a goal. Explicit spawn trees, DeathWatch,
+arbitrary reentrancy, user-configurable mailboxes, and source-level physical
+placement controls remain absent unless a concrete workload demonstrates that
+one is necessary.
+
 ## Define
 
 The type supplies semantic meaning once. The implementation supplies only
@@ -196,6 +219,54 @@ Awaited external Dependency effects retain stable invocation identity, but
 their providers must be idempotent when retrying an external side effect. Kit
 does not claim exactly-once effects outside the Actor journal.
 
+## Actor Foundation Contract
+
+The reminder machinery supplies:
+
+- an atomic commit of Actor state, method outcome, and timer schedule or
+  cancellation;
+- stable timer invocation identity derived from timer name and generation;
+- replaceable one-shot scheduling with generation fencing;
+- recovery of committed timer intent when a process stops after the journal
+  append but before Alarm scheduling;
+- admission, execution claims, stale-owner fencing, and durable result
+  deduplication for the Actor command eventually fired by the reminder.
+
+Actor-backed Feature factories can additionally use an internal outbound
+kernel:
+
+1. commit Actor state/result and typed outbound intent in one journal append;
+2. assign one stable identity to each logical outbound invocation;
+3. project and dispatch committed intent outside the Actor's exclusive turn;
+4. claim and complete an invocation idempotently with owner and attempt
+   fencing;
+5. recover across failure after intent commit, during dispatch, after provider
+   completion, and before result delivery;
+6. retain a cancellation request in the journal and project it to both an
+   active provider and a future recovery delivery;
+7. durably admit a typed completion method so Feature-owned policy resumes
+   inside the Actor's ordered state transition.
+
+The kernel reuses the existing EventStore, Alarm, registration, activation,
+and fencing machinery. It is an internal `createActorFactory` facility rather
+than part of the public Actor authoring API. A direct Actor-authoring workload
+must justify exposing it. Retry, timeout, heartbeat, cancellation,
+compensation, replay-history, and other domain policy remain owned by the
+Feature factory using it.
+
+A projected Alarm permits at most one active delivery for one logical Alarm
+identity while allowing unrelated identities to run concurrently. Replacing an
+active Alarm leaves the new generation pending; it cannot overwrite the
+cancellation handle of the active generation. `requestCancellation` signals
+the active generation and any pending replacement without deleting either.
+Hard `cancel` both signals and retracts the pending Alarm. These are adapter
+mechanics, not public Actor cancellation policy.
+
+A normal public Actor method that directly awaits a Dependency still holds its
+exclusive write turn until that Dependency returns. The internal kernel is the
+mechanism for a higher-level Feature factory to durably commit work and
+dispatch it after releasing that turn.
+
 ## Realization
 
 The generated Feature requires ordinary server Dependencies:
@@ -277,6 +348,10 @@ skew; ordinary deployments leave it at zero.
   provider-owned outcome boundary.
 - Actor source does not expose reentrancy, placement, shard, lease, mailbox, or
   transport controls.
+- The outbound kernel is not a general exactly-once claim. A provider may run
+  again after an uncertain result boundary and must honor the stable invocation
+  identity. Fencing prevents stale Actor completion; provider-side atomicity or
+  idempotency prevents duplicate external effects.
 
 ## Verification
 
@@ -293,4 +368,19 @@ nested calls, reminders, invocation identities, and restart behavior:
 ```sh
 nub exec vitest run src/platforms/server/adapter/rust/compiler.spec.ts \
   -t 'compiles Actor Features'
+```
+
+The Actor foundation checkpoint additionally requires executable evidence
+that committed outbound intent survives restart, duplicate delivery preserves
+one invocation identity, provider-completion uncertainty is recovered safely,
+stale claims are fenced, and an ordinary Actor without outbound work retains
+its current journal and behavior. The same scenarios must produce equivalent
+normalized journals and outcomes in TypeScript and generated Rust.
+
+The focused Alarm contract gate verifies independent delivery, replacement,
+active cancellation, and shared JetStream behavior:
+
+```sh
+nub exec vitest run src/platforms/server/adapter/typescript/host.spec.ts
+cargo test -p kit-server-alarm
 ```

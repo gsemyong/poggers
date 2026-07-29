@@ -1,16 +1,24 @@
 import { describe, expect, test } from "vitest";
 
 import { collectDependencyOperations, type DependencyIR } from "@/compiler/ir";
-import type { Timer } from "@/platforms/server";
+import type { Calendar, Timer } from "@/platforms/server";
 import {
+  calendarDependency,
   defineServerProductionDependency,
   resolveServerProductionDependencies,
   timerDependency,
   type ServerProductionDependency,
 } from "@/platforms/server/adapter/rust/providers";
 import { rustServerDependencyTarget } from "@/platforms/server/adapter/rust/testing";
-import { timerConformance } from "@/platforms/server/testing";
+import { calendarConformance, timerConformance } from "@/platforms/server/testing";
 
+calendarConformance.test(
+  rustServerDependencyTarget<Calendar>({
+    name: "Rust",
+    provider: calendarDependency,
+    configuration: () => ({ values: {} }),
+  }),
+);
 timerConformance.test(
   rustServerDependencyTarget<Timer>({
     name: "Rust",

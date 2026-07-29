@@ -354,8 +354,8 @@ describe("generic Process distribution", () => {
     const second = await start();
     try {
       const secondInvocation = (await second.counter.get({ key: "same" }).read()).owner;
-      expect(firstInvocation).toMatch(/^process:worker:1:direct:counter:read:1$/);
-      expect(secondInvocation).toMatch(/^process:worker:2:direct:counter:read:1$/);
+      expect(firstInvocation).toMatch(/^process:worker:1:direct:[0-9a-f-]+:counter:read:1$/);
+      expect(secondInvocation).toMatch(/^process:worker:2:direct:[0-9a-f-]+:counter:read:1$/);
       expect(secondInvocation).not.toBe(firstInvocation);
     } finally {
       await second.process.drain();

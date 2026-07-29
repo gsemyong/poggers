@@ -329,6 +329,21 @@ describe("System realization", { tags: ["compiler"] }, () => {
     );
   });
 
+  test("invalidates every semantic unit when shared compiler input changes", async () => {
+    const fixture = await incrementalFixture();
+    const first = createSystemRevisionSource(fixture.system, mockCompilerExtensions, true);
+    expect(first.current.work.features).toEqual({ compiled: 3, reused: 0 });
+
+    await writeFile(fixture.contracts, `${fixture.contractsSource}\n`);
+    const restored = createSystemRevisionSource(fixture.system, mockCompilerExtensions, true);
+
+    expect(restored.current.cache).toBe("miss");
+    expect(restored.current.work.features).toEqual({ compiled: 3, reused: 0 });
+    expect(serializeSystemIR(restored.current.ir)).toBe(
+      serializeSystemIR(compileSystem(fixture.system, mockCompilerExtensions)),
+    );
+  });
+
   test(
     "keeps unchanged multi-Application meaning stable across retained compilations",
     { tags: ["package"], timeout: 30_000 },
@@ -498,7 +513,7 @@ describe("System realization", { tags: ["compiler"] }, () => {
       "program/api",
     ]);
     expect(built.release).toMatchObject({
-      version: 1,
+      version: 2,
       system: "Company",
       app: "operations",
       artifacts: [
@@ -631,6 +646,7 @@ export default createSystem({
 
 async function incrementalFixture(): Promise<{
   system: string;
+  contracts: string;
   shared: string;
   sharedUI: string;
   operations: string;
@@ -639,6 +655,7 @@ async function incrementalFixture(): Promise<{
   sharedSource: string;
   operationsSource: string;
   operationsTypeSource: string;
+  contractsSource: string;
 }> {
   const directory = await mkdtemp(resolve(tmpdir(), "kit-incremental-"));
   directories.push(directory);
@@ -712,6 +729,7 @@ export const ${name} = createApplication<Application>({
   const operationsTypeSource = 'export type OperationsLabel = "operations";\n';
   const files = {
     system: resolve(source, "system.ts"),
+    contracts: resolve(source, "contracts.ts"),
     shared: resolve(source, "shared.ts"),
     sharedUI: resolve(source, "shared-ui.ts"),
     operations: resolve(source, "operations.ts"),
@@ -719,7 +737,7 @@ export const ${name} = createApplication<Application>({
     customer: resolve(source, "customer.ts"),
   };
   await Promise.all([
-    writeFile(resolve(source, "contracts.ts"), contracts),
+    writeFile(files.contracts, contracts),
     writeFile(files.shared, sharedSource),
     writeFile(files.sharedUI, 'export const marker = "shared";\n'),
     writeFile(files.operations, operationsSource),
@@ -742,5 +760,11 @@ export default createSystem({
 `,
     ),
   ]);
-  return { ...files, sharedSource, operationsSource, operationsTypeSource };
+  return {
+    ...files,
+    sharedSource,
+    operationsSource,
+    operationsTypeSource,
+    contractsSource: contracts,
+  };
 }

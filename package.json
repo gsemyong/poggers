@@ -88,9 +88,9 @@
       "default": "./dist/src/factory.js"
     },
     "./features/actor": {
-      "source": "./dist/source/features/actor/index.ts",
-      "types": "./dist/src/features/actor/index.d.ts",
-      "default": "./dist/src/features/actor/index.js"
+      "source": "./dist/source/features/actor/public.ts",
+      "types": "./dist/src/features/actor/public.d.ts",
+      "default": "./dist/src/features/actor/public.js"
     },
     "./features/data": {
       "source": "./dist/source/features/data/index.ts",
@@ -107,26 +107,37 @@
       "types": "./dist/src/features/identity/index.d.ts",
       "default": "./dist/src/features/identity/index.js"
     },
+    "./features/model": {
+      "source": "./dist/source/features/model/index.ts",
+      "types": "./dist/src/features/model/index.d.ts",
+      "default": "./dist/src/features/model/index.js"
+    },
+    "./features/workflow": {
+      "source": "./dist/source/features/workflow/public.ts",
+      "types": "./dist/src/features/workflow/public.d.ts",
+      "default": "./dist/src/features/workflow/public.js"
+    },
     "./tsconfig": "./config/tsconfig.json"
   },
   "scripts": {
     "build": "nub scripts/build.ts",
     "check:distribution": "tsc -p src/platforms/web/adapter/fixtures/request-render/tsconfig.json && vitest run --tagsFilter='package && !production' src/realization.spec.ts src/platforms/web/adapter/pipeline.spec.ts src/platforms/web/adapter/fixtures/request-render/src/system.spec.ts",
     "check:examples": "tsc --noEmit -p examples/basic && tsc --noEmit -p examples/authenticated-crud && tsc --noEmit -p examples/presentation && vitest run --tagsFilter='!production' examples && vitest run --tagsFilter=package src/cli.spec.ts",
-    "check:compiler": "vitest run --tagsFilter='compiler && !package' src/compiler src/realization.spec.ts src/platforms/server/adapter/rust",
+    "check:compiler": "vitest run --no-file-parallelism --tagsFilter='compiler && !package' src/compiler src/features/actor/feature.spec.ts src/realization.spec.ts src/platforms/server/adapter/rust",
     "check:providers": "vitest run --tagsFilter=provider src/features src/platforms/server && cargo test --workspace",
     "check:presentation": "vitest run src/platforms/web/presentation src/platforms/web/adapter/presentation src/platforms/web/adapter/ui/component/adapter.spec.ts",
-    "check:production": "KIT_NATIVE_PROFILE=release vitest run --tagsFilter=production src examples",
+    "check:production": "KIT_NATIVE_PROFILE=release vitest run --no-file-parallelism --tagsFilter=production src examples",
     "check:source": "nub run typecheck && nub run lint && nub run fmt:check && nub run test",
+    "check:workflow": "vitest run --no-file-parallelism --tagsFilter='!compiler && !package && !provider && !production' src/features/workflow/feature.spec.ts && vitest run --no-file-parallelism --tagsFilter='compiler && !package && !production' src/features/workflow/feature.spec.ts && vitest run --no-file-parallelism src/features/workflow/ir.spec.ts",
     "dev": "nub src/cli.ts dev --dir examples/basic",
     "fmt": "oxfmt --config config/format.json .",
     "fmt:check": "oxfmt --config config/format.json --check .",
     "lint": "oxlint --config config/lint.json --disable-nested-config src scripts config template examples vitest.config.ts",
     "release": "nub scripts/release.ts",
     "release:check": "nub scripts/release.ts --check",
-    "test": "vitest run --tagsFilter='!compiler && !package && !provider && !production' --exclude='examples/**'",
+    "test": "vitest run --no-file-parallelism --tagsFilter='!compiler && !package && !provider && !production' --exclude='examples/**' --exclude='src/features/workflow/**'",
     "typecheck": "tsc --noEmit",
-    "check": "nub run check:source && nub run check:compiler && nub run check:providers && nub run build && nub run check:examples && nub run check:distribution && nub run check:production"
+    "check": "nub run check:source && nub run check:workflow && nub run check:compiler && nub run check:providers && nub run build && nub run check:examples && nub run check:distribution && nub run check:production"
   },
   "dependencies": {
     "@nats-io/jetstream": "3.4.0",

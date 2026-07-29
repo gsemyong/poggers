@@ -38,7 +38,7 @@ export type ComponentOwner = {
       Components?: Record<string, ComponentContract>;
     }
   >;
-  Features?: Record<string, ComponentOwner>;
+  Features?: Record<string, unknown>;
 };
 
 type UIKey = "State" | "Actions" | "Components";
@@ -71,10 +71,17 @@ type ComponentsOf<Owner extends ComponentOwner> = [UIOf<Owner>] extends [never]
       }
     ? Components
     : Empty;
+type VisualFeatures<Features extends Record<string, unknown>> = {
+  [Name in keyof Features as Features[Name] extends ComponentOwner ? Name : never]: Extract<
+    Features[Name],
+    ComponentOwner
+  >;
+};
+
 export type ComponentFeatures<Owner extends ComponentOwner> = Owner extends {
-  Features: infer Features extends Record<string, ComponentOwner>;
+  Features: infer Features extends Record<string, unknown>;
 }
-  ? Features
+  ? VisualFeatures<Features>
   : Empty;
 type UIStateOf<Owner extends ComponentOwner> = [UIOf<Owner>] extends [never]
   ? Empty

@@ -1207,7 +1207,10 @@ export async function runWebInterface(options: {
     options.serverOrigin,
   );
   const interfaceState: PreparedInterfaceState = { current: prepared };
-  await writeFile(resolve(work, "index.html"), htmlSource("/browser.generated.ts"));
+  await writeFile(
+    resolve(work, "index.html"),
+    htmlSource("/browser.generated.ts", prepared.ir.system.name),
+  );
   await pruneGeneratedSources(work, prepared);
 
   const server = await createServer({
@@ -1234,16 +1237,28 @@ export async function runWebInterface(options: {
       strictPort: options.strictPort ?? options.port !== undefined,
     },
   });
-  await server.listen();
-  await server.watcher.unwatch([
-    prepared.candidate,
-    ...(prepared.documentEvaluator ? [prepared.documentEvaluator] : []),
-    prepared.entry,
-    ...(prepared.serviceWorkerBootstrap ? [prepared.serviceWorkerBootstrap] : []),
-    ...prepared.routeEntries.map(({ source }) => source),
-    ...prepared.workers.map(({ source }) => source),
-    ...(prepared.serviceWorker ? [prepared.serviceWorker] : []),
-  ]);
+  try {
+    await server.listen();
+    await server.watcher.unwatch([
+      prepared.candidate,
+      ...(prepared.documentEvaluator ? [prepared.documentEvaluator] : []),
+      prepared.entry,
+      ...(prepared.serviceWorkerBootstrap ? [prepared.serviceWorkerBootstrap] : []),
+      ...prepared.routeEntries.map(({ source }) => source),
+      ...prepared.workers.map(({ source }) => source),
+      ...(prepared.serviceWorker ? [prepared.serviceWorker] : []),
+    ]);
+  } catch (error) {
+    try {
+      await server.close();
+    } catch (disposalError) {
+      throw new AggregateError(
+        [error, disposalError],
+        "Web development startup and rollback failed.",
+      );
+    }
+    throw error;
+  }
   const address = server.httpServer?.address();
   const port = typeof address === "object" && address ? address.port : (options.port ?? 3000);
 
@@ -4299,9 +4314,13 @@ if (import.meta.hot) {
 `;
 }
 
-function htmlSource(entry: string): string {
+function htmlSource(entry: string, title: string): string {
   return `<!doctype html>
-<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><style>@layer kit.reset,kit.presentation;@layer kit.reset{${webResetCss}}</style><title>Kit</title></head><body><div id="app"></div><script type="module" src="${entry}"></script></body></html>`;
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><style>@layer kit.reset,kit.presentation;@layer kit.reset{${webResetCss}}</style><title>${escapeHtmlText(title)}</title></head><body><div id="app"></div><script type="module" src="${entry}"></script></body></html>`;
+}
+
+function escapeHtmlText(value: string): string {
+  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
 
 function cleanId(id: string): string {

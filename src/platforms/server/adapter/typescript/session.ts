@@ -77,10 +77,11 @@ export async function developServerPrograms(
     },
     server: { middlewareMode: true, ws: false },
   });
-  const system = moduleDefault<System<SystemContract>>(await vite.ssrLoadModule(input.system));
   let activePrograms = new Map<string, ActiveServerProgram>();
-  const initialNames = programNames(input.programs);
+  let system: System<SystemContract>;
   try {
+    system = moduleDefault<System<SystemContract>>(await vite.ssrLoadModule(input.system));
+    const initialNames = programNames(input.programs);
     for (const program of input.programs) {
       activePrograms.set(
         program.name,
@@ -206,7 +207,7 @@ async function startDevelopmentProgram(
     ...options.developmentHost,
     appName,
     dependencies: projectDependencyContracts(externalDependencies),
-    directory,
+    directory: options.developmentHost?.directory ?? directory,
     providers: developmentFeatureProviders(system, providers),
     host: options.developmentHost?.host,
     port: serverPort(program.name, names, options.developmentPort),

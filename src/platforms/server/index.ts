@@ -1,3 +1,4 @@
+import type { ProductionServiceRequirement } from "@/adapter";
 import type {
   Dependency,
   DependencyContract,
@@ -69,6 +70,11 @@ export type ServerProviderConfiguration = Readonly<{
   source?:
     | Readonly<{ kind: "process-location" }>
     | Readonly<{
+        kind: "service-location";
+        service: string;
+        endpoint: string;
+      }>
+    | Readonly<{
         kind: "assets";
         artifact?: "interface" | "program";
         platform?: string;
@@ -85,6 +91,11 @@ export type ServerProviderProduction = Readonly<{
   rust: Readonly<{ type: string; constructor: string }>;
 }>;
 
+/** Auxiliary services declared by one server Dependency provider. */
+export type ServerProviderRequirements = Readonly<{
+  services: readonly ProductionServiceRequirement[];
+}>;
+
 export type ServerProviderContext = Readonly<{
   appName: string;
   configuration: Readonly<Record<string, string>>;
@@ -94,14 +105,18 @@ export type ServerProviderContext = Readonly<{
 }>;
 
 /** One server realization packaged by the semantic owner of a Dependency. */
-export type ServerDependencyProvider<Api extends DependencyContract> = DependencyProvider<
+export type ServerDependencyProvider<
+  Api extends DependencyContract,
+  Requirements extends ServerProviderRequirements | never = never,
+> = DependencyProvider<
   Api,
   (
     context: ServerProviderContext,
   ) =>
     | (DependencyImplementation<Api> & Partial<Disposable & AsyncDisposable>)
     | PromiseLike<DependencyImplementation<Api> & Partial<Disposable & AsyncDisposable>>,
-  ServerProviderProduction
+  ServerProviderProduction,
+  Requirements
 >;
 
 export type StoredEvent<Event = object> = Readonly<{
@@ -182,6 +197,40 @@ export type Timer = ServerDependency<{
   sleep(input: { until: number }): Promise<void>;
 }>;
 
+export type CalendarRange = Readonly<{
+  start: number | string;
+  end?: number | string;
+  step?: number;
+}>;
+
+export type CalendarField =
+  | "*"
+  | number
+  | string
+  | CalendarRange
+  | readonly (number | string | CalendarRange)[];
+
+/** One civil-calendar predicate, independent of any scheduling policy. */
+export type CalendarPattern = Readonly<{
+  second?: CalendarField;
+  minute?: CalendarField;
+  hour?: CalendarField;
+  dayOfMonth?: CalendarField;
+  month?: CalendarField;
+  year?: CalendarField;
+  dayOfWeek?: CalendarField;
+}>;
+
+/** Civil-time resolution supplied by a server Platform realization. */
+export type Calendar = ServerDependency<{
+  next(input: {
+    after: number;
+    through: number;
+    timeZone: string;
+    pattern: Readonly<{ calendar: CalendarPattern }> | Readonly<{ cron: string }>;
+  }): Promise<Readonly<{ at: number }> | undefined>;
+}>;
+
 /** A future invocation routed through one Program's ordinary Dependency graph. */
 export type ScheduledDependencyTarget = Readonly<{
   dependency: string;
@@ -199,6 +248,7 @@ export type ScheduledDependencyTarget = Readonly<{
 export type Alarm = ServerDependency<{
   schedule(input: { id: string; at: number; target: ScheduledDependencyTarget }): Promise<void>;
   cancel(input: { id: string }): Promise<void>;
+  requestCancellation(input: { id: string }): Promise<void>;
 }>;
 
 /** Carries portable semantic scopes through asynchronous Program execution. */

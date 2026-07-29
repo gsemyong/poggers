@@ -692,7 +692,7 @@ if (import.meta.main) {
     await runCli();
   } catch (error) {
     if (process.stdout.isTTY) process.stdout.write("\r\u001B[2K");
-    new CommandOutput(process.argv.includes("--json")).error(errorMessage(error));
+    new CommandOutput(process.argv.includes("--json")).error(formatCliError(error));
     process.exitCode = 1;
   }
 }
@@ -829,6 +829,28 @@ function hasCode(error: unknown, code: string): error is { readonly code: string
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** @internal Preserves nested startup and disposal causes in CLI diagnostics. */
+export function formatCliError(error: unknown): string {
+  return formatErrorLines(error, 0, new Set()).join("\n");
+}
+
+function formatErrorLines(error: unknown, depth: number, seen: Set<unknown>): string[] {
+  if ((typeof error === "object" && error !== null) || typeof error === "function") {
+    if (seen.has(error)) return [];
+    seen.add(error);
+  }
+  const message = errorMessage(error);
+  const lines = [`${depth === 0 ? "" : `${"  ".repeat(depth)}- `}${message}`];
+  if (error instanceof AggregateError) {
+    for (const nested of error.errors as unknown[]) {
+      lines.push(...formatErrorLines(nested, depth + 1, seen));
+    }
+  } else if (error instanceof Error && error.cause !== undefined) {
+    lines.push(...formatErrorLines(error.cause, depth + 1, seen));
+  }
+  return lines;
 }
 
 function readFlag(arguments_: readonly string[], name: string): string | undefined {

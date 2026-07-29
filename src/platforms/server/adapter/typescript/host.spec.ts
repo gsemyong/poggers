@@ -16,6 +16,7 @@ import {
   type NodeFeatureDependencyProviders,
 } from "@/platforms/server/adapter/typescript/host";
 import {
+  calendarConformance,
   clockConformance,
   identifiersConformance,
   timerConformance,
@@ -27,6 +28,7 @@ afterEach(async () => {
   await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true })));
 });
 
+calendarConformance.test(nodeHostTarget("calendar", calendarContract()));
 clockConformance.test(nodeHostTarget("clock", dependency("clock", "now", primitive("number"))));
 identifiersConformance.test(
   nodeHostTarget("identifiers", dependency("identifiers", "create", primitive("string"))),
@@ -82,14 +84,14 @@ describe("server Platform host", () => {
       probe: {
         development({ configuration }: { configuration: Readonly<Record<string, string>> }) {
           configured = configuration.value;
-          return {
+          return Object.freeze({
             read({ input }: { input: { value: string } }) {
               return `${configuration.value}:${input.value}`;
             },
             [Symbol.dispose]() {
               disposed = true;
             },
-          };
+          });
         },
         production: {
           configuration: [
@@ -154,6 +156,126 @@ describe("server Platform host", () => {
 
     await new Promise<void>((resolve) => setTimeout(resolve, 50));
     expect(calls).toEqual(["second"]);
+    host.alarm[Symbol.dispose]();
+  });
+
+  test("requests cancellation from an active scheduled Dependency target", async () => {
+    const host = await createNodeHost({ dependencies: [alarmDependency] });
+    let markStarted: (() => void) | undefined;
+    let markCancelled: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const cancelled = new Promise<void>((resolve) => {
+      markCancelled = resolve;
+    });
+    using _binding = bindNodeAlarmDispatcher(host, async ({ cancellation }) => {
+      markStarted?.();
+      await cancellation.wait();
+      markCancelled?.();
+    });
+    await host.alarm.schedule({
+      id: "active",
+      at: 0,
+      target: {
+        dependency: "counter",
+        operation: "blocked",
+        input: {},
+      },
+    });
+
+    await started;
+    await host.alarm.requestCancellation({ id: "active" });
+    await cancelled;
+    host.alarm[Symbol.dispose]();
+  });
+
+  test("does not let one blocked alarm delay an unrelated target", async () => {
+    const host = await createNodeHost({ dependencies: [alarmDependency] });
+    let releaseBlocked: (() => void) | undefined;
+    let markBlockedStarted: (() => void) | undefined;
+    let markFastCompleted: (() => void) | undefined;
+    const release = new Promise<void>((resolve) => {
+      releaseBlocked = resolve;
+    });
+    const blockedStarted = new Promise<void>((resolve) => {
+      markBlockedStarted = resolve;
+    });
+    const fastCompleted = new Promise<void>((resolve) => {
+      markFastCompleted = resolve;
+    });
+    using _binding = bindNodeAlarmDispatcher(host, async ({ target }) => {
+      if (target.operation === "blocked") {
+        markBlockedStarted?.();
+        await release;
+      } else {
+        markFastCompleted?.();
+      }
+    });
+    await host.alarm.schedule({
+      id: "blocked",
+      at: 0,
+      target: { dependency: "counter", operation: "blocked", input: {} },
+    });
+    await blockedStarted;
+    await host.alarm.schedule({
+      id: "fast",
+      at: 0,
+      target: { dependency: "counter", operation: "fast", input: {} },
+    });
+
+    await expect(
+      Promise.race([
+        fastCompleted,
+        new Promise<never>((_resolve, reject) => {
+          setTimeout(() => reject(new Error("Unrelated alarm was blocked.")), 250);
+        }),
+      ]),
+    ).resolves.toBeUndefined();
+    releaseBlocked?.();
+    host.alarm[Symbol.dispose]();
+  });
+
+  test("serializes replacement generations and preserves active cancellation", async () => {
+    const host = await createNodeHost({ dependencies: [alarmDependency] });
+    let starts = 0;
+    let active = 0;
+    let maximumActive = 0;
+    let markFirstStarted: (() => void) | undefined;
+    let markBothCompleted: (() => void) | undefined;
+    const firstStarted = new Promise<void>((resolve) => {
+      markFirstStarted = resolve;
+    });
+    const bothCompleted = new Promise<void>((resolve) => {
+      markBothCompleted = resolve;
+    });
+    using _binding = bindNodeAlarmDispatcher(host, async ({ cancellation }) => {
+      starts += 1;
+      active += 1;
+      maximumActive = Math.max(maximumActive, active);
+      if (starts === 1) markFirstStarted?.();
+      await cancellation.wait();
+      active -= 1;
+      if (starts === 2 && active === 0) markBothCompleted?.();
+    });
+    const target = { dependency: "counter", operation: "blocked", input: {} } as const;
+    await host.alarm.schedule({ id: "replacement-active", at: 0, target });
+    await firstStarted;
+    await host.alarm.schedule({ id: "replacement-active", at: 0, target });
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    expect(starts).toBe(1);
+
+    await host.alarm.requestCancellation({ id: "replacement-active" });
+    await expect(
+      Promise.race([
+        bothCompleted,
+        new Promise<never>((_resolve, reject) => {
+          setTimeout(() => reject(new Error("Replacement cancellation was lost.")), 250);
+        }),
+      ]),
+    ).resolves.toBeUndefined();
+    expect(starts).toBe(2);
+    expect(maximumActive).toBe(1);
     host.alarm[Symbol.dispose]();
   });
 
@@ -389,7 +511,7 @@ const httpDependency = dependency("http", "route", {
 });
 const alarmDependency = {
   name: "alarm",
-  operations: ["schedule", "cancel"].map((name) => ({
+  operations: ["schedule", "cancel", "requestCancellation"].map((name) => ({
     name,
     mode: "asynchronous" as const,
     input: { kind: "opaque" as const, name: "Input" },
@@ -427,6 +549,23 @@ const synchronizationDependency = {
 
 function primitive(name: "number" | "string"): TypeIR {
   return { kind: "primitive", name };
+}
+
+function calendarContract(): DependencyContractIR {
+  return {
+    name: "calendar",
+    operations: [
+      {
+        name: "next",
+        mode: "asynchronous",
+        input: { kind: "opaque", name: "CalendarQuery" },
+        output: {
+          kind: "option",
+          value: { kind: "opaque", name: "CalendarResult" },
+        },
+      },
+    ],
+  };
 }
 
 function dependency<const Name extends string>(

@@ -4,7 +4,7 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{
-        Arc, Mutex, RwLock,
+        Arc, Mutex, OnceLock, RwLock,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     task::{Context, Poll},
@@ -369,13 +369,33 @@ impl DependencyInvocation {
             .map_err(|error| NativeError::new("ClockFailure", error.to_string()))?
             .as_secs_f64()
             * 1_000.0;
+        static DIRECT_INVOCATION_IDENTITY: OnceLock<String> = OnceLock::new();
+        let identity = DIRECT_INVOCATION_IDENTITY.get_or_init(|| {
+            let started = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default();
+            format!("{}-{started}", std::process::id())
+        });
         Ok(Self::new(
-            format!("direct:{name}:{operation}:{sequence}"),
+            format!("direct:{identity}:{name}:{operation}:{sequence}"),
             1,
             now,
             now,
             None,
         ))
+    }
+
+    pub fn idempotent(key: &str) -> NativeResult<Self> {
+        if key.is_empty() {
+            return Err(NativeError::new(
+                "TypeError",
+                "Dependency idempotencyKey must be a non-empty string.",
+            ));
+        }
+        let mut invocation = Self::direct("idempotency", "call", 1)?;
+        invocation.id = format!("idempotency:{key}");
+        Ok(invocation)
     }
 
     pub fn with_controls(
@@ -1123,6 +1143,15 @@ impl Engine {
         }
     }
 
+    fn spawn_detached(&self, operation: NativeFuture<Value>) {
+        self.0.tasks.fetch_add(1, Ordering::AcqRel);
+        let state = self.0.clone();
+        tokio::spawn(async move {
+            let _task = ConcurrentTask(state);
+            let _ = operation.await;
+        });
+    }
+
     pub async fn next(&self, stream: Value) -> NativeResult<Option<Value>> {
         match stream {
             Value::Stream(stream) => stream.lock().await.next().await.transpose(),
@@ -1197,19 +1226,94 @@ impl Engine {
         operation: &str,
         input: Value,
     ) -> NativeResult<Value> {
-        let sequence = {
-            let mut invocations = lock(&self.0.invocations);
-            let sequence = invocations.entry(format!("{scope}\0{name}")).or_default();
-            *sequence += 1;
-            *sequence
+        self.call_dependency_scoped_with_options(scope, name, operation, input, Value::Undefined)
+            .await
+    }
+
+    pub async fn call_dependency_scoped_with_options(
+        &self,
+        scope: &str,
+        name: &str,
+        operation: &str,
+        input: Value,
+        options: Value,
+    ) -> NativeResult<Value> {
+        let options = dependency_dispatch_options(options)?;
+        let cancellation_source = options.cancellation.clone();
+        let cancellation = DependencyCancellation::default();
+        let mut invocation = match options.idempotency_key {
+            Some(key) => DependencyInvocation::idempotent(&key)?,
+            None => {
+                let sequence = {
+                    let mut invocations = lock(&self.0.invocations);
+                    let sequence = invocations.entry(format!("{scope}\0{name}")).or_default();
+                    *sequence += 1;
+                    *sequence
+                };
+                DependencyInvocation::direct(name, operation, sequence)?
+            }
         };
-        self.call_dependency_with_invocation(
-            name,
-            operation,
-            input,
-            DependencyInvocation::direct(name, operation, sequence)?,
-        )
-        .await
+        if let Some(attempt) = options.attempt {
+            invocation.attempt = attempt;
+        }
+        if let Some(scheduled_at) = options.scheduled_at {
+            invocation.scheduled_at = scheduled_at;
+        }
+        if let Some(started_at) = options.started_at {
+            invocation.started_at = started_at;
+        }
+        invocation.deadline = options.deadline;
+        if let Some(source) = &cancellation_source {
+            let requested = match self.method(source.clone(), "requested", Vec::new()).await? {
+                Value::Boolean(requested) => requested,
+                _ => {
+                    return Err(NativeError::new(
+                        "TypeError",
+                        "Dependency cancellation requested must return a boolean.",
+                    ));
+                }
+            };
+            if requested {
+                cancellation.request();
+            }
+        }
+        if options.previous_heartbeat.is_some() || options.heartbeat.is_some() {
+            let engine = self.clone();
+            let heartbeat = options.heartbeat;
+            invocation = invocation.with_controls(
+                options.previous_heartbeat,
+                move |details| {
+                    if let Some(function) = heartbeat.clone() {
+                        let task_engine = engine.clone();
+                        engine.spawn_detached(Box::pin(async move {
+                            task_engine.invoke(function, vec![details]).await
+                        }));
+                    }
+                    Ok(())
+                },
+                cancellation.clone(),
+            );
+        } else {
+            invocation.cancellation = cancellation.clone();
+        }
+        let call = self.call_dependency_with_invocation(name, operation, input, invocation);
+        let Some(source) = cancellation_source else {
+            return call.await;
+        };
+        if cancellation.requested() {
+            return call.await;
+        }
+        let wait = self.method(source, "wait", Vec::new());
+        tokio::pin!(call);
+        tokio::pin!(wait);
+        tokio::select! {
+            result = &mut call => result,
+            result = &mut wait => {
+                result?;
+                cancellation.request();
+                call.await
+            }
+        }
     }
 
     pub async fn call_dependency_with_invocation(
@@ -1307,16 +1411,36 @@ impl Engine {
         operator: &str,
         right: Value,
     ) -> NativeResult<()> {
-        let Value::MutableRecord(record) = target else {
-            return Err(NativeError::new(
+        match target {
+            Value::MutableRecord(record) => {
+                let mut record = lock(&record);
+                let left = record.get(property).cloned().unwrap_or(Value::Undefined);
+                record.insert(property.to_owned(), assign(operator, left, right)?);
+                Ok(())
+            }
+            Value::Array(values) => {
+                let index = property
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|index| property == index.to_string());
+                let Some(index) = index else {
+                    return Err(NativeError::new(
+                        "TypeError",
+                        format!("Cannot assign array property {property:?}."),
+                    ));
+                };
+                let mut values = lock(&values);
+                if index >= values.len() {
+                    values.resize(index + 1, Value::Undefined);
+                }
+                values[index] = assign(operator, values[index].clone(), right)?;
+                Ok(())
+            }
+            target => Err(NativeError::new(
                 "TypeError",
                 format!("Cannot assign property {property:?} on {target:?}."),
-            ));
-        };
-        let mut record = lock(&record);
-        let left = record.get(property).cloned().unwrap_or(Value::Undefined);
-        record.insert(property.to_owned(), assign(operator, left, right)?);
-        Ok(())
+            )),
+        }
     }
 
     pub fn method(
@@ -1329,20 +1453,21 @@ impl Engine {
         let method = method.to_owned();
         Box::pin(async move {
             if let Value::Dependency(name) = &receiver {
+                let mut arguments = arguments.into_iter();
+                let input = arguments.next().unwrap_or(Value::Undefined);
+                let options = arguments.next().unwrap_or(Value::Undefined);
                 return engine
-                    .call_dependency(
-                        name,
-                        &method,
-                        arguments.into_iter().next().unwrap_or(Value::Undefined),
-                    )
+                    .call_dependency_scoped_with_options("runtime", name, &method, input, options)
                     .await;
             }
             if let Value::InterceptedDependency(function) = &receiver {
-                let input = arguments.into_iter().next().unwrap_or(Value::Undefined);
+                let mut arguments = arguments.into_iter();
+                let input = arguments.next().unwrap_or(Value::Undefined);
+                let options = arguments.next().unwrap_or(Value::Undefined);
                 return engine
                     .invoke(
                         Value::Function(function.clone()),
-                        vec![Value::String(method), input],
+                        vec![Value::String(method), input, options],
                     )
                     .await;
             }
@@ -1363,6 +1488,22 @@ impl Engine {
                 }
                 return Ok(Value::Undefined);
             }
+            if method == "findIndex" {
+                let values = receiver.as_array()?.lock().expect("array lock").clone();
+                let predicate = arguments.into_iter().next().ok_or_else(|| {
+                    NativeError::new("TypeError", "findIndex requires a predicate.")
+                })?;
+                for (index, value) in values.into_iter().enumerate() {
+                    if engine
+                        .invoke(predicate.clone(), vec![value])
+                        .await?
+                        .truthy()
+                    {
+                        return Ok(Value::Number(index as f64));
+                    }
+                }
+                return Ok(Value::Number(-1.0));
+            }
             if method == "map" {
                 let values = receiver.as_array()?.lock().expect("array lock").clone();
                 let transform = arguments
@@ -1374,6 +1515,75 @@ impl Engine {
                     mapped.push(engine.invoke(transform.clone(), vec![value]).await?);
                 }
                 return Ok(Value::array(mapped));
+            }
+            if method == "filter" {
+                let values = receiver.as_array()?.lock().expect("array lock").clone();
+                let predicate = arguments
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| NativeError::new("TypeError", "filter requires a predicate."))?;
+                let mut filtered = Vec::new();
+                for value in values {
+                    if engine
+                        .invoke(predicate.clone(), vec![value.clone()])
+                        .await?
+                        .truthy()
+                    {
+                        filtered.push(value);
+                    }
+                }
+                return Ok(Value::array(filtered));
+            }
+            if method == "some" {
+                let values = receiver.as_array()?.lock().expect("array lock").clone();
+                let predicate = arguments
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| NativeError::new("TypeError", "some requires a predicate."))?;
+                for value in values {
+                    if engine
+                        .invoke(predicate.clone(), vec![value])
+                        .await?
+                        .truthy()
+                    {
+                        return Ok(Value::Boolean(true));
+                    }
+                }
+                return Ok(Value::Boolean(false));
+            }
+            if method == "push" {
+                let array = receiver.as_array()?;
+                let mut values = array.lock().expect("array lock");
+                values.extend(arguments);
+                return Ok(Value::Number(values.len() as f64));
+            }
+            if method == "sort" {
+                let array = receiver.as_array()?;
+                let mut values = array.lock().expect("array lock").clone();
+                let compare = arguments.into_iter().next();
+                for right in 1..values.len() {
+                    let mut index = right;
+                    while index > 0 {
+                        let order = if let Some(compare) = &compare {
+                            engine
+                                .invoke(
+                                    compare.clone(),
+                                    vec![values[index - 1].clone(), values[index].clone()],
+                                )
+                                .await?
+                                .number()?
+                        } else {
+                            values[index - 1].to_text().cmp(&values[index].to_text()) as i32 as f64
+                        };
+                        if order <= 0.0 {
+                            break;
+                        }
+                        values.swap(index - 1, index);
+                        index -= 1;
+                    }
+                }
+                *array.lock().expect("array lock") = values;
+                return Ok(receiver);
             }
             if method == "startsWith" {
                 let prefix = arguments
@@ -1389,9 +1599,34 @@ impl Engine {
                     .cloned()
                     .unwrap_or(Value::Number(0.0))
                     .number()? as usize;
-                return Ok(Value::String(
-                    receiver.string()?.chars().skip(from).collect(),
+                let to = arguments
+                    .get(1)
+                    .map(Value::number)
+                    .transpose()?
+                    .map(|value| value as usize);
+                if let Value::String(value) = &receiver {
+                    let values = value.chars().collect::<Vec<_>>();
+                    let end = to.unwrap_or(values.len()).min(values.len());
+                    return Ok(Value::String(
+                        values
+                            .into_iter()
+                            .skip(from)
+                            .take(end.saturating_sub(from))
+                            .collect(),
+                    ));
+                }
+                let values = receiver.as_array()?.lock().expect("array lock").clone();
+                let end = to.unwrap_or(values.len()).min(values.len());
+                return Ok(Value::array(
+                    values
+                        .into_iter()
+                        .skip(from)
+                        .take(end.saturating_sub(from))
+                        .collect(),
                 ));
+            }
+            if method == "trim" {
+                return Ok(Value::String(receiver.string()?.trim().to_owned()));
             }
             if method == "iterator" {
                 return match receiver {
@@ -1793,6 +2028,30 @@ impl Value {
             Self::String(value) if name == "length" => {
                 Ok(Self::Number(value.chars().count() as f64))
             }
+            Self::Dependency(dependency) => {
+                let dependency = dependency.clone();
+                let operation = name.to_owned();
+                Ok(Self::Function(NativeFunction::new(
+                    move |engine, arguments| {
+                        let dependency = dependency.clone();
+                        let operation = operation.clone();
+                        Box::pin(async move {
+                            let mut arguments = arguments.into_iter();
+                            let input = arguments.next().unwrap_or(Value::Undefined);
+                            let options = arguments.next().unwrap_or(Value::Undefined);
+                            engine
+                                .call_dependency_scoped_with_options(
+                                    "runtime",
+                                    &dependency,
+                                    &operation,
+                                    input,
+                                    options,
+                                )
+                                .await
+                        })
+                    },
+                )))
+            }
             _ => Err(NativeError::new(
                 "TypeError",
                 format!("Cannot read {name} from {self:?}."),
@@ -1806,6 +2065,126 @@ impl Value {
             value => NativeError::new("Error", format!("{value:?}")),
         }
     }
+}
+
+#[derive(Default)]
+struct DependencyDispatchOptions {
+    idempotency_key: Option<String>,
+    attempt: Option<u64>,
+    scheduled_at: Option<f64>,
+    started_at: Option<f64>,
+    deadline: Option<f64>,
+    previous_heartbeat: Option<Value>,
+    heartbeat: Option<Value>,
+    cancellation: Option<Value>,
+}
+
+fn dependency_dispatch_options(options: Value) -> NativeResult<DependencyDispatchOptions> {
+    if options.is_undefined() {
+        return Ok(DependencyDispatchOptions::default());
+    }
+    let options = options.as_record()?;
+    const ALLOWED: [&str; 8] = [
+        "attempt",
+        "cancellation",
+        "deadline",
+        "heartbeat",
+        "idempotencyKey",
+        "previousHeartbeat",
+        "scheduledAt",
+        "startedAt",
+    ];
+    if let Some(unknown) = options
+        .keys()
+        .find(|name| !ALLOWED.contains(&name.as_str()))
+    {
+        return Err(NativeError::new(
+            "TypeError",
+            format!("Dependency has unknown dispatch option {unknown:?}."),
+        ));
+    }
+    let key = options
+        .get("idempotencyKey")
+        .cloned()
+        .unwrap_or(Value::Undefined);
+    let idempotency_key = if key.is_undefined() {
+        None
+    } else {
+        let key = key.string()?;
+        if key.is_empty() {
+            return Err(NativeError::new(
+                "TypeError",
+                "Dependency idempotencyKey must be a non-empty string.",
+            ));
+        }
+        Some(key)
+    };
+    let number = |name: &str| -> NativeResult<Option<f64>> {
+        let value = options.get(name).cloned().unwrap_or(Value::Undefined);
+        if value.is_undefined() {
+            return Ok(None);
+        }
+        let value = value.number()?;
+        if !value.is_finite() {
+            return Err(NativeError::new(
+                "TypeError",
+                format!("Dependency {name} must be finite."),
+            ));
+        }
+        Ok(Some(value))
+    };
+    let attempt = number("attempt")?
+        .map(|value| {
+            if value < 1.0 || value.fract() != 0.0 || value > 9_007_199_254_740_991.0 {
+                return Err(NativeError::new(
+                    "TypeError",
+                    "Dependency attempt must be a positive safe integer.",
+                ));
+            }
+            Ok(value as u64)
+        })
+        .transpose()?;
+    let heartbeat = options
+        .get("heartbeat")
+        .filter(|value| !value.is_undefined())
+        .cloned();
+    if heartbeat
+        .as_ref()
+        .is_some_and(|value| !matches!(value, Value::Function(_)))
+    {
+        return Err(NativeError::new(
+            "TypeError",
+            "Dependency heartbeat must be a function.",
+        ));
+    }
+    let cancellation = options
+        .get("cancellation")
+        .filter(|value| !value.is_undefined())
+        .cloned();
+    if let Some(cancellation) = &cancellation {
+        let cancellation = cancellation.as_record()?;
+        if !matches!(cancellation.get("requested"), Some(Value::Function(_)))
+            || !matches!(cancellation.get("wait"), Some(Value::Function(_)))
+        {
+            return Err(NativeError::new(
+                "TypeError",
+                "Dependency cancellation must expose requested and wait functions.",
+            ));
+        }
+    }
+    Ok(DependencyDispatchOptions {
+        idempotency_key,
+        attempt,
+        scheduled_at: number("scheduledAt")?,
+        started_at: number("startedAt")?,
+        deadline: number("deadline")?,
+        previous_heartbeat: options
+            .get("previousHeartbeat")
+            .filter(|value| !value.is_undefined())
+            .cloned(),
+        heartbeat,
+        cancellation,
+    })
 }
 
 pub fn binary(operator: &str, left: Value, right: Value) -> NativeResult<Value> {
@@ -1878,7 +2257,7 @@ fn write<T>(value: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use super::*;
 
@@ -1898,6 +2277,27 @@ mod tests {
                     "UnknownOperation",
                     format!("Noop has no operation {operation:?}."),
                 ))
+            })
+        }
+    }
+
+    struct CancellationAware {
+        started: Arc<tokio::sync::Notify>,
+    }
+
+    impl Dependency for CancellationAware {
+        fn call(
+            &self,
+            _engine: Engine,
+            _operation: &str,
+            _input: Value,
+            invocation: DependencyInvocation,
+        ) -> NativeFuture<Value> {
+            let started = self.started.clone();
+            Box::pin(async move {
+                started.notify_one();
+                invocation.cancellation.wait().await;
+                Ok(Value::String("cancelled".to_owned()))
             })
         }
     }
@@ -1955,6 +2355,113 @@ mod tests {
                 .expect("missing array index")
                 .is_undefined()
         );
+        let engine = Engine::new();
+        engine
+            .assign_property(values.clone(), "1", "=", Value::String("second".to_owned()))
+            .expect("array index assignment");
+        engine
+            .assign_property(values.clone(), "3", "=", Value::String("fourth".to_owned()))
+            .expect("sparse array index assignment");
+        assert_eq!(
+            values.to_json().expect("assigned array"),
+            serde_json::json!(["first", "second", null, "fourth"])
+        );
+    }
+
+    #[tokio::test]
+    async fn evaluates_the_portable_array_and_string_methods_used_by_product_programs() {
+        let engine = Engine::new();
+        let values = Value::array(vec![
+            Value::Number(3.0),
+            Value::Number(1.0),
+            Value::Number(2.0),
+        ]);
+        let above_one = Value::Function(NativeFunction::new(|_engine, arguments| {
+            Box::pin(async move {
+                Ok(Value::Boolean(
+                    arguments
+                        .first()
+                        .cloned()
+                        .unwrap_or(Value::Undefined)
+                        .number()?
+                        > 1.0,
+                ))
+            })
+        }));
+        let compare = Value::Function(NativeFunction::new(|_engine, arguments| {
+            Box::pin(async move {
+                let left = arguments.first().cloned().unwrap_or(Value::Undefined);
+                let right = arguments.get(1).cloned().unwrap_or(Value::Undefined);
+                Ok(Value::Number(left.number()? - right.number()?))
+            })
+        }));
+
+        let filtered = engine
+            .method(values.clone(), "filter", vec![above_one.clone()])
+            .await
+            .expect("filter");
+        assert_eq!(
+            filtered.to_json().expect("filtered JSON"),
+            serde_json::json!([3, 2])
+        );
+        assert_eq!(
+            engine
+                .method(values.clone(), "findIndex", vec![above_one.clone()])
+                .await
+                .expect("findIndex")
+                .number()
+                .expect("index"),
+            0.0
+        );
+        assert!(
+            engine
+                .method(values.clone(), "some", vec![above_one])
+                .await
+                .expect("some")
+                .truthy()
+        );
+        engine
+            .method(values.clone(), "sort", vec![compare])
+            .await
+            .expect("sort");
+        assert_eq!(
+            engine
+                .method(
+                    values,
+                    "slice",
+                    vec![Value::Number(0.0), Value::Number(2.0)],
+                )
+                .await
+                .expect("slice")
+                .to_json()
+                .expect("slice JSON"),
+            serde_json::json!([1, 2])
+        );
+        assert_eq!(
+            engine
+                .method(Value::String("  durable  ".to_owned()), "trim", Vec::new(),)
+                .await
+                .expect("trim")
+                .string()
+                .expect("trimmed string"),
+            "durable"
+        );
+    }
+
+    #[tokio::test]
+    async fn invokes_a_dynamically_selected_dependency_operation() {
+        let engine = Engine::new();
+        engine.register("noop", Arc::new(Noop)).expect("register");
+        let operation = Value::Dependency("noop".to_owned())
+            .property("selected", false)
+            .expect("operation projection");
+        let error = engine
+            .invoke(operation, vec![Value::record([])])
+            .await
+            .expect_err("Noop rejects every operation");
+
+        assert_eq!(error.name, "UnknownOperation");
+        assert!(error.message.contains("selected"));
     }
 
     #[test]
@@ -2170,6 +2677,70 @@ mod tests {
                 .expect("requested")
                 .truthy()
         );
+    }
+
+    #[tokio::test]
+    async fn forwards_portable_cancellation_into_native_dependency_invocations() {
+        let engine = Engine::new();
+        let started = Arc::new(tokio::sync::Notify::new());
+        engine
+            .register(
+                "cancellable",
+                Arc::new(CancellationAware {
+                    started: started.clone(),
+                }),
+            )
+            .expect("register cancellable Dependency");
+        let requested = Arc::new(AtomicBool::new(false));
+        let requested_function = {
+            let requested = requested.clone();
+            NativeFunction::new(move |_engine, _arguments| {
+                let requested = requested.clone();
+                Box::pin(async move { Ok(Value::Boolean(requested.load(Ordering::SeqCst))) })
+            })
+        };
+        let cancellation = Arc::new(tokio::sync::Notify::new());
+        let wait_function = {
+            let cancellation = cancellation.clone();
+            NativeFunction::new(move |_engine, _arguments| {
+                let cancellation = cancellation.clone();
+                Box::pin(async move {
+                    cancellation.notified().await;
+                    Ok(Value::Undefined)
+                })
+            })
+        };
+        let options = Value::record(IndexMap::from([(
+            "cancellation".to_owned(),
+            Value::record(IndexMap::from([
+                ("requested".to_owned(), Value::Function(requested_function)),
+                ("wait".to_owned(), Value::Function(wait_function)),
+            ])),
+        )]));
+        let call = tokio::spawn({
+            let engine = engine.clone();
+            async move {
+                engine
+                    .call_dependency_scoped_with_options(
+                        "caller",
+                        "cancellable",
+                        "run",
+                        Value::Undefined,
+                        options,
+                    )
+                    .await
+            }
+        });
+        started.notified().await;
+
+        requested.store(true, Ordering::SeqCst);
+        cancellation.notify_one();
+
+        let result = call
+            .await
+            .expect("Dependency task")
+            .expect("Dependency result");
+        assert_eq!(result.string().expect("result string"), "cancelled");
     }
 
     #[tokio::test]

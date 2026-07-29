@@ -1,5 +1,6 @@
 import type { PlatformAdapters } from "@/adapter";
 import { selectSystemOutputs } from "@/compiler/ir";
+import { workflowCompilerExtension } from "@/features/workflow/compiler";
 import type { ServerPlatform } from "@/platforms/server";
 import {
   createServerPlatformAdapter,
@@ -23,34 +24,44 @@ export function createPlatformAdapters(
   const programAttachments = createDevelopmentWebLoaderRegistry();
   const configuredDevelopmentHost = options.server?.developmentHost;
   const webDevelopmentPort = options.web?.developmentPort ?? 3000;
+  const serverDevelopmentPort =
+    options.server?.developmentPort ?? (process.env.PORT ? Number(process.env.PORT) : 3010);
   const configuredProductionDependencies = options.server?.productionDependencies ?? [];
   const productionDependencies = configuredProductionDependencies.some(
     ({ dependency }) => dependency === "http",
   )
     ? configuredProductionDependencies
     : [webHttpProductionDependency, ...configuredProductionDependencies];
+  const server = createServerPlatformAdapter({
+    ...options.server,
+    developmentHost(input) {
+      const configured =
+        typeof configuredDevelopmentHost === "function"
+          ? configuredDevelopmentHost(input)
+          : configuredDevelopmentHost;
+      return {
+        ...configured,
+        allowedOrigins:
+          configured?.allowedOrigins ??
+          selectSystemOutputs(input.ir, input.app)
+            .interfaces.filter(({ platform }) => platform === "web")
+            .map((_, index) => `http://localhost:${webDevelopmentPort + index}`),
+      };
+    },
+    productionDependencies,
+    attachmentSources: [webRouteLoaderAttachments, ...(options.server?.attachmentSources ?? [])],
+    programAttachments,
+  });
   return {
-    server: createServerPlatformAdapter({
-      ...options.server,
-      developmentHost(input) {
-        const configured =
-          typeof configuredDevelopmentHost === "function"
-            ? configuredDevelopmentHost(input)
-            : configuredDevelopmentHost;
-        return {
-          ...configured,
-          allowedOrigins:
-            configured?.allowedOrigins ??
-            selectSystemOutputs(input.ir, input.app)
-              .interfaces.filter(({ platform }) => platform === "web")
-              .map((_, index) => `http://localhost:${webDevelopmentPort + index}`),
-        };
-      },
-      productionDependencies,
-      attachmentSources: [webRouteLoaderAttachments, ...(options.server?.attachmentSources ?? [])],
+    server: {
+      ...server,
+      compiler: [...(server.compiler ?? []), workflowCompilerExtension],
+    },
+    web: createWebPlatformAdapter({
+      serverOrigin: `http://localhost:${serverDevelopmentPort}`,
+      ...options.web,
       programAttachments,
     }),
-    web: createWebPlatformAdapter({ ...options.web, programAttachments }),
   };
 }
 

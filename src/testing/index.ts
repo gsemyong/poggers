@@ -372,10 +372,10 @@ function testAdapters(input: {
       developmentPort: input.serverPort,
       developmentHost: {
         configuration: {
-          database: input.database,
           secret: "kit-system-test-secret",
         },
         database: input.database,
+        directory: dirname(input.database),
         host: "localhost",
         shutdownTimeout: 500,
         allowedOrigins: [webOrigin],
@@ -468,6 +468,15 @@ async function startProductionSystem(
         ),
       );
     }
+    await Promise.all(
+      prepared.map((process, index) =>
+        process.status
+          ? readyProcess(process.artifact.identity, process.status, () =>
+              processes[index]?.output(),
+            )
+          : Promise.resolve(),
+      ),
+    );
 
     for (const artifact of interfaceArtifacts) {
       if (interfaceOrigins.has(artifact.identity)) continue;
@@ -519,6 +528,7 @@ type PreparedProductionProcess = {
   deferred: ProductionConfiguration[];
   environment: Record<string, string>;
   locations: string[];
+  status?: string;
 };
 
 async function prepareProductionProcess(input: {
@@ -559,7 +569,7 @@ async function prepareProductionProcess(input: {
         recursive: true,
       });
     } else {
-      value = field.default;
+      value = process.env[field.binding.name] ?? field.default;
     }
     if (value === undefined) {
       if (field.required) {
@@ -574,12 +584,46 @@ async function prepareProductionProcess(input: {
 
   const host = environment.HOST ?? "127.0.0.1";
   const locations = allocatedPorts.map((port) => `http://${host}:${port}`);
+  let status: string | undefined;
   if (input.artifact.lifecycle?.status) {
-    const status = resolve(processState, "status.json");
+    status = resolve(processState, "status.json");
     await mkdir(dirname(status), { recursive: true });
+    await rm(status, { force: true });
     environment[input.artifact.lifecycle.status.environment] = status;
   }
-  return { artifact: input.artifact, deferred, environment, locations };
+  return {
+    artifact: input.artifact,
+    deferred,
+    environment,
+    locations,
+    ...(status ? { status } : {}),
+  };
+}
+
+async function readyProcess(
+  identity: string,
+  statusFile: string,
+  diagnostics: () => string | undefined,
+): Promise<void> {
+  const deadline = Date.now() + 15_000;
+  let status: string | undefined;
+  while (Date.now() < deadline) {
+    try {
+      const value = JSON.parse(await readFile(statusFile, "utf8")) as Readonly<{
+        status?: unknown;
+      }>;
+      status = typeof value.status === "string" ? value.status : undefined;
+      if (status === "ready") return;
+      if (status === "failed") break;
+    } catch {
+      // The Process publishes its status atomically after it starts.
+    }
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+  }
+  const output = diagnostics()?.trim();
+  throw new Error(
+    `Production Process ${JSON.stringify(identity)} did not become ready${status ? ` (status: ${status})` : ""}.${output ? `\n${output}` : ""}`,
+  );
 }
 
 function resolveProductionSources(
@@ -601,6 +645,15 @@ function resolveProductionSources(
           : [],
       );
       value = selected[0] ?? process.locations[0];
+    } else if (source.kind === "service-location") {
+      value = globalThis.process.env[field.binding.name] ?? field.default;
+      if (!value) {
+        throw new Error(
+          `Production test requires service endpoint ${JSON.stringify(
+            `${source.service}.${source.endpoint}`,
+          )}; provide ${field.binding.name} or use a Deployment adapter that realizes services.`,
+        );
+      }
     } else {
       const selected = selectAssetArtifacts(assets, source);
       if (source.format === "single" && selected.length === 1) {

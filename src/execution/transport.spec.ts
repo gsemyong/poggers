@@ -135,7 +135,9 @@ test("runs unrelated asynchronous and stream Dependencies across one generic Pro
         },
         [dependencyInvocationControl]: {
           previousHeartbeat: { completed: 1 },
-          heartbeat: (details) => observed.push(details),
+          heartbeat(details) {
+            observed.push(details);
+          },
           cancellation: inactiveCancellation(),
         },
       },
@@ -399,6 +401,7 @@ test("reports loss as uncertain and leaves retries explicit with stable invocati
 test("propagates cancellation and deadlines", async () => {
   const cancellation = cancellable();
   const providerCancelled = vi.fn();
+  const logicalDeadlineStarted = vi.fn();
   const network = createMemoryDependencyTransport();
   network.bind(
     "worker",
@@ -418,8 +421,9 @@ test("propagates cancellation and deadlines", async () => {
             providerCancelled();
             return 1;
           }
+          if (input.value === 4) logicalDeadlineStarted();
           await new Promise((resolve) => setTimeout(resolve, 100));
-          return 3;
+          return input.value;
         },
       },
     }),
@@ -452,6 +456,21 @@ test("propagates cancellation and deadlines", async () => {
       },
     ),
   ).rejects.toMatchObject({ code: "deadline-exceeded", uncertain: true });
+
+  await expect(
+    invokeDependency(
+      remote,
+      "work",
+      { value: 4 },
+      {
+        ...invocation("logical-deadline-4", 1),
+        scheduledAt: 0,
+        startedAt: 0,
+        deadline: 10,
+      },
+    ),
+  ).rejects.toMatchObject({ code: "deadline-exceeded", uncertain: true });
+  expect(logicalDeadlineStarted).toHaveBeenCalledOnce();
 });
 
 function invocation(id: string, attempt: number): DependencyInvocation {

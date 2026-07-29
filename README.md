@@ -31,6 +31,7 @@ Creation combines the shared project scaffold with one executable example.
 nubx -y -p "$package" kit create my-system --package "$package" --example basic
 nubx -y -p "$package" kit create my-system --package "$package" --example authenticated-crud
 nubx -y -p "$package" kit create my-system --package "$package" --example presentation
+nubx -y -p "$package" kit create my-system --package "$package" --example voice
 ```
 
 `system.ts` is the only compilation root. Apps and their platform interfaces
@@ -78,5 +79,5 @@ nub src/cli.ts dev --dir examples/presentation
 
 Reference: [architecture](docs/architecture.md), [Feature factories](docs/features.md),
 [Portable TypeScript](docs/portable-typescript.md), [Actors](docs/actors.md),
-[Data](docs/data.md), [web](docs/web.md), [Presentation](docs/presentation.md), and
-[Deployment](docs/deployment.md).
+[Workflows](docs/workflows.md), [Data](docs/data.md), [web](docs/web.md),
+[Presentation](docs/presentation.md), and [Deployment](docs/deployment.md).

@@ -18,6 +18,7 @@ import { dirname, isAbsolute, relative, resolve } from "node:path";
 
 import {
   validateProgramAttachmentIR,
+  type ProductionServiceRequirement,
   type ProgramAttachmentBinding,
   type ProgramAttachmentIR,
 } from "@/adapter";
@@ -71,6 +72,7 @@ export type ServerProductionRequirement = Readonly<{
   dependency: string;
   implementation: string;
   configuration: readonly ServerProviderConfiguration[];
+  services: readonly ProductionServiceRequirement[];
 }>;
 
 export type ServerProductionProfile = "debug" | "release";
@@ -125,6 +127,7 @@ export async function buildServerProgram(input: {
     dependency: dependency.name,
     implementation: implementation.name,
     configuration: implementation.configuration,
+    services: implementation.services ?? [],
   }));
   const seed = await generateRustWorkspace(
     linked,
@@ -288,6 +291,7 @@ function featureProductionDependencies(
       ...production,
       name: featureProviderName(provider.feature, provider.dependency),
       dependency: provider.dependency,
+      services: featureProviderServices(provider),
       crate: {
         ...production.crate,
         directory: canonicalNativeDirectory(
@@ -297,6 +301,26 @@ function featureProductionDependencies(
       },
     });
   });
+}
+
+function featureProviderServices(
+  provider: ReturnType<typeof selectDependencyProviders>[number],
+): readonly ProductionServiceRequirement[] {
+  if (provider.requirements === undefined) return [];
+  if (!provider.requirements || typeof provider.requirements !== "object") {
+    throw new Error(
+      `Feature ${JSON.stringify(provider.feature)} has invalid server provider requirements for ` +
+        `Dependency ${JSON.stringify(provider.dependency)}.`,
+    );
+  }
+  const services = Reflect.get(provider.requirements, "services");
+  if (!Array.isArray(services)) {
+    throw new Error(
+      `Feature ${JSON.stringify(provider.feature)} server provider requirements for ` +
+        `Dependency ${JSON.stringify(provider.dependency)} must declare services.`,
+    );
+  }
+  return services as readonly ProductionServiceRequirement[];
 }
 
 function featureProviderName(feature: string, dependency: string): string {
@@ -395,10 +419,7 @@ async function generateRustWorkspace(
   binary: string,
   nativeRoot: string,
 ): Promise<RustWorkspace> {
-  duplicate(
-    dependencies.map(({ implementation }) => implementation.crate.package),
-    "production Cargo package",
-  );
+  const crates = productionCrates(dependencies);
   const runtimeDirectory = resolve(nativeRoot, "compiler/rust/runtime");
   const distributionDirectory = resolve(nativeRoot, "platforms/server/adapter/rust/distribution");
   const distribution = rustDistributionContracts(linked);
@@ -407,7 +428,7 @@ async function generateRustWorkspace(
     ...(distribution.length ? await crateFiles(distributionDirectory, "native/distribution") : []),
     ...(
       await Promise.all(
-        dependencies.map(({ implementation }) =>
+        crates.map((implementation) =>
           crateFiles(
             implementation.crate.directory,
             `native/${productionDependencyDestination(implementation)}`,
@@ -443,7 +464,7 @@ async function generateRustWorkspace(
       binary,
       "kit-server-runtime",
       ...(distribution.length ? ["kit-server-distribution"] : []),
-      ...dependencies.map(({ implementation }) => implementation.crate.package),
+      ...crates.map(({ crate }) => crate.package),
     ],
   };
 }
@@ -514,9 +535,9 @@ function cargoManifest(
   distributionDirectory: string | undefined,
   dependencies: readonly ResolvedServerProductionDependency[],
 ): string {
-  const cargoDependencies = dependencies
+  const cargoDependencies = productionCrates(dependencies)
     .map(
-      ({ implementation }) =>
+      (implementation) =>
         `${implementation.crate.package} = { path = ${JSON.stringify(
           resolve(implementation.crate.directory),
         )} }`,
@@ -535,6 +556,26 @@ kit-server-runtime = { path = ${JSON.stringify(resolve(runtimeDirectory))} }
 ${distributionDirectory ? `kit-server-distribution = { path = ${JSON.stringify(resolve(distributionDirectory))} }\n` : ""}serde_json = "1.0.145"
 tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread", "signal"] }
 ${cargoDependencies}${cargoDependencies ? "\n" : ""}`;
+}
+
+function productionCrates(
+  dependencies: readonly ResolvedServerProductionDependency[],
+): readonly ServerProductionDependency[] {
+  const crates = new Map<string, ServerProductionDependency>();
+  for (const { implementation } of dependencies) {
+    const package_ = implementation.crate.package;
+    const existing = crates.get(package_);
+    if (
+      existing !== undefined &&
+      resolve(existing.crate.directory) !== resolve(implementation.crate.directory)
+    ) {
+      throw new Error(
+        `production Cargo package ${JSON.stringify(package_)} has conflicting sources.`,
+      );
+    }
+    if (existing === undefined) crates.set(package_, implementation);
+  }
+  return [...crates.values()];
 }
 
 function productionDependencyDestination(implementation: ServerProductionDependency): string {
@@ -905,7 +946,7 @@ function rustTypeContract(type: TypeIR): string {
         return `TypeContract::LiteralBoolean(${String(type.value)})`;
       }
       if (typeof type.value === "number") {
-        return `TypeContract::LiteralNumber(${String(type.value)})`;
+        return `TypeContract::LiteralNumber(${rustNumber(type.value)})`;
       }
       return `TypeContract::LiteralString(${rustString(type.value)})`;
     case "array":
@@ -932,6 +973,13 @@ function rustTypeContract(type: TypeIR): string {
     case "function":
       return "TypeContract::Function";
   }
+}
+
+export function rustNumber(value: number): string {
+  if (!Number.isFinite(value)) {
+    throw new TypeError("Rust production cannot represent a non-finite number literal.");
+  }
+  return `${String(value)}f64`;
 }
 
 function result(

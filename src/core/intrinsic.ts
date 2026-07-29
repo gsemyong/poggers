@@ -21,3 +21,13 @@ export function typeLiteral<Value extends PortableLiteral>(): Value {
 export function typeSchema<Value>(): TypeSchema {
   throw new Error("typeSchema() must be lowered by the Kit compiler.");
 }
+
+/**
+ * Materializes the string keys of one resolved record type.
+ *
+ * This avoids repeating type-level names in runtime declarations while
+ * preserving an ordinary serializable array in generated Programs.
+ */
+export function typeKeys<Value extends object>(): readonly Extract<keyof Value, string>[] {
+  throw new Error("typeKeys() must be lowered by the Kit compiler.");
+}

@@ -1,5 +1,7 @@
 import {
+  dispatchDependency,
   dependencyInvocation,
+  type DependencyDispatchOptions,
   type Dependency,
   type DependencyContract,
   type DependencyImplementations,
@@ -18,10 +20,12 @@ import type {
   Synchronization,
   Telemetry,
   Timer,
+  ScheduledDependencyTarget,
 } from "@/platforms/server";
 
 type MaybePromise<Value> = Value | PromiseLike<Value>;
 type Procedure = (context: never) => object | PromiseLike<object>;
+type Empty = Record<never, never>;
 declare const actorModel: unique symbol;
 declare const actorDefinition: unique symbol;
 declare const actorCommandModel: unique symbol;
@@ -37,22 +41,42 @@ export type ActorMethodDefinition = Readonly<{
   readonly [actorMethod]?: never;
 }>;
 
-export type ActorModelDefinition = Readonly<{
+type ActorModelInput = Readonly<{
   Name: string;
   Key: string;
   State: object;
   Dependencies?: Readonly<Record<string, DependencyContract>>;
   Methods: Readonly<Record<string, ActorMethodDefinition>>;
+  Version?: number;
+  History?: Readonly<Record<number, object>>;
 }>;
 
-/** The complete semantic model of one durable Actor type. */
-export type Actor<Model extends ActorModelDefinition> = Readonly<Model>;
+export type ActorModelDefinition = Readonly<
+  Omit<ActorModelInput, "Dependencies" | "History" | "Version"> & {
+    Dependencies: Readonly<Record<string, DependencyContract>>;
+    History: Readonly<Record<number, object>>;
+    Version: number;
+  }
+>;
 
-type DependenciesOf<Model extends ActorModelDefinition> = Model extends {
-  Dependencies: infer Dependencies extends object;
-}
-  ? Dependencies
-  : Record<never, never>;
+/** The complete semantic model of one durable Actor type. */
+export type Actor<Model extends ActorModelInput> = Readonly<
+  Omit<Model, "Dependencies" | "History" | "Version"> & {
+    Dependencies: Model extends {
+      Dependencies: infer Dependencies extends Readonly<Record<string, DependencyContract>>;
+    }
+      ? Dependencies
+      : Empty;
+    History: Model extends {
+      History: infer History extends Readonly<Record<number, object>>;
+    }
+      ? History
+      : Empty;
+    Version: Model extends { Version: infer Version extends number } ? Version : 1;
+  }
+>;
+
+type DependenciesOf<Model extends ActorModelDefinition> = Model["Dependencies"];
 
 type FailureOf<Failures extends Readonly<Record<string, object>>> = {
   readonly [Name in keyof Failures]: Readonly<{
@@ -118,7 +142,7 @@ type ActorWriteContext<
   state: Model["State"];
   input: Input;
   dependencies: DependenciesOf<Model>;
-  invocation: Readonly<{ id: string }>;
+  invocation: Readonly<{ id: string; at: number }>;
   fail(failure: FailureOf<Failures>): never;
   reminders: Readonly<{
     schedule<Handler extends Procedure>(
@@ -165,15 +189,33 @@ type ActorMethodProcedure<
       context: ActorWriteContext<Model, InputOfMethod<Method>, FailuresOfMethod<Method>>,
     ) => MaybePromise<ResultOfMethod<Method>>;
 
+type ActorHistoricalState<Model extends ActorModelDefinition> = {
+  [Version in Extract<keyof Model["History"], number>]: Readonly<{
+    key: Model["Key"];
+    version: Version;
+    state: Model["History"][Version];
+  }>;
+}[Extract<keyof Model["History"], number>];
+
+type ActorEvolutionField<Model extends ActorModelDefinition> = keyof Model["History"] extends never
+  ? Readonly<{ evolve?: never }>
+  : Readonly<{
+      evolve(context: ActorHistoricalState<Model>): Model["State"];
+    }>;
+
 type ActorImplementation<Model extends ActorModelDefinition> = Readonly<{
   state(context: ActorInitialContext<Model>): Model["State"];
   methods: Readonly<{
     [Name in keyof Model["Methods"]]: ActorMethodProcedure<Model, Model["Methods"][Name]>;
   }>;
-}>;
+}> &
+  ActorEvolutionField<Model>;
 
 type ValidActorImplementation<Model extends ActorModelDefinition> =
-  Extract<keyof Model["Methods"], "then" | "$wake"> extends never
+  Extract<
+    keyof Model["Methods"],
+    "then" | "$keys" | "$wake" | "$claimOutbound" | "$heartbeatOutbound" | "$completeOutbound"
+  > extends never
     ? ActorImplementation<Model>
     : never;
 
@@ -190,7 +232,11 @@ type ReadMethodName<Model extends ActorReferenceDefinition> = {
   [Name in keyof Model["Methods"]]: Model["Methods"][Name]["Mode"] extends "read" ? Name : never;
 }[keyof Model["Methods"]];
 
+const actorKeysOperation = "$keys";
 const actorWakeOperation = "$wake";
+const actorOutboundClaimOperation = "$claimOutbound";
+const actorOutboundHeartbeatOperation = "$heartbeatOutbound";
+const actorOutboundCompleteOperation = "$completeOutbound";
 
 type ActorWireOperations<Model extends ActorReferenceDefinition> = Readonly<
   {
@@ -213,9 +259,34 @@ type ActorWireOperations<Model extends ActorReferenceDefinition> = Readonly<
         OperationInput<InputOfMethod<Model["Methods"][Name]>>,
     ) => Promise<ResultOfMethod<Model["Methods"][Name]>>;
   } & {
+    readonly $keys: (
+      request: Readonly<{ after?: number; limit?: number }>,
+    ) => Promise<ActorKeyPage<Model["Key"]>>;
     readonly $wake: (
       request: Readonly<{ key: Model["Key"]; dueAt: number }>,
     ) => Promise<Record<never, never>>;
+    readonly $claimOutbound: (
+      request: Readonly<{ key: Model["Key"]; outbound: string; generation: number }>,
+    ) => Promise<ActorOutboundClaim>;
+    readonly $heartbeatOutbound: (
+      request: Readonly<{
+        key: Model["Key"];
+        outbound: string;
+        generation: number;
+        owner: string;
+        attempt: number;
+      }>,
+    ) => Promise<Readonly<{ accepted: boolean; until?: number }>>;
+    readonly $completeOutbound: (
+      request: Readonly<{
+        key: Model["Key"];
+        outbound: string;
+        generation: number;
+        owner: string;
+        attempt: number;
+        output: object;
+      }>,
+    ) => Promise<Readonly<{ accepted: boolean }>>;
   }
 >;
 
@@ -347,6 +418,7 @@ export namespace Actor {
     readonly [actorMethod]?: never;
   }>;
   export type Initial<Model extends ActorModelDefinition> = ActorInitialContext<Model>;
+  export type Historical<Model extends ActorModelDefinition> = ActorHistoricalState<Model>;
   export type Methods<Model extends ActorModelDefinition> = ActorImplementation<Model>["methods"];
   export type Handler<
     Model extends ActorModelDefinition,
@@ -360,6 +432,7 @@ export namespace Actor {
       : never;
   export type Error = ActorError;
   export type Failure = ActorInfrastructureFailure;
+  export type Invocation = ActorInvocation;
   export type Outcome<Result, Failure = never> = ActorOutcome<Result, Failure>;
 }
 
@@ -373,8 +446,137 @@ export function createActor<const Model extends ActorModelDefinition>(
   return createActorFeature<Model>(
     definition,
     () => typeLiteral<Model["Name"]>(),
-    () => typeSchema<Model["Methods"]>(),
+    () => actorMethodModes(typeSchema<Model["Methods"]>()),
+    () => ({}),
+    () => typeLiteral<Model["Version"]>(),
+    () => ({}),
   );
+}
+
+/** @internal Compiler hooks used by Feature factories built directly on Actor. */
+export function createActorFactory<Model extends ActorModelDefinition>(
+  definition: ActorImplementation<Model>,
+  identify: () => Model["Name"],
+  methods: () => Readonly<Record<string, ActorMethodMode>>,
+  factory: () => object,
+  version: () => number,
+  outbounds: () => RuntimeActorOutboundTargets<Model>,
+): DefinedActor<Model> {
+  return createActorFeature(definition, identify, methods, factory, version, outbounds);
+}
+
+/** @internal One bounded page of durable Actor identities. */
+export type ActorKeyPage<Key extends string> = Readonly<{
+  entries: readonly Readonly<{ cursor: number; key: Key }>[];
+  done: boolean;
+}>;
+
+/** @internal Enumerates durable Actor identities for a composing Feature factory. */
+export async function listActorKeys<Key extends string>(
+  actor: object,
+  request: Readonly<{ after?: number; limit?: number }> = {},
+): Promise<ActorKeyPage<Key>> {
+  return await dispatchDependency<ActorKeyPage<Key>>(actor, actorKeysOperation, request);
+}
+
+/** @internal Durable outbound claim used only by Feature factories built on Actor. */
+export type ActorOutboundClaim =
+  | Readonly<{ status: "settled" }>
+  | Readonly<{ status: "busy"; retryAt: number }>
+  | Readonly<{
+      status: "claimed";
+      owner: string;
+      attempt: number;
+      invocation: string;
+      scheduledAt: number;
+      startedAt: number;
+      cancellationRequested: boolean;
+    }>;
+
+/** @internal Completion envelope admitted after an outbound provider returns. */
+export type ActorOutboundDelivery = Readonly<{
+  id: string;
+  generation: number;
+  invocation: string;
+  attempt: number;
+  scheduledAt: number;
+  startedAt: number;
+  completedAt: number;
+  output: object;
+}>;
+
+/** @internal Claims one committed Actor outbound intent without holding its write turn. */
+export async function claimActorOutbound<Key extends string>(
+  actor: object,
+  request: Readonly<{ key: Key; id: string; generation: number }>,
+  options?: DependencyDispatchOptions,
+): Promise<ActorOutboundClaim> {
+  return await dispatchDependency<ActorOutboundClaim>(
+    actor,
+    actorOutboundClaimOperation,
+    {
+      key: request.key,
+      outbound: request.id,
+      generation: request.generation,
+    },
+    options,
+  );
+}
+
+/** @internal Renews the infrastructure lease for one in-flight outbound intent. */
+export async function heartbeatActorOutbound<Key extends string>(
+  actor: object,
+  request: Readonly<{
+    key: Key;
+    id: string;
+    generation: number;
+    owner: string;
+    attempt: number;
+  }>,
+  options?: DependencyDispatchOptions,
+): Promise<boolean> {
+  const result = await dispatchDependency<Readonly<{ accepted: boolean }>>(
+    actor,
+    actorOutboundHeartbeatOperation,
+    {
+      key: request.key,
+      outbound: request.id,
+      generation: request.generation,
+      owner: request.owner,
+      attempt: request.attempt,
+    },
+    options,
+  );
+  return result.accepted;
+}
+
+/** @internal Fenced, idempotent completion of one Actor outbound intent. */
+export async function completeActorOutbound<Key extends string>(
+  actor: object,
+  request: Readonly<{
+    key: Key;
+    id: string;
+    generation: number;
+    owner: string;
+    attempt: number;
+    output: object;
+  }>,
+  options?: DependencyDispatchOptions,
+): Promise<boolean> {
+  const result = await dispatchDependency<Readonly<{ accepted: boolean }>>(
+    actor,
+    actorOutboundCompleteOperation,
+    {
+      key: request.key,
+      outbound: request.id,
+      generation: request.generation,
+      owner: request.owner,
+      attempt: request.attempt,
+      output: request.output,
+    },
+    options,
+  );
+  return result.accepted;
 }
 
 type RuntimeRequest<Model extends ActorModelDefinition> = Readonly<{
@@ -384,6 +586,10 @@ type RuntimeRequest<Model extends ActorModelDefinition> = Readonly<{
   wait?: "accepted" | "completed";
   idempotencyKey?: string;
 }>;
+
+type RuntimeActorRequest<Model extends ActorModelDefinition> =
+  | RuntimeRequest<Model>
+  | Readonly<{ after?: number; limit?: number }>;
 
 type RuntimeInvocation = Readonly<{
   id: string;
@@ -404,11 +610,26 @@ type RuntimeCommandContext<Model extends ActorModelDefinition> = Readonly<{
   state: Model["State"];
   input?: object;
   dependencies: DependenciesOf<Model>;
-  invocation: Readonly<{ id: string }>;
+  factory: object;
+  invocation: Readonly<{ id: string; at: number }>;
   fail(failure: object): never;
   reminders: Readonly<{
     schedule(request: Readonly<{ id: string; at: number; method: Procedure; input: object }>): void;
     cancel(request: Readonly<{ id: string }>): void;
+  }>;
+  outbox: Readonly<{
+    schedule(
+      request: Readonly<{
+        id: string;
+        at: number;
+        operation: string;
+        input: object;
+        complete: Procedure;
+        completion: object;
+      }>,
+    ): void;
+    cancel(request: Readonly<{ id: string }>): void;
+    requestCancellation(request: Readonly<{ id: string }>): void;
   }>;
 }>;
 
@@ -416,6 +637,7 @@ type RuntimeQueryContext<Model extends ActorModelDefinition> = Readonly<{
   key: Model["Key"];
   state: Readonly<Model["State"]>;
   input?: object;
+  factory: object;
 }>;
 
 type RuntimeCommandHandler<Model extends ActorModelDefinition> = (
@@ -443,8 +665,16 @@ type ActorRegistered<Model extends ActorModelDefinition> = Readonly<{
 type ActorJournalCompleted<Model extends ActorModelDefinition> = Readonly<{
   type: "actor.command.completed";
   invocation: string;
+  stateVersion: number;
   state: Model["State"];
   outcome: ActorOutcome<object, object>;
+  at: number;
+}>;
+
+type ActorStateEvolved<Model extends ActorModelDefinition> = Readonly<{
+  type: "actor.state.evolved";
+  stateVersion: number;
+  state: Model["State"];
   at: number;
 }>;
 
@@ -501,6 +731,58 @@ type ActorJournalTimerEvent =
   | ActorJournalTimerCancelled
   | ActorJournalTimerFired;
 
+type ActorJournalOutboundScheduled = Readonly<{
+  type: "actor.outbound.scheduled";
+  outbound: string;
+  generation: number;
+  dueAt: number;
+  target: ScheduledDependencyTarget;
+  completion: string;
+  completionInput: object;
+  at: number;
+}>;
+
+type ActorJournalOutboundClaimed = Readonly<{
+  type: "actor.outbound.claimed";
+  outbound: string;
+  generation: number;
+  owner: string;
+  attempt: number;
+  until: number;
+  at: number;
+}>;
+
+type ActorJournalOutboundCompleted = Readonly<{
+  type: "actor.outbound.completed";
+  outbound: string;
+  generation: number;
+  owner: string;
+  attempt: number;
+  invocation: string;
+  at: number;
+}>;
+
+type ActorJournalOutboundCancelled = Readonly<{
+  type: "actor.outbound.cancelled";
+  outbound: string;
+  generation: number;
+  at: number;
+}>;
+
+type ActorJournalOutboundCancellationRequested = Readonly<{
+  type: "actor.outbound.cancellation-requested";
+  outbound: string;
+  generation: number;
+  at: number;
+}>;
+
+type ActorJournalOutboundEvent =
+  | ActorJournalOutboundScheduled
+  | ActorJournalOutboundClaimed
+  | ActorJournalOutboundCompleted
+  | ActorJournalOutboundCancelled
+  | ActorJournalOutboundCancellationRequested;
+
 type ActorJournalEvent<Model extends ActorModelDefinition> =
   | ActorRegistered<Model>
   | ActorJournalAccepted
@@ -508,6 +790,8 @@ type ActorJournalEvent<Model extends ActorModelDefinition> =
   | ActorJournalFailed
   | ActorJournalPoisoned
   | ActorJournalTimerEvent
+  | ActorJournalOutboundEvent
+  | ActorStateEvolved<Model>
   | ActorJournalCompleted<Model>;
 
 type ActorRequirements<Model extends ActorModelDefinition> = Readonly<
@@ -534,6 +818,7 @@ type RuntimeActorRequirements<Model extends ActorModelDefinition> = Omit<
 type ActorJournal<Model extends ActorModelDefinition> = Readonly<{
   revision: number;
   snapshotRevision: number;
+  stateVersion: number;
   state: Model["State"];
   accepted: readonly ActorJournalAccepted[];
   expired: readonly ActorJournalAccepted[];
@@ -543,11 +828,13 @@ type ActorJournal<Model extends ActorModelDefinition> = Readonly<{
   poisoned: readonly ActorJournalPoisoned[];
   completed: readonly ActorJournalCompleted<Model>[];
   timers: readonly ActorJournalTimerEvent[];
+  outbounds: readonly ActorJournalOutboundEvent[];
 }>;
 
 type ActorJournalSnapshot<Model extends ActorModelDefinition> = Readonly<{
   format: "kit.actor";
-  version: 1;
+  version: 2;
+  stateVersion: number;
   state: Model["State"];
   accepted: readonly ActorJournalAccepted[];
   expired: readonly ActorJournalAccepted[];
@@ -556,6 +843,7 @@ type ActorJournalSnapshot<Model extends ActorModelDefinition> = Readonly<{
   poisoned: readonly ActorJournalPoisoned[];
   completed: readonly ActorJournalCompleted<Model>[];
   timers: readonly ActorJournalTimerEvent[];
+  outbounds: readonly ActorJournalOutboundEvent[];
 }>;
 
 type ActorExecutionSlot = {
@@ -630,6 +918,17 @@ type ActorCommandExecution<Model extends ActorModelDefinition> = Readonly<{
   state: Model["State"];
   outcome: ActorOutcome<object, object>;
   timers: readonly ActorTimerIntent[];
+  outbounds: readonly ActorOutboundIntent[];
+}>;
+
+type RuntimeActorEvolution<Model extends ActorModelDefinition> = (
+  context: Readonly<{ key: Model["Key"]; version: number; state: object }>,
+) => Model["State"];
+
+type RuntimeActorState<Model extends ActorModelDefinition> = Readonly<{
+  version: number;
+  initialize(context: ActorInitialContext<Model>): Model["State"];
+  evolve: RuntimeActorEvolution<Model> | undefined;
 }>;
 
 type ActorTimerIntent =
@@ -641,6 +940,32 @@ type ActorTimerIntent =
       input: object;
     }>
   | Readonly<{ type: "cancel"; timer: string }>;
+
+type ActorOutboundIntent =
+  | Readonly<{
+      type: "schedule";
+      outbound: string;
+      dueAt: number;
+      operation: string;
+      input: object;
+      completion: Procedure;
+      completionInput: object;
+    }>
+  | Readonly<{ type: "cancel"; outbound: string }>
+  | Readonly<{ type: "request-cancellation"; outbound: string }>;
+
+type RuntimeActorOutboundTarget<Model extends ActorModelDefinition> = (
+  context: Readonly<{
+    key: Model["Key"];
+    id: string;
+    generation: number;
+    input: object;
+  }>,
+) => ScheduledDependencyTarget;
+
+type RuntimeActorOutboundTargets<Model extends ActorModelDefinition> = Readonly<
+  Record<string, RuntimeActorOutboundTarget<Model>>
+>;
 
 type ActiveActorTimer = Readonly<{
   timer: string;
@@ -656,6 +981,29 @@ type ActorTimerSlot = {
   dueAt: number;
   operation: string;
   input: object;
+  active: boolean;
+};
+
+type ActiveActorOutbound = Readonly<{
+  outbound: string;
+  generation: number;
+  dueAt: number;
+  target: ScheduledDependencyTarget;
+  completion: string;
+  completionInput: object;
+  claim?: ActorJournalOutboundClaimed;
+  cancellationRequested: boolean;
+}>;
+
+type ActorOutboundSlot = {
+  outbound: string;
+  generation: number;
+  dueAt: number;
+  target: ScheduledDependencyTarget;
+  completion: string;
+  completionInput: object;
+  claim?: ActorJournalOutboundClaimed;
+  cancellationRequested: boolean;
   active: boolean;
 };
 
@@ -676,6 +1024,14 @@ function actorRegistryStream(name: string): string {
 
 function actorAlarm(stream: string): string {
   return `actor-alarm:${stream.length}:${stream}`;
+}
+
+function actorOutboundAlarm(stream: string, outbound: string): string {
+  return `actor-outbound:${stream.length}:${stream}:${outbound.length}:${outbound}`;
+}
+
+function actorOutboundInvocation(stream: string, outbound: string, generation: number): string {
+  return `actor-outbound:${stream.length}:${stream}:${outbound.length}:${outbound}:${generation}`;
 }
 
 function actorAdmission(stream: string): string {
@@ -834,6 +1190,51 @@ function compactActorTimers(timers: readonly ActorJournalTimerEvent[]): ActorJou
   return compacted;
 }
 
+function compactActorOutbounds(
+  outbounds: readonly ActorJournalOutboundEvent[],
+): ActorJournalOutboundEvent[] {
+  const latestGenerations: Partial<Record<string, number>> = {};
+  for (const outboundEvent of outbounds) {
+    const currentGeneration = latestGenerations[outboundEvent.outbound];
+    if (currentGeneration === undefined || outboundEvent.generation > currentGeneration) {
+      latestGenerations[outboundEvent.outbound] = outboundEvent.generation;
+    }
+  }
+  const compacted: ActorJournalOutboundEvent[] = [];
+  for (const outbound of Object.keys(latestGenerations)) {
+    const latestGeneration = latestGenerations[outbound];
+    if (latestGeneration !== undefined) {
+      let scheduled: ActorJournalOutboundScheduled | undefined;
+      let claimed: ActorJournalOutboundClaimed | undefined;
+      let cancellationRequested: ActorJournalOutboundCancellationRequested | undefined;
+      let terminal: ActorJournalOutboundCompleted | ActorJournalOutboundCancelled | undefined;
+      for (const candidateEvent of outbounds) {
+        if (
+          candidateEvent.outbound === outbound &&
+          candidateEvent.generation === latestGeneration
+        ) {
+          if (candidateEvent.type === "actor.outbound.scheduled") {
+            scheduled = candidateEvent;
+          } else if (candidateEvent.type === "actor.outbound.claimed") {
+            claimed = candidateEvent;
+          } else if (candidateEvent.type === "actor.outbound.cancellation-requested") {
+            cancellationRequested = candidateEvent;
+          } else {
+            terminal = candidateEvent;
+          }
+        }
+      }
+      if (terminal !== undefined) compacted.push(terminal);
+      else {
+        if (scheduled !== undefined) compacted.push(scheduled);
+        if (claimed !== undefined) compacted.push(claimed);
+        if (cancellationRequested !== undefined) compacted.push(cancellationRequested);
+      }
+    }
+  }
+  return compacted;
+}
+
 function actorJournalSnapshot<Model extends ActorModelDefinition>(
   journal: ActorJournal<Model>,
 ): ActorJournalSnapshot<Model> {
@@ -925,7 +1326,8 @@ function actorJournalSnapshot<Model extends ActorModelDefinition>(
   }
   return {
     format: "kit.actor",
-    version: 1,
+    version: 2,
+    stateVersion: journal.stateVersion,
     state: journal.state,
     accepted,
     expired,
@@ -934,6 +1336,7 @@ function actorJournalSnapshot<Model extends ActorModelDefinition>(
     poisoned,
     completed,
     timers: compactActorTimers(journal.timers),
+    outbounds: compactActorOutbounds(journal.outbounds),
   };
 }
 
@@ -1002,10 +1405,52 @@ function assertActorJournalEvent<Model extends ActorModelDefinition>(
       [],
       "actor timer contract",
     );
+  } else if (event.type === "actor.outbound.scheduled") {
+    assertActorRecord(
+      event,
+      ["type", "outbound", "generation", "dueAt", "target", "completion", "completionInput", "at"],
+      [],
+      "actor outbound contract",
+    );
+  } else if (event.type === "actor.outbound.claimed") {
+    assertActorRecord(
+      event,
+      ["type", "outbound", "generation", "owner", "attempt", "until", "at"],
+      [],
+      "actor outbound claim contract",
+    );
+  } else if (event.type === "actor.outbound.completed") {
+    assertActorRecord(
+      event,
+      ["type", "outbound", "generation", "owner", "attempt", "invocation", "at"],
+      [],
+      "actor outbound completion contract",
+    );
+  } else if (event.type === "actor.outbound.cancelled") {
+    assertActorRecord(
+      event,
+      ["type", "outbound", "generation", "at"],
+      [],
+      "actor outbound contract",
+    );
+  } else if (event.type === "actor.outbound.cancellation-requested") {
+    assertActorRecord(
+      event,
+      ["type", "outbound", "generation", "at"],
+      [],
+      "actor outbound cancellation contract",
+    );
+  } else if (event.type === "actor.state.evolved") {
+    assertActorRecord(
+      event,
+      ["type", "stateVersion", "state", "at"],
+      [],
+      "actor state evolution contract",
+    );
   } else if (event.type === "actor.command.completed") {
     assertActorRecord(
       event,
-      ["type", "invocation", "state", "outcome", "at"],
+      ["type", "invocation", "stateVersion", "state", "outcome", "at"],
       [],
       "actor state contract",
     );
@@ -1023,6 +1468,7 @@ function restoreActorSnapshot<Model extends ActorModelDefinition>(
     [
       "format",
       "version",
+      "stateVersion",
       "state",
       "accepted",
       "expired",
@@ -1031,11 +1477,12 @@ function restoreActorSnapshot<Model extends ActorModelDefinition>(
       "poisoned",
       "completed",
       "timers",
+      "outbounds",
     ],
     [],
     "actor snapshot contract",
   );
-  if (snapshot.format !== "kit.actor" || snapshot.version !== 1) {
+  if (snapshot.format !== "kit.actor" || snapshot.version !== 2) {
     throw new ActorError({ type: "invalid", reason: "actor snapshot contract" });
   }
   for (const acceptedEvent of snapshot.accepted) {
@@ -1053,9 +1500,13 @@ function restoreActorSnapshot<Model extends ActorModelDefinition>(
     assertActorJournalEvent<Model>(completedEvent);
   }
   for (const timerEvent of snapshot.timers) assertActorJournalEvent<Model>(timerEvent);
+  for (const outboundEvent of snapshot.outbounds) {
+    assertActorJournalEvent<Model>(outboundEvent);
+  }
   return {
     revision,
     snapshotRevision: revision,
+    stateVersion: snapshot.stateVersion,
     state: snapshot.state,
     accepted: snapshot.accepted,
     expired: snapshot.expired,
@@ -1070,17 +1521,18 @@ function restoreActorSnapshot<Model extends ActorModelDefinition>(
     poisoned: snapshot.poisoned,
     completed: snapshot.completed,
     timers: snapshot.timers,
+    outbounds: snapshot.outbounds,
   };
 }
 
-async function readActorJournal<Model extends ActorModelDefinition>(
+async function readActorJournalAttempt<Model extends ActorModelDefinition>(
   events: EventStore<ActorJournalEvent<Model>, ActorJournalSnapshot<Model>>,
   stream: string,
   key: Model["Key"],
-  initialize: (context: ActorInitialContext<Model>) => Model["State"],
+  actorState: RuntimeActorState<Model>,
   cache: ActorActivationCache<Model>,
   at: number,
-): Promise<ActorJournal<Model>> {
+): Promise<ActorJournal<Model> | undefined> {
   const activation = beginActorActivation(cache, stream, at);
   let cached = activation.journal;
   try {
@@ -1095,7 +1547,8 @@ async function readActorJournal<Model extends ActorModelDefinition>(
       ...(cached === undefined ? {} : { after: cached.revision }),
     });
     let revision = cached?.revision ?? 0;
-    let state = cached?.state ?? initialize({ key });
+    let stateVersion = cached?.stateVersion ?? actorState.version;
+    let state = cached?.state ?? actorState.initialize({ key });
     const accepted: ActorJournalAccepted[] = [];
     const expired: ActorJournalAccepted[] = [];
     const pendingCandidates: ActorJournalAccepted[] = [];
@@ -1104,6 +1557,7 @@ async function readActorJournal<Model extends ActorModelDefinition>(
     const poisoned: ActorJournalPoisoned[] = [];
     const completed: ActorJournalCompleted<Model>[] = [];
     const timers: ActorJournalTimerEvent[] = [];
+    const outbounds: ActorJournalOutboundEvent[] = [];
     if (cached !== undefined) {
       for (const acceptedEvent of cached.accepted) {
         accepted.push(acceptedEvent);
@@ -1115,6 +1569,7 @@ async function readActorJournal<Model extends ActorModelDefinition>(
       for (const poisonEvent of cached.poisoned) poisoned.push(poisonEvent);
       for (const completionEvent of cached.completed) completed.push(completionEvent);
       for (const timerEvent of cached.timers) timers.push(timerEvent);
+      for (const outboundEvent of cached.outbounds) outbounds.push(outboundEvent);
     }
     for (const entry of stored) {
       revision = entry.revision;
@@ -1135,15 +1590,58 @@ async function readActorJournal<Model extends ActorModelDefinition>(
         timers.push(event);
       } else if (event.type === "actor.timer.fired") {
         timers.push(event);
+      } else if (
+        event.type === "actor.outbound.scheduled" ||
+        event.type === "actor.outbound.claimed" ||
+        event.type === "actor.outbound.completed" ||
+        event.type === "actor.outbound.cancelled" ||
+        event.type === "actor.outbound.cancellation-requested"
+      ) {
+        outbounds.push(event);
+      } else if (event.type === "actor.state.evolved") {
+        stateVersion = event.stateVersion;
+        state = event.state;
       } else if (event.type === "actor.command.completed") {
         completed.push(event);
+        stateVersion = event.stateVersion;
         state = event.state;
       }
+    }
+    if (stateVersion > actorState.version) {
+      throw new ActorError({ type: "invalid", reason: "actor state is newer than this Program" });
+    }
+    if (stateVersion < actorState.version) {
+      if (actorState.evolve === undefined) {
+        throw new ActorError({ type: "invalid", reason: "actor state evolution is unavailable" });
+      }
+      const evolved = actorState.evolve({ key, version: stateVersion, state });
+      const appended = await events.append({
+        stream,
+        expectedRevision: revision,
+        events: [
+          {
+            type: "actor.state.evolved",
+            stateVersion: actorState.version,
+            state: evolved,
+            at,
+          },
+        ],
+      });
+      if (appended === undefined) {
+        activation.journal = undefined;
+        activation.phase = "idle";
+        return undefined;
+      }
+      const last = appended[appended.length - 1];
+      if (last !== undefined) revision = last.revision;
+      stateVersion = actorState.version;
+      state = evolved;
     }
     const pending = pendingActorInvocations(pendingCandidates, completed, failed, poisoned);
     const journal = {
       revision,
       snapshotRevision: cached?.snapshotRevision ?? 0,
+      stateVersion,
       state,
       accepted,
       expired,
@@ -1153,6 +1651,7 @@ async function readActorJournal<Model extends ActorModelDefinition>(
       poisoned,
       completed,
       timers,
+      outbounds,
     };
     const current = cache.entries[stream];
     if (
@@ -1171,6 +1670,21 @@ async function readActorJournal<Model extends ActorModelDefinition>(
     activation.touchedAt = at;
     throw error;
   }
+}
+
+async function readActorJournal<Model extends ActorModelDefinition>(
+  events: EventStore<ActorJournalEvent<Model>, ActorJournalSnapshot<Model>>,
+  stream: string,
+  key: Model["Key"],
+  actorState: RuntimeActorState<Model>,
+  cache: ActorActivationCache<Model>,
+  at: number,
+): Promise<ActorJournal<Model>> {
+  for (let attempt = 0; attempt < 128; attempt += 1) {
+    const journal = await readActorJournalAttempt(events, stream, key, actorState, cache, at);
+    if (journal !== undefined) return journal;
+  }
+  throw new ActorError({ type: "overloaded" });
 }
 
 async function registerActor<Model extends ActorModelDefinition>(
@@ -1243,6 +1757,31 @@ async function registeredActorKeys<Model extends ActorModelDefinition>(
     }
   }
   return { revision, keys };
+}
+
+async function registeredActorKeyPage<Model extends ActorModelDefinition>(
+  events: EventStore<ActorJournalEvent<Model>, ActorJournalSnapshot<Model>>,
+  registry: string,
+  after: number,
+  limit: number,
+): Promise<ActorKeyPage<Model["Key"]>> {
+  if (after < 0 || after % 1 !== 0) {
+    throw new TypeError("Actor key cursor must be a non-negative integer.");
+  }
+  if (limit < 1 || limit > actorRegistryBatchSize || limit % 1 !== 0) {
+    throw new TypeError(`Actor key page size must be between 1 and ${actorRegistryBatchSize}.`);
+  }
+  const stored = await events.read({ stream: registry, after, limit });
+  const entries: Readonly<{ cursor: number; key: Model["Key"] }>[] = [];
+  for (const entry of stored) {
+    if (entry.event.type === "actor.registered") {
+      entries.push({ cursor: entry.revision, key: entry.event.key });
+    }
+  }
+  return {
+    entries,
+    done: stored.length < limit,
+  };
 }
 
 function activeActorTimers<Model extends ActorModelDefinition>(
@@ -1348,6 +1887,156 @@ function actorTimerEvents<Model extends ActorModelDefinition>(
   return events;
 }
 
+function activeActorOutbounds<Model extends ActorModelDefinition>(
+  journal: ActorJournal<Model>,
+  appended: readonly ActorJournalOutboundEvent[] = [],
+): readonly ActiveActorOutbound[] {
+  const slots: ActorOutboundSlot[] = [];
+  for (const event of journal.outbounds) {
+    applyActorOutboundEvent(slots, event);
+  }
+  for (const appendedEvent of appended) {
+    applyActorOutboundEvent(slots, appendedEvent);
+  }
+  const active: ActiveActorOutbound[] = [];
+  for (const slot of slots) {
+    if (slot.active) {
+      active.push({
+        outbound: slot.outbound,
+        generation: slot.generation,
+        dueAt: slot.dueAt,
+        target: slot.target,
+        completion: slot.completion,
+        completionInput: slot.completionInput,
+        cancellationRequested: slot.cancellationRequested,
+        ...(slot.claim === undefined ? {} : { claim: slot.claim }),
+      });
+    }
+  }
+  return active;
+}
+
+function applyActorOutboundEvent(
+  slots: ActorOutboundSlot[],
+  event: ActorJournalOutboundEvent,
+): void {
+  const existing = slots.find((candidate) => candidate.outbound === event.outbound);
+  if (event.type === "actor.outbound.scheduled") {
+    if (existing === undefined) {
+      slots.push({
+        outbound: event.outbound,
+        generation: event.generation,
+        dueAt: event.dueAt,
+        target: event.target,
+        completion: event.completion,
+        completionInput: event.completionInput,
+        cancellationRequested: false,
+        active: true,
+      });
+    } else {
+      existing.generation = event.generation;
+      existing.dueAt = event.dueAt;
+      existing.target = event.target;
+      existing.completion = event.completion;
+      existing.completionInput = event.completionInput;
+      existing.claim = undefined;
+      existing.cancellationRequested = false;
+      existing.active = true;
+    }
+  } else if (existing !== undefined) {
+    if (event.type === "actor.outbound.cancelled") {
+      existing.generation = event.generation;
+      existing.claim = undefined;
+      existing.active = false;
+    } else if (existing.generation === event.generation) {
+      if (event.type === "actor.outbound.claimed") existing.claim = event;
+      else if (event.type === "actor.outbound.cancellation-requested") {
+        existing.cancellationRequested = true;
+      } else {
+        existing.active = false;
+      }
+    }
+  }
+}
+
+function nextActorOutboundGeneration<Model extends ActorModelDefinition>(
+  journal: ActorJournal<Model>,
+  appended: readonly ActorJournalOutboundEvent[],
+  outbound: string,
+): number {
+  let generation = 0;
+  for (const event of journal.outbounds) {
+    if (event.outbound === outbound && event.generation > generation) generation = event.generation;
+  }
+  for (const appendedEvent of appended) {
+    if (appendedEvent.outbound === outbound && appendedEvent.generation > generation) {
+      generation = appendedEvent.generation;
+    }
+  }
+  return generation + 1;
+}
+
+function actorOutboundEvents<Model extends ActorModelDefinition>(
+  journal: ActorJournal<Model>,
+  intents: readonly ActorOutboundIntent[],
+  commands: Readonly<Partial<Record<string, RuntimeCommandHandler<Model>>>>,
+  commandNames: readonly string[],
+  targets: RuntimeActorOutboundTargets<Model>,
+  key: Model["Key"],
+  now: number,
+): readonly ActorJournalOutboundEvent[] {
+  const events: ActorJournalOutboundEvent[] = [];
+  for (const intent of intents) {
+    if (intent.type === "request-cancellation") {
+      const current = activeActorOutbounds(journal, events).find(
+        (candidate) => candidate.outbound === intent.outbound,
+      );
+      if (current !== undefined && !current.cancellationRequested) {
+        events.push({
+          type: "actor.outbound.cancellation-requested",
+          outbound: intent.outbound,
+          generation: current.generation,
+          at: now,
+        });
+      }
+    } else {
+      const generation = nextActorOutboundGeneration(journal, events, intent.outbound);
+      if (intent.type === "cancel") {
+        events.push({
+          type: "actor.outbound.cancelled",
+          outbound: intent.outbound,
+          generation,
+          at: now,
+        });
+      } else {
+        const target = targets[intent.operation];
+        if (target === undefined) {
+          throw new ActorError({
+            type: "invalid",
+            reason: `unknown Actor outbound operation ${intent.operation}`,
+          });
+        }
+        events.push({
+          type: "actor.outbound.scheduled",
+          outbound: intent.outbound,
+          generation,
+          dueAt: intent.dueAt,
+          target: target({
+            key,
+            id: intent.outbound,
+            generation,
+            input: intent.input,
+          }),
+          completion: resolveActorCommandOperation(commands, commandNames, intent.completion),
+          completionInput: intent.completionInput,
+          at: now,
+        });
+      }
+    }
+  }
+  return events;
+}
+
 function pendingActorCommand<Model extends ActorModelDefinition>(
   journal: ActorJournal<Model>,
 ): ActorJournalAccepted | undefined {
@@ -1367,6 +2056,24 @@ function latestActorClaim<Model extends ActorModelDefinition>(
   let latest: ActorJournalClaimed | undefined;
   for (const claim of journal.claims) {
     if (claim.invocation === invocation) latest = claim;
+  }
+  return latest;
+}
+
+function latestActorOutboundClaim<Model extends ActorModelDefinition>(
+  journal: ActorJournal<Model>,
+  outbound: string,
+  generation: number,
+): ActorJournalOutboundClaimed | undefined {
+  let latest: ActorJournalOutboundClaimed | undefined;
+  for (const event of journal.outbounds) {
+    if (
+      event.type === "actor.outbound.claimed" &&
+      event.outbound === outbound &&
+      event.generation === generation
+    ) {
+      latest = event;
+    }
   }
   return latest;
 }
@@ -1395,7 +2102,8 @@ async function scheduleActorJournalWake<Model extends ActorModelDefinition>(
   journal: ActorJournal<Model>,
 ): Promise<void> {
   const id = actorAlarm(stream);
-  const at = nextActorWake(journal, dependencies.clock.now({}));
+  const now = dependencies.clock.now({});
+  const at = nextActorWake(journal, now);
   if (at === undefined) {
     await dependencies.alarm.cancel({ id });
   } else {
@@ -1408,6 +2116,33 @@ async function scheduleActorJournalWake<Model extends ActorModelDefinition>(
         input: { key, dueAt: at },
       },
     });
+  }
+  const activeOutbounds = activeActorOutbounds(journal);
+  const projected: Partial<Record<string, true>> = {};
+  for (const outbound of activeOutbounds) {
+    projected[outbound.outbound] = true;
+    const alarm = actorOutboundAlarm(stream, outbound.outbound);
+    const claimUntil = outbound.claim?.until;
+    const dueAt =
+      claimUntil !== undefined && claimUntil > now && claimUntil > outbound.dueAt
+        ? claimUntil
+        : outbound.dueAt;
+    await dependencies.alarm.schedule({
+      id: alarm,
+      at: dueAt,
+      target: outbound.target,
+    });
+    if (outbound.cancellationRequested) {
+      await dependencies.alarm.requestCancellation({ id: alarm });
+    }
+  }
+  for (const event of journal.outbounds) {
+    if (projected[event.outbound] !== true) {
+      projected[event.outbound] = true;
+      await dependencies.alarm.cancel({
+        id: actorOutboundAlarm(stream, event.outbound),
+      });
+    }
   }
 }
 
@@ -1449,6 +2184,205 @@ function assertMatchingActorInvocation(
   throw new ActorError({ type: "conflict", invocation: accepted.invocation });
 }
 
+async function claimCommittedActorOutbound<Model extends ActorModelDefinition>(
+  dependencies: RuntimeActorRequirements<Model>,
+  stream: string,
+  key: Model["Key"],
+  actorState: RuntimeActorState<Model>,
+  cache: ActorActivationCache<Model>,
+  outbound: string,
+  generation: number,
+  owner: string,
+): Promise<ActorOutboundClaim> {
+  for (let retry = 0; retry < 128; retry += 1) {
+    const journal = await readActorJournal(
+      dependencies.events,
+      stream,
+      key,
+      actorState,
+      cache,
+      dependencies.clock.now({}),
+    );
+    const intent = activeActorOutbounds(journal).find(
+      (candidate) => candidate.outbound === outbound && candidate.generation === generation,
+    );
+    if (intent === undefined) return { status: "settled" };
+    const now = dependencies.clock.now({});
+    const previous = latestActorOutboundClaim(journal, outbound, generation);
+    if (previous !== undefined && previous.until > now) {
+      return { status: "busy", retryAt: previous.until };
+    }
+    const attempt = (previous?.attempt ?? 0) + 1;
+    const until = now + 30_000;
+    const appended = await dependencies.events.append({
+      stream,
+      expectedRevision: journal.revision,
+      events: [
+        {
+          type: "actor.outbound.claimed",
+          outbound,
+          generation,
+          owner,
+          attempt,
+          until,
+          at: now,
+        },
+      ],
+    });
+    if (appended !== undefined) {
+      return {
+        status: "claimed",
+        owner,
+        attempt,
+        invocation: actorOutboundInvocation(stream, outbound, generation),
+        scheduledAt: intent.dueAt,
+        startedAt: now,
+        cancellationRequested: intent.cancellationRequested,
+      };
+    }
+  }
+  throw new ActorError({ type: "overloaded" });
+}
+
+async function heartbeatCommittedActorOutbound<Model extends ActorModelDefinition>(
+  dependencies: RuntimeActorRequirements<Model>,
+  stream: string,
+  key: Model["Key"],
+  actorState: RuntimeActorState<Model>,
+  cache: ActorActivationCache<Model>,
+  outbound: string,
+  generation: number,
+  owner: string,
+  attempt: number,
+): Promise<boolean> {
+  for (let retry = 0; retry < 128; retry += 1) {
+    const journal = await readActorJournal(
+      dependencies.events,
+      stream,
+      key,
+      actorState,
+      cache,
+      dependencies.clock.now({}),
+    );
+    const intent = activeActorOutbounds(journal).find(
+      (candidate) => candidate.outbound === outbound && candidate.generation === generation,
+    );
+    if (intent === undefined) return false;
+    const claim = latestActorOutboundClaim(journal, outbound, generation);
+    const now = dependencies.clock.now({});
+    if (
+      claim === undefined ||
+      claim.owner !== owner ||
+      claim.attempt !== attempt ||
+      claim.until <= now
+    ) {
+      return false;
+    }
+    const appended = await dependencies.events.append({
+      stream,
+      expectedRevision: journal.revision,
+      events: [
+        {
+          type: "actor.outbound.claimed",
+          outbound,
+          generation,
+          owner,
+          attempt,
+          until: now + 30_000,
+          at: now,
+        },
+      ],
+    });
+    if (appended !== undefined) return true;
+  }
+  throw new ActorError({ type: "overloaded" });
+}
+
+async function completeCommittedActorOutbound<Model extends ActorModelDefinition>(
+  dependencies: RuntimeActorRequirements<Model>,
+  stream: string,
+  key: Model["Key"],
+  actorState: RuntimeActorState<Model>,
+  cache: ActorActivationCache<Model>,
+  outbound: string,
+  generation: number,
+  owner: string,
+  attempt: number,
+  output: object,
+): Promise<boolean> {
+  for (let retry = 0; retry < 128; retry += 1) {
+    const journal = await readActorJournal(
+      dependencies.events,
+      stream,
+      key,
+      actorState,
+      cache,
+      dependencies.clock.now({}),
+    );
+    const alreadyCompleted = journal.outbounds.find(
+      (event) =>
+        event.type === "actor.outbound.completed" &&
+        event.outbound === outbound &&
+        event.generation === generation &&
+        event.owner === owner &&
+        event.attempt === attempt,
+    );
+    if (alreadyCompleted !== undefined) return true;
+    const intent = activeActorOutbounds(journal).find(
+      (candidate) => candidate.outbound === outbound && candidate.generation === generation,
+    );
+    if (intent === undefined) return false;
+    const claim = latestActorOutboundClaim(journal, outbound, generation);
+    const now = dependencies.clock.now({});
+    if (
+      claim === undefined ||
+      claim.owner !== owner ||
+      claim.attempt !== attempt ||
+      claim.until <= now
+    ) {
+      return false;
+    }
+    const invocation = actorOutboundInvocation(stream, outbound, generation);
+    const completionInvocation = `${invocation}:completion`;
+    const appended = await dependencies.events.append({
+      stream,
+      expectedRevision: journal.revision,
+      events: [
+        {
+          type: "actor.outbound.completed",
+          outbound,
+          generation,
+          owner,
+          attempt,
+          invocation,
+          at: now,
+        },
+        {
+          type: "actor.command.accepted",
+          invocation: completionInvocation,
+          operation: intent.completion,
+          input: {
+            request: cloneActorState(intent.completionInput),
+            delivery: {
+              id: outbound,
+              generation,
+              invocation,
+              attempt,
+              scheduledAt: intent.dueAt,
+              startedAt: claim.at,
+              completedAt: now,
+              output: cloneActorState(output),
+            } satisfies ActorOutboundDelivery,
+          },
+          at: now,
+        },
+      ],
+    });
+    if (appended !== undefined) return true;
+  }
+  throw new ActorError({ type: "overloaded" });
+}
+
 async function executeActorCommand<Model extends ActorModelDefinition>(
   accepted: ActorJournalAccepted,
   state: Model["State"],
@@ -1456,12 +2390,20 @@ async function executeActorCommand<Model extends ActorModelDefinition>(
   key: Model["Key"],
   commands: Readonly<Partial<Record<string, RuntimeCommandHandler<Model>>>>,
   dependencies: DependenciesOf<Model>,
+  factory: object,
   executionContext: ExecutionContext,
 ): Promise<ActorCommandExecution<Model>> {
   return (await executionContext.run({
     scope: { kind: "actor", actor: name, key },
     async task() {
-      return await executeActorCommandInScope(accepted, state, key, commands, dependencies);
+      return await executeActorCommandInScope(
+        accepted,
+        state,
+        key,
+        commands,
+        dependencies,
+        factory,
+      );
     },
   })) as ActorCommandExecution<Model>;
 }
@@ -1472,6 +2414,7 @@ async function executeActorCommandInScope<Model extends ActorModelDefinition>(
   key: Model["Key"],
   commands: Readonly<Partial<Record<string, RuntimeCommandHandler<Model>>>>,
   dependencies: DependenciesOf<Model>,
+  factory: object,
 ): Promise<ActorCommandExecution<Model>> {
   const command = commands[accepted.operation];
   if (command === undefined) {
@@ -1479,13 +2422,15 @@ async function executeActorCommandInScope<Model extends ActorModelDefinition>(
   }
   const next = cloneActorState(state);
   const timers: ActorTimerIntent[] = [];
+  const outbounds: ActorOutboundIntent[] = [];
   try {
     const value = await command({
       key,
       state: next,
       input: accepted.input,
       dependencies,
-      invocation: { id: accepted.invocation },
+      factory,
+      invocation: { id: accepted.invocation, at: accepted.at },
       fail(failure: object): never {
         throw new ActorCommandFailure(failure);
       },
@@ -1503,11 +2448,31 @@ async function executeActorCommandInScope<Model extends ActorModelDefinition>(
           timers.push({ type: "cancel", timer: request.id });
         },
       },
+      outbox: {
+        schedule(request): void {
+          outbounds.push({
+            type: "schedule",
+            outbound: request.id,
+            dueAt: request.at,
+            operation: request.operation,
+            input: request.input,
+            completion: request.complete,
+            completionInput: request.completion,
+          });
+        },
+        cancel(request): void {
+          outbounds.push({ type: "cancel", outbound: request.id });
+        },
+        requestCancellation(request): void {
+          outbounds.push({ type: "request-cancellation", outbound: request.id });
+        },
+      },
     });
     return {
       state: next,
       outcome: { status: "succeeded", value },
       timers,
+      outbounds,
     };
   } catch (error) {
     if (error instanceof ActorCommandFailure) {
@@ -1515,6 +2480,7 @@ async function executeActorCommandInScope<Model extends ActorModelDefinition>(
         state,
         outcome: { status: "failed", failure: error.failure },
         timers: [],
+        outbounds: [],
       };
     }
     throw error;
@@ -1542,7 +2508,7 @@ async function admitActorCommand<Model extends ActorModelDefinition>(
   dependencies: RuntimeActorRequirements<Model>,
   stream: string,
   key: Model["Key"],
-  initialize: (context: ActorInitialContext<Model>) => Model["State"],
+  actorState: RuntimeActorState<Model>,
   cache: ActorActivationCache<Model>,
   name: Model["Name"],
   operation: string,
@@ -1556,7 +2522,7 @@ async function admitActorCommand<Model extends ActorModelDefinition>(
       dependencies.events,
       stream,
       key,
-      initialize,
+      actorState,
       cache,
       dependencies.clock.now({}),
     );
@@ -1608,7 +2574,7 @@ async function admitSerializedActorCommand<Model extends ActorModelDefinition>(
   stream: string,
   registry: string,
   key: Model["Key"],
-  initialize: (context: ActorInitialContext<Model>) => Model["State"],
+  actorState: RuntimeActorState<Model>,
   cache: ActorActivationCache<Model>,
   name: Model["Name"],
   operation: string,
@@ -1631,7 +2597,7 @@ async function admitSerializedActorCommand<Model extends ActorModelDefinition>(
           dependencies,
           stream,
           key,
-          initialize,
+          actorState,
           cache,
           name,
           operation,
@@ -1648,7 +2614,7 @@ async function recordActorCommandFailure<Model extends ActorModelDefinition>(
   dependencies: RuntimeActorRequirements<Model>,
   stream: string,
   key: Model["Key"],
-  initialize: (context: ActorInitialContext<Model>) => Model["State"],
+  actorState: RuntimeActorState<Model>,
   cache: ActorActivationCache<Model>,
   invocation: string,
   owner: string,
@@ -1659,7 +2625,7 @@ async function recordActorCommandFailure<Model extends ActorModelDefinition>(
       dependencies.events,
       stream,
       key,
-      initialize,
+      actorState,
       cache,
       dependencies.clock.now({}),
     );
@@ -1692,7 +2658,7 @@ async function admitDueActorTimer<Model extends ActorModelDefinition>(
   dependencies: RuntimeActorRequirements<Model>,
   stream: string,
   key: Model["Key"],
-  initialize: (context: ActorInitialContext<Model>) => Model["State"],
+  actorState: RuntimeActorState<Model>,
   cache: ActorActivationCache<Model>,
 ): Promise<boolean> {
   for (let attempt = 0; attempt < 128; attempt += 1) {
@@ -1700,7 +2666,7 @@ async function admitDueActorTimer<Model extends ActorModelDefinition>(
       dependencies.events,
       stream,
       key,
-      initialize,
+      actorState,
       cache,
       dependencies.clock.now({}),
     );
@@ -1738,14 +2704,14 @@ async function snapshotActorHistory<Model extends ActorModelDefinition>(
   dependencies: RuntimeActorRequirements<Model>,
   stream: string,
   key: Model["Key"],
-  initialize: (context: ActorInitialContext<Model>) => Model["State"],
+  actorState: RuntimeActorState<Model>,
   cache: ActorActivationCache<Model>,
 ): Promise<void> {
   const journal = await readActorJournal(
     dependencies.events,
     stream,
     key,
-    initialize,
+    actorState,
     cache,
     dependencies.clock.now({}),
   );
@@ -1771,23 +2737,25 @@ async function drainActorCommands<Model extends ActorModelDefinition>(
   stream: string,
   name: Model["Name"],
   key: Model["Key"],
-  initialize: (context: ActorInitialContext<Model>) => Model["State"],
+  actorState: RuntimeActorState<Model>,
   cache: ActorActivationCache<Model>,
   commands: Readonly<Partial<Record<string, RuntimeCommandHandler<Model>>>>,
   commandNames: readonly string[],
+  outboundTargets: RuntimeActorOutboundTargets<Model>,
   modelDependencies: DependenciesOf<Model>,
+  factory: object,
   owner: string,
   requestedInvocation: string | undefined,
   authority?: DependencyInvocationAuthority,
 ): Promise<ActorJournalCompleted<Model> | undefined> {
   for (let executionAttempt = 0; executionAttempt < 2_048; executionAttempt += 1) {
-    const admittedTimer = await admitDueActorTimer(dependencies, stream, key, initialize, cache);
+    const admittedTimer = await admitDueActorTimer(dependencies, stream, key, actorState, cache);
     if (!admittedTimer) {
       const executionJournal = await readActorJournal(
         dependencies.events,
         stream,
         key,
-        initialize,
+        actorState,
         cache,
         dependencies.clock.now({}),
       );
@@ -1871,6 +2839,7 @@ async function drainActorCommands<Model extends ActorModelDefinition>(
             key,
             commands,
             modelDependencies,
+            factory,
             dependencies.executionContext,
           );
           if (execution.outcome.status === "failed") {
@@ -1882,7 +2851,7 @@ async function drainActorCommands<Model extends ActorModelDefinition>(
               dependencies,
               stream,
               key,
-              initialize,
+              actorState,
               cache,
               pending.invocation,
               owner,
@@ -1898,7 +2867,7 @@ async function drainActorCommands<Model extends ActorModelDefinition>(
             dependencies.events,
             stream,
             key,
-            initialize,
+            actorState,
             cache,
             dependencies.clock.now({}),
           );
@@ -1922,6 +2891,7 @@ async function drainActorCommands<Model extends ActorModelDefinition>(
                 {
                   type: "actor.command.completed",
                   invocation: pending.invocation,
+                  stateVersion: actorState.version,
                   state: execution.state,
                   outcome: execution.outcome,
                   at: completedAt,
@@ -1935,6 +2905,16 @@ async function drainActorCommands<Model extends ActorModelDefinition>(
                 completedAt,
               );
               for (const timerEvent of timerEvents) completionEvents.push(timerEvent);
+              const outboundEvents = actorOutboundEvents(
+                completionJournal,
+                execution.outbounds,
+                commands,
+                commandNames,
+                outboundTargets,
+                key,
+                completedAt,
+              );
+              for (const outboundEvent of outboundEvents) completionEvents.push(outboundEvent);
               const appended = await dependencies.events.append({
                 stream,
                 expectedRevision: completionJournal.revision,
@@ -1943,7 +2923,7 @@ async function drainActorCommands<Model extends ActorModelDefinition>(
               if (appended !== undefined) {
                 committed = true;
                 try {
-                  await snapshotActorHistory(dependencies, stream, key, initialize, cache);
+                  await snapshotActorHistory(dependencies, stream, key, actorState, cache);
                 } catch {
                   // Snapshotting is retried after later commits; journal state is authoritative.
                 }
@@ -1963,14 +2943,14 @@ async function scheduleActorWake<Model extends ActorModelDefinition>(
   stream: string,
   name: Model["Name"],
   key: Model["Key"],
-  initialize: (context: ActorInitialContext<Model>) => Model["State"],
+  actorState: RuntimeActorState<Model>,
   cache: ActorActivationCache<Model>,
 ): Promise<void> {
   const journal = await readActorJournal(
     dependencies.events,
     stream,
     key,
-    initialize,
+    actorState,
     cache,
     dependencies.clock.now({}),
   );
@@ -2022,7 +3002,10 @@ function actorMethodModes(schema: TypeSchema): Readonly<Record<string, ActorMeth
 function createActorFeature<Model extends ActorModelDefinition>(
   definition: ActorImplementation<Model>,
   identify: () => Model["Name"],
-  describe: () => TypeSchema,
+  resolveMethods: () => Readonly<Record<string, ActorMethodMode>>,
+  resolveFactory: () => object,
+  resolveVersion: () => number,
+  resolveOutbounds: () => RuntimeActorOutboundTargets<Model>,
 ): DefinedActor<Model> {
   return createFeature<ActorFeatureContract<Model>>({
     programs: {
@@ -2035,13 +3018,19 @@ function createActorFeature<Model extends ActorModelDefinition>(
           const slots: ActorExecutionSlots = {};
           const cache = createActorActivationCache<Model>();
           const modelDependencies = runtimeDependencies as unknown as DependenciesOf<Model>;
-          const initialize = definition.state as unknown as (
-            context: ActorInitialContext<Model>,
-          ) => Model["State"];
+          const actorState: RuntimeActorState<Model> = {
+            version: resolveVersion(),
+            initialize: definition.state as unknown as (
+              context: ActorInitialContext<Model>,
+            ) => Model["State"],
+            evolve: definition.evolve as unknown as RuntimeActorEvolution<Model> | undefined,
+          };
           const methods = definition.methods as unknown as Readonly<
             Record<string, RuntimeCommandHandler<Model> | RuntimeQueryHandler<Model>>
           >;
-          const methodModes = actorMethodModes(describe());
+          const methodModes = resolveMethods();
+          const factory = resolveFactory();
+          const outboundTargets = resolveOutbounds();
           const commands: Partial<Record<string, RuntimeCommandHandler<Model>>> = {};
           const queries: Partial<Record<string, RuntimeQueryHandler<Model>>> = {};
           for (const methodName of Object.keys(methods)) {
@@ -2066,19 +3055,30 @@ function createActorFeature<Model extends ActorModelDefinition>(
             const stream = actorStream(name, key);
             registrations.keys[actorRegistrationKey(key)] = true;
             resolveActorExecutionSlot(slots, stream);
-            await scheduleActorWake(runtimeDependencies, stream, name, key, initialize, cache);
+            await scheduleActorWake(runtimeDependencies, stream, name, key, actorState, cache);
             idleActorActivation(cache, stream, runtimeDependencies.clock.now({}));
           }
           return {
             [name]: {
               async [dependencyInvocation](
                 operation: string,
-                request: RuntimeRequest<Model>,
+                received: RuntimeActorRequest<Model>,
                 invocation: RuntimeInvocation,
               ) {
+                recordActorMetric(runtimeDependencies.telemetry, name, "counter", "actor.calls", 1);
+                if (operation === actorKeysOperation) {
+                  await assertActorAuthority(invocation.authority);
+                  const keyPage = received as Readonly<{ after?: number; limit?: number }>;
+                  return await registeredActorKeyPage(
+                    runtimeDependencies.events,
+                    registry,
+                    keyPage.after ?? 0,
+                    keyPage.limit ?? actorRegistryBatchSize,
+                  );
+                }
+                const request = received as RuntimeRequest<Model>;
                 const query = queries[operation];
                 const stream = actorStream(name, request.key);
-                recordActorMetric(runtimeDependencies.telemetry, name, "counter", "actor.calls", 1);
                 recordActorMetric(
                   runtimeDependencies.telemetry,
                   name,
@@ -2124,12 +3124,139 @@ function createActorFeature<Model extends ActorModelDefinition>(
                 }
                 if (
                   operation !== actorWakeOperation &&
+                  operation !== actorOutboundClaimOperation &&
+                  operation !== actorOutboundHeartbeatOperation &&
+                  operation !== actorOutboundCompleteOperation &&
                   query === undefined &&
                   commands[operation] === undefined
                 ) {
                   throw new Error(`Unknown Actor operation ${operation}.`);
                 }
                 try {
+                  if (operation === actorOutboundClaimOperation) {
+                    await assertActorAuthority(invocation.authority);
+                    const claimRequest = request as RuntimeRequest<Model> &
+                      Readonly<{ outbound: string; generation: number }>;
+                    const claim = (await runtimeDependencies.synchronization.exclusive({
+                      key: stream,
+                      async task() {
+                        return await claimCommittedActorOutbound(
+                          runtimeDependencies,
+                          stream,
+                          request.key,
+                          actorState,
+                          cache,
+                          claimRequest.outbound,
+                          claimRequest.generation,
+                          owner,
+                        );
+                      },
+                    })) as ActorOutboundClaim;
+                    await scheduleActorWake(
+                      runtimeDependencies,
+                      stream,
+                      name,
+                      request.key,
+                      actorState,
+                      cache,
+                    );
+                    return claim;
+                  }
+                  if (operation === actorOutboundHeartbeatOperation) {
+                    await assertActorAuthority(invocation.authority);
+                    const heartbeatRequest = request as RuntimeRequest<Model> &
+                      Readonly<{
+                        outbound: string;
+                        generation: number;
+                        owner: string;
+                        attempt: number;
+                      }>;
+                    const heartbeatAccepted = (await runtimeDependencies.synchronization.exclusive({
+                      key: stream,
+                      async task() {
+                        return {
+                          accepted: await heartbeatCommittedActorOutbound(
+                            runtimeDependencies,
+                            stream,
+                            request.key,
+                            actorState,
+                            cache,
+                            heartbeatRequest.outbound,
+                            heartbeatRequest.generation,
+                            heartbeatRequest.owner,
+                            heartbeatRequest.attempt,
+                          ),
+                        };
+                      },
+                    })) as Readonly<{ accepted: boolean }>;
+                    await scheduleActorWake(
+                      runtimeDependencies,
+                      stream,
+                      name,
+                      request.key,
+                      actorState,
+                      cache,
+                    );
+                    return heartbeatAccepted;
+                  }
+                  if (operation === actorOutboundCompleteOperation) {
+                    await assertActorAuthority(invocation.authority);
+                    const completionRequest = request as RuntimeRequest<Model> &
+                      Readonly<{
+                        outbound: string;
+                        generation: number;
+                        owner: string;
+                        attempt: number;
+                        output: object;
+                      }>;
+                    const completionAccepted = (await runtimeDependencies.synchronization.exclusive(
+                      {
+                        key: stream,
+                        async task() {
+                          const completed = await completeCommittedActorOutbound(
+                            runtimeDependencies,
+                            stream,
+                            request.key,
+                            actorState,
+                            cache,
+                            completionRequest.outbound,
+                            completionRequest.generation,
+                            completionRequest.owner,
+                            completionRequest.attempt,
+                            completionRequest.output,
+                          );
+                          if (completed) {
+                            await drainActorCommands(
+                              runtimeDependencies,
+                              stream,
+                              name,
+                              request.key,
+                              actorState,
+                              cache,
+                              commands,
+                              commandNames,
+                              outboundTargets,
+                              modelDependencies,
+                              factory,
+                              owner,
+                              undefined,
+                              invocation.authority,
+                            );
+                          }
+                          return { accepted: completed };
+                        },
+                      },
+                    )) as Readonly<{ accepted: boolean }>;
+                    await scheduleActorWake(
+                      runtimeDependencies,
+                      stream,
+                      name,
+                      request.key,
+                      actorState,
+                      cache,
+                    );
+                    return completionAccepted;
+                  }
                   if (operation === actorWakeOperation) {
                     await assertActorAuthority(invocation.authority);
                     return await runtimeDependencies.synchronization.exclusive({
@@ -2143,11 +3270,13 @@ function createActorFeature<Model extends ActorModelDefinition>(
                             stream,
                             name,
                             request.key,
-                            initialize,
+                            actorState,
                             cache,
                             commands,
                             commandNames,
+                            outboundTargets,
                             modelDependencies,
+                            factory,
                             owner,
                             undefined,
                             invocation.authority,
@@ -2169,7 +3298,7 @@ function createActorFeature<Model extends ActorModelDefinition>(
                         stream,
                         registry,
                         request.key,
-                        initialize,
+                        actorState,
                         cache,
                         name,
                         operation,
@@ -2182,7 +3311,7 @@ function createActorFeature<Model extends ActorModelDefinition>(
                         stream,
                         name,
                         request.key,
-                        initialize,
+                        actorState,
                         cache,
                       );
                       return { id: invocationId };
@@ -2200,7 +3329,7 @@ function createActorFeature<Model extends ActorModelDefinition>(
                               stream,
                               registry,
                               request.key,
-                              initialize,
+                              actorState,
                               cache,
                               name,
                               operation,
@@ -2213,11 +3342,13 @@ function createActorFeature<Model extends ActorModelDefinition>(
                               stream,
                               name,
                               request.key,
-                              initialize,
+                              actorState,
                               cache,
                               commands,
                               commandNames,
+                              outboundTargets,
                               modelDependencies,
+                              factory,
                               owner,
                               invocationId,
                               invocation.authority,
@@ -2238,7 +3369,7 @@ function createActorFeature<Model extends ActorModelDefinition>(
                         stream,
                         name,
                         request.key,
-                        initialize,
+                        actorState,
                         cache,
                       );
                       throw error;
@@ -2252,7 +3383,7 @@ function createActorFeature<Model extends ActorModelDefinition>(
                       runtimeDependencies.events,
                       stream,
                       request.key,
-                      initialize,
+                      actorState,
                       cache,
                       runtimeDependencies.clock.now({}),
                     );
@@ -2260,6 +3391,7 @@ function createActorFeature<Model extends ActorModelDefinition>(
                       key: request.key,
                       state: committedJournal.state,
                       input: request.input,
+                      factory,
                     });
                   }
                   return await runtimeDependencies.synchronization.exclusive({
@@ -2272,11 +3404,13 @@ function createActorFeature<Model extends ActorModelDefinition>(
                           stream,
                           name,
                           request.key,
-                          initialize,
+                          actorState,
                           cache,
                           commands,
                           commandNames,
+                          outboundTargets,
                           modelDependencies,
+                          factory,
                           owner,
                           undefined,
                           invocation.authority,
@@ -2285,7 +3419,7 @@ function createActorFeature<Model extends ActorModelDefinition>(
                           runtimeDependencies.events,
                           stream,
                           request.key,
-                          initialize,
+                          actorState,
                           cache,
                           runtimeDependencies.clock.now({}),
                         );
@@ -2294,6 +3428,7 @@ function createActorFeature<Model extends ActorModelDefinition>(
                           key: request.key,
                           state: queryJournal.state,
                           input: request.input,
+                          factory,
                         });
                       } finally {
                         querySlot.active = false;

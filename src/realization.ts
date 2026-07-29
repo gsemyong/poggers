@@ -252,8 +252,10 @@ function readSystemCompilationCache(
         .filter(([source, signature]) => sourceSignature(source) !== signature)
         .map(([source]) => source),
     );
-    const sourceFiles = new Set(cached.compilation.sourceFiles);
-    const globallyInvalid = [...invalid].some((source) => !sourceFiles.has(source));
+    const semanticSources = new Set(
+      cached.compilation.semanticGraph.features.flatMap(({ sourceFiles }) => sourceFiles),
+    );
+    const globallyInvalid = [...invalid].some((source) => !semanticSources.has(source));
     const semanticGraph = globallyInvalid
       ? { version: 1 as const, features: [] }
       : {

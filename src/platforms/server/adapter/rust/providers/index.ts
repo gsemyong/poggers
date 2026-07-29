@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 
+import type { ProductionServiceRequirement } from "@/adapter";
 import {
   collectDependencyOperations,
   type DependencyIR,
@@ -17,6 +18,7 @@ export type ServerProductionDependency = ServerProviderProduction &
   Readonly<{
     name: string;
     dependency: string;
+    services?: readonly ProductionServiceRequirement[];
   }>;
 
 export type ResolvedServerProductionDependency = Readonly<{
@@ -27,17 +29,42 @@ export type ResolvedServerProductionDependency = Readonly<{
 
 const dependencyDirectory = (name: string): string => resolve(import.meta.dirname, name);
 
+const natsService = Object.freeze({
+  service: "nats",
+  features: Object.freeze(["jetstream"]),
+  endpoints: Object.freeze([
+    Object.freeze({
+      name: "client",
+      transport: "tcp" as const,
+      scheme: "nats",
+    }),
+  ]),
+});
+
 export const alarmDependency = defineServerProductionDependency({
   name: "alarm",
   dependency: "alarm",
   configuration: [
-    { name: "servers", environment: "KIT_NATS_URL" },
+    {
+      name: "servers",
+      environment: "KIT_NATS_URL",
+      source: { kind: "service-location", service: "nats", endpoint: "client" },
+    },
     { name: "stream", environment: "KIT_ALARM_STREAM", default: "KIT_ALARMS" },
     { name: "state", environment: "KIT_ALARM_STATE", default: "KIT_ALARM_STATE" },
     { name: "replicas", environment: "KIT_ALARM_REPLICAS", default: "1" },
   ],
   crate: { package: "kit-server-alarm", directory: dependencyDirectory("alarm") },
   rust: { type: "kit_server_alarm::Alarm", constructor: "kit_server_alarm::create" },
+  services: [natsService],
+});
+
+export const calendarDependency = defineServerProductionDependency({
+  name: "calendar",
+  dependency: "calendar",
+  configuration: [],
+  crate: { package: "kit-server-calendar", directory: dependencyDirectory("calendar") },
+  rust: { type: "kit_server_calendar::Calendar", constructor: "kit_server_calendar::create" },
 });
 
 export const clockDependency = defineServerProductionDependency({
@@ -150,7 +177,11 @@ export const jetStreamEventsDependency = defineServerProductionDependency({
   ...eventsDependency,
   name: "events-jetstream",
   configuration: [
-    { name: "servers", environment: "NATS_URL", default: "nats://127.0.0.1:4222" },
+    {
+      name: "servers",
+      environment: "NATS_URL",
+      source: { kind: "service-location", service: "nats", endpoint: "client" },
+    },
     { name: "stream", environment: "KIT_EVENT_STREAM", default: "KIT_EVENTS" },
   ],
   crate: {
@@ -161,6 +192,7 @@ export const jetStreamEventsDependency = defineServerProductionDependency({
     type: "kit_server_events_jetstream::Events",
     constructor: "kit_server_events_jetstream::create",
   },
+  services: [natsService],
 });
 
 export const httpDependency = defineServerProductionDependency({
@@ -196,6 +228,7 @@ export const httpDependency = defineServerProductionDependency({
 
 export const serverProductionDependencies: readonly ServerProductionDependency[] = Object.freeze([
   alarmDependency,
+  calendarDependency,
   clockDependency,
   eventsDependency,
   executionContextDependency,
@@ -219,6 +252,7 @@ export function defineServerProductionDependency(
     implementation.configuration.map(({ name }) => name),
     `Server production Dependency ${JSON.stringify(implementation.name)} configuration field`,
   );
+  const services = serverServices(implementation.services);
   duplicate(
     implementation.bindings ?? [],
     `Server production Dependency ${JSON.stringify(implementation.name)} attachment binding`,
@@ -243,7 +277,69 @@ export function defineServerProductionDependency(
       );
     }
   }
-  return Object.freeze(implementation);
+  return Object.freeze({ ...implementation, services });
+}
+
+function serverServices(value: unknown): readonly ProductionServiceRequirement[] {
+  if (value === undefined) return Object.freeze([]);
+  if (!Array.isArray(value)) {
+    throw new Error("Server production services must be an array.");
+  }
+  const services = value.map((candidate): ProductionServiceRequirement => {
+    if (!candidate || typeof candidate !== "object") {
+      throw new Error("Server production service must be an object.");
+    }
+    const service = Reflect.get(candidate, "service");
+    const features = Reflect.get(candidate, "features");
+    const endpoints = Reflect.get(candidate, "endpoints");
+    if (typeof service !== "string") throw new Error("Server production service has no name.");
+    identifier(service, "server production service");
+    if (!Array.isArray(features) || !features.every((entry) => typeof entry === "string")) {
+      throw new Error(
+        `Server production service ${JSON.stringify(service)} features must be strings.`,
+      );
+    }
+    if (!Array.isArray(endpoints)) {
+      throw new Error(
+        `Server production service ${JSON.stringify(service)} endpoints must be an array.`,
+      );
+    }
+    duplicate(features, `Server production service ${JSON.stringify(service)} feature`);
+    const normalizedEndpoints = endpoints.map((endpoint) => {
+      if (!endpoint || typeof endpoint !== "object") {
+        throw new Error(
+          `Server production service ${JSON.stringify(service)} endpoint must be an object.`,
+        );
+      }
+      const name = Reflect.get(endpoint, "name");
+      const transport = Reflect.get(endpoint, "transport");
+      const scheme = Reflect.get(endpoint, "scheme");
+      if (typeof name !== "string" || typeof scheme !== "string" || transport !== "tcp") {
+        throw new Error(
+          `Server production service ${JSON.stringify(service)} endpoint is invalid.`,
+        );
+      }
+      identifier(name, `Server production service ${JSON.stringify(service)} endpoint`);
+      identifier(scheme, `Server production service ${JSON.stringify(service)} scheme`);
+      return Object.freeze({ name, transport, scheme });
+    });
+    duplicate(
+      normalizedEndpoints.map(({ name }) => name),
+      `Server production service ${JSON.stringify(service)} endpoint`,
+    );
+    return Object.freeze({
+      service,
+      features: Object.freeze([...features].sort()),
+      endpoints: Object.freeze(
+        normalizedEndpoints.sort((left, right) => left.name.localeCompare(right.name)),
+      ),
+    });
+  });
+  duplicate(
+    services.map(({ service }) => service),
+    "Server production service",
+  );
+  return Object.freeze(services.sort((left, right) => left.service.localeCompare(right.service)));
 }
 
 /**

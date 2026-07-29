@@ -22,10 +22,12 @@ import { connect } from "@nats-io/transport-node";
 
 import type { DependencyContractIR } from "@/compiler/ir";
 import { cloneData } from "@/core/data";
-import type {
-  DependencyContract,
-  DependencyImplementation,
-  DependencyProviderInvocation,
+import {
+  createDependencyCancellation,
+  type DependencyCancellation,
+  type DependencyContract,
+  type DependencyImplementation,
+  type DependencyProviderInvocation,
 } from "@/core/dependency";
 import {
   conformExternalDependencies,
@@ -35,6 +37,10 @@ import {
 import type { Clock, EventStore, Identifiers, StoredEvent } from "@/features/entity";
 import type {
   Alarm,
+  Calendar,
+  CalendarField,
+  CalendarPattern,
+  CalendarRange,
   ExecutionContext,
   HttpField,
   HttpRequest,
@@ -80,6 +86,7 @@ type AlarmDelivery = Readonly<{
   at: number;
   attempt: number;
   target: ScheduledDependencyTarget;
+  cancellation: DependencyCancellation;
 }>;
 
 type NodeAlarmImplementation = DependencyImplementation<Alarm> &
@@ -98,6 +105,7 @@ export type NodeHost<Event> = Readonly<{
   executionContext: ExecutionContext;
   identifiers: Identifiers;
   synchronization: Synchronization;
+  calendar: Calendar;
   clock: Clock;
   timer: Timer;
   telemetry: Telemetry;
@@ -110,6 +118,7 @@ type NodeHostImplementations<Event> = Readonly<{
   executionContext: DependencyImplementation<ExecutionContext>;
   identifiers: DependencyImplementation<Identifiers>;
   synchronization: DependencyImplementation<Synchronization>;
+  calendar: DependencyImplementation<Calendar>;
   clock: DependencyImplementation<Clock>;
   timer: DependencyImplementation<Timer>;
   telemetry: DependencyImplementation<Telemetry>;
@@ -263,6 +272,7 @@ export async function createNodeHost<Event = unknown>(
 ): Promise<Readonly<Record<string, unknown>>> {
   const available: readonly NodeHostDependency[] = [
     "alarm",
+    "calendar",
     "clock",
     "events",
     "executionContext",
@@ -337,6 +347,7 @@ export async function createNodeHost<Event = unknown>(
     if (requested.has("synchronization")) {
       result.synchronization = createNodeSynchronization();
     }
+    if (requested.has("calendar")) result.calendar = createNodeCalendar();
     if (requested.has("clock")) result.clock = { now: () => Date.now() };
     if (requested.has("timer")) {
       result.timer = {
@@ -445,15 +456,30 @@ function ownProviderResources(
   resources: readonly (Disposable | AsyncDisposable)[],
 ): object & AsyncDisposable {
   let disposed = false;
-  return new Proxy(implementation, {
-    get(target, property, receiver) {
-      if (property !== Symbol.asyncDispose) return Reflect.get(target, property, receiver);
-      return async () => {
-        if (disposed) return;
-        disposed = true;
-        await disposeResources([target, ...resources]);
-      };
+  const dispose = async () => {
+    if (disposed) return;
+    disposed = true;
+    await disposeResources([implementation, ...resources]);
+  };
+  return new Proxy(Object.create(null) as object, {
+    get(_target, property) {
+      return property === Symbol.asyncDispose
+        ? dispose
+        : Reflect.get(implementation, property, implementation);
     },
+    getOwnPropertyDescriptor(_target, property) {
+      if (property === Symbol.asyncDispose) {
+        return { configurable: true, enumerable: false, value: dispose, writable: false };
+      }
+      const descriptor = Reflect.getOwnPropertyDescriptor(implementation, property);
+      return descriptor ? { ...descriptor, configurable: true } : undefined;
+    },
+    getPrototypeOf: () => Reflect.getPrototypeOf(implementation),
+    has: (_target, property) =>
+      property === Symbol.asyncDispose || Reflect.has(implementation, property),
+    ownKeys: () => [
+      ...new Set<string | symbol>([...Reflect.ownKeys(implementation), Symbol.asyncDispose]),
+    ],
   }) as object & AsyncDisposable;
 }
 
@@ -513,6 +539,404 @@ function createNodeSynchronization(): DependencyImplementation<Synchronization> 
   });
 }
 
+type NormalizedCalendar = Readonly<{
+  second: readonly number[];
+  minute: readonly number[];
+  hour: readonly number[];
+  dayOfMonth: readonly number[];
+  month: readonly number[];
+  year: readonly number[];
+  dayOfWeek: readonly number[];
+}>;
+
+type CivilDateTime = Readonly<{
+  year: number;
+  month: number;
+  day: number;
+  hour: number;
+  minute: number;
+  second: number;
+}>;
+
+const calendarMonths: Readonly<Record<string, number>> = Object.freeze({
+  JAN: 1,
+  JANUARY: 1,
+  FEB: 2,
+  FEBRUARY: 2,
+  MAR: 3,
+  MARCH: 3,
+  APR: 4,
+  APRIL: 4,
+  MAY: 5,
+  JUN: 6,
+  JUNE: 6,
+  JUL: 7,
+  JULY: 7,
+  AUG: 8,
+  AUGUST: 8,
+  SEP: 9,
+  SEPTEMBER: 9,
+  OCT: 10,
+  OCTOBER: 10,
+  NOV: 11,
+  NOVEMBER: 11,
+  DEC: 12,
+  DECEMBER: 12,
+});
+const calendarWeekdays: Readonly<Record<string, number>> = Object.freeze({
+  SUN: 0,
+  SUNDAY: 0,
+  MON: 1,
+  MONDAY: 1,
+  TUE: 2,
+  TUESDAY: 2,
+  WED: 3,
+  WEDNESDAY: 3,
+  THU: 4,
+  THURSDAY: 4,
+  FRI: 5,
+  FRIDAY: 5,
+  SAT: 6,
+  SATURDAY: 6,
+});
+const civilFormatters = new Map<string, Intl.DateTimeFormat>();
+
+function createNodeCalendar(): DependencyImplementation<Calendar> {
+  return Object.freeze({
+    async next({ input: { after, through, timeZone, pattern } }) {
+      if (!Number.isSafeInteger(after) || !Number.isSafeInteger(through) || through < after) {
+        throw new TypeError("Calendar bounds must be ordered integer milliseconds.");
+      }
+      if (!timeZone) throw new TypeError("Calendar timeZone must be non-empty.");
+      const hasCron = Object.hasOwn(pattern, "cron");
+      const hasCalendar = Object.hasOwn(pattern, "calendar");
+      if (hasCron === hasCalendar) {
+        throw new TypeError("Calendar pattern must contain exactly one of calendar or cron.");
+      }
+      if (hasCron) {
+        const cron = parseCalendarCron((pattern as Readonly<{ cron: string }>).cron);
+        const zone = cron.timeZone ?? timeZone;
+        const at = nextCalendarMatch(cron.calendar, zone, after, through);
+        return at === undefined ? undefined : { at };
+      }
+      const at = nextCalendarMatch(
+        normalizeCalendar((pattern as Readonly<{ calendar: CalendarPattern }>).calendar),
+        timeZone,
+        after,
+        through,
+      );
+      return at === undefined ? undefined : { at };
+    },
+  });
+}
+
+function nextCalendarMatch(
+  calendar: NormalizedCalendar,
+  timeZone: string,
+  after: number,
+  through: number,
+): number | undefined {
+  const formatter = civilFormatter(timeZone);
+  const start = civilDateTime(formatter, after);
+  const finish = civilDateTime(formatter, through);
+  let date = Date.UTC(start.year, start.month - 1, start.day);
+  const finalDate = Date.UTC(finish.year, finish.month - 1, finish.day) + 86_400_000;
+  let searched = 0;
+  while (date <= finalDate && searched++ < 146_400) {
+    const candidateDate = new Date(date);
+    const year = candidateDate.getUTCFullYear();
+    const month = candidateDate.getUTCMonth() + 1;
+    const day = candidateDate.getUTCDate();
+    const weekday = candidateDate.getUTCDay();
+    if (
+      calendar.year.includes(year) &&
+      calendar.month.includes(month) &&
+      calendar.dayOfMonth.includes(day) &&
+      calendar.dayOfWeek.includes(weekday)
+    ) {
+      const sameDate = year === start.year && month === start.month && day === start.day;
+      let best: number | undefined;
+      for (const hour of calendar.hour) {
+        if (sameDate && hour < start.hour) continue;
+        for (const minute of calendar.minute) {
+          if (sameDate && hour === start.hour && minute < start.minute) continue;
+          for (const second of calendar.second) {
+            if (
+              sameDate &&
+              hour === start.hour &&
+              minute === start.minute &&
+              second < start.second
+            ) {
+              continue;
+            }
+            for (const instant of resolveCivilDateTime(formatter, timeZone, {
+              year,
+              month,
+              day,
+              hour,
+              minute,
+              second,
+            })) {
+              if (instant > after && instant <= through && (best === undefined || instant < best)) {
+                best = instant;
+              }
+            }
+            if (best !== undefined) break;
+          }
+          if (best !== undefined) break;
+        }
+        if (best !== undefined) break;
+      }
+      if (best !== undefined) return best;
+    }
+    date += 86_400_000;
+  }
+  if (date <= finalDate) {
+    throw new RangeError("Calendar search exceeds four hundred years.");
+  }
+  return undefined;
+}
+
+function civilFormatter(timeZone: string): Intl.DateTimeFormat {
+  const retained = civilFormatters.get(timeZone);
+  if (retained !== undefined) return retained;
+  const formatter = new Intl.DateTimeFormat("en-US-u-ca-iso8601-nu-latn", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  });
+  formatter.format(0);
+  civilFormatters.set(timeZone, formatter);
+  return formatter;
+}
+
+function civilDateTime(formatter: Intl.DateTimeFormat, instant: number): CivilDateTime {
+  const values: Partial<Record<Intl.DateTimeFormatPartTypes, number>> = {};
+  for (const part of formatter.formatToParts(new Date(instant))) {
+    if (
+      part.type === "year" ||
+      part.type === "month" ||
+      part.type === "day" ||
+      part.type === "hour" ||
+      part.type === "minute" ||
+      part.type === "second"
+    ) {
+      values[part.type] = Number(part.value);
+    }
+  }
+  if (
+    values.year === undefined ||
+    values.month === undefined ||
+    values.day === undefined ||
+    values.hour === undefined ||
+    values.minute === undefined ||
+    values.second === undefined
+  ) {
+    throw new TypeError("Calendar provider could not resolve civil time.");
+  }
+  return {
+    year: values.year,
+    month: values.month,
+    day: values.day,
+    hour: values.hour,
+    minute: values.minute,
+    second: values.second,
+  };
+}
+
+function resolveCivilDateTime(
+  formatter: Intl.DateTimeFormat,
+  timeZone: string,
+  value: CivilDateTime,
+): readonly number[] {
+  const naive = Date.UTC(
+    value.year,
+    value.month - 1,
+    value.day,
+    value.hour,
+    value.minute,
+    value.second,
+  );
+  if (!Number.isFinite(naive)) return [];
+  if (timeZone === "UTC" || timeZone === "Etc/UTC") return [naive];
+  const offsets = new Set<number>();
+  for (const distance of [-172_800_000, -86_400_000, 0, 86_400_000, 172_800_000]) {
+    const sampled = naive + distance;
+    const local = civilDateTime(formatter, sampled);
+    offsets.add(
+      Date.UTC(local.year, local.month - 1, local.day, local.hour, local.minute, local.second) -
+        sampled,
+    );
+  }
+  const matches = new Set<number>();
+  for (const offset of offsets) {
+    const instant = naive - offset;
+    if (sameCivilDateTime(civilDateTime(formatter, instant), value)) matches.add(instant);
+  }
+  return [...matches].sort((left, right) => left - right);
+}
+
+function sameCivilDateTime(left: CivilDateTime, right: CivilDateTime): boolean {
+  return (
+    left.year === right.year &&
+    left.month === right.month &&
+    left.day === right.day &&
+    left.hour === right.hour &&
+    left.minute === right.minute &&
+    left.second === right.second
+  );
+}
+
+function normalizeCalendar(pattern: CalendarPattern): NormalizedCalendar {
+  return {
+    second: calendarField(pattern.second, 0, 59, undefined, [0]),
+    minute: calendarField(pattern.minute, 0, 59, undefined, [0]),
+    hour: calendarField(pattern.hour, 0, 23, undefined, [0]),
+    dayOfMonth: calendarField(pattern.dayOfMonth, 1, 31),
+    month: calendarField(pattern.month, 1, 12, calendarMonths),
+    year: calendarField(pattern.year, 1, 9_999),
+    dayOfWeek: calendarField(pattern.dayOfWeek, 0, 6, calendarWeekdays, undefined, true),
+  };
+}
+
+function calendarField(
+  field: CalendarField | undefined,
+  minimum: number,
+  maximum: number,
+  aliases?: Readonly<Record<string, number>>,
+  defaults?: readonly number[],
+  sundayAlias = false,
+): readonly number[] {
+  if (field === undefined && defaults !== undefined) return defaults;
+  if (field === undefined || field === "*") return integerRange(minimum, maximum, 1);
+  const values = Array.isArray(field) ? field : [field];
+  const selected = new Set<number>();
+  for (const candidate of values) {
+    const range =
+      candidate && typeof candidate === "object"
+        ? (candidate as CalendarRange)
+        : { start: candidate as number | string };
+    let start = calendarUnit(range.start, aliases);
+    let end = range.end === undefined ? start : calendarUnit(range.end, aliases);
+    const step = range.step ?? 1;
+    if (!Number.isSafeInteger(step) || step < 1) {
+      throw new TypeError("Calendar field step must be a positive integer.");
+    }
+    const allowedMaximum = sundayAlias ? maximum + 1 : maximum;
+    if (start < minimum || end > allowedMaximum || end < start) {
+      throw new RangeError(`Calendar field must be between ${minimum} and ${maximum}.`);
+    }
+    for (; start <= end; start += step) {
+      selected.add(sundayAlias && start === 7 ? 0 : start);
+    }
+  }
+  if (selected.size === 0) throw new TypeError("Calendar field cannot be empty.");
+  return [...selected].sort((left, right) => left - right);
+}
+
+function calendarUnit(
+  value: number | string,
+  aliases: Readonly<Record<string, number>> | undefined,
+): number {
+  const named = typeof value === "string" ? aliases?.[value.toUpperCase()] : undefined;
+  const parsed = named ?? (typeof value === "string" ? Number(value) : value);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new TypeError(`Invalid calendar field value ${JSON.stringify(value)}.`);
+  }
+  return parsed;
+}
+
+function integerRange(start: number, end: number, step: number): readonly number[] {
+  const values: number[] = [];
+  for (let value = start; value <= end; value += step) values.push(value);
+  return values;
+}
+
+function parseCalendarCron(expression: string): Readonly<{
+  timeZone?: string;
+  calendar: NormalizedCalendar;
+}> {
+  let source = expression.split("#", 1)[0]?.trim() ?? "";
+  if (!source) throw new TypeError("Cron expression must be non-empty.");
+  let timeZone: string | undefined;
+  const zone = /^(?:CRON_TZ|TZ)=([^\s]+)\s+/.exec(source);
+  if (zone !== null) {
+    timeZone = zone[1];
+    source = source.slice(zone[0].length).trim();
+  }
+  const shorthand: Readonly<Record<string, string>> = {
+    "@yearly": "0 0 1 1 *",
+    "@annually": "0 0 1 1 *",
+    "@monthly": "0 0 1 * *",
+    "@weekly": "0 0 * * 0",
+    "@daily": "0 0 * * *",
+    "@midnight": "0 0 * * *",
+    "@hourly": "0 * * * *",
+  };
+  source = shorthand[source.toLowerCase()] ?? source;
+  const fields = source.split(/\s+/);
+  const expanded =
+    fields.length === 5 ? ["0", ...fields, "*"] : fields.length === 6 ? ["0", ...fields] : fields;
+  if (expanded.length !== 7) {
+    throw new TypeError("Cron must contain five, six, or seven fields.");
+  }
+  return {
+    ...(timeZone === undefined ? {} : { timeZone }),
+    calendar: {
+      second: parseCronField(expanded[0]!, 0, 59),
+      minute: parseCronField(expanded[1]!, 0, 59),
+      hour: parseCronField(expanded[2]!, 0, 23),
+      dayOfMonth: parseCronField(expanded[3]!, 1, 31),
+      month: parseCronField(expanded[4]!, 1, 12, calendarMonths),
+      dayOfWeek: parseCronField(expanded[5]!, 0, 6, calendarWeekdays, true),
+      year: parseCronField(expanded[6]!, 1, 9_999),
+    },
+  };
+}
+
+function parseCronField(
+  source: string,
+  minimum: number,
+  maximum: number,
+  aliases?: Readonly<Record<string, number>>,
+  sundayAlias = false,
+): readonly number[] {
+  const values = new Set<number>();
+  for (const segment of source.split(",")) {
+    const [base, stepSource, extra] = segment.split("/");
+    if (!base || extra !== undefined) throw new TypeError(`Invalid cron field ${source}.`);
+    const step = stepSource === undefined ? 1 : Number(stepSource);
+    if (!Number.isSafeInteger(step) || step < 1) {
+      throw new TypeError("Cron field step must be a positive integer.");
+    }
+    let start: number;
+    let end: number;
+    if (base === "*") {
+      start = minimum;
+      end = maximum;
+    } else {
+      const range = base.split("-");
+      if (range.length > 2 || !range[0]) throw new TypeError(`Invalid cron field ${source}.`);
+      start = calendarUnit(range[0], aliases);
+      end = range[1] === undefined ? start : calendarUnit(range[1], aliases);
+    }
+    const allowedMaximum = sundayAlias ? maximum + 1 : maximum;
+    if (start < minimum || end > allowedMaximum || end < start) {
+      throw new RangeError(`Cron field must be between ${minimum} and ${maximum}.`);
+    }
+    for (let value = start; value <= end; value += step) {
+      values.add(sundayAlias && value === 7 ? 0 : value);
+    }
+  }
+  if (values.size === 0) throw new TypeError("Cron field cannot be empty.");
+  return [...values].sort((left, right) => left - right);
+}
+
 function createNodeAlarm(): NodeAlarmImplementation {
   type Scheduled = {
     id: string;
@@ -521,8 +945,16 @@ function createNodeAlarm(): NodeAlarmImplementation {
     attempt: number;
     generation: number;
     target: ScheduledDependencyTarget;
+    cancellation: ReturnType<typeof createDependencyCancellation>;
   };
   const scheduled = new Map<string, Scheduled>();
+  const active = new Map<
+    string,
+    Readonly<{
+      generation: number;
+      cancellation: ReturnType<typeof createDependencyCancellation>;
+    }>
+  >();
   const dispatchers = new Set<(delivery: AlarmDelivery) => Promise<void>>();
   const generations = new Map<string, number>();
   let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -536,49 +968,65 @@ function createNodeAlarm(): NodeAlarmImplementation {
     }
     let next: number | undefined;
     for (const entry of scheduled.values()) {
+      if (active.has(entry.id)) continue;
       if (next === undefined || entry.readyAt < next) next = entry.readyAt;
     }
     if (next === undefined) return;
     timeout = setTimeout(
       () => {
         timeout = undefined;
-        void dispatchDue();
+        dispatchDue();
       },
       Math.min(2_147_483_647, Math.max(0, next - Date.now())),
     );
   };
-  const dispatchDue = async (): Promise<void> => {
+  const deliver = async (entry: Scheduled): Promise<void> => {
+    let delivered = false;
+    try {
+      for (const dispatch of dispatchers) {
+        try {
+          await dispatch({
+            id: entry.id,
+            at: entry.at,
+            attempt: entry.attempt,
+            target: entry.target,
+            cancellation: entry.cancellation,
+          });
+          delivered = true;
+          break;
+        } catch {
+          // Another bound Process may own the target; retain it for retry.
+        }
+      }
+    } finally {
+      const delivery = active.get(entry.id);
+      if (delivery?.generation === entry.generation) active.delete(entry.id);
+    }
+    const retained = scheduled.get(entry.id);
+    if (retained?.generation === entry.generation) {
+      if (delivered) scheduled.delete(entry.id);
+      else entry.readyAt = Date.now() + 25;
+    }
+    arm();
+  };
+  const dispatchDue = (): void => {
     if (disposed || running) return;
     running = true;
     try {
       const now = Date.now();
       const due = [...scheduled.values()]
-        .filter(({ readyAt }) => readyAt <= now)
+        .filter(({ id, readyAt }) => readyAt <= now && !active.has(id))
         .sort((left, right) => left.readyAt - right.readyAt || left.id.localeCompare(right.id))
         .slice(0, 256);
       for (const entry of due) {
         const current = scheduled.get(entry.id);
         if (current?.generation !== entry.generation) continue;
         entry.attempt += 1;
-        let delivered = false;
-        for (const dispatch of dispatchers) {
-          try {
-            await dispatch({
-              id: entry.id,
-              at: entry.at,
-              attempt: entry.attempt,
-              target: entry.target,
-            });
-            delivered = true;
-            break;
-          } catch {
-            // Another bound Process may own the target; retain it for retry.
-          }
-        }
-        const retained = scheduled.get(entry.id);
-        if (retained?.generation !== entry.generation) continue;
-        if (delivered) scheduled.delete(entry.id);
-        else entry.readyAt = Date.now() + 25;
+        active.set(entry.id, {
+          generation: entry.generation,
+          cancellation: entry.cancellation,
+        });
+        void deliver(entry);
       }
     } finally {
       running = false;
@@ -610,19 +1058,29 @@ function createNodeAlarm(): NodeAlarmImplementation {
         attempt: 0,
         generation,
         target: cloneData(target, `Alarm ${id} target`),
+        cancellation: createDependencyCancellation(),
       });
       arm();
     },
     async cancel({ input: { id } }) {
+      active.get(id)?.cancellation.request();
+      scheduled.get(id)?.cancellation.request();
       scheduled.delete(id);
       generations.set(id, (generations.get(id) ?? 0) + 1);
       arm();
+    },
+    async requestCancellation({ input: { id } }) {
+      active.get(id)?.cancellation.request();
+      scheduled.get(id)?.cancellation.request();
     },
     [Symbol.dispose]() {
       if (disposed) return;
       disposed = true;
       if (timeout !== undefined) clearTimeout(timeout);
       timeout = undefined;
+      for (const delivery of active.values()) delivery.cancellation.request();
+      for (const entry of scheduled.values()) entry.cancellation.request();
+      active.clear();
       scheduled.clear();
       dispatchers.clear();
     },
@@ -716,7 +1174,7 @@ function directProviderInvocation(): DependencyProviderInvocation {
     attempt: 1,
     scheduledAt: now,
     startedAt: now,
-    heartbeat() {},
+    async heartbeat() {},
     cancellation: {
       requested: () => false,
       wait: () => new Promise<void>(() => undefined),

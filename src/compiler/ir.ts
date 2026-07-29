@@ -1,4 +1,4 @@
-export const SYSTEM_IR_VERSION = 33 as const;
+export const SYSTEM_IR_VERSION = 35 as const;
 
 /** Maps semantic source files to the generated outputs affected by each source. */
 export type SystemOutputSources = Readonly<Record<string, readonly string[]>>;
@@ -163,6 +163,7 @@ export type ExpressionValueIR =
   | Readonly<{ kind: "json-parse"; value: ExpressionIR }>
   | Readonly<{ kind: "json-stringify"; value: ExpressionIR }>
   | Readonly<{ kind: "object-keys"; value: ExpressionIR }>
+  | Readonly<{ kind: "data-kind"; value: ExpressionIR }>
   | Readonly<{ kind: "to-string"; value: ExpressionIR }>
   | Readonly<{
       kind: "stream-map";
@@ -197,7 +198,21 @@ export type ExpressionValueIR =
       dependency: string;
       operation: string;
       arguments: readonly ExpressionIR[];
+      options?: ExpressionIR;
       awaited: boolean;
+    }>
+  | Readonly<{
+      kind: "dependency-dispatch";
+      dependency: ExpressionIR;
+      operation: ExpressionIR;
+      input: ExpressionIR;
+      options?: ExpressionIR;
+      awaited: boolean;
+    }>
+  | Readonly<{
+      kind: "dependency-intercept";
+      dependency: ExpressionIR;
+      intercept: ExpressionIR;
     }>
   | Readonly<{
       kind: "dependency-reference";

@@ -7,6 +7,7 @@ import { afterEach, describe, expect, test } from "vitest";
 
 import type { SourceCompilerExtension } from "@/compiler/extension";
 import {
+  projectDependencyContracts,
   selectSystemOutputs,
   serializeSystemIR,
   type SystemIR,
@@ -22,6 +23,8 @@ import {
   compileSystem as compileSystemSource,
   createSystemCompiler as createSystemCompilerSource,
 } from "@/compiler/source";
+import { executePortableFunctionIR } from "@/execution/interpreter";
+import { conformExternalDependencies } from "@/execution/process";
 import { serverCompilerExtension, serverProgramExecution } from "@/platforms/server/adapter";
 import {
   buildRustProgram,
@@ -720,7 +723,7 @@ export const clean = ({ parameters }: { parameters: { sheet: unknown } }) => ({
 
     const invocations: unknown[] = [];
     const writes: unknown[] = [];
-    await executeProgramIR(ir, "feature/worker/program/cloud", {
+    const dependencies = {
       numbers: {
         async read(context: {
           input: { count: number };
@@ -731,21 +734,40 @@ export const clean = ({ parameters }: { parameters: { sheet: unknown } }) => ({
         },
       },
       output: {
-        async write({ input }) {
+        async write({ input }: { input: unknown }) {
           writes.push(input);
         },
       },
-    });
+    };
+    await executeProgramIR(ir, "feature/worker/program/cloud", dependencies);
+    await executeProgramIR(ir, "feature/worker/program/cloud", dependencies);
     expect(invocations).toEqual([
-      {
+      expect.objectContaining({
         input: { count: 4 },
         invocation: expect.objectContaining({
-          id: "direct:numbers:read:1",
+          id: expect.stringMatching(/^direct:[0-9a-f-]+:numbers:read:1$/),
           attempt: 1,
         }),
-      },
+      }),
+      expect.objectContaining({
+        input: { count: 4 },
+        invocation: expect.objectContaining({
+          id: expect.stringMatching(/^direct:[0-9a-f-]+:numbers:read:1$/),
+          attempt: 1,
+        }),
+      }),
     ]);
-    expect(writes).toEqual([{ category: "small", value: 4 }]);
+    expect(
+      new Set(
+        invocations.map(
+          (value) => (value as { invocation: Readonly<{ id: string }> }).invocation.id,
+        ),
+      ).size,
+    ).toBe(2);
+    expect(writes).toEqual([
+      { category: "small", value: 4 },
+      { category: "small", value: 4 },
+    ]);
   });
 
   test("lowers authored dependency callbacks as portable closures", async () => {
@@ -1286,6 +1308,55 @@ const child = createFeature<Child>`,
     });
   });
 
+  test("lowers imported immutable data inside a portable Program", async () => {
+    const directory = await temporaryDirectory("kit-imported-data-");
+    const entry = resolve(directory, "system.ts");
+    await Promise.all([
+      writeFile(resolve(directory, "descriptor.ts"), 'export const descriptor = "stable";\n'),
+      writeFile(
+        entry,
+        `
+import { descriptor } from "./descriptor";
+
+type Platform = { readonly Name: string };
+type Environment = { readonly Name: string; readonly Platform: Platform };
+type Program<E extends Environment, C extends object = {}> = Readonly<C & { Environment: E }>;
+${compositionTypes()}
+
+type Fixture = {
+  Programs: {
+    server: Program<{ Name: "server"; Platform: { Name: "server" } }>;
+  };
+};
+
+const fixture = createFeature<Fixture>({
+  programs: {
+    server: {
+      start() {
+        const retained = descriptor;
+        if (retained !== "stable") throw new Error("Imported data changed.");
+      },
+    },
+  },
+});
+
+export default createSystem({ features: { fixture } });
+`,
+      ),
+    ]);
+
+    const ir = compileSystem(entry);
+    const implementation = serverExecution(
+      programContribution(ir, "feature/fixture/program/server"),
+    );
+    if (implementation?.kind !== "portable") throw new Error("Expected portable IR.");
+    expect(
+      collectExpressions(implementation.entry.body).some(
+        (expression) => expression.kind === "literal" && expression.value === "stable",
+      ),
+    ).toBe(true);
+  });
+
   test("expands nested Feature factories without compiler-specific wrappers", async () => {
     const ir = compileSystem(await fixture(nestedFactorySystemSource()));
     const contribution = programContribution(ir, "feature/parent.child/program/api");
@@ -1334,19 +1405,26 @@ const child = createFeature<Child>`,
     ).toEqual(["output.write"]);
 
     const writes: unknown[] = [];
+    const invocations: string[] = [];
     await executeProgramIR(ir, "feature/worker/program/server", {
       output: {
-        async write({ input }) {
+        async write({
+          input,
+          invocation,
+        }: Readonly<{ input: unknown; invocation: Readonly<{ id: string }> }>) {
           writes.push(input);
+          invocations.push(invocation.id);
         },
       },
     });
     expect(writes).toEqual([{ value: "ready" }]);
+    expect(invocations).toEqual(["idempotency:emit-ready"]);
   });
 
-  test("lowers a generic local Dependency reference to serializable operations", async () => {
+  test("lowers a type-derived local Dependency reference to serializable operations", async () => {
     const ir = compileSystem(await projectFixture(dependencyReferenceSystemSource()));
     const contribution = programContribution(ir, "feature/worker/program/server");
+    if (!contribution) throw new Error("Expected portable Dependency reference contribution.");
     const implementation = serverExecution(contribution);
     if (implementation?.kind !== "portable") {
       throw new Error("Expected portable Dependency reference fixture.");
@@ -1370,11 +1448,11 @@ const child = createFeature<Child>`,
     const requests: unknown[] = [];
     await executeProgramIR(ir, "feature/worker/program/server", {
       counter: {
-        async add({ input }) {
+        async add({ input }: { input: unknown }) {
           requests.push(input);
           return 2;
         },
-        async read({ input }) {
+        async read({ input }: { input: unknown }) {
           requests.push(input);
           return 2;
         },
@@ -1383,6 +1461,40 @@ const child = createFeature<Child>`,
     expect(requests).toEqual([
       { idempotencyKey: "add-1", key: "counter-1", input: { value: 2 } },
       { key: "counter-1" },
+    ]);
+
+    const helper = implementation.functions.find(({ body }) =>
+      collectExpressions(body).some(
+        (expression) => expression.kind === "dependency-reference-call",
+      ),
+    );
+    if (!helper) throw new Error("Expected a portable Dependency reference helper.");
+    const mounted = conformExternalDependencies(projectDependencyContracts(contribution.requires), {
+      counter: {
+        async add({ input }: { input: unknown }) {
+          requests.push(input);
+          return 2;
+        },
+        async read({ input }: { input: unknown }) {
+          requests.push(input);
+          return 2;
+        },
+      },
+    });
+    const liveReference = (
+      mounted.counter as Readonly<{
+        get(input: { key: string }): object;
+      }>
+    ).get({ key: "counter-2" });
+    await executePortableFunctionIR({
+      entry: helper,
+      functions: implementation.functions.filter(({ id }) => id !== helper.id),
+      arguments: [liveReference],
+      dependencies: mounted as Parameters<typeof executePortableFunctionIR>[0]["dependencies"],
+    });
+    expect(requests.slice(-2)).toEqual([
+      { idempotencyKey: "add-1", key: "counter-2", input: { value: 2 } },
+      { key: "counter-2" },
     ]);
   });
 
@@ -1682,6 +1794,50 @@ const child = createFeature<Child>`,
     expect(writes).toEqual([{ category: "large", value: 10 }]);
   });
 
+  test("preserves JavaScript Error inheritance in portable catch conditions", async () => {
+    const entry = await fixture(
+      systemSource().replace(
+        `const values = await dependencies.numbers.read({ count: 4 });
+        let total = 0;
+        for (const value of values) {
+          total += value;
+        }
+        if (total >= 10) {
+          await dependencies.output.write({ category: "large", value: total });
+        } else {
+          await dependencies.output.write({ category: "small", value: total });
+        }`,
+        `try {
+          await dependencies.numbers.read({ count: 4 });
+        } catch (error) {
+          await dependencies.output.write({
+            category: error instanceof Error ? "large" : "small",
+            value: 1,
+          });
+        }`,
+      ),
+    );
+    const ir = compileSystem(entry);
+    const writes: unknown[] = [];
+    class ProviderFailure extends Error {
+      override name = "ProviderFailure";
+    }
+    await executeProgramIR(ir, "feature/worker/program/cloud", {
+      numbers: {
+        async read() {
+          throw new ProviderFailure("handled subclass");
+        },
+      },
+      output: {
+        async write({ input }) {
+          writes.push(input);
+        },
+      },
+    });
+
+    expect(writes).toEqual([{ category: "large", value: 1 }]);
+  });
+
   test("lowers computed record writes through the portable subset", async () => {
     const entry = await fixture(
       systemSource().replace(
@@ -1729,6 +1885,41 @@ const child = createFeature<Child>`,
       },
     });
     expect(writes).toEqual([{ category: "large", value: 10 }]);
+  });
+
+  test("does not constant-fold mutable computed reads", async () => {
+    const entry = await fixture(
+      systemSource().replace(
+        `const values = await dependencies.numbers.read({ count: 4 });
+        let total = 0;
+        for (const value of values) {
+          total += value;
+        }
+        if (total >= 10) {
+          await dependencies.output.write({ category: "large", value: total });
+        } else {
+          await dependencies.output.write({ category: "small", value: total });
+        }`,
+        `const values: Record<string, number> = {};
+        let selected = "first";
+        values[selected] = 4;
+        selected = "second";
+        values[selected] = 6;
+        await dependencies.output.write({ category: "large", value: values[selected] });`,
+      ),
+    );
+    const ir = compileSystem(entry);
+    const writes: unknown[] = [];
+    await executeProgramIR(ir, "feature/worker/program/cloud", {
+      numbers: { read: async () => [] },
+      output: {
+        async write({ input }) {
+          writes.push(input);
+        },
+      },
+    });
+
+    expect(writes).toEqual([{ category: "large", value: 6 }]);
   });
 
   test(
@@ -1885,8 +2076,20 @@ function compositionTypes(): string {
 declare const featureContract: unique symbol;
 declare const applicationContract: unique symbol;
 declare const dependencyDefinition: unique symbol;
+type DependencyCallOptions = Readonly<{ idempotencyKey?: string }>;
+type DependencyConsumerOperations<Operations extends Record<string, (...arguments_: never[]) => unknown>> = {
+  [Name in keyof Operations]: Parameters<Operations[Name]> extends [unknown, ...unknown[]]
+    ? (
+        input: Parameters<Operations[Name]>[0],
+        options?: DependencyCallOptions,
+      ) => ReturnType<Operations[Name]>
+    : Operations[Name];
+};
 type Dependency<Definition extends { Operations: object }> = Readonly<
-  Definition["Operations"] & { readonly [dependencyDefinition]?: Definition }
+  Definition["Operations"] &
+    DependencyConsumerOperations<
+      Extract<Definition["Operations"], Record<string, (...arguments_: never[]) => unknown>>
+    > & { readonly [dependencyDefinition]?: Definition }
 >;
 type Feature<C> = Readonly<{ readonly [featureContract]?: C }>;
 type Application<C> = Readonly<{
@@ -2764,7 +2967,7 @@ function defineWorker(handlers: Handlers): Feature<Worker> {
 
 const worker = defineWorker({
   async emit({ dependencies }, input) {
-    await dependencies.output.write(input);
+    await dependencies.output.write(input, { idempotencyKey: "emit-ready" });
   },
 });
 
@@ -2780,6 +2983,7 @@ import {
   type Dependency,
   type DependencyReference,
 } from "@/index";
+import { typeLiteral } from "@/core/intrinsic";
 import type { ServerPlatform } from "@/platforms/server";
 
 type Server = { Name: "server"; Platform: ServerPlatform };
@@ -2816,13 +3020,32 @@ type Worker = {
   };
 };
 
+async function update(counter: CounterInstance) {
+  await counter.add({ value: 2 }, { idempotencyKey: "add-1" });
+  await counter.read();
+}
+
+type CounterRequirements<Name extends string> = Readonly<{
+  [Key in Name]: Counter;
+}>;
+
+function createCounterResolver<Name extends "counter">() {
+  return ({
+    dependencies,
+    key,
+  }: {
+    dependencies: CounterRequirements<Name>;
+    key: string;
+  }) => dependencies[typeLiteral<Name>()].get({ key });
+}
+
+const resolveCounter = createCounterResolver<"counter">();
+
 const worker = createFeature<Worker>({
   programs: {
     server: {
       async start({ dependencies }) {
-        const counter = dependencies.counter.get({ key: "counter-1" });
-        await counter.add({ value: 2 }, { idempotencyKey: "add-1" });
-        await counter.read();
+        await update(resolveCounter({ dependencies, key: "counter-1" }));
       },
     },
   },

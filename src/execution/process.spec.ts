@@ -138,6 +138,22 @@ describe("Program runtime", () => {
     for await (const value of service.changes({})) changes.push(value);
     expect(changes).toEqual([true, false]);
 
+    const deferred = conformExternalDependencies(contracts, {
+      service: {
+        now: () => 42,
+        read: async () => "ready",
+        changes: async () => ({
+          async *[Symbol.asyncIterator]() {
+            yield true;
+            yield false;
+          },
+        }),
+      },
+    }).service as typeof service;
+    const deferredChanges: boolean[] = [];
+    for await (const value of deferred.changes({})) deferredChanges.push(value);
+    expect(deferredChanges).toEqual([true, false]);
+
     const invalid = conformExternalDependencies(contracts, {
       service: {
         now: () => "not a number",
@@ -187,7 +203,7 @@ describe("Program runtime", () => {
       },
     );
     const service = dependencies.service as {
-      double(input: { value: number }): Promise<number>;
+      double(input: { value: number }, options?: { idempotencyKey?: string }): Promise<number>;
     };
 
     expect(dependencyInvocation in service).toBe(true);
@@ -205,6 +221,9 @@ describe("Program runtime", () => {
       ),
     ).toThrow("is not mounted through the runtime boundary");
     await expect(service.double({ value: 2 })).resolves.toBe(4);
+    await expect(service.double({ value: 4 }, { idempotencyKey: "stable-double" })).resolves.toBe(
+      8,
+    );
     await expect(
       invokeDependency(
         service,
@@ -219,13 +238,17 @@ describe("Program runtime", () => {
       ),
     ).resolves.toBe(6);
 
-    expect(invocations).toHaveLength(2);
+    expect(invocations).toHaveLength(3);
     expect(invocations[0]).toMatchObject({
       input: { value: 2 },
       invocation: { attempt: 1 },
     });
-    expect(invocations[0]?.invocation.id).toMatch(/^direct:service:double:1$/);
-    expect(invocations[1]).toEqual({
+    expect(invocations[0]?.invocation.id).toMatch(/^direct:[0-9a-f-]+:service:double:1$/);
+    expect(invocations[1]).toMatchObject({
+      input: { value: 4 },
+      invocation: { id: "idempotency:stable-double", attempt: 1 },
+    });
+    expect(invocations[2]).toEqual({
       input: { value: 3 },
       invocation: {
         id: "durable:one",
@@ -234,6 +257,15 @@ describe("Program runtime", () => {
         startedAt: 20,
       },
     });
+    expect(() => service.double({ value: 5 }, { idempotencyKey: "" })).toThrow("non-empty string");
+    expect(() =>
+      (
+        service.double as (
+          input: { value: number },
+          options: { unexpected: boolean },
+        ) => Promise<number>
+      )({ value: 5 }, { unexpected: true }),
+    ).toThrow("unknown call option");
   });
 
   test("binds local Dependency references to serializable wire operations", async () => {
@@ -389,7 +421,9 @@ describe("Program runtime", () => {
           startedAt: 20,
           [dependencyInvocationControl]: {
             previousHeartbeat: { completed: 2 },
-            heartbeat: (details) => heartbeats.push(details),
+            heartbeat(details) {
+              heartbeats.push(details);
+            },
             cancellation: {
               requested: () => true,
               wait: () => Promise.resolve(),
@@ -454,7 +488,7 @@ describe("Program runtime", () => {
           }: {
             invocation: DependencyProviderInvocation<unknown, unknown>;
           }) {
-            invocation.heartbeat({ details: heartbeat });
+            await invocation.heartbeat({ details: heartbeat });
             invocation.fail(failure);
           },
         },
@@ -1620,7 +1654,7 @@ describe("Program runtime", () => {
     expect(values).toEqual([42]);
     expect(invocations).toHaveLength(1);
     expect(invocations[0]).toMatchObject({ attempt: 1 });
-    expect(invocations[0]?.id).toMatch(/^direct:doubler:double:1$/);
+    expect(invocations[0]?.id).toMatch(/^direct:[0-9a-f-]+:doubler:double:1$/);
     await process.dispose();
   });
 

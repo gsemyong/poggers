@@ -1,7 +1,10 @@
 use std::{
     fs::{File, OpenOptions},
     io::Write,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use kit_server_runtime::{
@@ -12,6 +15,8 @@ use kit_server_runtime::{
 pub struct Recorder {
     input: Value,
     output: Arc<Mutex<File>>,
+    started: Arc<AtomicBool>,
+    cancelled: Arc<AtomicBool>,
 }
 
 pub async fn create(context: DependencyContext) -> NativeResult<Recorder> {
@@ -26,6 +31,8 @@ pub async fn create(context: DependencyContext) -> NativeResult<Recorder> {
                 .map_err(|error| NativeError::new("RecorderFailure", error.to_string()))?,
         ),
         output: Arc::new(Mutex::new(output)),
+        started: Arc::new(AtomicBool::new(false)),
+        cancelled: Arc::new(AtomicBool::new(false)),
     })
 }
 
@@ -35,14 +42,53 @@ impl Dependency for Recorder {
         _engine: Engine,
         operation: &str,
         input: Value,
-        _invocation: DependencyInvocation,
+        invocation: DependencyInvocation,
     ) -> NativeFuture<Value> {
         let output = self.output.clone();
         let input_value = self.input.clone();
+        let started = self.started.clone();
+        let cancelled = self.cancelled.clone();
         let operation = operation.to_owned();
         Box::pin(async move {
             if operation == "read" {
                 return Ok(input_value);
+            }
+            if operation == "evaluate" {
+                return Ok(Value::record([
+                    ("type".to_owned(), Value::String("complete".to_owned())),
+                    ("output".to_owned(), Value::record([])),
+                ]));
+            }
+            if operation == "search" {
+                if input
+                    .property("query", false)?
+                    .string()
+                    .is_ok_and(|query| query == "cancel")
+                {
+                    started.store(true, Ordering::SeqCst);
+                    invocation.cancellation.wait().await;
+                    cancelled.store(true, Ordering::SeqCst);
+                    return Ok(Value::record([(
+                        "answer".to_owned(),
+                        Value::String("cancelled".to_owned()),
+                    )]));
+                }
+                return Ok(Value::record([(
+                    "answer".to_owned(),
+                    Value::String(String::new()),
+                )]));
+            }
+            if operation == "status" {
+                return Ok(Value::record([
+                    (
+                        "started".to_owned(),
+                        Value::Boolean(started.load(Ordering::SeqCst)),
+                    ),
+                    (
+                        "cancelled".to_owned(),
+                        Value::Boolean(cancelled.load(Ordering::SeqCst)),
+                    ),
+                ]));
             }
             if operation != "record" {
                 return Err(NativeError::new(
@@ -62,6 +108,9 @@ impl Dependency for Recorder {
 }
 
 kit_server_runtime::dependency_operations!(Recorder {
+    operation_evaluate => "evaluate",
     operation_read => "read",
     operation_record => "record",
+    operation_search => "search",
+    operation_status => "status",
 });

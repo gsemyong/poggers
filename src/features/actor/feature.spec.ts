@@ -17,7 +17,7 @@ import {
   createMemoryDependencyTransport,
   createRemoteDependency,
 } from "@/execution/transport";
-import { ActorError, createActor, type Actor } from "@/features/actor";
+import { ActorError, createActor, listActorKeys, type Actor } from "@/features/actor";
 import { createMemoryEventStore } from "@/features/entity";
 import { serverCompilerExtension, serverProgramExecution } from "@/platforms/server/adapter";
 import { executeServerLinkedProgramIR as executeLinkedProgramIR } from "@/platforms/server/adapter/typescript/runtime";
@@ -76,37 +76,52 @@ describe("Actor", () => {
     expect(error.failure).toEqual({ type: "overloaded", retryAt: 1_000 });
   });
 
-  it("lowers the Feature factory to ordinary portable Programs and Dependencies", () => {
-    const ir = actorFixtureSystem();
-    const server = ir.programs.find(({ name }) => name === "server");
+  it(
+    "lowers the Feature factory to ordinary portable Programs and Dependencies",
+    { tags: ["compiler"] },
+    () => {
+      const ir = actorFixtureSystem();
+      const server = ir.programs.find(({ name }) => name === "server");
 
-    expect(
-      server?.contributions.map((contribution) => {
-        const implementation = serverProgramExecution(contribution);
-        return implementation.kind === "source"
-          ? { kind: implementation.kind, diagnostic: implementation.diagnostic }
-          : { kind: implementation.kind };
-      }),
-    ).toEqual([
-      { kind: "portable" },
-      { kind: "portable" },
-      { kind: "portable" },
-      { kind: "portable" },
-      { kind: "portable" },
-      { kind: "portable" },
-      { kind: "portable" },
-    ]);
-    expect(
-      server?.contributions.flatMap(({ provides }) => provides.map(({ name }) => name)).sort(),
-    ).toEqual(["account", "cycleA", "cycleB", "document", "inventory", "ledger", "reminder"]);
-    expect(JSON.stringify(ir)).not.toContain('"kind":"actor"');
-  });
+      expect(
+        server?.contributions.map((contribution) => {
+          const implementation = serverProgramExecution(contribution);
+          return implementation.kind === "source"
+            ? { kind: implementation.kind, diagnostic: implementation.diagnostic }
+            : { kind: implementation.kind };
+        }),
+      ).toEqual([
+        { kind: "portable" },
+        { kind: "portable" },
+        { kind: "portable" },
+        { kind: "portable" },
+        { kind: "portable" },
+        { kind: "portable" },
+        { kind: "portable" },
+        { kind: "portable" },
+      ]);
+      expect(
+        server?.contributions.flatMap(({ provides }) => provides.map(({ name }) => name)).sort(),
+      ).toEqual([
+        "account",
+        "cycleA",
+        "cycleB",
+        "document",
+        "inventory",
+        "ledger",
+        "profile",
+        "reminder",
+      ]);
+      expect(JSON.stringify(ir)).not.toContain('"kind":"actor"');
+    },
+  );
 
   it("executes generated Actor APIs through the ordinary linked Dependency graph", async () => {
     const server = actorFixtureServer();
+    const events = createMemoryEventStore<object>();
 
     await using execution = await executeLinkedProgramIR(linkProgram(server), {
-      ...createActorHost(),
+      ...createActorHost(events),
       payments: {
         async charge({ input }: { input: Readonly<{ account: string; amount: number }> }) {
           return { receipt: `${input.account}:${input.amount}` };
@@ -176,6 +191,75 @@ describe("Actor", () => {
     });
     await expect(item.availability()).resolves.toEqual({
       available: 5,
+    });
+    const journals = [
+      ...(await events.read({ stream: actorStream("inventory", "item-1") })),
+      ...(await events.read({ stream: actorStream("account", "account-1") })),
+    ];
+    expect(
+      journals.some(({ event }) =>
+        (event as Readonly<{ type?: string }>).type?.startsWith("actor.outbound."),
+      ),
+    ).toBe(false);
+  });
+
+  it("evolves historical state once and persists the current version", async () => {
+    const events = createMemoryEventStore<object>();
+    const stream = "actor:7:profile:6:legacy";
+    await events.append({
+      stream,
+      expectedRevision: 0,
+      events: [
+        {
+          type: "actor.command.completed",
+          invocation: "legacy-state",
+          stateVersion: 1,
+          state: { name: "Ada" },
+          outcome: { status: "succeeded", value: {} },
+          at: 1,
+        },
+      ],
+    });
+    const start = () =>
+      executeLinkedProgramIR(linkProgram(actorFixtureServer()), {
+        ...createActorHost(events),
+        payments: {
+          async charge() {
+            return { receipt: "unused" };
+          },
+        },
+      });
+    const profile = (execution: Awaited<ReturnType<typeof start>>) =>
+      (
+        execution.dependencies.profile as Readonly<{
+          get(input: { key: string }): Readonly<{
+            profile(): Promise<{ displayName: string; visits: number }>;
+          }>;
+        }>
+      ).get({ key: "legacy" });
+
+    {
+      await using first = await start();
+      await expect(profile(first).profile()).resolves.toEqual({
+        displayName: "Ada",
+        visits: 0,
+      });
+    }
+    {
+      await using restarted = await start();
+      await expect(profile(restarted).profile()).resolves.toEqual({
+        displayName: "Ada",
+        visits: 0,
+      });
+    }
+    const history = await events.read({ stream });
+    expect(
+      history.filter(({ event }) => (event as { type?: string }).type === "actor.state.evolved"),
+    ).toHaveLength(1);
+    expect(history.at(-1)?.event).toMatchObject({
+      type: "actor.state.evolved",
+      stateVersion: 2,
+      state: { displayName: "Ada", visits: 0 },
     });
   });
 
@@ -922,6 +1006,7 @@ describe("Actor", () => {
         {
           type: "actor.command.completed",
           invocation,
+          stateVersion: 1,
           state: { balance },
           outcome: { status: "succeeded", value: { balance } },
           at: balance * 2,
@@ -984,7 +1069,8 @@ describe("Actor", () => {
       revision: 2_053,
       snapshot: {
         format: "kit.actor",
-        version: 1,
+        version: 2,
+        stateVersion: 1,
         state: { balance: 1_026 },
       },
     });
@@ -1063,6 +1149,7 @@ describe("Actor", () => {
         {
           type: "actor.command.completed",
           invocation,
+          stateVersion: 1,
           state: { balance },
           outcome: { status: "succeeded", value: { balance } },
           at: balance * 2,
@@ -1125,7 +1212,7 @@ describe("Actor", () => {
     await expect(recovered.balance({ key })).resolves.toEqual({ balance: 130 });
   });
 
-  it("rejects a historical compacted snapshot instead of migrating it", async () => {
+  it("rejects historical compacted state when no evolution is declared", async () => {
     const server = actorFixtureServer();
     const events = createMemoryEventStore<object>();
     const key = "snapshot-pending-ledger";
@@ -1135,7 +1222,6 @@ describe("Actor", () => {
       invocation: "idempotency:pending-from-snapshot",
       operation: "credit",
       input: { amount: 5 },
-      commandVersion: 0,
       at: 1,
     };
     await events.append({ stream, expectedRevision: 0, events: [accepted] });
@@ -1145,7 +1231,7 @@ describe("Actor", () => {
       revision: 1,
       snapshot: {
         format: "kit.actor",
-        version: 1,
+        version: 2,
         state: { balance: 0 },
         stateVersion: 0,
         accepted: [accepted],
@@ -1155,6 +1241,7 @@ describe("Actor", () => {
         poisoned: [],
         completed: [],
         timers: [],
+        outbounds: [],
       },
     });
     await events.compact({ stream, through: 1 });
@@ -1176,7 +1263,7 @@ describe("Actor", () => {
       }),
     ).rejects.toMatchObject({
       name: "ActorError",
-      failure: { type: "invalid", reason: "actor snapshot contract" },
+      failure: { type: "invalid", reason: "actor state evolution is unavailable" },
     });
   });
 
@@ -2014,7 +2101,7 @@ describe("Actor", () => {
       },
     };
 
-    await using _execution = await executeLinkedProgramIR(linkProgram(actorFixtureServer()), {
+    await using execution = await executeLinkedProgramIR(linkProgram(actorFixtureServer()), {
       ...createActorHost(events),
       payments: {
         async charge({ input }: { input: Readonly<{ account: string; amount: number }> }) {
@@ -2022,12 +2109,35 @@ describe("Actor", () => {
         },
       },
     });
+    const first = await listActorKeys<string>(execution.dependencies.reminder as object, {
+      limit: 50,
+    });
+    const second = await listActorKeys<string>(execution.dependencies.reminder as object, {
+      after: first.entries.at(-1)?.cursor,
+      limit: 50,
+    });
 
     expect(registryReads).toEqual([
       { after: 0, limit: 256 },
       { after: 256, limit: 256 },
       { after: 300, limit: 256 },
+      { after: 0, limit: 50 },
+      { after: 50, limit: 50 },
     ]);
+    expect(first).toEqual({
+      entries: Array.from({ length: 50 }, (_, index) => ({
+        cursor: index + 1,
+        key: `reminder-${index}`,
+      })),
+      done: false,
+    });
+    expect(second).toEqual({
+      entries: Array.from({ length: 50 }, (_, index) => ({
+        cursor: index + 51,
+        key: `reminder-${index + 50}`,
+      })),
+      done: false,
+    });
   });
 
   it("persists one-shot reminders and fires them once after restart", async () => {
@@ -2186,7 +2296,8 @@ describe("Actor", () => {
       revision: 1,
       snapshot: {
         format: "kit.actor",
-        version: 1,
+        version: 2,
+        stateVersion: 1,
         state: { due: 500, fired: 0 },
         accepted: [],
         expired: [],
@@ -2195,6 +2306,7 @@ describe("Actor", () => {
         poisoned: [],
         completed: [],
         timers: [scheduled],
+        outbounds: [],
       },
     });
     await events.compact({ stream, through: 1 });
@@ -2451,7 +2563,7 @@ describe("Actor", () => {
     });
   });
 
-  it("rejects historical state journal fields", async () => {
+  it("rejects state written by a newer Program version", async () => {
     const server = actorFixtureServer();
     const events = createMemoryEventStore<object>();
     const key = "future-account";
@@ -2463,7 +2575,7 @@ describe("Actor", () => {
           type: "actor.command.completed",
           invocation: "future",
           state: { balance: 10 },
-          stateVersion: 1,
+          stateVersion: 2,
           outcome: { status: "succeeded", value: { balance: 10 } },
           at: 1,
         },
@@ -2482,7 +2594,7 @@ describe("Actor", () => {
 
     await expect(account.balance({ key })).rejects.toMatchObject({
       name: "ActorError",
-      failure: { type: "invalid", reason: "actor state contract" },
+      failure: { type: "invalid", reason: "actor state is newer than this Program" },
     });
   });
 });

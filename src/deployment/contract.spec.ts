@@ -157,6 +157,60 @@ describe("replica controller", () => {
 });
 
 describe("Release", () => {
+  test("canonicalizes provider-owned service requirements once per deployment", async () => {
+    const fixture = await releaseFixture("services");
+    const nats = {
+      service: "nats",
+      features: ["jetstream"],
+      endpoints: [{ name: "client", transport: "tcp" as const, scheme: "nats" }],
+    };
+    const server = {
+      ...fixture.server,
+      entries: fixture.server.entries.map((artifact) => ({
+        ...artifact,
+        services: [
+          nats,
+          {
+            ...nats,
+            features: ["jetstream", "key-value"],
+          },
+        ],
+      })),
+    };
+    const release = await createRelease({
+      directory: fixture.directory,
+      system: "commerce",
+      artifacts: { server, web: fixture.web },
+    });
+    const deployment = createDeployment(
+      {} as System<Record<never, never>>,
+      {
+        adapter: memoryAdapter(),
+        dependencies: {
+          events: dependency("events-jetstream", {
+            servers: "nats://127.0.0.1:4222",
+          }),
+        },
+      } as never,
+    );
+    const plan = planDeployment(deployment, release);
+
+    expect(release.artifacts.find(({ identity }) => identity === "program/api")?.services).toEqual([
+      {
+        service: "nats",
+        features: ["jetstream", "key-value"],
+        endpoints: [{ name: "client", transport: "tcp", scheme: "nats" }],
+      },
+    ]);
+    expect(plan.services).toEqual([
+      {
+        service: "nats",
+        features: ["jetstream", "key-value"],
+        endpoints: [{ name: "client", transport: "tcp", scheme: "nats" }],
+      },
+    ]);
+  });
+
   test("seals equivalent Platform outputs into one deterministic manifest", async () => {
     const first = await releaseFixture("first");
     const second = await releaseFixture("second");
@@ -588,7 +642,7 @@ function deploymentRelease(
   includeInterface: boolean,
 ): Release {
   return {
-    version: 1,
+    version: 2,
     system: "commerce",
     digest,
     files: [],
