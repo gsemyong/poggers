@@ -2288,7 +2288,10 @@ function writeCors(
     response.setHeader("vary", "origin");
   }
   response.setHeader("access-control-allow-credentials", "true");
-  response.setHeader("access-control-allow-headers", "content-type, x-kit-command, x-kit-entity");
+  response.setHeader(
+    "access-control-allow-headers",
+    "content-type, x-kit-after, x-kit-command, x-kit-entity",
+  );
   response.setHeader("access-control-allow-methods", "DELETE, GET, OPTIONS, PATCH, POST");
 }
 

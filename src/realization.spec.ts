@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
@@ -206,6 +206,10 @@ describe("System realization", { tags: ["compiler"] }, () => {
     const operationsRevision = revisions.compile(fixture.operations);
     expect(operationsRevision.revision).toBe(1);
     expect(operationsRevision.work.features).toEqual({ compiled: 1, reused: 2 });
+    expect(operationsRevision.work.files?.diagnosed).toBeGreaterThan(0);
+    expect(operationsRevision.work.files?.diagnosed).toBeLessThan(
+      operationsRevision.work.files?.total ?? 0,
+    );
     expect(operationsRevision.change?.outputs).toEqual([
       "interface/operations.web",
       "program/operations.web.browser",
@@ -260,11 +264,37 @@ describe("System realization", { tags: ["compiler"] }, () => {
 
     const first = createSystemRevisionSource(fixture.system, mockCompilerExtensions, true);
     expect(first.current.cache).toBe("miss");
+    const cache = resolve(fixture.system, "../../.kit/cache/compiler");
+    const manifest = await readFile(resolve(cache, "system.json"), "utf8");
+    const objects = await readdir(resolve(cache, "objects"));
+    const modified = new Map(
+      await Promise.all(
+        objects.map(
+          async (name) => [name, (await stat(resolve(cache, "objects", name))).mtimeMs] as const,
+        ),
+      ),
+    );
+    expect(Buffer.byteLength(manifest)).toBeLessThan(100_000);
+    expect(objects).toHaveLength(4);
 
     const second = createSystemRevisionSource(fixture.system, mockCompilerExtensions, true);
     expect(second.current.cache).toBe("hit");
+    expect(second.current.inputIdentity).toBe(first.current.inputIdentity);
     expect(second.current.work.features).toEqual({ compiled: 0, reused: 3 });
+    expect(second.current.work.files).toEqual({
+      diagnosed: 0,
+      total: first.current.sourceFiles.length,
+    });
     expect(serializeSystemIR(second.current.ir)).toBe(serializeSystemIR(first.current.ir));
+    expect(
+      new Map(
+        await Promise.all(
+          objects.map(
+            async (name) => [name, (await stat(resolve(cache, "objects", name))).mtimeMs] as const,
+          ),
+        ),
+      ),
+    ).toEqual(modified);
 
     const extensionSource = resolve(fixture.system, "../../cache-extension.ts");
     await writeFile(extensionSource, "export const revision = 1;\n");
@@ -300,6 +330,7 @@ describe("System realization", { tags: ["compiler"] }, () => {
     );
     const changed = createSystemRevisionSource(fixture.system, mockCompilerExtensions, true);
     expect(changed.current.cache).toBe("miss");
+    expect(changed.current.inputIdentity).not.toBe(first.current.inputIdentity);
     expect(serializeSystemIR(changed.current.ir)).not.toBe(serializeSystemIR(first.current.ir));
   });
 
@@ -470,6 +501,10 @@ describe("System realization", { tags: ["compiler"] }, () => {
         kind: "phase",
         phase: "compile",
         status: "completed",
+        cache: "hit",
+        work: expect.objectContaining({
+          features: expect.objectContaining({ compiled: 0 }),
+        }),
       }),
       {
         kind: "phase",
@@ -554,8 +589,14 @@ function adapter(
 function mockCompilerExtension(name: string): SourceCompilerExtension {
   return Object.freeze({
     name,
-    program: () => ({ ir: { version: 1 } }),
-    interface: () => ({ ir: { version: 1 } }),
+    program: (context) => ({
+      ir: { version: 1 },
+      sources: context.source.sources(context.implementation!).map(({ path }) => path),
+    }),
+    interface: (context) => ({
+      ir: { version: 1 },
+      sources: context.source.sources(context.implementation!).map(({ path }) => path),
+    }),
   });
 }
 

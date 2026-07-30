@@ -79,6 +79,7 @@ export type InterfaceUI = Readonly<{
   features: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
   components: RuntimeComponentComposition["components"];
   renderRoot(): Child;
+  activate(): Promise<void>;
   captureHotState(): HotRenderState;
   updatePresentation(presentation: RuntimeConfiguredPresentation): void;
   dispose(): Promise<void>;
@@ -103,6 +104,8 @@ export type CreateInterfaceUIOptions<Contract extends SystemContract> = Readonly
   loadRoute?(route: WebClientRouteIR): Promise<RuntimeRouteDefinition>;
   /** @internal Route identities whose server data can start alongside their code chunk. */
   routeLoaders?: readonly string[];
+  /** Defers browser effects until existing server markup has hydrated. */
+  deferActivation?: boolean;
   boundary: Element;
   presentationAdapter: PresentationAdapter<WebPresentationLanguage, Element>;
 }>;
@@ -242,6 +245,7 @@ export async function createInterfaceUI<Contract extends SystemContract>({
   routes = [],
   loadRoute,
   routeLoaders,
+  deferActivation = false,
   boundary,
   presentationAdapter,
 }: CreateInterfaceUIOptions<Contract>): Promise<InterfaceUI> {
@@ -277,6 +281,7 @@ export async function createInterfaceUI<Contract extends SystemContract>({
     hotState,
     notifyActionEvent,
     routes.length > 0,
+    deferActivation,
   );
   const composition: RuntimeComponentComposition = {
     components: componentGroups[""]!,
@@ -370,6 +375,7 @@ export async function createInterfaceUI<Contract extends SystemContract>({
       if (!root) throw new Error(`Unknown root Component "${rootName}".`);
       return root();
     },
+    activate: programUI.activate,
     captureHotState,
     updatePresentation(next) {
       validatePresentation(next);
@@ -704,6 +710,10 @@ async function createRouteRuntime(options: {
     if (activeResolution === initialResolution) break;
     initialResolution = activeResolution!;
   }
+  queueMicrotask(() => {
+    if (disposed || !routePrefetchAllowed()) return;
+    for (const route of options.routes) void loadDefinition(route).catch(() => undefined);
+  });
   return {
     render() {
       return renderedRoot();
@@ -718,6 +728,20 @@ async function createRouteRuntime(options: {
       routeNavigation[Symbol.dispose]();
     },
   };
+}
+
+function routePrefetchAllowed(): boolean {
+  if (typeof navigator === "undefined") return true;
+  const connection = (
+    navigator as Navigator & {
+      connection?: Readonly<{ saveData?: boolean; effectiveType?: string }>;
+    }
+  ).connection;
+  return (
+    !connection?.saveData &&
+    connection?.effectiveType !== "slow-2g" &&
+    connection?.effectiveType !== "2g"
+  );
 }
 
 function prepareDeferredRouteData(
@@ -1981,12 +2005,14 @@ async function createProgramUI(
   hotState?: HotRenderState,
   onActionEvent: () => void = () => undefined,
   routed = false,
+  deferActivation = false,
 ): Promise<{
   api: Readonly<Record<string, unknown>>;
   features: Record<string, Readonly<Record<string, unknown>>>;
   apis: Record<string, Readonly<Record<string, unknown>>>;
   dependencies: Record<string, Readonly<Record<string, unknown>>>;
   events: Record<string, Readonly<Record<string, unknown>>>;
+  activate(): Promise<void>;
   captureHotState(): HotRenderState;
   dispose(): Promise<void>;
 }> {
@@ -1998,6 +2024,7 @@ async function createProgramUI(
     dependencies: externalDependencies,
     manifest,
     initialState: hotState?.programs,
+    activation: deferActivation ? "deferred" : "eager",
   });
   const apis = { ...assembly.exposed };
   const dependencies: Record<string, Readonly<Record<string, unknown>>> = Object.create(null);
@@ -2034,6 +2061,7 @@ async function createProgramUI(
     apis,
     dependencies,
     events,
+    activate: assembly.activate,
     captureHotState,
     async dispose() {
       if (disposed) return;

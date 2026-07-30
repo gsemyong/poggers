@@ -15,6 +15,7 @@ import {
 import type { Feature } from "@/core/feature";
 import type { System, SystemContract } from "@/core/system";
 import {
+  assembleProgram,
   bindDependenciesToScope,
   conformExternalDependencies,
   createDeferredDependencyBinding,
@@ -1570,6 +1571,50 @@ describe("Program runtime", () => {
       "consumer:ready",
       "provider:dispose",
     ]);
+  });
+
+  test("can defer activation without changing provider ordering", async () => {
+    const events: string[] = [];
+    const process = await assembleProgram({
+      system: {
+        features: {
+          provider: {
+            programs: {
+              browser: {
+                start() {
+                  events.push("provider");
+                  return { reader: { read: () => "ready" } };
+                },
+              },
+            },
+          },
+          consumer: {
+            programs: {
+              browser: {
+                start({ dependencies }: { dependencies: { reader: { read(): string } } }) {
+                  events.push(`consumer:${dependencies.reader.read()}`);
+                },
+              },
+            },
+          },
+        },
+      },
+      name: "browser",
+      language: webProgramLanguageRuntime,
+      dependencies: {},
+      manifest: manifest(
+        "browser",
+        { feature: "provider", provides: ["reader"] },
+        { feature: "consumer", requires: ["reader"] },
+      ),
+      activation: "deferred",
+    });
+
+    expect(events).toEqual([]);
+    await process.activate();
+    await process.activate();
+    expect(events).toEqual(["provider", "consumer:ready"]);
+    await process.dispose();
   });
 
   test("mounts one semantic Feature provider for every consuming contribution", async () => {

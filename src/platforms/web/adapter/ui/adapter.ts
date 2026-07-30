@@ -45,6 +45,7 @@ export function createWebUIAdapter(
         features: ui.features,
         components: ui.components,
         renderRoot: () => ui.renderRoot(),
+        activate: () => ui.activate(),
         captureHotState: () => ui.captureHotState(),
         updatePresentation: (next) => ui.updatePresentation(next),
         async dispose() {

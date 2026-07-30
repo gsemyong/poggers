@@ -15,8 +15,7 @@ export default defineConfig({
         const example = importer?.split("?", 1)[0]?.match(/^(.*\/examples\/[^/]+)\//)?.[1];
         const packageSource = packageSources[id as keyof typeof packageSources];
         if (packageSource) {
-          const source = example ? "dist/source" : "src";
-          return resolve(import.meta.dirname, source, `${packageSource}.ts`);
+          return resolve(import.meta.dirname, "src", `${packageSource}.ts`);
         }
         if (!id.startsWith("@/")) return;
         const source = example ? resolve(example, "src") : resolve(import.meta.dirname, "src");
@@ -47,6 +46,10 @@ export default defineConfig({
       {
         name: "compiler",
         description: "Compiles or executes generated Programs through a production backend.",
+      },
+      {
+        name: "native",
+        description: "Builds or executes a generated native Program.",
       },
       {
         name: "package",

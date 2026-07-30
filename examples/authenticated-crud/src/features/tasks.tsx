@@ -2,6 +2,7 @@ import { createFeature, type FeatureContractOf } from "kit";
 import { createAggregate, type Aggregate } from "kit/features/aggregate";
 import { createProjection, type Projection } from "kit/features/projection";
 import { createReplica, type Replica } from "kit/features/replica";
+import { createWorkflow, type Workflow } from "kit/features/workflow";
 import {
   For,
   type BrowserMainThread,
@@ -37,8 +38,13 @@ type TaskAggregate = Aggregate<{
       { exists: Record<never, never> }
     >;
     update: Aggregate.Command<
-      Readonly<{ title?: string; completed?: boolean }>,
+      Readonly<{ title: string }>,
       Record<never, never>,
+      { missing: Record<never, never> }
+    >;
+    toggle: Aggregate.Command<
+      undefined,
+      Readonly<{ completed: boolean }>,
       { missing: Record<never, never> }
     >;
     remove: Aggregate.Command<undefined, Record<never, never>, { missing: Record<never, never> }>;
@@ -79,6 +85,14 @@ export const taskAggregateDefinition = {
       return {
         events: [{ updated: input }],
         result: {},
+      };
+    },
+    toggle({ state, fail }) {
+      if (!state.exists || state.deleted) fail({ type: "missing", data: {} });
+      const completed = !state.completed;
+      return {
+        events: [{ updated: { completed } }],
+        result: { completed },
       };
     },
     remove({ state, fail }) {
@@ -135,6 +149,9 @@ export const taskAggregateDefinition = {
       return !state.exists || state.deleted;
     },
     update({ state, principal }) {
+      return state.exists && !state.deleted && state.ownerId === principal.id;
+    },
+    toggle({ state, principal }) {
       return state.exists && !state.deleted && state.ownerId === principal.id;
     },
     remove({ state, principal }) {
@@ -204,6 +221,42 @@ export const taskProjectionDefinition = {
 
 export const taskProjection = createProjection<TaskProjection>(taskProjectionDefinition);
 
+type TaskCompletion = Workflow<{
+  Name: "taskCompletion";
+  Id: string;
+  Input: Readonly<{ taskId: string; principal: User }>;
+  State: {
+    phase: "verifying" | "completed";
+    revision: number;
+  };
+  Result: Readonly<{ revision: number }>;
+  Failures: {
+    notCompleted: Readonly<{ taskId: string }>;
+  };
+  Dependencies: {
+    tasks: Aggregate.Reference<typeof taskAggregate>;
+  };
+  Actions: {};
+}>;
+
+export const taskCompletionDefinition = {
+  state: () => ({ phase: "verifying", revision: 0 }),
+  actions: {},
+  async run({ input, state, dependencies, fail }) {
+    const snapshot = await dependencies.tasks
+      .get({ key: input.taskId, principal: input.principal })
+      .state();
+    if (!snapshot.state.completed) {
+      fail({ type: "notCompleted", data: { taskId: input.taskId } });
+    }
+    state.revision = snapshot.revision;
+    state.phase = "completed";
+    return { revision: snapshot.revision };
+  },
+} satisfies Workflow.Definition<TaskCompletion>;
+
+export const taskCompletion = createWorkflow<TaskCompletion>(taskCompletionDefinition);
+
 type TaskReplica = Replica<{
   Name: "taskReplica";
   Version: 1;
@@ -212,15 +265,18 @@ type TaskReplica = Replica<{
   Rows: "tasks";
   Dependencies: {
     tasks: Aggregate.Reference<typeof taskAggregate>;
+    taskCompletion: Workflow.Reference<typeof taskCompletion>;
   };
   Commands: {
     create: Replica.Command<Readonly<{ id: string; title: string }>>;
-    update: Replica.Command<Readonly<{ id: string; title?: string; completed?: boolean }>>;
+    update: Replica.Command<Readonly<{ id: string; title: string }>>;
+    toggle: Replica.Command<Readonly<{ id: string }>>;
     remove: Replica.Command<Readonly<{ id: string }>>;
   };
 }>;
 
 export const taskReplicaDefinition = {
+  state: () => ({ tasks: [] }),
   commands: {
     create: {
       async commit({ principal, dependencies, input, idempotencyKey }) {
@@ -235,8 +291,29 @@ export const taskReplicaDefinition = {
       async commit({ principal, dependencies, input, idempotencyKey }) {
         const outcome = await dependencies.tasks
           .get({ key: input.id, principal })
-          .update({ title: input.title, completed: input.completed }, { idempotencyKey });
+          .update({ title: input.title }, { idempotencyKey });
         if (outcome.status === "failed") throw new Error(outcome.failure.type);
+        return {};
+      },
+    },
+    toggle: {
+      async commit({ principal, dependencies, input, idempotencyKey }) {
+        const outcome = await dependencies.tasks
+          .get({ key: input.id, principal })
+          .toggle({ idempotencyKey });
+        if (outcome.status === "failed") throw new Error(outcome.failure.type);
+        if (outcome.value.completed) {
+          const execution = dependencies.taskCompletion.get({
+            id: `${input.id}:${idempotencyKey}`,
+          });
+          await execution.start({
+            input: { taskId: input.id, principal },
+          });
+          const completion = await execution.join();
+          if (completion.status !== "succeeded") {
+            throw new Error("Task completion Workflow did not succeed.");
+          }
+        }
         return {};
       },
     },
@@ -272,8 +349,26 @@ export const taskReplicaDefinition = {
             ? {
                 id: task.id,
                 ownerId: task.ownerId,
-                title: input.title ?? task.title,
-                completed: input.completed ?? task.completed,
+                title: input.title,
+                completed: task.completed,
+              }
+            : task,
+        );
+      }
+      return {
+        tasks: next,
+      };
+    },
+    toggle({ state, input }) {
+      const next = [];
+      for (const task of state.tasks) {
+        next.push(
+          task.id === input.id
+            ? {
+                id: task.id,
+                ownerId: task.ownerId,
+                title: task.title,
+                completed: !task.completed,
               }
             : task,
         );
@@ -342,7 +437,7 @@ type TasksBrowser = {
     edit(input: { id: string }): void;
     back(): void;
     save(input: { destination: TaskDestination; title: string }): void;
-    toggle(input: { id: string; completed: boolean }): void;
+    toggle(input: { id: string }): void;
     remove(input: { id: string }): void;
   };
   Components: {
@@ -388,6 +483,7 @@ type TasksBrowser = {
 type TasksFeatureDefinition = Readonly<{
   Features: {
     aggregate: FeatureContractOf<typeof taskAggregate>;
+    completion: FeatureContractOf<typeof taskCompletion>;
     projection: FeatureContractOf<typeof taskProjection>;
     replica: FeatureContractOf<typeof taskReplica>;
   };
@@ -399,6 +495,7 @@ export type TasksFeature = TasksFeatureDefinition;
 export const tasks = createFeature<TasksFeatureDefinition>({
   features: {
     aggregate: taskAggregate,
+    completion: taskCompletion,
     projection: taskProjection,
     replica: taskReplica,
   },
@@ -425,37 +522,43 @@ export const tasks = createFeature<TasksFeatureDefinition>({
         back({ dependencies }) {
           dependencies.navigation.navigate({ route: "list" });
         },
-        async save({ dependencies, state }, { destination, title: inputTitle }) {
+        save({ dependencies, state }, { destination, title: inputTitle }) {
           const title = inputTitle.trim();
           if (!title) return;
           state.error = undefined;
           try {
-            if (destination.route === "edit") {
-              await dependencies.taskReplica.update({
-                id: destination.params.id,
-                title,
-              });
-            } else {
-              await dependencies.taskReplica.create({
-                id: dependencies.identifiers.create({}),
-                title,
-              });
-            }
+            const command =
+              destination.route === "edit"
+                ? dependencies.taskReplica.update({
+                    id: destination.params.id,
+                    title,
+                  })
+                : dependencies.taskReplica.create({
+                    id: dependencies.identifiers.create({}),
+                    title,
+                  });
             dependencies.navigation.navigate({ route: "list" });
+            void command.catch((error: unknown) => {
+              state.error = message(error);
+            });
           } catch (error) {
             state.error = message(error);
           }
         },
-        async toggle({ dependencies, state }, { id, completed }) {
+        toggle({ dependencies, state }, { id }) {
           try {
-            await dependencies.taskReplica.update({ id, completed });
+            void dependencies.taskReplica.toggle({ id }).catch((error: unknown) => {
+              state.error = message(error);
+            });
           } catch (error) {
             state.error = message(error);
           }
         },
-        async remove({ dependencies, state }, { id }) {
+        remove({ dependencies, state }, { id }) {
           try {
-            await dependencies.taskReplica.remove({ id });
+            void dependencies.taskReplica.remove({ id }).catch((error: unknown) => {
+              state.error = message(error);
+            });
           } catch (error) {
             state.error = message(error);
           }
@@ -536,6 +639,7 @@ export const tasks = createFeature<TasksFeatureDefinition>({
                   {() =>
                     feature.error ??
                     feature.replica.rejected[0]?.message ??
+                    feature.replica.error ??
                     (feature.replica.status === "loading"
                       ? "Restoring tasks"
                       : feature.replica.status === "offline"
@@ -547,93 +651,88 @@ export const tasks = createFeature<TasksFeatureDefinition>({
                             : `${tasks().length} ${tasks().length === 1 ? "task" : "tasks"}`)
                   }
                 </Status>
-                {() =>
-                  props.destination.route === "list" ? (
-                    tasks().length ? (
-                      <List>
-                        <For each={() => tasks()} by="id">
-                          {(task) => (
-                            <Row>
-                              <TaskBody>
-                                <TaskTitle>{() => task.title}</TaskTitle>
-                                <TaskState>
-                                  {() => (task.completed ? "Completed" : "In progress")}
-                                </TaskState>
-                              </TaskBody>
-                              <Actions>
-                                <Edit type="button" onClick={() => feature.edit({ id: task.id })}>
-                                  Edit
-                                </Edit>
-                                <Toggle
-                                  type="button"
-                                  onClick={() =>
-                                    feature.toggle({ id: task.id, completed: !task.completed })
-                                  }
-                                >
-                                  {() => (task.completed ? "Reopen" : "Complete")}
-                                </Toggle>
-                                <Remove
-                                  type="button"
-                                  onClick={() => feature.remove({ id: task.id })}
-                                >
-                                  Delete
-                                </Remove>
-                              </Actions>
-                            </Row>
-                          )}
-                        </For>
-                      </List>
-                    ) : (
-                      <Empty>
-                        <EmptyTitle>No tasks yet</EmptyTitle>
-                        <EmptyCopy>Create the first task to start this workspace.</EmptyCopy>
-                      </Empty>
-                    )
-                  ) : props.destination.route === "edit" &&
+                {props.destination.route === "list" ? (
+                  <List>
+                    <For
+                      each={() => tasks()}
+                      by="id"
+                      fallback={
+                        <Empty>
+                          <EmptyTitle>No tasks yet</EmptyTitle>
+                          <EmptyCopy>Create the first task to start this workspace.</EmptyCopy>
+                        </Empty>
+                      }
+                    >
+                      {(task) => (
+                        <Row>
+                          <TaskBody>
+                            <TaskTitle>{() => task.title}</TaskTitle>
+                            <TaskState>
+                              {() => (task.completed ? "Completed" : "In progress")}
+                            </TaskState>
+                          </TaskBody>
+                          <Actions>
+                            <Edit type="button" onClick={() => feature.edit({ id: task.id })}>
+                              Edit
+                            </Edit>
+                            <Toggle type="button" onClick={() => feature.toggle({ id: task.id })}>
+                              {() => (task.completed ? "Reopen" : "Complete")}
+                            </Toggle>
+                            <Remove type="button" onClick={() => feature.remove({ id: task.id })}>
+                              Delete
+                            </Remove>
+                          </Actions>
+                        </Row>
+                      )}
+                    </For>
+                  </List>
+                ) : (
+                  () =>
+                    props.destination.route === "edit" &&
                     feature.replica.status === "synchronized" &&
                     !editingTask() ? (
-                    <Empty>
-                      <EmptyTitle>Task not found</EmptyTitle>
-                      <EmptyCopy>This task no longer exists.</EmptyCopy>
-                      <Back type="button" onClick={() => feature.back()}>
-                        Back to tasks
-                      </Back>
-                    </Empty>
-                  ) : (
-                    <Form
-                      onSubmit={(event) => {
-                        event.preventDefault();
-                        void feature.save({
-                          destination: props.destination,
-                          title: title(),
-                        });
-                      }}
-                    >
-                      <FormHeader>
-                        <Eyebrow>{props.destination.route === "edit" ? "Edit" : "New"}</Eyebrow>
-                        <FormTitle>
-                          {props.destination.route === "edit" ? "Update task" : "Create task"}
-                        </FormTitle>
-                      </FormHeader>
-                      <Label for="task-title">Task title</Label>
-                      <Input
-                        id="task-title"
-                        name="title"
-                        autofocus
-                        value={() => title()}
-                        onInput={(event) =>
-                          actions.changeTitle({ title: event.currentTarget.value })
-                        }
-                      />
-                      <FormActions>
-                        <Save type="submit">Save task</Save>
+                      <Empty>
+                        <EmptyTitle>Task not found</EmptyTitle>
+                        <EmptyCopy>This task no longer exists.</EmptyCopy>
                         <Back type="button" onClick={() => feature.back()}>
-                          Cancel
+                          Back to tasks
                         </Back>
-                      </FormActions>
-                    </Form>
-                  )
-                }
+                      </Empty>
+                    ) : (
+                      <Form
+                        onSubmit={(event) => {
+                          event.preventDefault();
+                          void feature.save({
+                            destination: props.destination,
+                            title: title(),
+                          });
+                        }}
+                      >
+                        <FormHeader>
+                          <Eyebrow>{props.destination.route === "edit" ? "Edit" : "New"}</Eyebrow>
+                          <FormTitle>
+                            {props.destination.route === "edit" ? "Update task" : "Create task"}
+                          </FormTitle>
+                        </FormHeader>
+                        <Label for="task-title">Task title</Label>
+                        <Input
+                          id="task-title"
+                          name="title"
+                          autofocus
+                          value={() => title()}
+                          onInput={(event) =>
+                            actions.changeTitle({ title: event.currentTarget.value })
+                          }
+                        />
+                        <FormActions>
+                          <Save type="submit">Save task</Save>
+                          <Back type="button" onClick={() => feature.back()}>
+                            Cancel
+                          </Back>
+                        </FormActions>
+                      </Form>
+                    )
+                )}
               </Root>
             );
           },

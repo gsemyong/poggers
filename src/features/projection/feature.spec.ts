@@ -31,7 +31,7 @@ describe("Projection", () => {
     expect(
       server.contributions.map((contribution) => ({
         id: contribution.id,
-        kind: serverProgramExecution(contribution).kind,
+        kind: serverProgramExecution(contribution, server).kind,
       })),
     ).toEqual([
       { id: "feature/operations/program/server", kind: "portable" },

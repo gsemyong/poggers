@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   mkdir,
   open,
@@ -66,7 +66,7 @@ type PreparedLocalGateway = Omit<LocalGatewayState, "pid" | "targets"> &
     targets: readonly string[];
   }>;
 
-const LOCAL_GATEWAY_VERSION = 4;
+const LOCAL_GATEWAY_VERSION = 5;
 
 export type LocalDeploymentState = DeploymentState &
   Readonly<{
@@ -498,6 +498,7 @@ async function realizePlan(input: {
       }
       assertLocalTarget(artifact);
       const previous = observed.get(artifact.identity);
+      const version = localProcessVersion(artifact, input.plan.release.artifacts, input.gateways);
       const serviceChanged = artifact.configuration.some(
         ({ source }) =>
           source?.kind === "service-location" && input.changedServices.has(source.service),
@@ -505,11 +506,13 @@ async function realizePlan(input: {
       const replacing = Boolean(
         previous &&
         (previous.digest !== artifact.digest ||
+          (previous.processes ?? []).some((process) => process.version !== version) ||
           input.observed?.runtime !== input.plan.runtime ||
           serviceChanged),
       );
       const retained =
         previous?.digest === artifact.digest &&
+        (previous.processes ?? []).every((process) => process.version === version) &&
         input.observed?.runtime === input.plan.runtime &&
         !serviceChanged
           ? (previous.processes ?? []).filter(({ healthy }) => healthy)
@@ -533,6 +536,7 @@ async function realizePlan(input: {
           startupTimeoutMs: input.options.startupTimeoutMs ?? 5_000,
           resolveSecret: input.options.resolveSecret,
           system: input.plan.release.system,
+          version,
         });
         started.push(process);
         processes = [...processes, process];
@@ -568,6 +572,7 @@ async function startProcess(input: {
   startupTimeoutMs: number;
   resolveSecret: LocalDeploymentAdapterOptions["resolveSecret"];
   system: string;
+  version: string;
 }): Promise<DeploymentProcessState> {
   if (!input.artifact.entrypoint) {
     throw new Error(
@@ -587,7 +592,7 @@ async function startProcess(input: {
       KIT_PROCESS_CLUSTER: input.system,
       KIT_PROCESS_ID: id,
       KIT_PROCESS_STATUS_FILE: statusFile,
-      KIT_PROCESS_VERSION: input.artifact.digest,
+      KIT_PROCESS_VERSION: input.version,
     },
     input.resolveSecret,
     input.release,
@@ -625,7 +630,7 @@ async function startProcess(input: {
   }
   return Object.freeze({
     ...status,
-    version: input.artifact.digest,
+    version: input.version,
     ...(input.artifact.lifecycle?.shutdown
       ? { shutdown: input.artifact.lifecycle.shutdown.signal }
       : {}),
@@ -637,6 +642,42 @@ async function startProcess(input: {
       : {}),
     logs: Object.freeze({ stdout: stdoutPath, stderr: stderrPath }),
   });
+}
+
+function localProcessVersion(
+  artifact: ReleaseArtifact,
+  release: readonly ReleaseArtifact[],
+  gateways: readonly PreparedLocalGateway[],
+): string {
+  const sources = artifact.configuration.flatMap(({ source }) =>
+    source?.kind === "assets" ? [source] : [],
+  );
+  const usesGatewayLocations = artifact.configuration.some(
+    ({ source }) =>
+      source?.kind === "process-location" ||
+      (source?.kind === "assets" && source.format === "interfaces"),
+  );
+  if (!sources.length && !usesGatewayLocations) return artifact.digest;
+  const assets = release
+    .filter(
+      (candidate) =>
+        candidate.deployment === "asset" &&
+        sources.some(
+          (source) =>
+            (!source.artifact || source.artifact === candidate.kind) &&
+            (!source.platform || source.platform === candidate.platform),
+        ),
+    )
+    .map(({ identity, digest }) => ({ identity, digest }))
+    .sort((left, right) => left.identity.localeCompare(right.identity));
+  const locations = usesGatewayLocations
+    ? gateways
+        .map(({ identity, location }) => ({ identity, location }))
+        .sort((left, right) => left.identity.localeCompare(right.identity))
+    : [];
+  return `sha256:${createHash("sha256")
+    .update(JSON.stringify({ artifact: artifact.digest, assets, locations }))
+    .digest("hex")}`;
 }
 
 async function processEnvironment(
@@ -814,8 +855,9 @@ async function prepareGateways(
             ? current
             : undefined;
         const location =
-          current?.location ??
-          `http://${hosts[0] ?? `web-${index + 1}.localhost`}:${await availablePort()}`;
+          current?.version === LOCAL_GATEWAY_VERSION
+            ? current.location
+            : `http://${hosts[0] ?? `web-${index + 1}.localhost`}:${await availablePort()}`;
         const directory = resolve(stateDirectory, "gateways", readableIdentity(artifact.identity));
         return Object.freeze({
           identity: artifact.identity,
@@ -1376,6 +1418,60 @@ const server = createServer(async (incoming, outgoing) => {
   } catch (error) {
     if (!outgoing.headersSent) outgoing.writeHead(500);
     outgoing.end(error instanceof Error ? error.message : String(error));
+  }
+});
+
+server.on("upgrade", async (incoming, socket, head) => {
+  try {
+    const current = await configuration();
+    if (!current.targets.length) {
+      socket.end("HTTP/1.1 503 Service Unavailable\\r\\nConnection: close\\r\\n\\r\\n");
+      return;
+    }
+    const target = new URL(current.targets[cursor++ % current.targets.length]);
+    const headers = { ...incoming.headers };
+    headers["x-forwarded-host"] = incoming.headers.host || "";
+    headers["x-forwarded-proto"] = "http";
+    const upstream = createRequest(new URL(incoming.url || "/", target), {
+      method: incoming.method,
+      headers,
+    });
+    upstream.once("upgrade", (response, connection, upstreamHead) => {
+      const responseHeaders = [];
+      for (let index = 0; index < response.rawHeaders.length; index += 2) {
+        responseHeaders.push(response.rawHeaders[index] + ": " + response.rawHeaders[index + 1]);
+      }
+      socket.write(
+        "HTTP/1.1 " +
+          (response.statusCode || 101) +
+          " " +
+          (response.statusMessage || "Switching Protocols") +
+          "\\r\\n" +
+          responseHeaders.join("\\r\\n") +
+          "\\r\\n\\r\\n",
+      );
+      if (head.length) connection.write(head);
+      if (upstreamHead.length) socket.write(upstreamHead);
+      connection.on("error", () => socket.destroy());
+      socket.on("error", () => connection.destroy());
+      connection.pipe(socket);
+      socket.pipe(connection);
+    });
+    upstream.once("response", (response) => {
+      socket.write(
+        "HTTP/1.1 " +
+          (response.statusCode || 502) +
+          " " +
+          (response.statusMessage || "Bad Gateway") +
+          "\\r\\nConnection: close\\r\\n\\r\\n",
+      );
+      response.pipe(socket);
+    });
+    upstream.once("error", () => socket.destroy());
+    socket.once("error", () => upstream.destroy());
+    upstream.end();
+  } catch {
+    socket.destroy();
   }
 });
 

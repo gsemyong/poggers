@@ -14,7 +14,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
 import {
   validateProgramAttachmentIR,
@@ -50,7 +50,7 @@ import {
   type ServerProductionDependency,
 } from "@/platforms/server/adapter/rust/providers";
 
-const SERVER_PRODUCTION_VERSION = 12;
+const SERVER_PRODUCTION_VERSION = 14;
 const DEFAULT_CACHE_ENTRIES = 8;
 const MAX_CACHE_ENTRIES = 32;
 const DEFAULT_TARGET_CACHE_BYTES = 6 * 1024 * 1024 * 1024;
@@ -129,22 +129,60 @@ export async function buildServerProgram(input: {
     configuration: implementation.configuration,
     services: implementation.services ?? [],
   }));
-  const seed = await generateRustWorkspace(
-    linked,
-    dependencies,
-    attachments,
-    packageName(input.program.name),
-    nativeRoot,
+  const cacheRoot = resolve(
+    input.cache ?? process.env.KIT_PRODUCTION_CACHE ?? resolve(homedir(), ".cache/kit/production"),
   );
-  const project = digest(JSON.stringify(canonicalGeneratedInputs(seed.inputs))).slice(0, 16);
+  const toolchain = await rustToolchain();
+  const native = await rustWorkspaceInputs(linked, dependencies, nativeRoot);
+  const inputIdentity = digest(
+    JSON.stringify({
+      version: SERVER_PRODUCTION_VERSION,
+      target: `${process.platform}-${process.arch}`,
+      toolchain,
+      program: linked,
+      attachments: {
+        exports: attachments.exports,
+        dispatch: attachments.dispatch,
+        bindings: attachments.bindings,
+      },
+      dependencies,
+      native: canonicalGeneratedInputs(native.inputs),
+    }),
+  );
+  const inputCache = resolve(cacheRoot, "inputs", `${inputIdentity}.${profile}.json`);
+  const cachedInput = await readServerBuildInputCache(inputCache, cacheRoot);
+  if (cachedInput && (!input.lint || (await exists(cachedInput.lintedMarker)))) {
+    await mkdir(dirname(input.output), { recursive: true });
+    await touch(cachedInput.artifact);
+    await touch(cachedInput.workspace);
+    await copyExecutable(cachedInput.artifact, input.output);
+    return result(
+      "hit",
+      [],
+      started,
+      input.output,
+      cachedInput.semanticHash,
+      profile,
+      cachedInput.workspace,
+      requirements,
+    );
+  }
+  const portable = generatedRustProgram(linked, attachments);
+  const project = digest(
+    JSON.stringify({
+      directory: resolve(input.directory),
+      program: input.program.name,
+      portable: portable.identity,
+    }),
+  ).slice(0, 16);
   const generated = await generateRustWorkspace(
     linked,
     dependencies,
     attachments,
     packageName(`${input.program.name}_${project}`),
-    nativeRoot,
+    portable,
+    native,
   );
-  const toolchain = await rustToolchain();
   const semanticHash = digest(
     JSON.stringify({
       version: SERVER_PRODUCTION_VERSION,
@@ -152,9 +190,6 @@ export async function buildServerProgram(input: {
       toolchain,
       files: canonicalGeneratedInputs(generated.inputs),
     }),
-  );
-  const cacheRoot = resolve(
-    input.cache ?? process.env.KIT_PRODUCTION_CACHE ?? resolve(homedir(), ".cache/kit/production"),
   );
   const workspace = resolve(cacheRoot, "workspaces", project, fileName(input.program.name));
   const cached = resolve(
@@ -173,8 +208,14 @@ export async function buildServerProgram(input: {
   // Retention uses workspace mtime as its cross-process active-build fence.
   await touch(workspace);
   await mkdir(dirname(input.output), { recursive: true });
-  const artifactCached = await exists(cached);
+  const artifactCached = await validCachedArtifact(cached);
   if (artifactCached && (!input.lint || (await exists(lintedMarker)))) {
+    await writeServerBuildInputCache(inputCache, {
+      artifact: cached,
+      lintedMarker,
+      semanticHash,
+      workspace,
+    });
     await touch(cached);
     await touch(workspace);
     await copyExecutable(cached, input.output);
@@ -187,13 +228,6 @@ export async function buildServerProgram(input: {
   const lockMarker = resolve(workspace, ".kit/Cargo.lock.source");
   const dependencyGraphChanged =
     (await readFile(lockMarker, "utf8").catch(() => undefined)) !== dependencyGraphHash;
-  const formatted = await command("cargo", ["fmt", "--all", "--", "--check"], workspace);
-  if (formatted.code !== 0) {
-    const format = await command("cargo", ["fmt", "--all"], workspace);
-    if (format.code !== 0) {
-      throw new Error(`Generated server production formatting failed:\n${format.stderr}`);
-    }
-  }
   const environment: NodeJS.ProcessEnv = {
     ...process.env,
     CARGO_INCREMENTAL: process.env.CARGO_INCREMENTAL ?? "1",
@@ -214,6 +248,12 @@ export async function buildServerProgram(input: {
     await writeFile(lintedMarker, "");
   }
   if (artifactCached) {
+    await writeServerBuildInputCache(inputCache, {
+      artifact: cached,
+      lintedMarker,
+      semanticHash,
+      workspace,
+    });
     await copyExecutable(cached, input.output);
     return result("hit", [], started, input.output, semanticHash, profile, workspace, requirements);
   }
@@ -237,7 +277,14 @@ export async function buildServerProgram(input: {
     await rm(temporary, { force: true });
     if (!(await exists(cached))) throw error;
   });
+  await writeFile(artifactDigestPath(cached), await fileDigest(cached));
   await copyExecutable(cached, input.output);
+  await writeServerBuildInputCache(inputCache, {
+    artifact: cached,
+    lintedMarker,
+    semanticHash,
+    workspace,
+  });
   const builtResult = result(
     "miss",
     compiledCrates([built.stdout], generated.packages),
@@ -331,7 +378,7 @@ function featureProviderName(feature: string, dependency: string): string {
 
 function assertPortableProgram(linked: LinkedProgramIR, project: PortableProgramProjection): void {
   for (const { contribution } of linked.contributions) {
-    const implementation = project(contribution);
+    const implementation = project(contribution, linked.program);
     if (implementation.kind !== "source") continue;
     const { span } = implementation;
     throw new Error(
@@ -358,6 +405,20 @@ type RustWorkspace = Readonly<{
   files: readonly GeneratedFile[];
   inputs: readonly GeneratedFile[];
   packages: readonly string[];
+  programIdentity: string;
+}>;
+
+type RustWorkspaceInputs = Readonly<{
+  distribution: readonly RustDistributionContract[];
+  distributionDirectory?: string;
+  inputs: readonly GeneratedFile[];
+  runtimeDirectory: string;
+}>;
+
+type GeneratedRustProgram = Readonly<{
+  identity: string;
+  package: string;
+  source: string;
 }>;
 
 type RustProgramAttachments = Readonly<{
@@ -404,8 +465,8 @@ function rustProgramAttachments(plans: readonly ProgramAttachmentIR[]): RustProg
   }));
   return {
     contributions,
-    project: (contribution) =>
-      executions.get(contribution.id) ?? serverProgramExecution(contribution),
+    project: (contribution, program) =>
+      executions.get(contribution.id) ?? serverProgramExecution(contribution, program),
     exports,
     dispatch: exported.map(({ name }, index) => ({ name, function: exports[index]!.name })),
     bindings: plans.flatMap(({ bindings }) => bindings),
@@ -417,15 +478,66 @@ async function generateRustWorkspace(
   dependencies: readonly ResolvedServerProductionDependency[],
   attachments: RustProgramAttachments,
   binary: string,
-  nativeRoot: string,
+  program: GeneratedRustProgram,
+  native: RustWorkspaceInputs,
 ): Promise<RustWorkspace> {
   const crates = productionCrates(dependencies);
+  const { distribution, distributionDirectory, inputs: nativeInputs, runtimeDirectory } = native;
+  const files: GeneratedFile[] = [
+    {
+      path: "Cargo.toml",
+      source: cargoManifest(
+        binary,
+        program.package,
+        runtimeDirectory,
+        distribution.length ? distributionDirectory : undefined,
+        dependencies,
+      ),
+    },
+    {
+      path: "src/main.rs",
+      source: rustMain(linked.program.name, dependencies, distribution, attachments.bindings),
+    },
+    {
+      path: "program/Cargo.toml",
+      source: generatedProgramManifest(program.package, runtimeDirectory),
+    },
+    {
+      path: "program/src/lib.rs",
+      source: program.source,
+    },
+  ];
+  return {
+    binary,
+    files,
+    inputs: [...files, ...nativeInputs],
+    programIdentity: program.identity,
+    packages: [
+      binary,
+      program.package,
+      "kit-server-runtime",
+      ...(distribution.length ? ["kit-server-distribution"] : []),
+      ...crates.map(({ crate }) => crate.package),
+    ],
+  };
+}
+
+async function rustWorkspaceInputs(
+  linked: LinkedProgramIR,
+  dependencies: readonly ResolvedServerProductionDependency[],
+  nativeRoot: string,
+): Promise<RustWorkspaceInputs> {
+  const crates = productionCrates(dependencies);
   const runtimeDirectory = resolve(nativeRoot, "compiler/rust/runtime");
-  const distributionDirectory = resolve(nativeRoot, "platforms/server/adapter/rust/distribution");
   const distribution = rustDistributionContracts(linked);
-  const nativeInputs = [
+  const distributionDirectory = distribution.length
+    ? resolve(nativeRoot, "platforms/server/adapter/rust/distribution")
+    : undefined;
+  const inputs = [
     ...(await crateFiles(runtimeDirectory, "native/runtime")),
-    ...(distribution.length ? await crateFiles(distributionDirectory, "native/distribution") : []),
+    ...(distributionDirectory
+      ? await crateFiles(distributionDirectory, "native/distribution")
+      : []),
     ...(
       await Promise.all(
         crates.map((implementation) =>
@@ -437,35 +549,24 @@ async function generateRustWorkspace(
       )
     ).flat(),
   ];
-  const files: GeneratedFile[] = [
-    {
-      path: "Cargo.toml",
-      source: cargoManifest(
-        binary,
-        runtimeDirectory,
-        distribution.length ? distributionDirectory : undefined,
-        dependencies,
-      ),
-    },
-    {
-      path: "src/main.rs",
-      source: rustMain(linked.program.name, dependencies, distribution, attachments.bindings),
-    },
-    {
-      path: "src/program.rs",
-      source: `${generateRustProgram(linked, attachments.project, attachments.exports)}\n${rustProgramAttachmentDispatch(attachments.dispatch)}`,
-    },
-  ];
   return {
-    binary,
-    files,
-    inputs: [...files, ...nativeInputs],
-    packages: [
-      binary,
-      "kit-server-runtime",
-      ...(distribution.length ? ["kit-server-distribution"] : []),
-      ...crates.map(({ crate }) => crate.package),
-    ],
+    distribution,
+    ...(distributionDirectory ? { distributionDirectory } : {}),
+    inputs,
+    runtimeDirectory,
+  };
+}
+
+function generatedRustProgram(
+  linked: LinkedProgramIR,
+  attachments: RustProgramAttachments,
+): GeneratedRustProgram {
+  const source = `${generateRustProgram(linked, attachments.project, attachments.exports)}\n${rustProgramAttachmentDispatch(attachments.dispatch)}`;
+  const identity = digest(canonicalGeneratedInputs([{ path: "src/lib.rs", source }])[0]!.source);
+  return {
+    identity,
+    package: `kit-generated-program-${identity}`,
+    source,
   };
 }
 
@@ -531,6 +632,7 @@ async function crateFiles(directory: string, destination: string): Promise<Gener
 
 function cargoManifest(
   binary: string,
+  programPackage: string,
   runtimeDirectory: string,
   distributionDirectory: string | undefined,
   dependencies: readonly ResolvedServerProductionDependency[],
@@ -551,11 +653,29 @@ edition = "2024"
 [profile.dev]
 debug = 0
 
+[profile.release.package.${JSON.stringify(programPackage)}]
+# Portable Programs dispatch through the optimized native runtime. Optimizing the generated
+# Value-level wrappers themselves adds minutes of compiler work with no useful specialization.
+opt-level = 0
+
 [dependencies]
+kit-generated-program = { package = ${JSON.stringify(programPackage)}, path = "program" }
 kit-server-runtime = { path = ${JSON.stringify(resolve(runtimeDirectory))} }
-${distributionDirectory ? `kit-server-distribution = { path = ${JSON.stringify(resolve(distributionDirectory))} }\n` : ""}serde_json = "1.0.145"
+${distributionDirectory ? `kit-server-distribution = { path = ${JSON.stringify(resolve(distributionDirectory))} }\n` : ""}
 tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread", "signal"] }
 ${cargoDependencies}${cargoDependencies ? "\n" : ""}`;
+}
+
+function generatedProgramManifest(programPackage: string, runtimeDirectory: string): string {
+  return `[package]
+name = ${JSON.stringify(programPackage)}
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+kit-server-runtime = { path = ${JSON.stringify(resolve(runtimeDirectory))} }
+serde_json = "1.0.145"
+`;
 }
 
 function productionCrates(
@@ -675,7 +795,7 @@ use kit_server_runtime::{
 
 ${providerAdapters}
 
-mod program;
+use kit_generated_program as program;
 
 #[tokio::main]
 async fn main() {
@@ -1012,6 +1132,106 @@ async function copyExecutable(source: string, output: string): Promise<void> {
 async function touch(path: string): Promise<void> {
   const now = new Date();
   await utimes(path, now, now).catch(() => undefined);
+}
+
+type ServerBuildInputCache = Readonly<{
+  artifact: string;
+  artifactDigest: string;
+  lintedMarker: string;
+  semanticHash: string;
+  workspace: string;
+}>;
+
+async function readServerBuildInputCache(
+  path: string,
+  cacheRoot: string,
+): Promise<ServerBuildInputCache | undefined> {
+  try {
+    const value = JSON.parse(await readFile(path, "utf8")) as Partial<ServerBuildInputCache>;
+    if (
+      typeof value.artifact !== "string" ||
+      typeof value.artifactDigest !== "string" ||
+      !/^[a-f0-9]{64}$/.test(value.artifactDigest) ||
+      typeof value.lintedMarker !== "string" ||
+      typeof value.semanticHash !== "string" ||
+      !/^[a-f0-9]{64}$/.test(value.semanticHash) ||
+      typeof value.workspace !== "string" ||
+      !inside(resolve(cacheRoot, "artifacts"), value.artifact) ||
+      !inside(resolve(cacheRoot, "checks"), value.lintedMarker) ||
+      !inside(resolve(cacheRoot, "workspaces"), value.workspace) ||
+      !(await exists(value.artifact)) ||
+      !(await exists(value.workspace)) ||
+      (await fileDigest(value.artifact)) !== value.artifactDigest
+    ) {
+      return undefined;
+    }
+    return value as ServerBuildInputCache;
+  } catch {
+    return undefined;
+  }
+}
+
+async function writeServerBuildInputCache(
+  path: string,
+  value: Omit<ServerBuildInputCache, "artifactDigest">,
+): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
+  const temporary = `${path}.${process.pid}.tmp`;
+  await writeFile(
+    temporary,
+    JSON.stringify({
+      ...value,
+      artifactDigest: await fileDigest(value.artifact),
+    } satisfies ServerBuildInputCache),
+  );
+  await rename(temporary, path).catch(async (error: unknown) => {
+    await rm(temporary, { force: true });
+    throw error;
+  });
+  await retainInputCaches(dirname(path), basename(path));
+}
+
+async function validCachedArtifact(path: string): Promise<boolean> {
+  try {
+    const expected = (await readFile(artifactDigestPath(path), "utf8")).trim();
+    return /^[a-f0-9]{64}$/.test(expected) && (await fileDigest(path)) === expected;
+  } catch {
+    return false;
+  }
+}
+
+function artifactDigestPath(path: string): string {
+  return `${path}.sha256`;
+}
+
+async function fileDigest(path: string): Promise<string> {
+  return createHash("sha256")
+    .update(await readFile(path))
+    .digest("hex");
+}
+
+async function retainInputCaches(directory: string, retained: string): Promise<void> {
+  const configured = Number(process.env.KIT_PRODUCTION_CACHE_ENTRIES ?? DEFAULT_CACHE_ENTRIES);
+  const entries =
+    Number.isSafeInteger(configured) && configured > 1 ? configured : DEFAULT_CACHE_ENTRIES;
+  const files = await Promise.all(
+    (await readdir(directory, { withFileTypes: true }).catch(() => []))
+      .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
+      .map(async (entry) => ({
+        name: entry.name,
+        modified: (await stat(resolve(directory, entry.name))).mtimeMs,
+      })),
+  );
+  const remove = files
+    .filter(({ name }) => name !== retained)
+    .sort((left, right) => left.modified - right.modified)
+    .slice(0, Math.max(0, files.length - entries * 4));
+  await Promise.all(remove.map(({ name }) => rm(resolve(directory, name), { force: true })));
+}
+
+function inside(root: string, candidate: string): boolean {
+  const path = relative(resolve(root), resolve(candidate));
+  return path === "" || (!isAbsolute(path) && path !== ".." && !path.startsWith(`..${sep}`));
 }
 
 async function retainCache(

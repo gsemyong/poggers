@@ -829,17 +829,18 @@ export type WebUIRuntime = Readonly<{
   mountDrag(element: HTMLElement, options: DragOptions): Disposable;
 }>;
 
-const runtimes: WebUIRuntime[] = [];
+const runtimes: Readonly<{ runtime: WebUIRuntime }>[] = [];
 
 /** @internal Activates one adapter implementation for a mounted web UI lifetime. */
 export function activateWebUIRuntime(runtime: WebUIRuntime): Disposable {
-  runtimes.push(runtime);
+  const registration = { runtime };
+  runtimes.push(registration);
   let active = true;
   return {
     [Symbol.dispose]() {
       if (!active) return;
       active = false;
-      const index = runtimes.lastIndexOf(runtime);
+      const index = runtimes.lastIndexOf(registration);
       if (index >= 0) runtimes.splice(index, 1);
     },
   };
@@ -877,7 +878,7 @@ export function mountDrag(element: HTMLElement, options: DragOptions): Disposabl
 }
 
 function webUIRuntime(): WebUIRuntime {
-  const runtime = runtimes.at(-1);
+  const runtime = runtimes.at(-1)?.runtime;
   if (!runtime) throw new Error("No web UI adapter is active.");
   return runtime;
 }

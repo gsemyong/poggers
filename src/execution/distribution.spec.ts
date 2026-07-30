@@ -81,6 +81,32 @@ type Counter = Readonly<{
 }>;
 
 describe("generic Process distribution", () => {
+  test("advertises fixed-size fingerprints rather than contract schemas", () => {
+    const contracts = processContracts([
+      {
+        name: "large",
+        operations: [
+          {
+            name: "write",
+            mode: "asynchronous",
+            input: {
+              kind: "record",
+              fields: Array.from({ length: 1_000 }, (_, index) => ({
+                name: `field${index}`,
+                optional: false,
+                type: { kind: "primitive", name: "string" as const },
+              })),
+            },
+            output: { kind: "primitive", name: "void" },
+          },
+        ],
+      },
+    ]);
+
+    expect(contracts.large?.write).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(JSON.stringify(contracts).length).toBeLessThan(256);
+  });
+
   test("retains binding identity and maps it to stable virtual partitions", () => {
     expect(processPartition("server", contract, { key: "one" }, 64)).toEqual(
       processPartition("server", contract, { key: "one", ignored: true }, 64),

@@ -11,19 +11,24 @@ use std::{
 use axum::{
     Router,
     body::{Body, to_bytes},
-    extract::State,
+    extract::{
+        State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
+    },
     http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode, header},
+    response::IntoResponse,
     routing::any,
 };
 use bytes::Bytes;
+use futures_util::{SinkExt, StreamExt};
 use kit_server_runtime::{
     Dependency, DependencyContext, DependencyInvocation, Engine, NativeError, NativeFunction,
     NativeFuture, NativeResult, Value,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::{
-    sync::{Semaphore, oneshot, watch},
+    sync::{Semaphore, mpsc, oneshot, watch},
     task::{JoinHandle, JoinSet},
 };
 use tower::ServiceBuilder;
@@ -37,6 +42,8 @@ use tower_http::{
 mod document;
 
 use document::{RouteLookup, WebDeferredDocument, WebDiscovery, WebDocument, WebLoaderOutcome};
+
+const WEB_REALTIME_PATH: &str = "/_kit/realtime";
 
 pub struct Http {
     state: Arc<HttpState>,
@@ -391,6 +398,7 @@ pub async fn create(context: DependencyContext) -> NativeResult<Http> {
     });
     let request_id = HeaderName::from_static("x-request-id");
     let router = Router::new()
+        .route(WEB_REALTIME_PATH, any(realtime))
         .fallback(any(dispatch))
         .layer(
             ServiceBuilder::new()
@@ -595,6 +603,310 @@ impl Dependency for Http {
 kit_server_runtime::dependency_operations!(Http {
     operation_route => "route",
 });
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
+enum WebRealtimeClientFrame {
+    Request {
+        id: String,
+        method: String,
+        path: String,
+        headers: BTreeMap<String, String>,
+        body: Option<String>,
+    },
+    Cancel {
+        id: String,
+    },
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+enum WebRealtimeServerFrame {
+    Response {
+        id: String,
+        status: u16,
+        headers: Vec<[String; 2]>,
+    },
+    Chunk {
+        id: String,
+        value: String,
+    },
+    End {
+        id: String,
+    },
+    Error {
+        id: String,
+        message: String,
+    },
+}
+
+async fn realtime(
+    upgrade: WebSocketUpgrade,
+    State(state): State<Arc<HttpState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    upgrade.on_upgrade(move |socket| realtime_socket(socket, state, headers))
+}
+
+async fn realtime_socket(socket: WebSocket, state: Arc<HttpState>, handshake: HeaderMap) {
+    let (mut sink, mut source) = socket.split();
+    let (outgoing, mut receive_outgoing) = mpsc::unbounded_channel::<String>();
+    let writer = tokio::spawn(async move {
+        while let Some(frame) = receive_outgoing.recv().await {
+            if sink.send(Message::Text(frame.into())).await.is_err() {
+                break;
+            }
+        }
+    });
+    let (finished, mut receive_finished) = mpsc::unbounded_channel::<String>();
+    let mut active = BTreeMap::<String, JoinHandle<()>>::new();
+
+    loop {
+        tokio::select! {
+            message = source.next() => {
+                let Some(Ok(message)) = message else {
+                    break;
+                };
+                let Message::Text(value) = message else {
+                    if matches!(message, Message::Close(_)) {
+                        break;
+                    }
+                    continue;
+                };
+                let frame = match serde_json::from_str::<WebRealtimeClientFrame>(&value) {
+                    Ok(frame) => frame,
+                    Err(error) => {
+                        let _ = send_realtime_frame(
+                            &outgoing,
+                            &WebRealtimeServerFrame::Error {
+                                id: String::new(),
+                                message: format!("Invalid realtime frame: {error}"),
+                            },
+                        );
+                        break;
+                    }
+                };
+                match frame {
+                    WebRealtimeClientFrame::Cancel { id } => {
+                        if let Some(task) = active.remove(&id) {
+                            task.abort();
+                        }
+                    }
+                    WebRealtimeClientFrame::Request {
+                        id,
+                        method,
+                        path,
+                        headers,
+                        body,
+                    } => {
+                        if active.contains_key(&id) {
+                            let _ = send_realtime_frame(
+                                &outgoing,
+                                &WebRealtimeServerFrame::Error {
+                                    id,
+                                    message: "Duplicate realtime request identity.".to_owned(),
+                                },
+                            );
+                            continue;
+                        }
+                        let task_id = id.clone();
+                        let request = WebRealtimeRequest {
+                            id,
+                            method,
+                            path,
+                            headers,
+                            body,
+                        };
+                        let task_state = state.clone();
+                        let task_handshake = handshake.clone();
+                        let task_outgoing = outgoing.clone();
+                        let task_finished = finished.clone();
+                        active.insert(
+                            task_id.clone(),
+                            tokio::spawn(async move {
+                                proxy_realtime_request(
+                                    request,
+                                    task_state,
+                                    task_handshake,
+                                    task_outgoing,
+                                )
+                                .await;
+                                let _ = task_finished.send(task_id);
+                            }),
+                        );
+                    }
+                }
+            }
+            Some(id) = receive_finished.recv() => {
+                active.remove(&id);
+            }
+        }
+    }
+
+    for (_, task) in active {
+        task.abort();
+    }
+    drop(outgoing);
+    let _ = writer.await;
+}
+
+struct WebRealtimeRequest {
+    id: String,
+    method: String,
+    path: String,
+    headers: BTreeMap<String, String>,
+    body: Option<String>,
+}
+
+async fn proxy_realtime_request(
+    input: WebRealtimeRequest,
+    state: Arc<HttpState>,
+    handshake: HeaderMap,
+    outgoing: mpsc::UnboundedSender<String>,
+) {
+    let id = input.id.clone();
+    let request = build_realtime_request(&input, &handshake);
+    let Ok(request) = request else {
+        let _ = send_realtime_frame(
+            &outgoing,
+            &WebRealtimeServerFrame::Error {
+                id,
+                message: request.expect_err("checked realtime request"),
+            },
+        );
+        return;
+    };
+    let response = dispatch(State(state), request).await;
+    let status = response.status().as_u16();
+    let headers = response
+        .headers()
+        .iter()
+        .filter(|(name, _)| {
+            *name != header::CONNECTION
+                && *name != header::TRANSFER_ENCODING
+                && *name != header::CONTENT_LENGTH
+        })
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|value| [name.as_str().to_owned(), value.to_owned()])
+        })
+        .collect();
+    if send_realtime_frame(
+        &outgoing,
+        &WebRealtimeServerFrame::Response {
+            id: id.clone(),
+            status,
+            headers,
+        },
+    )
+    .is_err()
+    {
+        return;
+    }
+
+    let mut body = response.into_body().into_data_stream();
+    let mut utf8 = Vec::new();
+    while let Some(chunk) = body.next().await {
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                let _ = send_realtime_frame(
+                    &outgoing,
+                    &WebRealtimeServerFrame::Error {
+                        id,
+                        message: error.to_string(),
+                    },
+                );
+                return;
+            }
+        };
+        utf8.extend_from_slice(&chunk);
+        if send_realtime_text(&outgoing, &id, &mut utf8, false).is_err() {
+            return;
+        }
+    }
+    if let Err(message) = send_realtime_text(&outgoing, &id, &mut utf8, true) {
+        let _ = send_realtime_frame(&outgoing, &WebRealtimeServerFrame::Error { id, message });
+        return;
+    }
+    let _ = send_realtime_frame(&outgoing, &WebRealtimeServerFrame::End { id });
+}
+
+fn build_realtime_request(
+    input: &WebRealtimeRequest,
+    handshake: &HeaderMap,
+) -> Result<Request<Body>, String> {
+    if !input.path.starts_with('/') {
+        return Err("Realtime request paths must be absolute.".to_owned());
+    }
+    let method = input
+        .method
+        .parse::<axum::http::Method>()
+        .map_err(|error| format!("Invalid realtime request method: {error}"))?;
+    let uri = input
+        .path
+        .parse::<axum::http::Uri>()
+        .map_err(|error| format!("Invalid realtime request path: {error}"))?;
+    let mut request = Request::builder()
+        .method(method)
+        .uri(uri)
+        .body(input.body.clone().map_or_else(Body::empty, Body::from))
+        .map_err(|error| format!("Invalid realtime request: {error}"))?;
+    for (name, value) in &input.headers {
+        let name = HeaderName::try_from(name)
+            .map_err(|error| format!("Invalid realtime request header: {error}"))?;
+        let value = HeaderValue::try_from(value)
+            .map_err(|error| format!("Invalid realtime request header: {error}"))?;
+        request.headers_mut().append(name, value);
+    }
+    for name in [header::COOKIE, header::ORIGIN] {
+        if let Some(value) = handshake.get(&name) {
+            request.headers_mut().insert(name, value.clone());
+        }
+    }
+    Ok(request)
+}
+
+fn send_realtime_text(
+    outgoing: &mpsc::UnboundedSender<String>,
+    id: &str,
+    buffered: &mut Vec<u8>,
+    complete: bool,
+) -> Result<(), String> {
+    let valid = match std::str::from_utf8(buffered) {
+        Ok(_) => buffered.len(),
+        Err(error) if error.error_len().is_none() => error.valid_up_to(),
+        Err(error) => return Err(format!("Realtime response is not UTF-8: {error}")),
+    };
+    if valid > 0 {
+        let value =
+            String::from_utf8(buffered.drain(..valid).collect()).expect("validated realtime UTF-8");
+        send_realtime_frame(
+            outgoing,
+            &WebRealtimeServerFrame::Chunk {
+                id: id.to_owned(),
+                value,
+            },
+        )?;
+    }
+    if complete && !buffered.is_empty() {
+        return Err("Realtime response ended with incomplete UTF-8.".to_owned());
+    }
+    Ok(())
+}
+
+fn send_realtime_frame(
+    outgoing: &mpsc::UnboundedSender<String>,
+    frame: &WebRealtimeServerFrame,
+) -> Result<(), String> {
+    let encoded = serde_json::to_string(frame)
+        .map_err(|error| format!("Cannot encode realtime response: {error}"))?;
+    outgoing
+        .send(encoded)
+        .map_err(|_| "Realtime connection closed.".to_owned())
+}
 
 async fn dispatch(State(state): State<Arc<HttpState>>, request: Request<Body>) -> Response<Body> {
     let origin = request.headers().get(header::ORIGIN).cloned();
@@ -1673,7 +1985,7 @@ fn cors(
     );
     headers.insert(
         header::ACCESS_CONTROL_ALLOW_HEADERS,
-        HeaderValue::from_static("content-type, x-kit-command, x-kit-entity"),
+        HeaderValue::from_static("content-type, x-kit-after, x-kit-command, x-kit-entity"),
     );
     headers.insert(
         header::ACCESS_CONTROL_ALLOW_METHODS,

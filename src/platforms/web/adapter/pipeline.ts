@@ -1,9 +1,8 @@
 import { Buffer } from "node:buffer";
 import { createHash, randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import type { IncomingHttpHeaders, ServerResponse } from "node:http";
-import { tmpdir } from "node:os";
 import { basename, dirname, extname, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { stripVTControlCharacters } from "node:util";
@@ -14,12 +13,14 @@ import {
   createServer,
   defaultClientConditions,
   defaultServerConditions,
+  transformWithOxc,
   type HmrContext,
   type Logger,
   type ModuleNode,
   type Plugin,
   type ViteDevServer,
 } from "vite";
+import { WebSocketServer } from "ws";
 
 import type {
   DevelopmentReporter,
@@ -94,6 +95,11 @@ import {
   webResetCss,
 } from "@/platforms/web/adapter/presentation/compiler";
 import { compilePresentationSource } from "@/platforms/web/adapter/presentation/source";
+import {
+  parseWebRealtimeClientFrame,
+  WEB_REALTIME_PATH,
+  type WebRealtimeServerFrame,
+} from "@/platforms/web/adapter/transport";
 import { transformComponentSource } from "@/platforms/web/adapter/ui/component/compiler";
 import {
   isWebRedirectStatus,
@@ -152,6 +158,7 @@ export type WebBuild = Readonly<{
 }>;
 
 export const WEB_ROUTE_ARTIFACT_VERSION = 7 as const;
+const PROJECTED_SOURCE_PREFIX = "\0kit-projected-source:";
 const DEVELOPMENT_WEB_CACHE_BYTES = 16 * 1024 * 1024;
 const DEVELOPMENT_WEB_CACHE_ENTRIES = 256;
 const DEVELOPMENT_WEB_CACHE_REFRESHES = 8;
@@ -648,13 +655,18 @@ export async function buildWebInterface(options: {
 }): Promise<WebBuild> {
   const paths = resolveSystem(options.directory);
   const outdir = resolve(paths.directory, options.outdir);
-  const work = await realpath(
-    await mkdtemp(resolve(tmpdir(), options.development ? "kit-web-dev-build-" : "kit-web-build-")),
+  const workspace = webWorkspace(
+    paths.directory,
+    options.interface,
+    options.development ? "development-build" : "production",
   );
+  await mkdir(workspace, { recursive: true });
+  const work = await realpath(workspace);
   await rm(outdir, { recursive: true, force: true });
   await mkdir(outdir, { recursive: true });
-  try {
+  {
     const presentationAssets: ProductionPresentationAssets = { files: new Map() };
+    const cacheDir = await webBuildCacheDirectory(work);
     const prepared = await prepareInterface(
       paths,
       work,
@@ -662,6 +674,7 @@ export async function buildWebInterface(options: {
       options.development ?? false,
       {
         revision: 0,
+        inputIdentity: "direct-web-interface-build",
         ir: options.ir,
         outputSources: {},
         sourceFiles: [],
@@ -671,6 +684,7 @@ export async function buildWebInterface(options: {
         },
       },
     );
+    await pruneGeneratedSources(work, prepared);
     const contract = webInterfaceContract(prepared.ir, prepared.interface);
     const crossOriginIsolated = webInterfaceRequiresCrossOriginIsolation(
       prepared.ir,
@@ -716,6 +730,7 @@ export async function buildWebInterface(options: {
         presentationAssets,
         options.report,
       ),
+      cacheDir,
       build: {
         emptyOutDir: false,
         manifest: "manifest.json",
@@ -734,7 +749,22 @@ export async function buildWebInterface(options: {
               asset.names.some((name) => name.endsWith(".css"))
                 ? "styles.css"
                 : "assets/[name]-[hash][extname]",
-            chunkFileNames: "assets/[name]-[hash].js",
+            chunkFileNames(chunk) {
+              const routes = [
+                ...new Set(
+                  chunk.moduleIds
+                    .map((id) => sourceProjection(id))
+                    .filter(
+                      (projection): projection is Readonly<{ kind: "route"; name: string }> =>
+                        projection?.kind === "route",
+                    )
+                    .map(({ name }) => name),
+                ),
+              ];
+              return routes.length === 1
+                ? `assets/${routeModuleName(routes[0]!)}.generated-[hash].js`
+                : "assets/[name]-[hash].js";
+            },
             entryFileNames: ({ name }) =>
               name === "app" || name === "service-worker-bootstrap"
                 ? "assets/[name]-[hash].js"
@@ -875,8 +905,6 @@ export async function buildWebInterface(options: {
         })),
       ],
     };
-  } finally {
-    await removeWorkDirectory(work);
   }
 }
 
@@ -1204,7 +1232,7 @@ export async function runWebInterface(options: {
     options.revisions.current,
     "full",
     undefined,
-    options.serverOrigin,
+    undefined,
   );
   const interfaceState: PreparedInterfaceState = { current: prepared };
   await writeFile(
@@ -1218,22 +1246,34 @@ export async function runWebInterface(options: {
     appType: "spa",
     cacheDir: resolve(work, ".vite"),
     plugins: [
+      ...(options.serverOrigin ? [webRealtimeProxyPlugin(options.serverOrigin)] : []),
       presentationContractPlugin(
         paths,
         work,
         options.revisions,
         interfaceState,
-        options.serverOrigin,
+        undefined,
         options.programAttachments,
         options.report,
       ),
-      ...vitePlugins(paths, () => interfaceState.current.ir),
+      ...vitePlugins(paths, () => interfaceState.current.ir, undefined, true),
     ],
     root: work,
     server: {
       fs: { allow: [work, paths.directory, resolve(import.meta.dirname, "../../..")] },
       host: "localhost",
       port: options.port ?? 3000,
+      ...(options.serverOrigin
+        ? {
+            proxy: {
+              "/api": {
+                target: options.serverOrigin,
+                changeOrigin: true,
+                ws: true,
+              },
+            },
+          }
+        : {}),
       strictPort: options.strictPort ?? options.port !== undefined,
     },
   });
@@ -1273,8 +1313,137 @@ export async function runWebInterface(options: {
   };
 }
 
+function webRealtimeProxyPlugin(target: string): Plugin {
+  return {
+    name: "kit-realtime-proxy",
+    configureServer(server) {
+      const http = server.httpServer;
+      if (!http) return;
+      const sockets = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
+      const upgrade = (
+        request: Parameters<NonNullable<typeof http>["emit"]>[1] & {
+          url?: string;
+        },
+        socket: Parameters<WebSocketServer["handleUpgrade"]>[1],
+        head: Parameters<WebSocketServer["handleUpgrade"]>[2],
+      ) => {
+        const path = new URL(request.url ?? "/", target).pathname;
+        if (path !== WEB_REALTIME_PATH) return;
+        sockets.handleUpgrade(request as never, socket, head, (webSocket) => {
+          sockets.emit("connection", webSocket, request);
+        });
+      };
+      http.on("upgrade", upgrade as never);
+      sockets.on("connection", (socket, request) => {
+        const active = new Map<string, AbortController>();
+        const send = (frame: WebRealtimeServerFrame): void => {
+          if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(frame));
+        };
+        const cancel = (): void => {
+          for (const controller of active.values()) controller.abort();
+          active.clear();
+        };
+        socket.on("close", cancel);
+        socket.on("error", cancel);
+        socket.on("message", (data, binary) => {
+          if (binary) {
+            socket.close(1003, "Text frames required");
+            return;
+          }
+          let frame;
+          try {
+            frame = parseWebRealtimeClientFrame(data.toString("utf8"));
+          } catch {
+            socket.close(1007, "Invalid frame");
+            return;
+          }
+          if (frame.type === "cancel") {
+            active.get(frame.id)?.abort();
+            active.delete(frame.id);
+            return;
+          }
+          if (active.has(frame.id)) {
+            send({
+              type: "error",
+              id: frame.id,
+              message: "Duplicate realtime request identity.",
+            });
+            return;
+          }
+          const controller = new AbortController();
+          active.set(frame.id, controller);
+          void proxyWebRealtimeRequest({
+            target,
+            frame,
+            requestHeaders: request.headers,
+            signal: controller.signal,
+            send,
+          }).finally(() => active.delete(frame.id));
+        });
+      });
+      http.once("close", () => {
+        http.off("upgrade", upgrade as never);
+        for (const socket of sockets.clients) socket.close(1001, "Development server stopped");
+        sockets.close();
+      });
+    },
+  };
+}
+
+async function proxyWebRealtimeRequest(input: {
+  target: string;
+  frame: Extract<ReturnType<typeof parseWebRealtimeClientFrame>, Readonly<{ type: "request" }>>;
+  requestHeaders: IncomingHttpHeaders;
+  signal: AbortSignal;
+  send(frame: WebRealtimeServerFrame): void;
+}): Promise<void> {
+  try {
+    const headers = new Headers(input.frame.headers);
+    if (input.requestHeaders.cookie) headers.set("cookie", input.requestHeaders.cookie);
+    if (input.requestHeaders.origin) headers.set("origin", input.requestHeaders.origin);
+    const response = await fetch(new URL(input.frame.path, input.target), {
+      method: input.frame.method,
+      headers,
+      ...(input.frame.body === undefined ? {} : { body: input.frame.body }),
+      redirect: "manual",
+      signal: input.signal,
+    });
+    input.send({
+      type: "response",
+      id: input.frame.id,
+      status: response.status,
+      headers: [...response.headers],
+    });
+    if (response.body) {
+      const decoder = new TextDecoder();
+      for await (const chunk of response.body) {
+        const value = decoder.decode(chunk, { stream: true });
+        if (value) input.send({ type: "chunk", id: input.frame.id, value });
+      }
+      const remaining = decoder.decode();
+      if (remaining) input.send({ type: "chunk", id: input.frame.id, value: remaining });
+    }
+    input.send({ type: "end", id: input.frame.id });
+  } catch (error) {
+    if (input.signal.aborted) return;
+    input.send({
+      type: "error",
+      id: input.frame.id,
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
 /** @internal Returns the stable generated-source and Vite cache owner for one interface. */
 export function webDevelopmentWorkspace(directory: string, interfaceId: string): string {
+  return webWorkspace(directory, interfaceId, "development");
+}
+
+function webWorkspace(
+  directory: string,
+  interfaceId: string,
+  purpose: "development" | "development-build" | "production",
+): string {
   const root = canonicalSourcePath(directory);
   const readable =
     interfaceId
@@ -1283,10 +1452,41 @@ export function webDevelopmentWorkspace(directory: string, interfaceId: string):
       .replaceAll(/^-|-$/g, "")
       .slice(0, 48) || "interface";
   const identity = createHash("sha256")
-    .update(`${root}\0${interfaceId}`)
+    .update(
+      purpose === "development" ? `${root}\0${interfaceId}` : `${root}\0${interfaceId}\0${purpose}`,
+    )
     .digest("hex")
     .slice(0, 12);
-  return resolve(root, ".kit/cache/web", `${readable}-${identity}`);
+  const name =
+    purpose === "development" ? `${readable}-${identity}` : `${purpose}-${readable}-${identity}`;
+  return resolve(root, ".kit/cache/web", name);
+}
+
+let transformIdentity: Promise<string> | undefined;
+
+async function webBuildCacheDirectory(work: string): Promise<string> {
+  transformIdentity ??= Promise.all(
+    [
+      import.meta.filename,
+      resolve(import.meta.dirname, `presentation/source${moduleExtension()}`),
+      resolve(import.meta.dirname, `ui/component/compiler${moduleExtension()}`),
+    ].map((file) => readFile(file)),
+  ).then((sources) => {
+    const hash = createHash("sha256");
+    for (const source of sources) hash.update(source);
+    return hash.digest("hex").slice(0, 16);
+  });
+  const current = `.vite-${await transformIdentity}`;
+  await Promise.all(
+    (await readdir(work, { withFileTypes: true }))
+      .filter(
+        (entry) =>
+          entry.isDirectory() &&
+          (entry.name === ".vite" || (entry.name.startsWith(".vite-") && entry.name !== current)),
+      )
+      .map((entry) => rm(resolve(work, entry.name), { recursive: true, force: true })),
+  );
+  return resolve(work, current);
 }
 
 async function pruneGeneratedSources(work: string, prepared: PreparedInterface): Promise<void> {
@@ -1313,10 +1513,6 @@ async function pruneGeneratedSources(work: string, prepared: PreparedInterface):
       )
       .map((entry) => rm(resolve(work, entry.name), { force: true })),
   );
-}
-
-async function removeWorkDirectory(work: string): Promise<void> {
-  await rm(work, { recursive: true, force: true });
 }
 
 async function prepareInterface(
@@ -1357,13 +1553,13 @@ async function prepareInterface(
       documentEvaluator,
       developmentDocumentEvaluatorSource({
         system: paths.system,
+        program: contract.uiProgram,
         application: contract.interface.app,
         interface: contract.interface.path,
         applicationName: contract.applicationName,
         features: contract.interface.features,
         routes: contract.routes,
         document: resolve(import.meta.dirname, `document${moduleExtension()}`),
-        revision,
       }),
     );
   }
@@ -1384,7 +1580,6 @@ async function prepareInterface(
             import.meta.dirname,
             `../../../execution/process${moduleExtension()}`,
           ),
-          revision,
           program,
           manifest,
           dependencies: projectDependencyContracts(linkProgram(program).external),
@@ -1443,8 +1638,6 @@ async function prepareInterface(
         source,
         routeModuleSource({
           system: paths.system,
-          development,
-          revision,
           program: ui.logicalName,
           route,
         }),
@@ -1459,7 +1652,6 @@ async function prepareInterface(
       development,
       serverOrigin,
       host: resolve(import.meta.dirname, `host${moduleExtension()}`),
-      revision,
       runtime: resolve(import.meta.dirname, `./ui/adapter${moduleExtension()}`),
       presentationRuntime: resolve(
         import.meta.dirname,
@@ -1554,7 +1746,7 @@ function viteConfiguration(
     customLogger: viteReporter(report),
     oxc: { jsx: { development } },
     ...(development ? { optimizeDeps: { include: [], noDiscovery: true } } : {}),
-    plugins: vitePlugins(paths, ir, presentationAssets),
+    plugins: vitePlugins(paths, ir, presentationAssets, development),
     resolve: {
       alias: packageSourceAliases(),
       conditions: ["source", ...defaultClientConditions],
@@ -1610,14 +1802,28 @@ function vitePlugins(
   paths: SystemPaths,
   ir?: SystemIR | (() => SystemIR),
   presentationAssets?: ProductionPresentationAssets,
+  virtualProjections = false,
 ): Plugin[] {
   return [
-    ...(ir ? [routeSourcePlugin(paths, ir)] : []),
+    ...(ir ? [routeSourcePlugin(paths, ir, virtualProjections)] : []),
     systemAliasPlugin(paths.source),
     productionPresentationAssetPlugin(paths.source, presentationAssets),
     presentationTransformPlugin(paths.source),
     componentTransformPlugin(paths.source),
+    projectedSourceSyntaxPlugin(),
   ];
+}
+
+function projectedSourceSyntaxPlugin(): Plugin {
+  return {
+    name: "kit-projected-source-syntax",
+    enforce: "pre",
+    async transform(code, rawId) {
+      const source = projectedSourceSpecifier(rawId);
+      if (!source) return;
+      return transformWithOxc(code, cleanId(source));
+    },
+  };
 }
 
 /** @internal Resolves authored local Presentation assets identically for SSR and the client. */
@@ -1825,14 +2031,21 @@ function webScriptKind(file: string): ts.ScriptKind {
 }
 
 /** @internal Creates source projections for independently loaded browser Routes and Programs. */
-export function routeSourcePlugin(paths: SystemPaths, system: SystemIR | (() => SystemIR)): Plugin {
+export function routeSourcePlugin(
+  paths: SystemPaths,
+  system: SystemIR | (() => SystemIR),
+  virtual = false,
+): Plugin {
   type RouteLocation = Readonly<{
+    feature: string;
     identity: string;
     parent?: string;
     program: string;
     span: CompiledWebRouteIR["implementationSpan"];
   }>;
+  const projectionCache = new Map<string, Readonly<{ code: string; map: null }>>();
   type ProgramLocation = Readonly<{
+    feature: string;
     identity: string;
     span: ProgramIR["contributions"][number]["span"];
   }>;
@@ -1848,9 +2061,16 @@ export function routeSourcePlugin(paths: SystemPaths, system: SystemIR | (() => 
       );
       for (const contribution of program.contributions) {
         const file = canonicalSourcePath(resolve(paths.directory, contribution.span.file));
-        const current = programLocations.get(file) ?? [];
-        current.push({ identity: program.name, span: contribution.span });
-        programLocations.set(file, current);
+        const location = {
+          feature: contribution.feature,
+          identity: program.name,
+          span: contribution.span,
+        };
+        for (const source of projectionSourceAliases(file)) {
+          const current = programLocations.get(source) ?? [];
+          current.push(location);
+          programLocations.set(source, current);
+        }
       }
       if (program.environment.platform !== "web") continue;
       for (const contribution of program.contributions) {
@@ -1859,6 +2079,7 @@ export function routeSourcePlugin(paths: SystemPaths, system: SystemIR | (() => 
           const file = canonicalSourcePath(resolve(paths.source, route.implementationSpan.file));
           const current = routeLocations.get(file) ?? [];
           current.push({
+            feature: route.feature,
             identity: routeIdentity(route),
             ...(routeParents.get(routeIdentity(route))
               ? { parent: routeParents.get(routeIdentity(route)) }
@@ -1871,13 +2092,9 @@ export function routeSourcePlugin(paths: SystemPaths, system: SystemIR | (() => 
       }
     }
     return {
+      ir,
       routeLocations,
       programLocations,
-      browserMainPrograms: new Set(
-        ir.programs
-          .filter(({ environment }) => environment.name === "browser-main")
-          .map(({ name }) => name),
-      ),
     };
   };
 
@@ -1896,17 +2113,31 @@ export function routeSourcePlugin(paths: SystemPaths, system: SystemIR | (() => 
       );
       if (!resolved) return;
       const id = cleanId(resolved.id);
-      if (!isSystemSourceModule(id, paths.source)) return;
+      if (!isProjectableSourceModule(id, paths.source)) return;
       const parameters = sourceProjection(source)
         ? sourceParameters(source)
         : new URLSearchParams();
-      parameters.set(projection.kind === "route" ? "kit-route" : "kit-program", projection.name);
-      return routeSourceId(id, parameters);
+      parameters.set(
+        projection.kind === "route"
+          ? "kit-route"
+          : projection.kind === "document"
+            ? "kit-document"
+            : "kit-program",
+        projection.name,
+      );
+      return virtual ? projectedSourceId(id, parameters) : routeSourceId(id, parameters);
+    },
+    async load(id) {
+      const source = projectedSourceSpecifier(id);
+      if (!source) return;
+      const file = cleanId(source);
+      this.addWatchFile(file);
+      return readFile(file, "utf8");
     },
     transform(code, rawId) {
       const projection = sourceProjection(rawId);
       if (!projection) return;
-      const { routeLocations, programLocations, browserMainPrograms } = contract();
+      const { ir, routeLocations, programLocations } = contract();
       const id = canonicalSourcePath(cleanId(rawId));
       const routes = routeLocations.get(id) ?? [];
       const programs = programLocations.get(id) ?? [];
@@ -1919,6 +2150,7 @@ export function routeSourcePlugin(paths: SystemPaths, system: SystemIR | (() => 
       );
       const objects = new Map<string, ts.ObjectLiteralExpression>();
       const expressions = new Map<string, ts.Expression>();
+      const projectionRoots = new Set<string>();
       const visit = (node: ts.Node): void => {
         if (ts.isExpression(node)) {
           const position = source.getLineAndCharacterOfPosition(node.getStart(source));
@@ -1935,32 +2167,72 @@ export function routeSourcePlugin(paths: SystemPaths, system: SystemIR | (() => 
       visit(source);
       const replacements: Array<Readonly<{ start: number; end: number; value: string }>> = [];
       const retainedPrograms =
-        projection.kind === "program"
-          ? new Set([projection.name])
-          : projection.name === "base"
-            ? browserMainPrograms
-            : new Set(
-                routes
-                  .filter(({ identity }) => identity === projection.name)
-                  .map(({ program }) => program),
-              );
+        projection.kind === "route"
+          ? new Set(
+              [...routeLocations.values()]
+                .flat()
+                .filter(({ identity }) => identity === projection.name)
+                .map(({ program }) => program),
+            )
+          : new Set([projection.name]);
+      const retainedApplications = projectedApplications(ir, retainedPrograms);
+      const retainedFeatures =
+        projection.kind === "route"
+          ? projectedRouteFeaturePaths(routeLocations, projection.name)
+          : projectedFeaturePaths(ir, retainedPrograms, retainedApplications);
+      const retainedPlatforms = new Set(
+        ir.programs
+          .filter(({ name }) => retainedPrograms.has(name))
+          .map(({ environment }) => environment.platform),
+      );
+      const projectionCacheKey =
+        routes.length === 0
+          ? [
+              id,
+              projection.kind,
+              projection.name,
+              [...retainedPrograms].sort().join(","),
+              createHash("sha256").update(code).digest("base64url"),
+            ].join("\0")
+          : undefined;
+      const cached = projectionCacheKey ? projectionCache.get(projectionCacheKey) : undefined;
+      if (cached) return cached;
       const retainedProgramSpans = new Set(
         programs
           .filter(({ identity }) => retainedPrograms.has(identity))
           .map(({ span }) => `${span.line}:${span.column}`),
       );
-      if (projection.kind === "route") {
+      for (const program of programs) {
+        if (!retainedFeatures.has(program.feature)) continue;
+        const node = expressions.get(`${program.span.line}:${program.span.column}`);
+        if (node) retainProjectionRoot(node, projectionRoots);
+      }
+      for (const program of programs) {
+        if (!retainedPrograms.has(program.identity)) continue;
+        const node = expressions.get(`${program.span.line}:${program.span.column}`);
+        if (node) retainProjectionRoot(node, projectionRoots);
+      }
+      retainApplicationProjectionRoots(source, retainedApplications, projectionRoots);
+      let retainedRoutes: ReadonlySet<string> | undefined;
+      if (projection.kind === "route" || projection.kind === "document") {
         const routeParents = new Map(
           [...routeLocations.values()]
             .flat()
             .map(({ identity, parent }) => [identity, parent] as const),
         );
-        const retainedRoutes = new Set<string>();
-        let current: string | undefined = projection.name;
-        while (current && !retainedRoutes.has(current)) {
-          retainedRoutes.add(current);
-          current = routeParents.get(current);
+        const selectedRoutes = new Set<string>();
+        if (projection.kind === "document") {
+          for (const route of routes) {
+            if (retainedPrograms.has(route.program)) selectedRoutes.add(route.identity);
+          }
+        } else {
+          let current: string | undefined = projection.name;
+          while (current && !selectedRoutes.has(current)) {
+            selectedRoutes.add(current);
+            current = routeParents.get(current);
+          }
         }
+        retainedRoutes = selectedRoutes;
         for (const route of routes) {
           if (!retainedPrograms.has(route.program)) continue;
           const node = objects.get(`${route.span.line}:${route.span.column}`);
@@ -1970,9 +2242,19 @@ export function routeSourcePlugin(paths: SystemPaths, system: SystemIR | (() => 
                 `Unable to isolate web Route ${JSON.stringify(route.identity)}.`,
             );
           }
-          if (!retainedRoutes.has(route.identity)) {
-            replacements.push({ start: node.getStart(source), end: node.end, value: "{}" });
+          if (retainedRoutes.has(route.identity)) retainProjectionRoot(node, projectionRoots);
+        }
+      } else {
+        for (const route of routes) {
+          if (!retainedPrograms.has(route.program)) continue;
+          const node = objects.get(`${route.span.line}:${route.span.column}`);
+          if (!node) {
+            throw new Error(
+              `${route.span.file}:${route.span.line}:${route.span.column}: ` +
+                `Unable to isolate web Route ${JSON.stringify(route.identity)}.`,
+            );
           }
+          replacements.push({ start: node.getStart(source), end: node.end, value: "{}" });
         }
       }
       for (const program of programs) {
@@ -1988,6 +2270,61 @@ export function routeSourcePlugin(paths: SystemPaths, system: SystemIR | (() => 
         }
         replacements.push({ start: node.getStart(source), end: node.end, value: "{}" });
       }
+      if (projection.kind === "route" || projection.kind === "document") {
+        for (const program of programs) {
+          if (!retainedPrograms.has(program.identity)) continue;
+          const node = expressions.get(`${program.span.line}:${program.span.column}`);
+          if (!node || !ts.isObjectLiteralExpression(node)) continue;
+          projectRouteProgramObject(
+            source,
+            node,
+            program.feature,
+            retainedRoutes ?? new Set(),
+            projection.kind === "route",
+            replacements,
+          );
+        }
+      }
+      for (const [feature, node] of projectedFeatureObjects(
+        expressions,
+        programs,
+        retainedPrograms,
+      )) {
+        projectObjectProperty(
+          source,
+          node,
+          "features",
+          (name) => retainedFeatures.has(`${feature}.${name}`),
+          replacements,
+        );
+        projectObjectProperty(
+          source,
+          node,
+          "providers",
+          (name) => retainedPlatforms.has(name),
+          replacements,
+        );
+      }
+      const retainedRoots = new Set(
+        [...retainedFeatures].filter((feature) => !feature.includes(".")),
+      );
+      for (const node of systemDefinitionObjects(source)) {
+        projectObjectProperty(
+          source,
+          node,
+          "features",
+          (name) => retainedRoots.has(name),
+          replacements,
+        );
+        projectObjectProperty(
+          source,
+          node,
+          "applications",
+          (name) => retainedApplications.has(name),
+          replacements,
+        );
+      }
+      markFrameworkFactoriesPure(source, replacements);
       if (!replacements.length) return;
       let transformed = code;
       const unique = [
@@ -2001,9 +2338,406 @@ export function routeSourcePlugin(paths: SystemPaths, system: SystemIR | (() => 
       for (const replacement of unique.sort((left, right) => right.start - left.start)) {
         transformed = `${transformed.slice(0, replacement.start)}${replacement.value}${transformed.slice(replacement.end)}`;
       }
-      return { code: pruneProjectionImports(transformed, id), map: null };
+      const result: Readonly<{ code: string; map: null }> = {
+        code: pruneProjectionImports(
+          pruneProjectionDeclarations(
+            transformed,
+            id,
+            projectionRoots,
+            insideSourceRoot(id, canonicalSourcePath(paths.source)) &&
+              (routes.length > 0 || programs.length > 0),
+          ),
+          id,
+        ),
+        map: null,
+      };
+      if (projectionCacheKey) projectionCache.set(projectionCacheKey, result);
+      return result;
     },
   };
+}
+
+function projectedFeaturePaths(
+  ir: SystemIR,
+  programs: ReadonlySet<string>,
+  applications: ReadonlySet<string>,
+): ReadonlySet<string> {
+  const retained = new Set([
+    ...ir.programs
+      .filter(({ name }) => programs.has(name))
+      .flatMap(({ contributions }) => contributions.map(({ feature }) => feature)),
+    ...ir.interfaces
+      .filter(({ app }) => applications.has(app))
+      .flatMap(({ features }) => Object.values(features)),
+  ]);
+  for (const feature of retained) {
+    const segments = feature.split(".");
+    while (segments.length > 1) {
+      segments.pop();
+      retained.add(segments.join("."));
+    }
+  }
+  return retained;
+}
+
+function projectedRouteFeaturePaths(
+  routes: ReadonlyMap<string, readonly Readonly<{ feature: string; identity: string }>[]>,
+  identity: string,
+): ReadonlySet<string> {
+  const retained = new Set(
+    [...routes.values()]
+      .flat()
+      .filter((route) => route.identity === identity)
+      .map(({ feature }) => feature),
+  );
+  for (const feature of retained) {
+    const segments = feature.split(".");
+    while (segments.length > 1) {
+      segments.pop();
+      retained.add(segments.join("."));
+    }
+  }
+  return retained;
+}
+
+function projectedApplications(ir: SystemIR, programs: ReadonlySet<string>): ReadonlySet<string> {
+  const interfaces = new Set(
+    ir.programs
+      .filter(({ name }) => programs.has(name))
+      .flatMap(({ interface: owner }) => (owner ? [owner] : [])),
+  );
+  return new Set(ir.interfaces.filter(({ path }) => interfaces.has(path)).map(({ app }) => app));
+}
+
+function projectedFeatureObjects(
+  expressions: ReadonlyMap<string, ts.Expression>,
+  programs: readonly Readonly<{
+    feature: string;
+    identity: string;
+    span: ProgramIR["contributions"][number]["span"];
+  }>[],
+  retainedPrograms: ReadonlySet<string>,
+): ReadonlyMap<string, ts.ObjectLiteralExpression> {
+  const features = new Map<string, ts.ObjectLiteralExpression>();
+  for (const program of programs) {
+    if (!retainedPrograms.has(program.identity)) continue;
+    const expression = expressions.get(`${program.span.line}:${program.span.column}`);
+    if (!expression) continue;
+    let current: ts.Node | undefined = expression;
+    while (current) {
+      if (ts.isObjectLiteralExpression(current) && objectProperty(current, "programs")) {
+        features.set(program.feature, current);
+        break;
+      }
+      current = current.parent;
+    }
+  }
+  return features;
+}
+
+function systemDefinitionObjects(source: ts.SourceFile): readonly ts.ObjectLiteralExpression[] {
+  const definitions: ts.ObjectLiteralExpression[] = [];
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isCallExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.text === "createSystem" &&
+      node.arguments[0] &&
+      ts.isObjectLiteralExpression(node.arguments[0])
+    ) {
+      definitions.push(node.arguments[0]);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return definitions;
+}
+
+function retainApplicationProjectionRoots(
+  source: ts.SourceFile,
+  applications: ReadonlySet<string>,
+  roots: Set<string>,
+): void {
+  for (const statement of source.statements) {
+    if (!ts.isVariableStatement(statement)) continue;
+    for (const declaration of statement.declarationList.declarations) {
+      if (ts.isIdentifier(declaration.name) && applications.has(declaration.name.text)) {
+        retainProjectionRoot(declaration, roots);
+      }
+    }
+  }
+}
+
+function projectObjectProperty(
+  source: ts.SourceFile,
+  owner: ts.ObjectLiteralExpression,
+  name: string,
+  retain: (name: string) => boolean,
+  replacements: Array<Readonly<{ start: number; end: number; value: string }>>,
+): void {
+  const property = objectProperty(owner, name);
+  if (!property || !ts.isObjectLiteralExpression(property.initializer)) return;
+  const properties = property.initializer.properties.filter((candidate) => {
+    const key = objectPropertyName(candidate.name);
+    return key === undefined || retain(key);
+  });
+  if (properties.length === property.initializer.properties.length) return;
+  const projected = ts.factory.updateObjectLiteralExpression(property.initializer, properties);
+  replacements.push({
+    start: property.initializer.getStart(source),
+    end: property.initializer.end,
+    value: ts.createPrinter().printNode(ts.EmitHint.Expression, projected, source),
+  });
+}
+
+function projectRouteProgramObject(
+  source: ts.SourceFile,
+  owner: ts.ObjectLiteralExpression,
+  feature: string,
+  retainedRoutes: ReadonlySet<string>,
+  routesOnly: boolean,
+  replacements: Array<Readonly<{ start: number; end: number; value: string }>>,
+): void {
+  const routeProperty = objectProperty(owner, "routes");
+  if (!routeProperty || !ts.isObjectLiteralExpression(routeProperty.initializer)) return;
+  const routes = routeProperty.initializer.properties.filter((candidate) => {
+    const name = objectPropertyName(candidate.name);
+    return name === undefined || retainedRoutes.has(`${feature}.${name}`);
+  });
+  const projectedRoutes = ts.factory.updateObjectLiteralExpression(
+    routeProperty.initializer,
+    routes,
+  );
+  if (!routesOnly && routes.length === routeProperty.initializer.properties.length) return;
+  const projectedRoute = ts.factory.updatePropertyAssignment(
+    routeProperty,
+    routeProperty.name,
+    projectedRoutes,
+  );
+  const projected = ts.factory.updateObjectLiteralExpression(
+    owner,
+    routesOnly
+      ? [projectedRoute]
+      : owner.properties.map((property) =>
+          property === routeProperty ? projectedRoute : property,
+        ),
+  );
+  replacements.push({
+    start: owner.getStart(source),
+    end: owner.end,
+    value: ts.createPrinter().printNode(ts.EmitHint.Expression, projected, source),
+  });
+}
+
+function objectProperty(
+  owner: ts.ObjectLiteralExpression,
+  name: string,
+): ts.PropertyAssignment | undefined {
+  return owner.properties.find(
+    (property): property is ts.PropertyAssignment =>
+      ts.isPropertyAssignment(property) && objectPropertyName(property.name) === name,
+  );
+}
+
+function objectPropertyName(name: ts.PropertyName | undefined): string | undefined {
+  if (!name) return undefined;
+  if (ts.isIdentifier(name) || ts.isStringLiteralLike(name) || ts.isNumericLiteral(name)) {
+    return name.text;
+  }
+  return undefined;
+}
+
+function markFrameworkFactoriesPure(
+  source: ts.SourceFile,
+  replacements: Array<Readonly<{ start: number; end: number; value: string }>>,
+): void {
+  const factories = new Set<string>();
+  for (const statement of source.statements) {
+    if (
+      !ts.isImportDeclaration(statement) ||
+      !ts.isStringLiteral(statement.moduleSpecifier) ||
+      (statement.moduleSpecifier.text !== "kit" &&
+        !statement.moduleSpecifier.text.startsWith("kit/features/"))
+    ) {
+      continue;
+    }
+    const bindings = statement.importClause?.namedBindings;
+    if (!bindings || !ts.isNamedImports(bindings)) continue;
+    for (const element of bindings.elements) {
+      const imported = element.propertyName?.text ?? element.name.text;
+      if (imported.startsWith("create")) factories.add(element.name.text);
+    }
+  }
+  if (!factories.size) return;
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isCallExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      factories.has(node.expression.text)
+    ) {
+      replacements.push({
+        start: node.getStart(source),
+        end: node.getStart(source),
+        value: "/* @__PURE__ */ ",
+      });
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+}
+
+function retainProjectionRoot(node: ts.Node, roots: Set<string>): void {
+  let current: ts.Node = node;
+  while (current.parent && !ts.isSourceFile(current.parent)) current = current.parent;
+  if (ts.isVariableStatement(current)) {
+    for (const declaration of current.declarationList.declarations) {
+      if (ts.isIdentifier(declaration.name)) roots.add(declaration.name.text);
+    }
+  } else if (
+    (ts.isFunctionDeclaration(current) || ts.isClassDeclaration(current)) &&
+    current.name
+  ) {
+    roots.add(current.name.text);
+  }
+}
+
+function pruneProjectionDeclarations(
+  code: string,
+  id: string,
+  roots: ReadonlySet<string> = new Set(),
+  pruneExports = false,
+): string {
+  let transformed = code;
+  for (;;) {
+    const source = ts.createSourceFile(
+      id,
+      transformed,
+      ts.ScriptTarget.Latest,
+      true,
+      id.endsWith("x") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+    );
+    const factories = projectionFactoryNames(source);
+    const removals: Array<Readonly<{ start: number; end: number }>> = [];
+    const candidates: Array<Readonly<{ names: readonly string[]; statement: ts.Statement }>> = [];
+    for (const statement of source.statements) {
+      if (
+        ts.isFunctionDeclaration(statement) &&
+        statement.name?.text.endsWith("Fixture") &&
+        hasExportModifier(statement)
+      ) {
+        removals.push({ start: statement.getStart(source), end: statement.end });
+        continue;
+      }
+      if (hasExportModifier(statement) && !pruneExports) continue;
+      if (ts.isFunctionDeclaration(statement) && statement.name) {
+        candidates.push({ names: [statement.name.text], statement });
+        continue;
+      }
+      if (
+        ts.isVariableStatement(statement) &&
+        statement.declarationList.declarations.length > 0 &&
+        statement.declarationList.declarations.every(
+          (declaration) =>
+            ts.isIdentifier(declaration.name) &&
+            (!declaration.initializer ||
+              pureProjectionInitializer(declaration.initializer, factories)),
+        )
+      ) {
+        candidates.push({
+          names: statement.declarationList.declarations.map(
+            (declaration) => (declaration.name as ts.Identifier).text,
+          ),
+          statement,
+        });
+      }
+    }
+    const owners = new Map(
+      candidates.flatMap((candidate) => candidate.names.map((name) => [name, candidate] as const)),
+    );
+    const referenced = new Set<string>();
+    const visit = (node: ts.Node): void => {
+      if (
+        ts.isTypeNode(node) ||
+        ts.isTypeAliasDeclaration(node) ||
+        ts.isInterfaceDeclaration(node) ||
+        ts.isImportDeclaration(node)
+      ) {
+        return;
+      }
+      if (ts.isIdentifier(node)) {
+        const candidate = owners.get(node.text);
+        if (
+          candidate &&
+          (node.getStart(source) < candidate.statement.getStart(source) ||
+            node.end > candidate.statement.end)
+        ) {
+          referenced.add(node.text);
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
+    for (const candidate of candidates) {
+      if (candidate.names.every((name) => !roots.has(name) && !referenced.has(name))) {
+        removals.push({
+          start: candidate.statement.getStart(source),
+          end: candidate.statement.end,
+        });
+      }
+    }
+    if (!removals.length) return transformed;
+    for (const removal of removals.sort((left, right) => right.start - left.start)) {
+      transformed = `${transformed.slice(0, removal.start)}${transformed.slice(removal.end)}`;
+    }
+  }
+}
+
+function projectionFactoryNames(source: ts.SourceFile): ReadonlySet<string> {
+  const factories = new Set<string>();
+  for (const statement of source.statements) {
+    if (!ts.isImportDeclaration(statement)) continue;
+    const bindings = statement.importClause?.namedBindings;
+    if (!bindings || !ts.isNamedImports(bindings)) continue;
+    for (const element of bindings.elements) {
+      const imported = element.propertyName?.text ?? element.name.text;
+      if (imported.startsWith("create")) factories.add(element.name.text);
+    }
+  }
+  return factories;
+}
+
+function hasExportModifier(node: ts.Node): boolean {
+  return Boolean(
+    ts.canHaveModifiers(node) &&
+    ts.getModifiers(node)?.some(({ kind }) => kind === ts.SyntaxKind.ExportKeyword),
+  );
+}
+
+function pureProjectionInitializer(
+  expression: ts.Expression,
+  factories: ReadonlySet<string>,
+): boolean {
+  if (
+    ts.isAsExpression(expression) ||
+    ts.isSatisfiesExpression(expression) ||
+    ts.isParenthesizedExpression(expression) ||
+    ts.isTypeAssertionExpression(expression)
+  ) {
+    return pureProjectionInitializer(expression.expression, factories);
+  }
+  return (
+    ts.isArrowFunction(expression) ||
+    ts.isFunctionExpression(expression) ||
+    ts.isObjectLiteralExpression(expression) ||
+    ts.isArrayLiteralExpression(expression) ||
+    ts.isLiteralExpression(expression) ||
+    (ts.isCallExpression(expression) &&
+      ts.isIdentifier(expression.expression) &&
+      factories.has(expression.expression.text)) ||
+    expression.kind === ts.SyntaxKind.NullKeyword ||
+    expression.kind === ts.SyntaxKind.TrueKeyword ||
+    expression.kind === ts.SyntaxKind.FalseKeyword
+  );
 }
 
 function pruneProjectionImports(code: string, id: string): string {
@@ -2017,7 +2751,14 @@ function pruneProjectionImports(code: string, id: string): string {
   );
   const references = new Set<string>();
   const collect = (node: ts.Node): void => {
-    if (ts.isImportDeclaration(node)) return;
+    if (
+      ts.isTypeNode(node) ||
+      ts.isTypeAliasDeclaration(node) ||
+      ts.isInterfaceDeclaration(node) ||
+      ts.isImportDeclaration(node)
+    ) {
+      return;
+    }
     if (ts.isIdentifier(node)) references.add(node.text);
     ts.forEachChild(node, collect);
   };
@@ -2073,38 +2814,64 @@ function canonicalSourcePath(path: string): string {
   }
 }
 
-function isSystemSourceModule(id: string, source: string): boolean {
-  const root = canonicalSourcePath(source);
+function isProjectableSourceModule(id: string, source: string): boolean {
   const file = canonicalSourcePath(id);
-  return (file === root || file.startsWith(`${root}${sep}`)) && /\.[cm]?[jt]sx?$/.test(file);
+  const sourceRoot = canonicalSourcePath(source);
+  const sourceModule = /\.[cm]?[jt]sx?$/.test(file);
+  if (insideSourceRoot(file, sourceRoot)) return sourceModule;
+  const framework = canonicalSourcePath(resolve(import.meta.dirname, "../../.."));
+  const sharedRuntimeRoots = [
+    canonicalSourcePath(resolve(framework, "jsx")),
+    canonicalSourcePath(resolve(framework, "platforms/web")),
+  ];
+  if (sharedRuntimeRoots.some((root) => insideSourceRoot(file, root))) return false;
+  return insideSourceRoot(file, framework) && sourceModule;
+}
+
+function insideSourceRoot(file: string, root: string): boolean {
+  return file === root || file.startsWith(`${root}${sep}`);
+}
+
+function projectionSourceAliases(path: string): readonly string[] {
+  const aliases = new Set([canonicalSourcePath(path)]);
+  const marker = `${sep}dist${sep}source${sep}`;
+  if (path.includes(marker)) {
+    aliases.add(canonicalSourcePath(path.replace(marker, `${sep}src${sep}`)));
+  }
+  return [...aliases];
 }
 
 function sourceParameters(id: string): URLSearchParams {
-  const query = id.indexOf("?");
-  return new URLSearchParams(query < 0 ? "" : id.slice(query + 1));
+  const source = projectedSourceSpecifier(id) ?? id;
+  const query = source.indexOf("?");
+  return new URLSearchParams(query < 0 ? "" : source.slice(query + 1));
 }
 
 function sourceProjection(
   id: string | undefined,
-): Readonly<{ kind: "program" | "route"; name: string }> | undefined {
+): Readonly<{ kind: "document" | "program" | "route"; name: string }> | undefined {
   if (!id) return undefined;
   const parameters = sourceParameters(id);
   const route = parameters.get("kit-route");
   if (route) return { kind: "route", name: route };
+  const document = parameters.get("kit-document");
+  if (document) return { kind: "document", name: document };
   const program = parameters.get("kit-program");
   return program ? { kind: "program", name: program } : undefined;
 }
 
-function routeSystemSpecifier(system: string, route: string, revision?: number): string {
+function routeSystemSpecifier(system: string, route: string): string {
   const parameters = new URLSearchParams({ "kit-route": route });
-  if (revision !== undefined) parameters.set("kit-revision", String(revision));
   return routeSourceId(system, parameters);
 }
 
-function programSystemSpecifier(system: string, program: string, revision?: number): string {
+function programSystemSpecifier(system: string, program: string): string {
   const parameters = new URLSearchParams({ "kit-program": program });
-  if (revision !== undefined) parameters.set("kit-revision", String(revision));
   return routeSourceId(system, parameters);
+}
+
+function documentSystemSpecifier(system: string, program: string): string {
+  return routeSourceId(system, new URLSearchParams({ "kit-document": program }));
 }
 
 function routeSourceId(id: string, parameters: URLSearchParams): string {
@@ -2113,6 +2880,20 @@ function routeSourceId(id: string, parameters: URLSearchParams): string {
   }
   const extension = id.match(/\.([cm]?[jt]sx?)$/)?.[1] ?? "ts";
   return `${id}?${parameters}&lang.${extension}`;
+}
+
+function projectedSourceId(id: string, parameters: URLSearchParams): string {
+  return `${PROJECTED_SOURCE_PREFIX}${encodeURIComponent(routeSourceId(id, parameters))}`;
+}
+
+function projectedSourceSpecifier(id: string): string | undefined {
+  if (!id.startsWith(PROJECTED_SOURCE_PREFIX)) return;
+  return decodeURIComponent(id.slice(PROJECTED_SOURCE_PREFIX.length));
+}
+
+function projectedSourceFile(id: string): string | undefined {
+  const source = projectedSourceSpecifier(id);
+  return source ? canonicalSourcePath(cleanId(source)) : undefined;
 }
 
 function routeModuleName(identity: string): string {
@@ -2127,16 +2908,10 @@ function routeModuleName(identity: string): string {
 
 function routeModuleSource(input: {
   system: string;
-  development: boolean;
-  revision: number;
   program: string;
   route: ReturnType<typeof collectWebRoutes>[number];
 }): string {
-  const system = routeSystemSpecifier(
-    input.system,
-    routeIdentity(input.route),
-    input.development ? input.revision : undefined,
-  );
+  const system = routeSystemSpecifier(input.system, routeIdentity(input.route));
   return `import system from ${JSON.stringify(system)};
 
 const [root, ...path] = ${JSON.stringify(input.route.feature.split(".").filter(Boolean))};
@@ -2292,6 +3067,20 @@ function presentationContractPlugin(
         );
         state.current = prepared;
         responseCache.clear();
+        const candidateModules = [
+          ...(context.server.moduleGraph.getModulesByFile(prepared.candidate) ?? []),
+        ];
+        const invalidated = new Set<ModuleNode>();
+        const timestamp = Date.now();
+        const changed = canonicalSourcePath(context.file);
+        for (const module of context.server.moduleGraph.idToModuleMap.values()) {
+          if (module.id && projectedSourceFile(module.id) === changed) {
+            context.server.moduleGraph.invalidateModule(module, invalidated, timestamp, true);
+          }
+        }
+        for (const module of candidateModules) {
+          context.server.moduleGraph.invalidateModule(module, invalidated, timestamp, true);
+        }
         report?.({
           kind: "update",
           platform: "web",
@@ -2300,17 +3089,6 @@ function presentationContractPlugin(
           outputs: Object.freeze([prepared.interface]),
           durationMs: performance.now() - started,
         });
-        const candidateModules = [
-          ...(context.server.moduleGraph.getModulesByFile(prepared.candidate) ?? []),
-        ];
-        const invalidated = new Set<ModuleNode>();
-        const timestamp = Date.now();
-        for (const module of context.modules) {
-          context.server.moduleGraph.invalidateModule(module, invalidated, timestamp, true);
-        }
-        for (const module of candidateModules) {
-          context.server.moduleGraph.invalidateModule(module, invalidated, timestamp, true);
-        }
         context.server.ws.send({
           type: "custom",
           event: "kit:update-kind",
@@ -3671,17 +4449,12 @@ function workerSource(input: {
   host: string;
   runtime: string;
   processRuntime: string;
-  revision: number;
   program: ProgramIR;
   manifest: unknown;
   dependencies: readonly DependencyContractIR[];
   providers: readonly SelectedDependencyProviderIR[];
 }): string {
-  const system = programSystemSpecifier(
-    input.system,
-    input.program.name,
-    input.development ? input.revision : undefined,
-  );
+  const system = programSystemSpecifier(input.system, input.program.name);
   const serviceWorker = input.program.environment.name === "browser-service-worker";
   const lifecycle = serviceWorker
     ? `const programs = globalThis.__kitServiceWorkerPrograms ??= [];
@@ -3702,11 +4475,10 @@ addEventListener("message", (event) => {
     ? `globalThis.__kitServiceWorkerSubscriptions ??= new Set();
 const ready = createWebHost({
   dependencies: ${JSON.stringify(input.dependencies)},
-  providers: ${JSON.stringify(input.providers)},
-  system,
-  context: "service-worker",
-  ${input.development ? `serverOrigin: ${JSON.stringify(input.serverOrigin ?? "http://localhost:3010")},` : ""}
-}).then((dependencies) => startProcess(
+	  providers: ${JSON.stringify(input.providers)},
+	  system,
+	  context: "service-worker",
+	}).then((dependencies) => startProcess(
   system,
   ${JSON.stringify(input.program.name)},
 	  dependencies,
@@ -3716,11 +4488,10 @@ const ready = createWebHost({
 	));`
     : `const dependencies = await createWebHost({
   dependencies: ${JSON.stringify(input.dependencies)},
-  providers: ${JSON.stringify(input.providers)},
-  system,
-  context: "worker",
-  ${input.development ? `serverOrigin: ${JSON.stringify(input.serverOrigin ?? "http://localhost:3010")},` : ""}
-});
+	  providers: ${JSON.stringify(input.providers)},
+	  system,
+	  context: "worker",
+	});
 const ready = startProcess(
   system,
   ${JSON.stringify(input.program.name)},
@@ -3825,7 +4596,6 @@ function candidateSource(input: {
   serverOrigin?: string;
   host: string;
   processRuntime: string;
-  revision: number;
   runtime: string;
   presentationRuntime: string;
   program: ProgramIR;
@@ -3849,11 +4619,7 @@ function candidateSource(input: {
     source: string;
   }>[];
 }): string {
-  const system = routeSystemSpecifier(
-    input.system,
-    "base",
-    input.development ? input.revision : undefined,
-  );
+  const system = programSystemSpecifier(input.system, input.program.name);
   const routeEntries = Object.fromEntries(
     input.routeEntries.map(({ identity, source }) => [
       identity,
@@ -3951,11 +4717,10 @@ const loadRoute = (route) =>
 
 const hostOptions = (definition) => ({
   dependencies: definition.dependencies,
-  providers: definition.providers,
-  system,
-  routes: ${JSON.stringify(clientWebRoutes(input.routes))},
-  ${input.development ? `serverOrigin: ${JSON.stringify(input.serverOrigin ?? "http://localhost:3010")},` : ""}
-});
+	  providers: definition.providers,
+	  system,
+	  routes: ${JSON.stringify(clientWebRoutes(input.routes))},
+	});
 
 const disposeAll = async (values) => {
   const results = await Promise.allSettled(values.slice().reverse().map((value) => value()));
@@ -3984,6 +4749,8 @@ const disposeWorker = (worker) => new Promise((resolve) => {
 
 export async function activate(root${input.development ? ", previous = {}" : ""}) {
   ${hotState}
+  const deferUIActivation =
+    root.getAttribute("data-kit-rendering") === "hydrate" && root.childNodes.length > 0;
   const cleanups = [];
   try {
     for (const definition of headlessPrograms) {
@@ -4015,7 +4782,6 @@ export async function activate(root${input.development ? ", previous = {}" : ""}
       routeDependencies: input.routeDependencies,
       providers: input.providers,
       routes: input.routes,
-      ...(input.development ? { serverOrigin: input.serverOrigin ?? "http://localhost:3010" } : {}),
     })},
     system,
   });
@@ -4036,6 +4802,7 @@ export async function activate(root${input.development ? ", previous = {}" : ""}
       loadRoute,
       routeLoaders: ${JSON.stringify(routesWithLoaders)},
       hotState,
+      deferActivation: deferUIActivation,
       boundary: root,
     });
   } catch (error) {
@@ -4050,6 +4817,14 @@ export async function activate(root${input.development ? ", previous = {}" : ""}
     await disposeAll(cleanups);
     throw error;
   }
+  try {
+    await ui.activate();
+  } catch (error) {
+    disposeRender();
+    await ui.dispose();
+    await disposeAll(cleanups);
+    throw error;
+  }
   ${activation}
 }
 `;
@@ -4057,18 +4832,15 @@ export async function activate(root${input.development ? ", previous = {}" : ""}
 
 function developmentDocumentEvaluatorSource(input: {
   system: string;
+  program: string;
   application: string;
   interface: string;
   applicationName: string;
   features: Readonly<Record<string, string>>;
   routes: readonly WebRouteIR[];
   document: string;
-  revision: number;
 }): string {
-  const system = routeSourceId(
-    input.system,
-    new URLSearchParams({ "kit-revision": String(input.revision) }),
-  );
+  const system = documentSystemSpecifier(input.system, input.program);
   return `import system from ${JSON.stringify(system)};
 import { prepareWebDocument } from ${JSON.stringify(input.document)};
 
@@ -4324,8 +5096,9 @@ function escapeHtmlText(value: string): string {
 }
 
 function cleanId(id: string): string {
-  const query = id.indexOf("?");
-  return query < 0 ? id : id.slice(0, query);
+  const source = projectedSourceSpecifier(id) ?? id;
+  const query = source.indexOf("?");
+  return query < 0 ? source : source.slice(0, query);
 }
 
 function record(value: unknown): Record<string, unknown> {

@@ -133,7 +133,9 @@
     "check:presentation": "vitest run src/platforms/web/presentation src/platforms/web/adapter/presentation src/platforms/web/adapter/ui/component/adapter.spec.ts",
     "check:production": "KIT_NATIVE_PROFILE=release vitest run --no-file-parallelism --tagsFilter=production src examples",
     "check:source": "nub run typecheck && nub run lint && nub run fmt:check && nub run test",
-    "check:workflow": "vitest run --no-file-parallelism --tagsFilter='!compiler && !package && !provider && !production' src/features/workflow/feature.spec.ts && vitest run --no-file-parallelism --tagsFilter='compiler && !package && !production' src/features/workflow/feature.spec.ts && vitest run --no-file-parallelism src/features/workflow/ir.spec.ts",
+    "check:workflow": "nub run check:workflow:source && nub run check:workflow:native",
+    "check:workflow:native": "vitest run --no-file-parallelism --tagsFilter='native && !production' src/features/workflow/feature.spec.ts",
+    "check:workflow:source": "vitest run --no-file-parallelism --tagsFilter='!compiler && !native && !package && !provider && !production' src/features/workflow/feature.spec.ts && vitest run --no-file-parallelism --tagsFilter='compiler && !native && !package && !production' src/features/workflow/feature.spec.ts && vitest run --no-file-parallelism src/features/workflow/ir.spec.ts",
     "dev": "nub src/cli.ts dev --dir examples/basic",
     "fmt": "oxfmt --config config/format.json .",
     "fmt:check": "oxfmt --config config/format.json --check .",
@@ -156,9 +158,11 @@
     "oxlint": "^1.75.0",
     "typescript": "^7.0.2",
     "vite": "^8.1.5",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.10",
+    "ws": "^8.21.1"
   },
   "devDependencies": {
+    "@types/ws": "^8.18.1",
     "fast-check": "^4.9.0"
   },
   "devEngines": {

@@ -309,6 +309,11 @@ type ProjectionWireOperations<Model extends ProjectionModelDefinition> = Readonl
       principal: Model["Principal"];
       after: Readonly<Record<string, string>>;
     }): Promise<AsyncIterable<Readonly<{ cursor: string }>>>;
+    $synchronize(input: {
+      principal: Model["Principal"];
+      rows: readonly Extract<keyof Model["Rows"], string>[];
+      after?: number;
+    }): Promise<ProjectionSynchronization<Model>>;
   } & {
     [Name in keyof Model["Rows"]]: (
       input: RuntimeProjectionRequest<Model>,
@@ -440,10 +445,35 @@ type RuntimeProjectionState = Readonly<{
   rows: Readonly<Record<string, readonly object[]>>;
 }>;
 
-type ProjectionCheckpoint = Readonly<{
-  type: "projection.checkpoint";
-  state: RuntimeProjectionState;
+type ProjectionStateChange = Readonly<{
+  row: string;
+  id: string;
+  before?: Readonly<{ id: string }>;
+  after?: Readonly<{ id: string }>;
 }>;
+
+type ProjectionCheckpoint = Readonly<{
+  type: "projection.change";
+  cursors: Readonly<Record<string, string>>;
+  changes: readonly ProjectionStateChange[];
+}>;
+
+type ProjectionSynchronizationChange<Model extends ProjectionModelDefinition> = {
+  [Name in Extract<keyof Model["Rows"], string>]:
+    | Readonly<{ row: Name; upsert: Model["Rows"][Name] }>
+    | Readonly<{ row: Name; remove: Readonly<{ id: string }> }>;
+}[Extract<keyof Model["Rows"], string>];
+
+type ProjectionSynchronization<Model extends ProjectionModelDefinition> = Readonly<{
+  revision: number;
+  observations: Readonly<Record<string, string>>;
+  snapshot?: Readonly<{
+    [Name in keyof Model["Rows"]]?: readonly Model["Rows"][Name][];
+  }>;
+  changes: readonly ProjectionSynchronizationChange<Model>[];
+}>;
+
+const retainedProjectionChanges = 256;
 
 type RuntimeProjectionQuery = Readonly<{
   find?: object;
@@ -497,9 +527,78 @@ async function loadProjectionState(
   const appended = await events.read({ stream, after: snapshot?.revision ?? 0 });
   for (const stored of appended) {
     const checkpoint = stored.event as ProjectionCheckpoint;
-    if (checkpoint.type === "projection.checkpoint") state = checkpoint.state;
+    if (checkpoint.type === "projection.change") {
+      state = {
+        revision: stored.revision,
+        cursors: checkpoint.cursors,
+        rows: applyProjectionChanges(state.rows, checkpoint.changes),
+      };
+    }
   }
   return state;
+}
+
+function applyProjectionChanges(
+  rows: Readonly<Record<string, readonly object[]>>,
+  changes: readonly ProjectionStateChange[],
+): Readonly<Record<string, readonly object[]>> {
+  let next = rows;
+  for (const change of changes) {
+    const copied: Record<string, readonly object[]> = { ...next };
+    const values: object[] = [];
+    let replaced = false;
+    for (const value of next[change.row] ?? []) {
+      if ((value as Readonly<{ id: string }>).id !== change.id) {
+        values.push(value);
+      } else if (change.after !== undefined) {
+        values.push(change.after);
+        replaced = true;
+      }
+    }
+    if (change.after !== undefined && !replaced) values.push(change.after);
+    copied[change.row] = values;
+    next = copied;
+  }
+  return next;
+}
+
+function projectionStateChanges(
+  previous: Readonly<Record<string, readonly object[]>>,
+  next: Readonly<Record<string, readonly object[]>>,
+): readonly ProjectionStateChange[] {
+  const changes: ProjectionStateChange[] = [];
+  for (const row of Object.keys(next)) {
+    const before = previous[row] ?? [];
+    const after = next[row] ?? [];
+    for (const current of before) {
+      const id = (current as Readonly<{ id: string }>).id;
+      let replacement: object | undefined;
+      for (const candidate of after) {
+        if ((candidate as Readonly<{ id: string }>).id === id) replacement = candidate;
+      }
+      if (replacement === undefined) {
+        changes.push({ row, id, before: current as Readonly<{ id: string }> });
+      } else if (JSON.stringify(current) !== JSON.stringify(replacement)) {
+        changes.push({
+          row,
+          id,
+          before: current as Readonly<{ id: string }>,
+          after: replacement as Readonly<{ id: string }>,
+        });
+      }
+    }
+    for (const added of after) {
+      const addedId = (added as Readonly<{ id: string }>).id;
+      let existed = false;
+      for (const previousValue of before) {
+        if ((previousValue as Readonly<{ id: string }>).id === addedId) existed = true;
+      }
+      if (!existed) {
+        changes.push({ row, id: addedId, after: added as Readonly<{ id: string }> });
+      }
+    }
+  }
+  return changes;
 }
 
 function applyProjectionMutations(
@@ -601,23 +700,49 @@ async function saveProjectionState(
   next: RuntimeProjectionState,
 ): Promise<RuntimeProjectionState> {
   if (previous === next) return previous;
-  const committed = {
-    ...next,
-    revision: previous.revision + 1,
-  };
+  const changes = projectionStateChanges(previous.rows, next.rows);
+  if (changes.length === 0) {
+    const advanced = {
+      ...next,
+      revision: previous.revision,
+    };
+    const cursorCheckpointSaved = await events.saveSnapshot({
+      stream,
+      expectedRevision: previous.revision,
+      revision: previous.revision,
+      snapshot: advanced,
+    });
+    if (!cursorCheckpointSaved) throw new Error("Projection cursor checkpoint conflicted.");
+    return advanced;
+  }
   const appended = await events.append({
     stream,
     expectedRevision: previous.revision,
-    events: [{ type: "projection.checkpoint", state: committed } satisfies ProjectionCheckpoint],
+    events: [
+      {
+        type: "projection.change",
+        cursors: next.cursors,
+        changes,
+      } satisfies ProjectionCheckpoint,
+    ],
   });
   if (appended === undefined) throw new Error("Projection checkpoint conflicted.");
+  const committed = {
+    ...next,
+    revision: appended[appended.length - 1]?.revision ?? previous.revision + 1,
+  };
   const saved = await events.saveSnapshot({
     stream,
     expectedRevision: previous.revision,
     revision: committed.revision,
     snapshot: committed,
   });
-  if (saved) await events.compact({ stream, through: committed.revision });
+  if (saved && committed.revision > retainedProjectionChanges) {
+    await events.compact({
+      stream,
+      through: committed.revision - retainedProjectionChanges,
+    });
+  }
   return committed;
 }
 
@@ -934,6 +1059,115 @@ async function queryProjection<Model extends ProjectionModelDefinition>(
   );
 }
 
+async function synchronizeProjection<Model extends ProjectionModelDefinition>(
+  definition: ProjectionImplementation<Model>,
+  dependencies: Model["Dependencies"],
+  events: EventStore<object>,
+  stream: string,
+  state: RuntimeProjectionState,
+  rowNames: readonly string[],
+  request: Readonly<{
+    principal: Model["Principal"];
+    rows: readonly string[];
+    after?: number;
+  }>,
+): Promise<ProjectionSynchronization<Model>> {
+  for (const row of request.rows) {
+    if (!valueIn(rowNames, row)) throw new Error(`Unknown Projection row ${row}.`);
+  }
+  const snapshot = async (): Promise<ProjectionSynchronization<Model>> => {
+    const rows: Record<string, readonly object[]> = {};
+    for (const row of request.rows) {
+      const result = await queryProjection(definition, dependencies, row, state, {
+        principal: request.principal,
+        query: { find: {} },
+      });
+      if (result.kind !== "rows") {
+        throw new Error(`Projection synchronization row ${row} returned analytics.`);
+      }
+      rows[row] = result.matches.map(({ row: value }) => value);
+    }
+    return {
+      revision: state.revision,
+      observations: state.cursors,
+      snapshot: rows as ProjectionSynchronization<Model>["snapshot"],
+      changes: [],
+    };
+  };
+
+  const after = request.after;
+  if (after === undefined || after < 0 || after > state.revision) {
+    return await snapshot();
+  }
+  if (after === state.revision) {
+    return {
+      revision: state.revision,
+      observations: state.cursors,
+      changes: [],
+    };
+  }
+
+  const retained = await events.read({
+    stream,
+    after,
+    limit: retainedProjectionChanges + 1,
+  });
+  if (
+    retained[0]?.revision !== after + 1 ||
+    retained[retained.length - 1]?.revision !== state.revision ||
+    retained.length > retainedProjectionChanges
+  ) {
+    return await snapshot();
+  }
+
+  const changes: Array<
+    Readonly<{ row: string; upsert: object } | { row: string; remove: Readonly<{ id: string }> }>
+  > = [];
+  for (const stored of retained) {
+    const checkpoint = stored.event as ProjectionCheckpoint;
+    if (checkpoint.type !== "projection.change") return await snapshot();
+    for (const change of checkpoint.changes) {
+      if (valueIn(request.rows, change.row)) {
+        const authorize = definition.authorize[change.row] as
+          | ((
+              context: Readonly<{
+                principal: Model["Principal"];
+                row: Readonly<{ id: string }>;
+                dependencies: Model["Dependencies"];
+              }>,
+            ) => MaybePromise<boolean>)
+          | undefined;
+        if (!authorize)
+          throw new Error(`Projection row ${change.row} has no authorization policy.`);
+        const beforeVisible =
+          change.before !== undefined &&
+          (await authorize({
+            principal: request.principal,
+            row: change.before,
+            dependencies,
+          }));
+        const afterVisible =
+          change.after !== undefined &&
+          (await authorize({
+            principal: request.principal,
+            row: change.after,
+            dependencies,
+          }));
+        if (afterVisible) {
+          changes.push({ row: change.row, upsert: change.after! });
+        } else if (beforeVisible) {
+          changes.push({ row: change.row, remove: { id: change.id } });
+        }
+      }
+    }
+  }
+  return {
+    revision: state.revision,
+    observations: state.cursors,
+    changes: changes as unknown as readonly ProjectionSynchronizationChange<Model>[],
+  };
+}
+
 /** Evaluates a typed Projection query over rows already filtered by authority. */
 export function evaluateProjectionRows<Row extends ProjectionRow>(
   rows: readonly Row[],
@@ -1055,14 +1289,14 @@ export function createProjection<const Model extends ProjectionModelDefinition>(
             [name]: {
               async [dependencyInvocation](operation: string, received: object) {
                 if (operation === "observe") {
-                  const request = received as Readonly<{
+                  const observation = received as Readonly<{
                     principal: Model["Principal"];
                     after: Readonly<Record<string, string>>;
                   }>;
                   const streams = [];
                   for (const source of sourceNames) {
                     const sourceName: string = source;
-                    const after = request.after[sourceName];
+                    const after = observation.after[sourceName];
                     streams.push({
                       prefix: aggregateEventStreamPrefix(sourceName),
                       ...(after === undefined ? {} : { after }),
@@ -1071,6 +1305,40 @@ export function createProjection<const Model extends ProjectionModelDefinition>(
                   return mapStream(eventStore.subscribeAll({ streams }), ({ cursor }) => ({
                     cursor,
                   }));
+                }
+                if (operation === "$synchronize") {
+                  const synchronization = received as Readonly<{
+                    principal: Model["Principal"];
+                    rows: readonly string[];
+                    after?: number;
+                  }>;
+                  return await dependencies.synchronization.exclusive({
+                    key: stream,
+                    async task() {
+                      const previous = await loadProjectionState(eventStore, stream, rowNames);
+                      const refreshed = await refreshProjection(
+                        dependencies,
+                        definition,
+                        previous,
+                        sourceNames,
+                      );
+                      const state = await saveProjectionState(
+                        eventStore,
+                        stream,
+                        previous,
+                        refreshed,
+                      );
+                      return await synchronizeProjection(
+                        definition,
+                        modelDependencies,
+                        eventStore,
+                        stream,
+                        state,
+                        rowNames,
+                        synchronization,
+                      );
+                    },
+                  });
                 }
                 if (!valueIn(rowNames, operation)) {
                   throw new Error(`Unknown Projection row ${operation}.`);

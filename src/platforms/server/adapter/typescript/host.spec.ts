@@ -510,13 +510,14 @@ describe("server Platform host", () => {
         method: "OPTIONS",
         headers: {
           origin,
-          "access-control-request-headers": "content-type,x-kit-command,x-kit-entity",
+          "access-control-request-headers": "content-type,x-kit-after,x-kit-command,x-kit-entity",
           "access-control-request-method": "POST",
         },
       });
 
       expect(response.status).toBe(204);
       expect(response.headers.get("access-control-allow-origin")).toBe(origin);
+      expect(response.headers.get("access-control-allow-headers")).toContain("x-kit-after");
       expect(response.headers.get("access-control-allow-headers")).toContain("x-kit-command");
       expect(response.headers.get("access-control-allow-headers")).toContain("x-kit-entity");
     }

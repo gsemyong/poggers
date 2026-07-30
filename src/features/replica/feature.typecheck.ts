@@ -72,6 +72,7 @@ type LocalOperations = Replica<{
 }>;
 
 export const localOperationsDefinition = {
+  state: () => ({ orders: [] }),
   commands: {
     placeOrder: {
       async commit({ principal, dependencies, input, idempotencyKey }) {

@@ -16,6 +16,7 @@ import type {
 } from "@/compiler/extension";
 import {
   SYSTEM_IR_VERSION,
+  typeIdentity,
   type DependencyIR,
   type DependencyProviderIR,
   type CompilerExtensionsIR,
@@ -273,6 +274,7 @@ export function systemCompilerIdentity(
       compiler.call,
       compiler.interface,
       compiler.program,
+      compiler.assemble,
       compiler.validate,
     ]) {
       hash.update(hook?.toString() ?? "");
@@ -700,8 +702,15 @@ function compileSystemProgram(
   const file = resolve(entry);
   const configuration = ts.findConfigFile(dirname(file), ts.sys.fileExists, "tsconfig.json");
   const changedSource = changedFile ? program.getSourceFile(resolve(changedFile)) : undefined;
-  const diagnostics = changedSource
-    ? program.getSyntacticDiagnostics(changedSource)
+  const diagnosticSources =
+    changedSource && previous
+      ? affectedDiagnosticSources(program, changedSource, previous, file)
+      : undefined;
+  const diagnostics = diagnosticSources
+    ? diagnosticSources.flatMap((source) => [
+        ...program.getSyntacticDiagnostics(source),
+        ...program.getSemanticDiagnostics(source),
+      ])
     : ts.getPreEmitDiagnostics(program);
   const first = diagnostics.find(
     (diagnostic) => diagnostic.category === ts.DiagnosticCategory.Error,
@@ -750,6 +759,10 @@ function compileSystemProgram(
   const featureUnits: FeatureCompilationUnit[] = [];
   const work = {
     features: { compiled: 0, reused: 0 },
+    files: {
+      diagnosed: diagnosticSources?.length ?? program.getSourceFiles().length,
+      total: program.getSourceFiles().length,
+    },
   };
   const extractionStarted = performance.now();
   const previousFeatures = new Map(previous?.semanticGraph.features.map((unit) => [unit.id, unit]));
@@ -820,7 +833,7 @@ function compileSystemProgram(
   }
   const extractionCompleted = performance.now();
   validateProgramEnvironments(contributions);
-  const programs = assemblePrograms(contributions);
+  const programs = assemblePrograms(contributions, extensions);
 
   const platforms = [
     ...new Set([
@@ -896,6 +909,7 @@ function compileSystemProgram(
     }),
     work: Object.freeze({
       features: Object.freeze({ ...work.features }),
+      files: Object.freeze({ ...work.files }),
       durations: Object.freeze({
         diagnostics: diagnosticsCompleted - compilationStarted,
         extraction: extractionCompleted - extractionStarted,
@@ -913,6 +927,28 @@ function compileSystemProgram(
     ),
     outputSources,
   };
+}
+
+function affectedDiagnosticSources(
+  program: ts.Program,
+  changed: ts.SourceFile,
+  previous: SystemCompilation,
+  entry: string,
+): readonly ts.SourceFile[] | undefined {
+  const path = canonicalSourceFile(changed.fileName);
+  const affected = previous.semanticGraph.features.filter(({ sourceFiles }) =>
+    sourceFiles.includes(path),
+  );
+  if (!affected.length) return undefined;
+  const names = new Set([
+    canonicalSourceFile(entry),
+    path,
+    ...affected.flatMap(({ sourceFiles }) => sourceFiles),
+  ]);
+  return program
+    .getSourceFiles()
+    .filter((source) => names.has(canonicalSourceFile(source.fileName)))
+    .sort((left, right) => left.fileName.localeCompare(right.fileName));
 }
 
 function compilerOptions(file: string): ts.CompilerOptions {
@@ -988,7 +1024,10 @@ function validateProgramEnvironments(programs: readonly UnassembledProgramIR[]):
   }
 }
 
-function assemblePrograms(contributions: readonly UnassembledProgramIR[]): ProgramIR[] {
+function assemblePrograms(
+  contributions: readonly UnassembledProgramIR[],
+  extensions: readonly SourceCompilerExtension[],
+): ProgramIR[] {
   const names = [...new Set(contributions.map(({ name }) => name))].sort();
   return names.map((name) => {
     const candidates = contributions
@@ -1020,7 +1059,7 @@ function assemblePrograms(contributions: readonly UnassembledProgramIR[]): Progr
       };
     }
     const environment = members[0]!.environment;
-    return {
+    const program: ProgramIR = {
       id: `program/${name}`,
       name,
       logicalName: members[0]!.logicalName,
@@ -1042,7 +1081,64 @@ function assemblePrograms(contributions: readonly UnassembledProgramIR[]): Progr
         }),
       ),
     };
+    const extension = extensions.find(({ name }) => name === environment.platform);
+    if (!extension?.assemble) return program;
+    const assembled = extension.assemble(program);
+    assertProgramAssembly(assembled, environment.platform, program);
+    return {
+      ...program,
+      extensions: Object.freeze({ [environment.platform]: assembled.ir }),
+      contributions: program.contributions.map((contribution) => ({
+        ...contribution,
+        extensions: Object.freeze({
+          ...contribution.extensions,
+          [environment.platform]: assembled.contributions[contribution.id]!,
+        }),
+      })),
+    };
   });
+}
+
+function assertProgramAssembly(
+  value: ReturnType<NonNullable<SourceCompilerExtension["assemble"]>>,
+  platform: string,
+  program: ProgramIR,
+): void {
+  assertExtensionIR(value.ir, platform, new Set());
+  if (
+    !value.ir ||
+    typeof value.ir !== "object" ||
+    Array.isArray(value.ir) ||
+    !Number.isSafeInteger(value.ir.version) ||
+    value.ir.version < 1
+  ) {
+    throw new TypeError(
+      `Platform ${JSON.stringify(platform)} returned unversioned Program assembly meaning.`,
+    );
+  }
+  const expected = program.contributions.map(({ id }) => id).sort();
+  const actual = Object.keys(value.contributions).sort();
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+    throw new TypeError(
+      `Platform ${JSON.stringify(platform)} must assemble every contribution in ` +
+        `${JSON.stringify(program.id)} exactly once.`,
+    );
+  }
+  for (const contribution of program.contributions) {
+    const ir = value.contributions[contribution.id]!;
+    assertExtensionIR(ir, platform, new Set());
+    if (
+      !ir ||
+      typeof ir !== "object" ||
+      Array.isArray(ir) ||
+      !Number.isSafeInteger(ir.version) ||
+      ir.version < 1
+    ) {
+      throw new TypeError(
+        `Platform ${JSON.stringify(platform)} returned unversioned contribution assembly meaning.`,
+      );
+    }
+  }
 }
 
 function semanticHash(value: unknown): string {
@@ -1517,7 +1613,7 @@ function expressionDeclarations(
 }
 
 function inside(root: string, file: string): boolean {
-  const path = relative(root, resolve(file));
+  const path = relative(canonicalSourceFile(root), canonicalSourceFile(file));
   return path === "" || (!path.startsWith("..") && !isAbsolute(path));
 }
 
@@ -1940,17 +2036,14 @@ function extractDependencyProviders(
           `Feature Dependency provider ${JSON.stringify(dependency)} production meaning must be static data.`,
         );
       }
+      const implementation = staticImplementationIdentity(checker, development);
       providers.push({
         dependency,
         platform,
         development: true,
+        developmentIdentity: implementation.identity,
         sources: Object.freeze(
-          [
-            ...transitiveLocalSources(program, checker, root, [
-              development.getSourceFile(),
-              ...(providerValue ? [providerValue.getSourceFile()] : []),
-            ]),
-          ].sort(),
+          implementation.sources.filter((source) => inside(root, source)).sort(),
         ),
         ...(requirements === undefined ? {} : { requirements }),
         ...(production === undefined ? {} : { production }),
@@ -1961,6 +2054,61 @@ function extractDependencyProviders(
   return providers.sort((left, right) =>
     `${left.platform}/${left.dependency}`.localeCompare(`${right.platform}/${right.dependency}`),
   );
+}
+
+function staticImplementationIdentity(
+  checker: ts.TypeChecker,
+  implementation: ts.Node,
+): Readonly<{ identity: string; sources: readonly string[] }> {
+  const pending: ts.Node[] = [implementation];
+  const visited = new Set<ts.Node>();
+  const fragments = new Set<string>();
+  const sources = new Set<string>();
+
+  while (pending.length) {
+    const current = pending.pop()!;
+    if (visited.has(current)) continue;
+    visited.add(current);
+    const source = current.getSourceFile();
+    if (!source.isDeclarationFile) {
+      sources.add(canonicalSourceFile(source.fileName));
+      fragments.add(current.getText(source));
+    }
+    const visit = (node: ts.Node): void => {
+      if (ts.isIdentifier(node)) {
+        let symbol = checker.getSymbolAtLocation(node);
+        if (symbol?.flags && symbol.flags & ts.SymbolFlags.Alias) {
+          symbol = checker.getAliasedSymbol(symbol);
+        }
+        for (const declaration of symbol?.declarations ?? []) {
+          const candidate = runtimeDeclaration(declaration);
+          if (
+            candidate.getSourceFile().isDeclarationFile ||
+            containsNode(implementation, candidate) ||
+            containsNode(candidate, implementation)
+          ) {
+            continue;
+          }
+          pending.push(candidate);
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    ts.forEachChild(current, visit);
+  }
+
+  return Object.freeze({
+    identity: semanticHash([...fragments].sort()),
+    sources: Object.freeze([...sources].sort()),
+  });
+}
+
+function runtimeDeclaration(declaration: ts.Declaration): ts.Node {
+  if (ts.isVariableDeclaration(declaration) && declaration.initializer) {
+    return declaration.initializer;
+  }
+  if (ts.isPropertyAssignment(declaration)) return declaration.initializer;
+  return declaration;
 }
 
 function staticObjectExpression(
@@ -2125,6 +2273,10 @@ function validatePortableLocals(
       case "stream-map":
         expression(value.source, names);
         expression(value.transform, names);
+        return;
+      case "stream-filter":
+        expression(value.source, names);
+        expression(value.predicate, names);
         return;
       case "stream-distinct":
         expression(value.source, names);
@@ -4338,6 +4490,16 @@ function lowerPortableCall(
       transform: lowerExpression(lowering, call.arguments[1]!, dependenciesName),
     });
   }
+  if (intrinsic === "stream-filter") {
+    if (call.arguments.length !== 2) {
+      throw diagnostic(call, "filterStream requires a source and predicate.");
+    }
+    return typedExpression(lowering, typeNode, {
+      kind: "stream-filter",
+      source: lowerExpression(lowering, call.arguments[0]!, dependenciesName),
+      predicate: lowerExpression(lowering, call.arguments[1]!, dependenciesName),
+    });
+  }
   if (intrinsic === "stream-distinct") {
     if (call.arguments.length !== 2) {
       throw diagnostic(call, "distinctStream requires a source and selector.");
@@ -4516,7 +4678,11 @@ function lowerPortableCall(
   );
   const resultType = lowering.checker.getTypeAtLocation(call);
   const captures = capturedSymbols(lowering, direct.functionLike);
-  const id = portableFunctionId(lowering.checker, symbol, direct.functionLike, parameterTypes);
+  const id = portableFunctionId(
+    symbol,
+    direct.functionLike,
+    arguments_.map(({ type }) => type),
+  );
   if (!lowering.functions.has(id)) {
     if (lowering.active.has(id)) {
       throw diagnostic(call, "Recursive portable functions are not supported in profile v0.");
@@ -4711,6 +4877,7 @@ function portableIntrinsic(
   | "dependency-intercept"
   | "data-kind"
   | "stream-distinct"
+  | "stream-filter"
   | "stream-map"
   | "type-keys"
   | "type-literal"
@@ -4739,9 +4906,13 @@ function portableIntrinsic(
     if (direct.symbol.getName() === "typeSchema") return "type-schema";
     if (direct.symbol.getName() === "typeKeys") return "type-keys";
   }
-  if (!["distinctStream", "mapStream"].includes(direct.symbol.getName())) return undefined;
+  if (!["distinctStream", "filterStream", "mapStream"].includes(direct.symbol.getName())) {
+    return undefined;
+  }
   if (!file.endsWith("/core/stream.ts")) return undefined;
-  return direct.symbol.getName() === "mapStream" ? "stream-map" : "stream-distinct";
+  if (direct.symbol.getName() === "mapStream") return "stream-map";
+  if (direct.symbol.getName() === "filterStream") return "stream-filter";
+  return "stream-distinct";
 }
 
 function portableDataExpression(value: unknown, span: SourceSpan): ExpressionIR {
@@ -4991,7 +5162,11 @@ function enclosingFunction(node: ts.Node): ts.FunctionLikeDeclaration | undefine
 }
 
 function containsNode(container: ts.Node, node: ts.Node): boolean {
-  return container.pos <= node.pos && container.end >= node.end;
+  return (
+    container.getSourceFile() === node.getSourceFile() &&
+    container.pos <= node.pos &&
+    container.end >= node.end
+  );
 }
 
 function isValueIdentifier(node: ts.Identifier): boolean {
@@ -5025,13 +5200,12 @@ function valueSymbol(checker: ts.TypeChecker, node: ts.Identifier): ts.Symbol | 
 }
 
 function portableFunctionId(
-  checker: ts.TypeChecker,
   symbol: ts.Symbol,
   declaration: ts.FunctionLikeDeclaration,
-  parameterTypes: readonly ts.Type[],
+  parameterTypes: readonly TypeIR[],
 ): string {
-  const parameters = parameterTypes.map((type) => checker.typeToString(type)).join(",");
-  return `function/${semanticNodeKey(declaration)}/${symbol.getName()}(${parameters})`;
+  const parameters = parameterTypes.map(typeIdentity);
+  return `function/${semanticNodeKey(declaration)}/${symbol.getName()}#${semanticHash(parameters)}`;
 }
 
 function isPromiseType(checker: ts.TypeChecker, type: ts.Type): boolean {
@@ -6111,9 +6285,8 @@ function mutableVariableReference(checker: ts.TypeChecker, expression: ts.Expres
 
 function semanticSymbolName(symbol: ts.Symbol): string {
   const name = symbol.getName();
-  if (name.startsWith("__@dispose")) return "@dispose";
-  if (name.startsWith("__@asyncDispose")) return "@asyncDispose";
-  if (name.startsWith("__@asyncIterator")) return "@asyncIterator";
+  const unique = /^__@([^@]+)@\d+$/.exec(name);
+  if (unique) return `@${unique[1]}`;
   return name;
 }
 

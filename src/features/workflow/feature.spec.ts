@@ -352,7 +352,7 @@ test(
 
     expect(
       server?.contributions.map((contribution) => {
-        const execution = serverProgramExecution(contribution);
+        const execution = serverProgramExecution(contribution, server);
         return execution.kind === "source"
           ? { kind: execution.kind, diagnostic: execution.diagnostic?.message }
           : { kind: execution.kind };
@@ -362,6 +362,7 @@ test(
       server?.contributions.flatMap(({ provides }) => provides.map(({ name }) => name)).sort(),
     ).toEqual(["research", "research:workflow", "research:workflow-schedule"]);
     expect(JSON.stringify(ir)).not.toContain('"kind":"workflow"');
+    expect(JSON.stringify(ir).length).toBeLessThan(10 * 1024 * 1024);
   },
 );
 
@@ -377,7 +378,7 @@ test(
     ).toEqual(["automations", "automations:workflow", "automations:workflow-definitions"]);
     expect(
       server?.contributions.every(
-        (contribution) => serverProgramExecution(contribution).kind === "portable",
+        (contribution) => serverProgramExecution(contribution, server).kind === "portable",
       ),
     ).toBe(true);
     expect(JSON.stringify(ir)).not.toContain('"kind":"workflow"');
@@ -815,14 +816,14 @@ test(
 
 test(
   "executes static and retained Workflow state machines in generated Rust",
-  { tags: ["compiler"], timeout: 180_000 },
+  { tags: ["compiler", "native"], timeout: 180_000 },
   async () => {
     const system = workflowFixtureSystem();
     const feature = system.features.find(({ path }) => path === "research");
     const definition = workflowCompilerIR(feature?.extensions?.workflow);
     const server = system.programs.find(({ name }) => name === "server");
     const retainedExecution = server?.contributions
-      .map(serverProgramExecution)
+      .map((contribution) => serverProgramExecution(contribution, server))
       .find(
         (execution) =>
           execution.kind === "portable" &&

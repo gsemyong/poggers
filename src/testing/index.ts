@@ -436,7 +436,15 @@ async function startDeployedProductionSystem(
   const locations = () => productionDeploymentLocations(state);
   return {
     get location() {
-      return publicLocation(locations());
+      const available = locations();
+      if (!Object.keys(available).length && state.failures.length) {
+        throw new Error(
+          `The production Deployment exposed no location:\n${state.failures
+            .map(({ code, message }) => `[${code}] ${message}`)
+            .join("\n")}`,
+        );
+      }
+      return publicLocation(available);
     },
     get locations() {
       return locations();

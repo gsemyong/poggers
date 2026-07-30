@@ -5,15 +5,14 @@ import type { Task } from "@/features/tasks";
 
 type TaskReplicaPull = Readonly<{
   version: 1;
-  schema: string;
+  schema?: string;
   sequence: number;
   observations: Readonly<Record<string, string>>;
   cursor: string;
   snapshot?: Readonly<{ tasks: readonly Task[] }>;
-  changes: readonly Readonly<{
-    cursor: string;
-    replace: Readonly<{ tasks: readonly Task[] }>;
-  }>[];
+  changes: readonly Readonly<
+    { row: "tasks"; upsert: Task } | { row: "tasks"; remove: Readonly<{ id: string }> }
+  >[];
 }>;
 
 type TaskReplicaCommand = Readonly<{
@@ -89,13 +88,14 @@ testSystem({
     });
     expect(initial.schema).toContain('"create"');
     expect(initial.schema).toContain('"title"');
-    const subscribing = alice.subscribe<Readonly<{ cursor: string }>>(
+    const subscribing = alice.subscribe<TaskReplicaPull>(
       `/api/replicas/taskReplica/changes?after=${encodeURIComponent(
         JSON.stringify(initial.observations),
-      )}`,
+      )}&sequence=${initial.sequence}`,
     );
     const createHeaders = {
       "x-kit-command": "create-durable-task",
+      "x-kit-after": `${initial.sequence}`,
     };
     const created = await alice.post<TaskReplicaCommand>(
       "/api/replicas/taskReplica/create",
@@ -104,7 +104,12 @@ testSystem({
     );
     {
       await using changes = await subscribing;
-      await expect(changes.next()).resolves.toEqual({ cursor: expect.any(String) });
+      const streamed = await changes.next();
+      expect(streamed).toMatchObject({
+        sequence: created.pull.sequence,
+        changes: [{ row: "tasks", upsert: { id: "durable-task" } }],
+      });
+      expect(streamed.schema).toBeUndefined();
     }
     const retried = await alice.post<TaskReplicaCommand>(
       "/api/replicas/taskReplica/create",
@@ -112,48 +117,66 @@ testSystem({
       { headers: createHeaders },
     );
     expect(retried.result).toEqual(created.result);
-    expect(retried.pull.snapshot).toEqual(created.pull.snapshot);
-    expect(created.pull.snapshot).toEqual({
-      tasks: [
-        {
+    expect(retried.pull.changes).toEqual(created.pull.changes);
+    expect(created.pull.schema).toBeUndefined();
+    expect(created.pull.snapshot).toBeUndefined();
+    expect(created.pull.changes).toEqual([
+      {
+        row: "tasks",
+        upsert: {
           id: "durable-task",
           ownerId: expect.any(String),
           title: "Durable task",
           completed: false,
         },
-      ],
-    });
+      },
+    ]);
     expect((await bob.get<TaskReplicaPull>("/api/replicas/taskReplica")).snapshot).toEqual({
       tasks: [],
     });
     await expect(
       bob.post(
-        "/api/replicas/taskReplica/update",
-        { id: "durable-task", completed: true },
+        "/api/replicas/taskReplica/toggle",
+        { id: "durable-task" },
         { headers: { "x-kit-command": "bob-update" } },
       ),
     ).rejects.toMatchObject({ status: 409 });
     const updated = await alice.post<TaskReplicaCommand>(
-      "/api/replicas/taskReplica/update",
-      { id: "durable-task", completed: true },
-      { headers: { "x-kit-command": "complete-durable-task" } },
+      "/api/replicas/taskReplica/toggle",
+      { id: "durable-task" },
+      {
+        headers: {
+          "x-kit-command": "complete-durable-task",
+          "x-kit-after": `${created.pull.sequence}`,
+        },
+      },
     );
-    expect(updated.pull.snapshot).toMatchObject({
-      tasks: [{ id: "durable-task", completed: true }],
-    });
-    await alice.post<TaskReplicaCommand>(
+    expect(updated.pull.snapshot).toBeUndefined();
+    expect(updated.pull.changes).toMatchObject([
+      { row: "tasks", upsert: { id: "durable-task", completed: true } },
+    ]);
+    const createdForRemoval = await alice.post<TaskReplicaCommand>(
       "/api/replicas/taskReplica/create",
       { id: "removed-task", title: "Remove me" },
-      { headers: { "x-kit-command": "create-removed-task" } },
+      {
+        headers: {
+          "x-kit-command": "create-removed-task",
+          "x-kit-after": `${updated.pull.sequence}`,
+        },
+      },
     );
     const removed = await alice.post<TaskReplicaCommand>(
       "/api/replicas/taskReplica/remove",
       { id: "removed-task" },
-      { headers: { "x-kit-command": "remove-task" } },
+      {
+        headers: {
+          "x-kit-command": "remove-task",
+          "x-kit-after": `${createdForRemoval.pull.sequence}`,
+        },
+      },
     );
-    expect(removed.pull.snapshot).toMatchObject({
-      tasks: [{ id: "durable-task", completed: true }],
-    });
+    expect(removed.pull.snapshot).toBeUndefined();
+    expect(removed.pull.changes).toEqual([{ row: "tasks", remove: { id: "removed-task" } }]);
 
     await restart();
     await expect(

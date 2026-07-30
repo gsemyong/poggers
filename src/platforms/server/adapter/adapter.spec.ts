@@ -51,6 +51,11 @@ describe("server Platform adapter", () => {
       programs: ir.programs,
       interfaces: [],
       platform: "server",
+      compilation: {
+        inputIdentity: "server-adapter-test",
+        outputSources: {},
+        sourceFiles: [fixture.system],
+      },
       output,
     });
 
@@ -102,6 +107,11 @@ describe("server Platform adapter", () => {
         programs: ir.programs,
         interfaces: [],
         platform: "server",
+        compilation: {
+          inputIdentity: "server-http-adapter-test",
+          outputSources: {},
+          sourceFiles: [fixture.system],
+        },
         output,
       });
       const artifact = result.entries[0]!;
@@ -213,6 +223,8 @@ describe("server Platform adapter", () => {
       revisions.current.outputSources["program/server"]?.some((source) =>
         source.endsWith("/provider.ts"),
       ),
+      `server output sources: ${JSON.stringify(revisions.current.outputSources["program/server"])}; ` +
+        `providers: ${JSON.stringify(revisions.current.ir.features.flatMap((feature) => feature.providers ?? []))}`,
     ).toBe(true);
     const session = await createServerPlatformAdapter({ developmentPort: port }).develop({
       directory: fixture.directory,

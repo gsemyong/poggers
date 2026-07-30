@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
@@ -39,8 +39,9 @@ export async function runCli(
   adapters?: Readonly<Record<string, PlatformAdapterImplementation>>,
 ): Promise<void> {
   const [command = "dev", ...commandArguments] = arguments_;
-  const directory = resolve(readFlag(commandArguments, "dir") ?? process.cwd());
-  const app = positionalArguments(commandArguments)[0];
+  const selection = await resolveProjectSelection(command, commandArguments);
+  const directory = selection.directory;
+  const app = selection.app;
   const output = new CommandOutput(commandArguments.includes("--json"));
 
   if (command === "create") {
@@ -174,6 +175,27 @@ export async function runCli(
     );
     process.exitCode = 1;
   }
+}
+
+async function resolveProjectSelection(
+  command: string,
+  arguments_: readonly string[],
+): Promise<Readonly<{ directory: string; app?: string }>> {
+  const explicitDirectory = readFlag(arguments_, "dir");
+  const positional = positionalArguments(arguments_)[0];
+  if (explicitDirectory !== undefined || command === "create" || positional === undefined) {
+    return {
+      directory: resolve(explicitDirectory ?? process.cwd()),
+      ...(positional === undefined ? {} : { app: positional }),
+    };
+  }
+  const candidate = resolve(positional);
+  try {
+    if ((await stat(candidate)).isDirectory()) return { directory: candidate };
+  } catch {
+    // A non-directory positional value selects an Application.
+  }
+  return { directory: process.cwd(), app: positional };
 }
 
 async function resolvePlatformAdapters(
@@ -344,8 +366,14 @@ class CommandOutput {
         label,
         event.status,
         event.durationMs,
-        undefined,
-        event.platform ? { platform: event.platform } : {},
+        event.status === "completed" && event.phase === "compile"
+          ? compilationDetail(event)
+          : undefined,
+        {
+          ...(event.platform ? { platform: event.platform } : {}),
+          ...(event.cache ? { cache: event.cache } : {}),
+          ...(event.work ? { work: event.work } : {}),
+        },
       );
       return;
     }
@@ -533,7 +561,9 @@ class CommandOutput {
   }
 }
 
-function compilationDetail(event: DevelopmentPhaseEvent): string | undefined {
+function compilationDetail(
+  event: Pick<DevelopmentPhaseEvent, "cache" | "work">,
+): string | undefined {
   const work = event.work;
   const units = work
     ? [

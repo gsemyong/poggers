@@ -58,7 +58,7 @@ describe("web development workspace", () => {
 
   it(
     "retains the selected Route when one source Feature is reused by multiple Applications",
-    { tags: ["package"], timeout: 15_000 },
+    { tags: ["package"], timeout: 30_000 },
     async () => {
       const workspace = resolve(import.meta.dirname, "../../../..", "examples/authenticated-crud");
       const paths = resolveSystem(workspace);
@@ -78,10 +78,35 @@ describe("web development workspace", () => {
       expect(code).toContain("view({ children, components: { Layout } })");
       expect(code).not.toMatch(/routes:\s*{\s*auth:\s*{}\s*}/);
 
-      const base = await handler(authored, `${source}?kit-route=base&lang.tsx`);
+      const customerProgram = ir.programs.find(
+        ({ interface: owner }) => owner === "customer.web",
+      )?.name;
+      expect(customerProgram).toBeTruthy();
+      const base = await handler(authored, `${source}?kit-program=${customerProgram!}&lang.tsx`);
       const baseCode = (typeof base === "string" ? base : base?.code) ?? authored;
       expect(baseCode).toContain('phase: "loading"');
       expect(baseCode).toMatch(/routes:\s*{\s*workspace:\s*{},\s*auth:\s*{},?\s*}/);
+
+      const tasksSource = resolve(paths.source, "features/tasks.tsx");
+      const authoredTasks = await readFile(tasksSource, "utf8");
+      const taskRoute = await handler(
+        authoredTasks,
+        `${tasksSource}?kit-route=tasks.list&lang.tsx`,
+      );
+      const taskRouteCode = (typeof taskRoute === "string" ? taskRoute : taskRoute?.code) ?? "";
+      expect(taskRouteCode).toContain("export const tasks");
+      expect(taskRouteCode).not.toContain("taskAggregateDefinition");
+      expect(taskRouteCode).not.toContain("taskCompletionDefinition");
+      expect(taskRouteCode).not.toContain('from "kit/features/workflow"');
+
+      const tasks = await handler(
+        authoredTasks,
+        `${tasksSource}?kit-program=${customerProgram!}&lang.tsx`,
+      );
+      const tasksCode = (typeof tasks === "string" ? tasks : tasks?.code) ?? "";
+      expect(tasksCode).toMatch(/features:\s*{\s*replica:\s*taskReplica\s*}/);
+      expect(tasksCode).not.toMatch(/features:\s*{[^}]*aggregate:\s*taskAggregate/s);
+      expect(tasksCode).toContain("/* @__PURE__ */ createWorkflow");
     },
   );
 });

@@ -3109,7 +3109,7 @@ function workflowModel(context: FeatureSourceContext): ts.Type | undefined {
 }
 
 function workflowCall(context: FeatureSourceContext): ts.CallExpression {
-  const location = unwrap(context.location);
+  const location = workflowCallLocation(context, context.location, new Set());
   if (!ts.isCallExpression(location)) {
     context.source.fail(
       context.location,
@@ -3127,6 +3127,28 @@ function workflowCall(context: FeatureSourceContext): ts.CallExpression {
     );
   }
   return location;
+}
+
+function workflowCallLocation(
+  context: FeatureSourceContext,
+  node: ts.Node,
+  active: Set<ts.Symbol>,
+): ts.Node {
+  const location = unwrap(node);
+  if (!ts.isIdentifier(location)) return location;
+  let symbol = context.checker.getSymbolAtLocation(location);
+  if (symbol && symbol.flags & ts.SymbolFlags.Alias) {
+    symbol = context.checker.getAliasedSymbol(symbol);
+  }
+  if (!symbol || active.has(symbol)) return location;
+  const declaration = symbol.valueDeclaration;
+  if (!declaration || !ts.isVariableDeclaration(declaration) || !declaration.initializer) {
+    return location;
+  }
+  active.add(symbol);
+  const resolved = workflowCallLocation(context, declaration.initializer, active);
+  active.delete(symbol);
+  return resolved;
 }
 
 function workflowRuntimeIRCall(context: PortableConstantSourceContext): boolean {

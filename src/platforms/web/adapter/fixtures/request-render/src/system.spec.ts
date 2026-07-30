@@ -68,7 +68,7 @@ testSystem({
 
     const staticRoot = await request("/");
     const staticRootHtml = await staticRoot.text();
-    expect(staticRoot.status).toBe(200);
+    expect(staticRoot.status, staticRootHtml).toBe(200);
     expect(staticRootHtml).toContain('data-kit-rendering="static"');
     expect(staticRootHtml).not.toContain('id="kit-hydration"');
     expect(staticRootHtml).not.toContain("/browser.generated.ts");

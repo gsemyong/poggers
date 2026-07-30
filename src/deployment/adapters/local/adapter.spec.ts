@@ -1,8 +1,10 @@
+import { once } from "node:events";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
 import { afterEach, describe, expect, test } from "vitest";
+import WebSocket from "ws";
 
 import type { System } from "@/core/system";
 import {
@@ -35,6 +37,69 @@ afterEach(async () => {
 });
 
 describe("local Deployment adapter", { tags: ["production"] }, () => {
+  test("forwards WebSocket upgrades to a managed server Process", { timeout: 10_000 }, async () => {
+    const fixture = await localFixture();
+    const executable = resolve(fixture.artifacts, "server");
+    await writeFile(
+      executable,
+      `#!/usr/bin/env node
+import { createHash } from "node:crypto";
+import { renameSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+
+const statusFile = process.env.KIT_PROCESS_STATUS_FILE;
+const writeStatus = (status) => {
+  const temporary = statusFile + "." + process.pid + ".tmp";
+  writeFileSync(temporary, JSON.stringify({ status, pid: process.pid }) + "\\n");
+  renameSync(temporary, statusFile);
+};
+const server = createServer((_request, response) => response.writeHead(404).end());
+server.on("upgrade", (request, socket) => {
+  const key = request.headers["sec-websocket-key"];
+  const accept = createHash("sha1")
+    .update(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")
+    .digest("base64");
+  socket.write(
+    "HTTP/1.1 101 Switching Protocols\\r\\n" +
+      "Upgrade: websocket\\r\\n" +
+      "Connection: Upgrade\\r\\n" +
+      "Sec-WebSocket-Accept: " + accept + "\\r\\n\\r\\n",
+  );
+});
+const shutdown = () => {
+  writeStatus("draining");
+  server.close(() => {
+    writeStatus("stopped");
+    process.exit(0);
+  });
+};
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
+server.listen(Number(process.env.PORT), "127.0.0.1", () => writeStatus("ready"));
+`,
+    );
+    await chmod(executable, 0o755);
+    const adapter = createLocalDeploymentAdapter({
+      artifacts: fixture.artifacts,
+      state: fixture.state,
+      startupTimeoutMs: 2_000,
+      shutdownTimeoutMs: 1_000,
+    });
+    const deployment = createDeployment({} as System<Record<never, never>>, { adapter });
+    const created = await applyDeployment(deployment, fixture.release);
+    created.state.artifacts
+      .flatMap(({ processes = [] }) => processes)
+      .forEach(({ pid }) => pid && pids.add(pid));
+    created.state.gateways.forEach(({ pid }) => pids.add(pid));
+    const location = created.state.gateways[0]?.location;
+    if (!location) throw new Error("Local deployment did not create a gateway.");
+    const socket = new WebSocket(new URL("/_kit/realtime", location));
+
+    await once(socket, "open");
+    socket.terminate();
+    await removeDeployment(deployment);
+  });
+
   test("realizes, wires, retains, and removes provider-owned services", async () => {
     const fixture = await localFixture();
     const source = resolve(fixture.artifacts, "service.mjs");
@@ -219,9 +284,10 @@ process.on("SIGTERM", close);
       process.kill(scaledProcesses[0]!.pid!, "SIGKILL");
       await expect.poll(async () => (await recoveredAdapter.inspect())?.converged).toBe(false);
       const healed = await applyDeployment(three, fixture.release);
-      healed.state.artifacts
-        .flatMap(({ processes = [] }) => processes)
-        .forEach(({ pid }) => pid && pids.add(pid));
+      const healedProcesses = healed.state.artifacts.flatMap(({ processes = [] }) => processes);
+      healedProcesses.forEach(({ pid }) => pid && pids.add(pid));
+      const originalVersion = healedProcesses[0]!.version;
+      expect(healedProcesses.every(({ version }) => version === originalVersion)).toBe(true);
       expect(healed.plan.operations).toEqual([
         expect.objectContaining({ type: "scale", from: 2, to: 3 }),
       ]);
@@ -255,7 +321,8 @@ process.on("SIGTERM", close);
       replacementProcesses.forEach(({ pid }) => pid && pids.add(pid));
       replaced.state.gateways.forEach(({ pid }) => pids.add(pid));
       expect(replacementProcesses).toHaveLength(3);
-      expect(replacementProcesses.every(({ version }) => version === "program-v2")).toBe(true);
+      expect(new Set(replacementProcesses.map(({ version }) => version))).toHaveLength(1);
+      expect(replacementProcesses.every(({ version }) => version !== originalVersion)).toBe(true);
       expect(replaced.state.gateways[0]!.location).toBe(created.state.gateways[0]!.location);
 
       const rolledBack = await applyDeployment(three, fixture.release);
@@ -265,7 +332,7 @@ process.on("SIGTERM", close);
       rollbackProcesses.forEach(({ pid }) => pid && pids.add(pid));
       expect(rolledBack.plan.operations).toEqual([expect.objectContaining({ type: "replace" })]);
       expect(rollbackProcesses).toHaveLength(3);
-      expect(rollbackProcesses.every(({ version }) => version === "program-v1")).toBe(true);
+      expect(rollbackProcesses.every(({ version }) => version === originalVersion)).toBe(true);
       expect(rolledBack.state.gateways[0]!.location).toBe(created.state.gateways[0]!.location);
 
       const stale = planDeployment(three, replacement, {
@@ -484,6 +551,43 @@ process.on("SIGTERM", close);
     expect(() => process.kill(initialProcess.pid!, 0)).toThrow();
     expect(replaced.state.gateways[0]!.location).toBe(initial.state.gateways[0]!.location);
     await removeDeployment(changed);
+  });
+
+  test("restarts Processes that consume changed asset artifacts", async () => {
+    const fixture = await localFixture();
+    const system = {} as System<{
+      Programs: {
+        server: {
+          Environment: { Name: "server"; Platform: ServerPlatform };
+          Requires: {};
+          Provides: {};
+        };
+      };
+    }>;
+    const deployment = createDeployment(system, {
+      adapter: createLocalDeploymentAdapter({
+        artifacts: fixture.artifacts,
+        state: fixture.state,
+      }),
+    });
+    const initial = await applyDeployment(deployment, fixture.release);
+    const initialProcess = onlyProcess(initial.state);
+    const changedRelease: Release = {
+      ...fixture.release,
+      digest: "release-v2",
+      artifacts: fixture.release.artifacts.map((artifact) =>
+        artifact.deployment === "asset" ? { ...artifact, digest: "web-v2" } : artifact,
+      ),
+    };
+    const replaced = await applyDeployment(deployment, changedRelease);
+    const replacement = onlyProcess(replaced.state);
+    pids.add(replacement.pid!);
+    replaced.state.gateways.forEach(({ pid }) => pids.add(pid));
+
+    expect(replacement.id).not.toBe(initialProcess.id);
+    expect(replacement.version).not.toBe(initialProcess.version);
+    expect(() => process.kill(initialProcess.pid!, 0)).toThrow();
+    await removeDeployment(deployment);
   });
 });
 

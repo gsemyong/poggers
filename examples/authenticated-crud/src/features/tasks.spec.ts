@@ -19,11 +19,11 @@ describe("tasks Feature", () => {
       input: { title: "Verify the feature" },
     });
     const completed = await fixture.execute({
-      command: "update",
+      command: "toggle",
       key: "task-1",
       principal,
       state: created.snapshot,
-      input: { completed: true },
+      input: undefined,
     });
 
     expect(created.outcome).toEqual({

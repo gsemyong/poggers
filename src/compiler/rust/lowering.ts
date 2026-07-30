@@ -16,6 +16,7 @@ export type RustProgramFunctionExport = Readonly<{
 
 export type PortableProgramProjection = (
   contribution: ProgramContributionIR,
+  program: LinkedProgramIR["program"],
 ) => PortableProgramExecutionIR;
 
 /** Lowers linked portable Program meaning into direct Rust control flow. */
@@ -33,7 +34,12 @@ class RustProgramGenerator {
   readonly #linked: LinkedProgramIR;
   readonly #project: PortableProgramProjection;
   readonly #exports: readonly RustProgramFunctionExport[];
-  readonly #functions = new Map<FunctionIR, string>();
+  readonly #functions: Readonly<{
+    contribution: string;
+    function: FunctionIR;
+    name: string;
+    start: boolean;
+  }>[] = [];
   readonly #functionIds = new Map<string, string>();
   #temporary = 0;
 
@@ -45,31 +51,50 @@ class RustProgramGenerator {
     this.#linked = linked;
     this.#project = project;
     this.#exports = exports;
+    const nodes = linked.contributions.flatMap(({ contribution }) => {
+      const implementation = project(contribution, linked.program);
+      if (implementation.kind !== "portable") return [];
+      return [
+        { function: implementation.entry, start: true },
+        ...implementation.functions.map((function_) => ({ function: function_, start: false })),
+      ].map(({ function: function_, start }) => {
+        const semantic = portableFunctionShape(function_);
+        return {
+          contribution: contribution.id,
+          function: function_,
+          start,
+          shape: semantic.shape,
+          references: semantic.references,
+          stable: containsStablePortableClosure(function_),
+        };
+      });
+    });
+    const colors = portableFunctionGraphColors(nodes);
+    const names = new Map<number, string>();
     let index = 0;
-    for (const { contribution } of linked.contributions) {
-      const implementation = project(contribution);
-      if (implementation.kind !== "portable") continue;
-      for (const function_ of [implementation.entry, ...implementation.functions]) {
-        const name = `function_${index++}_${rustName(function_.name || function_.id)}`;
-        this.#functions.set(function_, name);
-        this.#functionIds.set(`${contribution.id}\0${function_.id}`, name);
+    nodes.forEach(({ contribution, function: function_, start }, node) => {
+      const color = colors[node]!;
+      let name = names.get(color);
+      if (!name) {
+        name = `function_${index++}_${rustName(function_.name || function_.id)}`;
+        names.set(color, name);
+        this.#functions.push({
+          contribution,
+          function: function_,
+          name,
+          start,
+        });
       }
-    }
+      this.#functionIds.set(`${contribution}\0${function_.id}`, name);
+    });
   }
 
   generate(): string {
-    const functions = this.#linked.contributions.flatMap(({ contribution }) => {
-      const implementation = this.#project(contribution);
-      if (implementation.kind !== "portable") return [];
-      return [
-        this.#function(contribution.id, implementation.entry, true),
-        ...implementation.functions.map((function_) =>
-          this.#function(contribution.id, function_, false),
-        ),
-      ];
-    });
+    const functions = this.#functions.map(({ contribution, function: function_, name, start }) =>
+      this.#function(contribution, function_, name, start),
+    );
     const starts = this.#linked.contributions.flatMap(({ contribution }) => {
-      const implementation = this.#project(contribution);
+      const implementation = this.#project(contribution, this.#linked.program);
       if (implementation.kind === "none") return [];
       if (implementation.kind !== "portable") {
         throw new Error(
@@ -77,7 +102,7 @@ class RustProgramGenerator {
             `Program contribution ${JSON.stringify(contribution.id)} is not portable.`,
         );
       }
-      const functionName = this.#functions.get(implementation.entry)!;
+      const functionName = this.#functionName(contribution.id, implementation.entry.id);
       const requirements = contribution.requires
         .map(
           ({ name }) =>
@@ -200,8 +225,7 @@ ${declarations}${starts.join("\n\n")}
 }`;
   }
 
-  #function(contribution: string, function_: FunctionIR, start: boolean): string {
-    const name = this.#functions.get(function_)!;
+  #function(contribution: string, function_: FunctionIR, name: string, start: boolean): string {
     const setup: string[] = [];
     function_.captures.forEach((capture, index) => {
       setup.push(
@@ -521,6 +545,8 @@ ${expression.input ? `            ${request}.insert(${rustString(expression.argu
         return `Value::String(${this.#expression(contribution, expression.value)}.to_text())`;
       case "stream-map":
         return `engine.map_stream(${this.#expression(contribution, expression.source)}, ${this.#expression(contribution, expression.transform)}).await?`;
+      case "stream-filter":
+        return `engine.filter_stream(${this.#expression(contribution, expression.source)}, ${this.#expression(contribution, expression.predicate)}).await?`;
       case "stream-distinct":
         return `engine.distinct_stream(${this.#expression(contribution, expression.source)}, ${this.#expression(contribution, expression.select)}).await?`;
       case "closure": {
@@ -659,6 +685,135 @@ ${expression.input ? `            ${request}.insert(${rustString(expression.argu
 
   #temporaryName(label: string): string {
     return `temporary_${this.#temporary++}_${rustName(label)}`;
+  }
+}
+
+type PortableFunctionNode = Readonly<{
+  contribution: string;
+  function: FunctionIR;
+  start: boolean;
+  shape: string;
+  references: readonly string[];
+  stable: boolean;
+}>;
+
+function portableFunctionGraphColors(nodes: readonly PortableFunctionNode[]): readonly number[] {
+  const indexes = new Map(
+    nodes.map(({ contribution, function: function_ }, index) => [
+      `${contribution}\0${function_.id}`,
+      index,
+    ]),
+  );
+  let colors = partition(
+    nodes.map(({ contribution, shape, stable, start }) =>
+      JSON.stringify([start, stable ? contribution : null, shape]),
+    ),
+  );
+  for (let iteration = 0; iteration <= nodes.length; iteration++) {
+    const next = partition(
+      nodes.map(({ contribution, references, stable, start }, index) =>
+        JSON.stringify([
+          colors[index],
+          start,
+          stable ? contribution : null,
+          references.map(
+            (reference) => colors[indexes.get(`${contribution}\0${reference}`) ?? -1] ?? -1,
+          ),
+        ]),
+      ),
+    );
+    if (samePartition(colors, next)) return next;
+    colors = next;
+  }
+  throw new Error("Portable function graph partition did not converge.");
+}
+
+function portableFunctionShape(
+  function_: FunctionIR,
+): Readonly<{ shape: string; references: readonly string[] }> {
+  const references: string[] = [];
+  const normalize = (value: unknown, root = false): unknown => {
+    if (Array.isArray(value)) return value.map((child) => normalize(child));
+    if (!value || typeof value !== "object") return value;
+    const record = value as Readonly<Record<string, unknown>>;
+    const normalized: Record<string, unknown> = {};
+    for (const key of Object.keys(record).sort()) {
+      if (key === "span" || (root && (key === "id" || key === "name"))) continue;
+      const child = record[key];
+      if (
+        key === "function" &&
+        typeof child === "string" &&
+        (record.kind === "call" || record.kind === "closure")
+      ) {
+        references.push(child);
+        normalized[key] = null;
+      } else {
+        normalized[key] = normalize(child);
+      }
+    }
+    return normalized;
+  };
+  return {
+    shape: JSON.stringify(normalize(function_, true)),
+    references: Object.freeze(references),
+  };
+}
+
+function partition(identities: readonly string[]): number[] {
+  const colors = new Map<string, number>();
+  return identities.map((identity) => {
+    const retained = colors.get(identity);
+    if (retained !== undefined) return retained;
+    const color = colors.size;
+    colors.set(identity, color);
+    return color;
+  });
+}
+
+function samePartition(left: readonly number[], right: readonly number[]): boolean {
+  if (left.length !== right.length) return false;
+  const forward = new Map<number, number>();
+  const reverse = new Map<number, number>();
+  for (let index = 0; index < left.length; index++) {
+    const leftColor = left[index]!;
+    const rightColor = right[index]!;
+    const mappedRight = forward.get(leftColor);
+    const mappedLeft = reverse.get(rightColor);
+    if (
+      (mappedRight !== undefined && mappedRight !== rightColor) ||
+      (mappedLeft !== undefined && mappedLeft !== leftColor)
+    ) {
+      return false;
+    }
+    forward.set(leftColor, rightColor);
+    reverse.set(rightColor, leftColor);
+  }
+  return true;
+}
+
+function containsStablePortableClosure(function_: FunctionIR): boolean {
+  let stable = false;
+  visitPortableFunctionValues(function_.body, (value) => {
+    if (value.kind === "closure" && value.stable === true) stable = true;
+  });
+  return stable;
+}
+
+function visitPortableFunctionValues(
+  value: unknown,
+  visit: (value: Readonly<Record<string, unknown>>) => void,
+): void {
+  const pending: unknown[] = [value];
+  while (pending.length) {
+    const current = pending.pop();
+    if (Array.isArray(current)) {
+      pending.push(...current);
+      continue;
+    }
+    if (!current || typeof current !== "object") continue;
+    const record = current as Readonly<Record<string, unknown>>;
+    visit(record);
+    pending.push(...Object.values(record));
   }
 }
 

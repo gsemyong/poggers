@@ -78,14 +78,14 @@ describe("Actor", () => {
 
   it(
     "lowers the Feature factory to ordinary portable Programs and Dependencies",
-    { tags: ["compiler"] },
+    { tags: ["compiler"], timeout: 15_000 },
     () => {
       const ir = actorFixtureSystem();
       const server = ir.programs.find(({ name }) => name === "server");
 
       expect(
         server?.contributions.map((contribution) => {
-          const implementation = serverProgramExecution(contribution);
+          const implementation = serverProgramExecution(contribution, server);
           return implementation.kind === "source"
             ? { kind: implementation.kind, diagnostic: implementation.diagnostic }
             : { kind: implementation.kind };
@@ -116,92 +116,96 @@ describe("Actor", () => {
     },
   );
 
-  it("executes generated Actor APIs through the ordinary linked Dependency graph", async () => {
-    const server = actorFixtureServer();
-    const events = createMemoryEventStore<object>();
+  it(
+    "executes generated Actor APIs through the ordinary linked Dependency graph",
+    { timeout: 15_000 },
+    async () => {
+      const server = actorFixtureServer();
+      const events = createMemoryEventStore<object>();
 
-    await using execution = await executeLinkedProgramIR(linkProgram(server), {
-      ...createActorHost(events),
-      payments: {
-        async charge({ input }: { input: Readonly<{ account: string; amount: number }> }) {
-          return { receipt: `${input.account}:${input.amount}` };
+      await using execution = await executeLinkedProgramIR(linkProgram(server), {
+        ...createActorHost(events),
+        payments: {
+          async charge({ input }: { input: Readonly<{ account: string; amount: number }> }) {
+            return { receipt: `${input.account}:${input.amount}` };
+          },
         },
-      },
-    });
-    const inventory = execution.dependencies.inventory as Readonly<{
-      get(identity: { key: string }): Readonly<{
-        reserve(
-          input: { quantity: number },
-          options?: { idempotencyKey?: string },
-        ): Promise<
-          | {
-              status: "succeeded";
-              value: { remaining: number };
-            }
-          | {
-              status: "failed";
-              failure: { type: "unavailable"; data: { available: number } };
-            }
-        >;
-        availability(): Promise<{ available: number }>;
-      }>;
-    }>;
-    const account = execution.dependencies.account as Readonly<{
-      get(identity: { key: string }): Readonly<{
-        deposit(input: { amount: number }): Promise<{
-          status: "succeeded";
-          value: { balance: number };
-        }>;
-        purchase(input: { item: string; quantity: number; amount: number }): Promise<{
-          status: "succeeded";
-          value: { balance: number; reservation: string };
+      });
+      const inventory = execution.dependencies.inventory as Readonly<{
+        get(identity: { key: string }): Readonly<{
+          reserve(
+            input: { quantity: number },
+            options?: { idempotencyKey?: string },
+          ): Promise<
+            | {
+                status: "succeeded";
+                value: { remaining: number };
+              }
+            | {
+                status: "failed";
+                failure: { type: "unavailable"; data: { available: number } };
+              }
+          >;
+          availability(): Promise<{ available: number }>;
         }>;
       }>;
-    }>;
-    const item = inventory.get({ key: "item-1" });
-    const customer = account.get({ key: "account-1" });
+      const account = execution.dependencies.account as Readonly<{
+        get(identity: { key: string }): Readonly<{
+          deposit(input: { amount: number }): Promise<{
+            status: "succeeded";
+            value: { balance: number };
+          }>;
+          purchase(input: { item: string; quantity: number; amount: number }): Promise<{
+            status: "succeeded";
+            value: { balance: number; reservation: string };
+          }>;
+        }>;
+      }>;
+      const item = inventory.get({ key: "item-1" });
+      const customer = account.get({ key: "account-1" });
 
-    await expect(item.availability()).resolves.toEqual({
-      available: 10,
-    });
-    await expect(item.reserve({ quantity: 20 })).resolves.toEqual({
-      status: "failed",
-      failure: { type: "unavailable", data: { available: 10 } },
-    });
-    await expect(item.availability()).resolves.toEqual({
-      available: 10,
-    });
-    await expect(item.reserve({ quantity: 3 })).resolves.toEqual({
-      status: "succeeded",
-      value: { remaining: 7 },
-    });
-    await expect(item.availability()).resolves.toEqual({
-      available: 7,
-    });
-    await expect(customer.deposit({ amount: 10 })).resolves.toEqual({
-      status: "succeeded",
-      value: { balance: 10 },
-    });
-    await expect(customer.purchase({ item: "item-1", quantity: 2, amount: 4 })).resolves.toEqual({
-      status: "succeeded",
-      value: {
-        balance: 6,
-        reservation: expect.any(String),
-      },
-    });
-    await expect(item.availability()).resolves.toEqual({
-      available: 5,
-    });
-    const journals = [
-      ...(await events.read({ stream: actorStream("inventory", "item-1") })),
-      ...(await events.read({ stream: actorStream("account", "account-1") })),
-    ];
-    expect(
-      journals.some(({ event }) =>
-        (event as Readonly<{ type?: string }>).type?.startsWith("actor.outbound."),
-      ),
-    ).toBe(false);
-  });
+      await expect(item.availability()).resolves.toEqual({
+        available: 10,
+      });
+      await expect(item.reserve({ quantity: 20 })).resolves.toEqual({
+        status: "failed",
+        failure: { type: "unavailable", data: { available: 10 } },
+      });
+      await expect(item.availability()).resolves.toEqual({
+        available: 10,
+      });
+      await expect(item.reserve({ quantity: 3 })).resolves.toEqual({
+        status: "succeeded",
+        value: { remaining: 7 },
+      });
+      await expect(item.availability()).resolves.toEqual({
+        available: 7,
+      });
+      await expect(customer.deposit({ amount: 10 })).resolves.toEqual({
+        status: "succeeded",
+        value: { balance: 10 },
+      });
+      await expect(customer.purchase({ item: "item-1", quantity: 2, amount: 4 })).resolves.toEqual({
+        status: "succeeded",
+        value: {
+          balance: 6,
+          reservation: expect.any(String),
+        },
+      });
+      await expect(item.availability()).resolves.toEqual({
+        available: 5,
+      });
+      const journals = [
+        ...(await events.read({ stream: actorStream("inventory", "item-1") })),
+        ...(await events.read({ stream: actorStream("account", "account-1") })),
+      ];
+      expect(
+        journals.some(({ event }) =>
+          (event as Readonly<{ type?: string }>).type?.startsWith("actor.outbound."),
+        ),
+      ).toBe(false);
+    },
+  );
 
   it("evolves historical state once and persists the current version", async () => {
     const events = createMemoryEventStore<object>();

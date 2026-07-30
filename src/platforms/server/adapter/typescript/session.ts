@@ -1,4 +1,4 @@
-import { realpathSync, statSync } from "node:fs";
+import { realpathSync, statSync, watch as watchFiles } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 
 import { createServer, defaultServerConditions, type Plugin } from "vite";
@@ -75,7 +75,11 @@ export async function developServerPrograms(
       alias: packageSourceAliases(),
       conditions: ["source", ...defaultServerConditions],
     },
-    server: { middlewareMode: true, ws: false },
+    server: {
+      middlewareMode: true,
+      ws: false,
+      watch: { ignored: [`${source}/**`] },
+    },
   });
   let activePrograms = new Map<string, ActiveServerProgram>();
   let system: System<SystemContract>;
@@ -105,7 +109,9 @@ export async function developServerPrograms(
   let disposed = false;
   let revision = 0;
   const observedRevisions = new Map<string, string>();
-  vite.watcher.on("change", (file) => {
+  const sourceWatcher = watchFiles(source, { recursive: true }, (_event, filename) => {
+    if (!filename) return;
+    const file = resolve(source, String(filename));
     if (disposed || !inside(source, file)) return;
     const path = canonicalPath(file);
     const fileRevision = revisionOf(path);
@@ -131,6 +137,7 @@ export async function developServerPrograms(
           developmentOptions.attachmentSources ?? [],
         );
         if (!affected.names.size) return;
+        vite.moduleGraph.onFileChange(path);
         candidate = moduleDefault(
           await vite.ssrLoadModule(`${input.system}?kit-revision=${++revision}`),
         );
@@ -171,6 +178,7 @@ export async function developServerPrograms(
     async [Symbol.asyncDispose]() {
       if (disposed) return;
       disposed = true;
+      sourceWatcher.close();
       await reload;
       await disposeActivePrograms(activePrograms.values());
       await vite.close();
@@ -419,14 +427,7 @@ function affectedPrograms(
     const attachmentPlans = projectProgramAttachments(attachmentSources, after, ir);
     const dependencies = collectExternalDependencies(after, attachmentPlans);
     const providers = selectedDevelopmentProviders(ir, after, dependencies);
-    if (
-      providerMeaningChanged(
-        active.get(name)?.providers ?? [],
-        providers,
-        active.get(name)?.directory ?? process.cwd(),
-        changedSource,
-      )
-    ) {
+    if (providerMeaningChanged(active.get(name)?.providers ?? [], providers)) {
       affected.add(name);
       providerAffected.add(name);
       continue;
@@ -447,25 +448,8 @@ function affectedPrograms(
 function providerMeaningChanged(
   previous: readonly SelectedDependencyProviderIR[],
   next: readonly SelectedDependencyProviderIR[],
-  directory: string,
-  changedSource: string | undefined,
 ): boolean {
-  if (JSON.stringify(previous) !== JSON.stringify(next)) return true;
-  if (!changedSource) return false;
-  const changed = canonicalPath(changedSource);
-  return [...previous, ...next].some((provider) =>
-    [...(provider.sources ?? []), provider.span.file].some((source) =>
-      sourceCandidates(directory, source).has(changed),
-    ),
-  );
-}
-
-function sourceCandidates(directory: string, source: string): ReadonlySet<string> {
-  if (isAbsolute(source)) return new Set([canonicalPath(source)]);
-  return new Set([
-    canonicalPath(resolve(directory, source)),
-    canonicalPath(resolve(directory, "src", source)),
-  ]);
+  return JSON.stringify(previous) !== JSON.stringify(next);
 }
 
 async function disposeProviderReplacements(

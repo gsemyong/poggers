@@ -96,7 +96,7 @@ describe("System compiler", { tags: ["compiler"] }, () => {
     ]);
     const program = first.programs[0];
     const contribution = programContribution(first, "feature/worker/program/cloud");
-    const implementation = serverExecution(contribution);
+    const implementation = serverExecution(first, contribution);
     expect(program).toMatchObject({
       environment: { name: "server", platform: "server" },
     });
@@ -148,9 +148,9 @@ describe("System compiler", { tags: ["compiler"] }, () => {
     const changedProgram = changed.programs.find(({ name }) => name === "server");
     if (!originalProgram || !changedProgram) throw new Error("Fixture has no server Program.");
     const identities = (ir: SystemIR) =>
-      ir.programs.flatMap(({ contributions }) =>
-        contributions.flatMap((contribution) => {
-          const implementation = serverProgramExecution(contribution);
+      ir.programs.flatMap((program) =>
+        program.contributions.flatMap((contribution) => {
+          const implementation = serverProgramExecution(contribution, program);
           return implementation.kind === "portable"
             ? [implementation.entry.id, ...implementation.functions.map(({ id }) => id)]
             : [];
@@ -782,8 +782,10 @@ export const clean = ({ parameters }: { parameters: { sheet: unknown } }) => ({
           "dependencies.numbers.subscribe({ receive: () => undefined });\n        const values = await dependencies.numbers.read({ count: 4 });",
         ),
     );
+    const ir = compileSystem(entry);
     const implementation = serverExecution(
-      programContribution(compileSystem(entry), "feature/worker/program/cloud"),
+      ir,
+      programContribution(ir, "feature/worker/program/cloud"),
     );
     expect(implementation?.kind).toBe("portable");
     if (implementation?.kind !== "portable") throw new Error("Expected portable IR.");
@@ -810,7 +812,7 @@ export const clean = ({ parameters }: { parameters: { sheet: unknown } }) => ({
     );
     const ir = compileSystem(entry);
     const contribution = programContribution(ir, "feature/worker/program/cloud");
-    const implementation = serverExecution(contribution);
+    const implementation = serverExecution(ir, contribution);
     if (implementation?.kind !== "portable") {
       throw new Error("Expected portable static-function fixture.");
     }
@@ -873,7 +875,7 @@ const child = createFeature<Child>`,
     );
     const ir = compileSystem(entry);
     const contribution = programContribution(ir, "feature/worker/program/cloud");
-    const implementation = serverExecution(contribution);
+    const implementation = serverExecution(ir, contribution);
     if (implementation?.kind !== "portable") {
       throw new Error("Expected portable recursive-function fixture.");
     }
@@ -939,11 +941,25 @@ const child = createFeature<Child>`,
     });
   });
 
+  test("invalidates a development provider only when its reachable implementation changes", async () => {
+    const entry = await projectFixture(providerIdentitySystemSource("Unrelated copy", 1));
+    const first = compileSystem(entry);
+    await writeFile(entry, providerIdentitySystemSource("Changed copy", 1));
+    const unrelated = compileSystem(entry);
+    await writeFile(entry, providerIdentitySystemSource("Changed copy", 2));
+    const changed = compileSystem(entry);
+    const identity = (ir: SystemIR) =>
+      ir.features.find(({ path }) => path === "store")?.providers?.[0]?.developmentIdentity;
+
+    expect(identity(unrelated)).toBe(identity(first));
+    expect(identity(changed)).not.toBe(identity(first));
+  });
+
   test("lowers and executes for-await-of over Dependency streams", async () => {
     const entry = await fixture(streamSystemSource());
     const ir = compileSystem(entry);
     const contribution = programContribution(ir, "feature/worker/program/cloud");
-    const implementation = serverExecution(contribution);
+    const implementation = serverExecution(ir, contribution);
     if (implementation?.kind !== "portable") {
       throw new Error("Expected portable IR.");
     }
@@ -998,7 +1014,7 @@ const child = createFeature<Child>`,
     );
     const ir = compileSystem(entry);
     const contribution = programContribution(ir, "feature/worker/program/cloud");
-    const implementation = serverExecution(contribution);
+    const implementation = serverExecution(ir, contribution);
     if (implementation?.kind !== "portable") {
       throw new Error("Expected portable IR.");
     }
@@ -1052,7 +1068,7 @@ const child = createFeature<Child>`,
     );
     const ir = compileSystem(entry);
     const contribution = programContribution(ir, "feature/worker/program/cloud");
-    const implementation = serverExecution(contribution);
+    const implementation = serverExecution(ir, contribution);
     if (implementation?.kind !== "portable") {
       throw new Error("Expected portable IR.");
     }
@@ -1111,7 +1127,7 @@ const child = createFeature<Child>`,
     );
     const ir = compileSystem(entry);
     const contribution = programContribution(ir, "feature/worker/program/cloud");
-    const implementation = serverExecution(contribution);
+    const implementation = serverExecution(ir, contribution);
     if (implementation?.kind !== "portable") {
       throw new Error("Expected portable IR.");
     }
@@ -1302,7 +1318,7 @@ const child = createFeature<Child>`,
       requires: [{ name: "repository" }],
       provides: [],
     });
-    expect(serverExecution(ir.programs[0]?.contributions[0])).toMatchObject({
+    expect(serverExecution(ir, ir.programs[0]?.contributions[0])).toMatchObject({
       kind: "portable",
       entry: { asynchronous: true },
     });
@@ -1347,6 +1363,7 @@ export default createSystem({ features: { fixture } });
 
     const ir = compileSystem(entry);
     const implementation = serverExecution(
+      ir,
       programContribution(ir, "feature/fixture/program/server"),
     );
     if (implementation?.kind !== "portable") throw new Error("Expected portable IR.");
@@ -1361,7 +1378,7 @@ export default createSystem({ features: { fixture } });
     const ir = compileSystem(await fixture(nestedFactorySystemSource()));
     const contribution = programContribution(ir, "feature/parent.child/program/api");
 
-    expect(serverExecution(contribution)).toMatchObject({
+    expect(serverExecution(ir, contribution)).toMatchObject({
       kind: "portable",
       entry: { asynchronous: true },
     });
@@ -1372,7 +1389,9 @@ export default createSystem({ features: { fixture } });
     const entry = await fixture(source);
     const ir = compileSystem(entry);
 
-    expect(serverExecution(programContribution(ir, "feature/tasks/program/server"))).toMatchObject({
+    expect(
+      serverExecution(ir, programContribution(ir, "feature/tasks/program/server")),
+    ).toMatchObject({
       kind: "portable",
       entry: { asynchronous: true },
     });
@@ -1383,14 +1402,14 @@ export default createSystem({ features: { fixture } });
     const changed = compileSystem(entry);
     expect(serializeSystemIR(changed)).not.toBe(serializeSystemIR(ir));
     expect(
-      serverExecution(programContribution(changed, "feature/tasks/program/server"))?.kind,
+      serverExecution(changed, programContribution(changed, "feature/tasks/program/server"))?.kind,
     ).toBe("portable");
   });
 
   test("uses a contextually typed callback's own Dependency binding", async () => {
     const ir = compileSystem(await fixture(contextualCallbackFactorySystemSource()));
     const contribution = programContribution(ir, "feature/worker/program/server");
-    const implementation = serverExecution(contribution);
+    const implementation = serverExecution(ir, contribution);
     if (implementation?.kind !== "portable") {
       throw new Error("Expected portable contextual callback fixture.");
     }
@@ -1425,7 +1444,7 @@ export default createSystem({ features: { fixture } });
     const ir = compileSystem(await projectFixture(dependencyReferenceSystemSource()));
     const contribution = programContribution(ir, "feature/worker/program/server");
     if (!contribution) throw new Error("Expected portable Dependency reference contribution.");
-    const implementation = serverExecution(contribution);
+    const implementation = serverExecution(ir, contribution);
     if (implementation?.kind !== "portable") {
       throw new Error("Expected portable Dependency reference fixture.");
     }
@@ -1509,7 +1528,7 @@ export default createSystem({ features: { fixture } });
   test("respects lexical shadowing of the Program Dependency binding in closures", async () => {
     const ir = compileSystem(await fixture(shadowedDependencySystemSource()));
     const contribution = programContribution(ir, "feature/worker/program/server");
-    const implementation = serverExecution(contribution);
+    const implementation = serverExecution(ir, contribution);
     if (implementation?.kind !== "portable") {
       throw new Error("Expected portable shadowing fixture.");
     }
@@ -1542,7 +1561,7 @@ export default createSystem({ features: { fixture } });
   test("materializes generic literal meaning without a Feature-specific compiler path", async () => {
     const ir = compileSystem(await projectFixture(typeLiteralFactorySystemSource()));
     const contribution = programContribution(ir, "feature/catalog/program/server");
-    const implementation = serverExecution(contribution);
+    const implementation = serverExecution(ir, contribution);
     if (implementation?.kind !== "portable") {
       throw new Error("Expected portable named-provider factory.");
     }
@@ -1564,7 +1583,7 @@ export default createSystem({ features: { fixture } });
   test("materializes nested indexed literals after generic factory substitution", async () => {
     const ir = compileSystem(await projectFixture(nestedTypeLiteralFactorySystemSource()));
     const contribution = programContribution(ir, "feature/catalog/program/server");
-    const implementation = serverExecution(contribution);
+    const implementation = serverExecution(ir, contribution);
     if (implementation?.kind !== "portable") {
       throw new Error("Expected portable nested named-provider factory.");
     }
@@ -1585,7 +1604,7 @@ export default createSystem({ features: { fixture } });
   test("materializes resolved structural types without a Feature-specific compiler path", async () => {
     const ir = compileSystem(await projectFixture(typeSchemaFactorySystemSource()));
     const contribution = programContribution(ir, "feature/catalog/program/server");
-    const implementation = serverExecution(contribution);
+    const implementation = serverExecution(ir, contribution);
     if (implementation?.kind !== "portable") {
       throw new Error("Expected portable schema-provider factory.");
     }
@@ -1736,7 +1755,7 @@ export default createSystem({ features: { fixture } });
     const ir = compileSystem(entry);
     const contribution = programContribution(ir, "feature/worker/program/cloud");
 
-    expect(serverExecution(contribution)).toMatchObject({
+    expect(serverExecution(ir, contribution)).toMatchObject({
       kind: "portable",
       functions: [{ name: "sum" }],
     });
@@ -1795,7 +1814,7 @@ export default createSystem({ features: { fixture } });
     );
     const ir = compileSystem(entry);
     const contribution = programContribution(ir, "feature/worker/program/cloud");
-    const implementation = serverExecution(contribution);
+    const implementation = serverExecution(ir, contribution);
     if (implementation?.kind !== "portable") {
       throw new Error("Expected portable IR.");
     }
@@ -1889,7 +1908,7 @@ export default createSystem({ features: { fixture } });
     );
     const ir = compileSystem(entry);
     const contribution = programContribution(ir, "feature/worker/program/cloud");
-    const implementation = serverExecution(contribution);
+    const implementation = serverExecution(ir, contribution);
     if (implementation?.kind !== "portable") {
       throw new Error("Expected portable IR.");
     }
@@ -2521,6 +2540,38 @@ export default createSystem({
 `;
 }
 
+function providerIdentitySystemSource(copy: string, value: number): string {
+  return `
+import { createFeature, createSystem, type Dependency, type Feature } from "@/index";
+import type { ServerDependencyProvider } from "@/platforms/server";
+
+type Store = Dependency<{
+  Operations: { read(input: {}): Promise<number> };
+}>;
+type StoreFeature = {
+  Providers: { server: { store: ServerDependencyProvider<Store> } };
+};
+
+const helper = ${value};
+const unrelatedCopy = ${JSON.stringify(copy)};
+void unrelatedCopy;
+const provider: ServerDependencyProvider<Store> = {
+  development() {
+    return {
+      async read() {
+        return helper;
+      },
+    };
+  },
+} as unknown as ServerDependencyProvider<Store>;
+const store: Feature<StoreFeature> = createFeature<StoreFeature>({
+  providers: { server: { store: provider } },
+});
+
+export default createSystem({ features: { store } });
+`;
+}
+
 function streamSystemSource(): string {
   return `
 type Platform = { readonly Name: "server" };
@@ -3116,8 +3167,11 @@ function programContribution(ir: SystemIR, id: string): ProgramContributionIR | 
   return ir.programs.flatMap(({ contributions }) => contributions).find((item) => item.id === id);
 }
 
-function serverExecution(contribution: ProgramContributionIR | undefined) {
-  return contribution ? serverProgramExecution(contribution) : undefined;
+function serverExecution(ir: SystemIR, contribution: ProgramContributionIR | undefined) {
+  const program = ir.programs.find(({ contributions }) =>
+    contribution ? contributions.includes(contribution) : false,
+  );
+  return contribution ? serverProgramExecution(contribution, program) : undefined;
 }
 
 function collectExpressions(statements: readonly StatementIR[]): ExpressionIR[] {

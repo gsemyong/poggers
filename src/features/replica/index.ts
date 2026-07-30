@@ -7,7 +7,7 @@ import {
 } from "@/core/dependency";
 import { createFeature, type Feature } from "@/core/feature";
 import { typeKeys, typeLiteral, typeSchema } from "@/core/intrinsic";
-import { mapStream } from "@/core/stream";
+import { distinctStream, filterStream, mapStream } from "@/core/stream";
 import type { Identity, IdentityModelDefinition } from "@/features/identity";
 import {
   evaluateProjectionRows,
@@ -246,6 +246,7 @@ type ReplicaMigration<
       }>);
 
 export type ReplicaImplementation<Model extends ReplicaModelDefinition> = Readonly<{
+  state(): Model["State"];
   commands: Readonly<{
     [Name in keyof Model["Commands"]]: Readonly<{
       commit(
@@ -274,28 +275,27 @@ type ReplicaClientImplementation<Model extends ReplicaModelDefinition> = Pick<
 
 type ReplicaPull<Model extends ReplicaModelDefinition> = Readonly<{
   version: Model["Version"];
-  schema: string;
+  schema?: string;
   sequence: number;
   observations: Readonly<Record<string, string>>;
   cursor: string;
   snapshot?: Model["State"];
-  changes: readonly Readonly<{
-    cursor: string;
-    replace: Model["State"];
-  }>[];
+  changes: readonly ReplicaChange<Model>[];
 }>;
 
-type ReplicaCommandResponse = Readonly<{
+type ReplicaChange<Model extends ReplicaModelDefinition> = {
+  [Name in Extract<keyof Model["State"], string>]:
+    | Readonly<{
+        row: Name;
+        upsert: Readonly<{ id: string }> &
+          (Model["State"][Name] extends readonly (infer Row)[] ? Row : never);
+      }>
+    | Readonly<{ row: Name; remove: Readonly<{ id: string }> }>;
+}[Extract<keyof Model["State"], string>];
+
+type ReplicaCommandResponse<Model extends ReplicaModelDefinition> = Readonly<{
   result: object;
-  pull: Readonly<{
-    version: number;
-    schema: string;
-    sequence: number;
-    observations: Readonly<Record<string, string>>;
-    cursor: string;
-    snapshot?: object;
-    changes: readonly Readonly<{ cursor: string; replace: object }>[];
-  }>;
+  pull: ReplicaPull<Model>;
 }>;
 
 type ReplicaProtocolSchema<Model extends ReplicaModelDefinition> = Readonly<{
@@ -313,7 +313,7 @@ type ReplicaAuthorityWire<Model extends ReplicaModelDefinition> = Readonly<
         input: object;
         idempotencyKey: string;
       }>,
-    ) => Promise<ReplicaCommandResponse>;
+    ) => Promise<ReplicaCommandResponse<Model>>;
   }
 >;
 
@@ -479,7 +479,7 @@ export function createReplica<const Model extends ReplicaModelDefinition>(
                     input as Parameters<ReplicaAuthorityWire<Model>["pull"]>[0],
                   );
                 }
-                return authority.command(operation, input);
+                return authority.command(operation, input, 0);
               },
               [Symbol.dispose]: () => route[Symbol.dispose](),
             }),
@@ -498,6 +498,7 @@ export function createReplica<const Model extends ReplicaModelDefinition>(
             (dependencies as Readonly<Record<string, object>>)[identityName] as Identity.Client<
               Model["Identity"]
             >,
+            definition.state(),
           );
           await controller.start();
           const operations = new Map<string, (context: Readonly<{ input: unknown }>) => unknown>();
@@ -583,42 +584,65 @@ function replicaAuthority<Model extends ReplicaModelDefinition>(
   version: Model["Version"],
   schema: string,
 ): Readonly<{
-  pull(input: { principal: PrincipalOf<Model>; after?: string }): Promise<ReplicaPull<Model>>;
+  pull(input: {
+    principal: PrincipalOf<Model>;
+    after?: number;
+    metadata?: boolean;
+  }): Promise<ReplicaPull<Model>>;
   observe(input: {
     principal: PrincipalOf<Model>;
     after: Readonly<Record<string, string>>;
-  }): Promise<AsyncIterable<Readonly<{ cursor: string }>>>;
-  command(operation: string, input: object): Promise<ReplicaCommandResponse>;
+    sequence: number;
+  }): Promise<AsyncIterable<ReplicaPull<Model>>>;
+  command(operation: string, input: object, after?: number): Promise<ReplicaCommandResponse<Model>>;
 }> {
   const pull = async (input: {
     principal: PrincipalOf<Model>;
-    after?: string;
+    after?: number;
+    metadata?: boolean;
   }): Promise<ReplicaPull<Model>> => {
-    const current = await replicaSnapshot<Model>(projection, rowNames, input.principal);
+    const current = await dispatchDependency<{
+      revision: number;
+      observations: Readonly<Record<string, string>>;
+      snapshot?: Model["State"];
+      changes: readonly ReplicaChange<Model>[];
+    }>(projection, "$synchronize", {
+      principal: input.principal,
+      rows: rowNames,
+      ...(input.after === undefined ? {} : { after: input.after }),
+    });
     return {
       version,
-      schema,
-      sequence: current.sequence,
+      ...(input.metadata ? { schema } : {}),
+      sequence: current.revision,
       observations: current.observations,
-      cursor: current.cursor,
-      ...(input.after === undefined ? { snapshot: current.state } : {}),
-      changes:
-        input.after === undefined || input.after === current.cursor
-          ? []
-          : [{ cursor: current.cursor, replace: current.state }],
+      cursor: `${current.revision}`,
+      ...(current.snapshot === undefined ? {} : { snapshot: current.snapshot }),
+      changes: current.changes,
     };
   };
   return Object.freeze({
     pull,
-    async observe({ principal, after }) {
-      const changes = await dispatchDependency<AsyncIterable<Readonly<{ cursor: string }>>>(
+    async observe({ principal, after, sequence }) {
+      const source = await dispatchDependency<AsyncIterable<Readonly<{ cursor: string }>>>(
         projection,
         "observe",
         { principal, after },
       );
-      return changes;
+      let current = sequence;
+      return distinctStream(
+        filterStream(
+          mapStream(source, async () => {
+            const change = await pull({ principal, after: current });
+            if (change.sequence > current) current = change.sequence;
+            return change;
+          }),
+          (change) => change.sequence > sequence,
+        ),
+        (change) => change.sequence,
+      );
     },
-    async command(operation, received) {
+    async command(operation, received, after?: number) {
       const request = received as Readonly<{
         principal: PrincipalOf<Model>;
         input: object;
@@ -643,54 +667,10 @@ function replicaAuthority<Model extends ReplicaModelDefinition>(
       });
       return {
         result,
-        pull: await pull({ principal: request.principal }),
+        pull: await pull({ principal: request.principal, after }),
       };
     },
   });
-}
-
-async function replicaSnapshot<Model extends ReplicaModelDefinition>(
-  projection: Projection.Reference<Model["Projection"]>,
-  rowNames: readonly Extract<keyof Model["State"], string>[],
-  principal: PrincipalOf<Model>,
-): Promise<
-  Readonly<{
-    sequence: number;
-    observations: Readonly<Record<string, string>>;
-    cursor: string;
-    state: Model["State"];
-  }>
-> {
-  const state: Record<string, readonly object[]> = {};
-  const observations: Record<string, string> = {};
-  let cursor = "";
-  let sequence = 0;
-  for (const row of rowNames) {
-    const name: string = row;
-    const result = await dispatchDependency<ProjectionResult<Readonly<{ id: string }>>>(
-      projection,
-      name,
-      { principal, query: { find: {} } },
-    );
-    if (result.kind !== "rows") {
-      throw new ReplicaError("rejected", `Projection row ${name} returned analytics.`);
-    }
-    state[name] = result.matches.map(({ row: value }) => value);
-    const rowSequence = result.revision ?? 0;
-    if (rowSequence > sequence) sequence = rowSequence;
-    for (const source of Object.keys(result.observations)) {
-      const sourceCursor = result.observations[source];
-      if (sourceCursor !== undefined) observations[source] = sourceCursor;
-    }
-    const positioned = `${name}:${result.cursor ?? "0"}`;
-    cursor = cursor === "" ? positioned : `${cursor}|${positioned}`;
-  }
-  return {
-    sequence,
-    observations,
-    cursor,
-    state: state as Model["State"],
-  };
 }
 
 function replicaHttpHandler<Model extends ReplicaModelDefinition>(
@@ -710,8 +690,12 @@ function replicaHttpHandler<Model extends ReplicaModelDefinition>(
         return replicaJson(
           await authority.pull(
             after
-              ? { principal: principal as PrincipalOf<Model>, after }
-              : { principal: principal as PrincipalOf<Model> },
+              ? {
+                  principal: principal as PrincipalOf<Model>,
+                  after: replicaSequence(after),
+                  metadata: true,
+                }
+              : { principal: principal as PrincipalOf<Model>, metadata: true },
           ),
         );
       }
@@ -719,6 +703,7 @@ function replicaHttpHandler<Model extends ReplicaModelDefinition>(
         const changes = await authority.observe({
           principal: principal as PrincipalOf<Model>,
           after: replicaObservations(getHttpValue(request.query, { name: "after" })),
+          sequence: replicaSequence(getHttpValue(request.query, { name: "sequence" }) ?? "0"),
         });
         return {
           status: 200,
@@ -742,12 +727,17 @@ function replicaHttpHandler<Model extends ReplicaModelDefinition>(
       if (!idempotencyKey) {
         throw new ReplicaError("invalid-command", "A stable command identity is required.");
       }
+      const afterHeader = getHttpValue(request.headers, { name: "x-kit-after" });
       return replicaJson(
-        await authority.command(command, {
-          principal: principal as PrincipalOf<Model>,
-          input: JSON.parse(request.body) as object,
-          idempotencyKey,
-        }),
+        await authority.command(
+          command,
+          {
+            principal: principal as PrincipalOf<Model>,
+            input: JSON.parse(request.body) as object,
+            idempotencyKey,
+          },
+          afterHeader === undefined ? undefined : replicaSequence(afterHeader),
+        ),
       );
     } catch (error) {
       if (error instanceof ReplicaError) {
@@ -765,6 +755,14 @@ function replicaHttpHandler<Model extends ReplicaModelDefinition>(
       );
     }
   };
+}
+
+function replicaSequence(value: string): number {
+  const sequence = JSON.parse(value) as number;
+  if (dataKind(sequence) !== "number" || sequence < 0 || sequence % 1 !== 0) {
+    throw new ReplicaError("invalid-command", "Replica sequence is invalid.");
+  }
+  return sequence;
 }
 
 function replicaObservations(value: string | undefined): Readonly<Record<string, string>> {
@@ -893,6 +891,7 @@ class ReplicaController<Model extends ReplicaModelDefinition> implements AsyncDi
   readonly #definition: ReplicaClientImplementation<Model>;
   readonly #dependencies: ReplicaBrowserRequirements<Model>;
   readonly #identity: Identity.Client<Model["Identity"]>;
+  readonly #initial: Model["State"];
   readonly #listeners = new Set<(state: ReplicaState<Model>) => void>();
   #state: ReplicaState<Model> = {
     status: "signed-out",
@@ -911,6 +910,7 @@ class ReplicaController<Model extends ReplicaModelDefinition> implements AsyncDi
   #generation = 0;
   #retryAttempt = 0;
   #flushing: Promise<void> | undefined;
+  #deferredPulls: ReplicaPull<Model>[] = [];
   #write: Promise<void> = Promise.resolve();
   #disposed = false;
 
@@ -920,6 +920,7 @@ class ReplicaController<Model extends ReplicaModelDefinition> implements AsyncDi
     definition: ReplicaClientImplementation<Model>,
     dependencies: ReplicaBrowserRequirements<Model>,
     identity: Identity.Client<Model["Identity"]>,
+    initial: Model["State"],
     schema?: string,
   ) {
     this.#name = name;
@@ -928,6 +929,7 @@ class ReplicaController<Model extends ReplicaModelDefinition> implements AsyncDi
     this.#definition = definition;
     this.#dependencies = dependencies;
     this.#identity = identity;
+    this.#initial = cloneData(initial);
   }
 
   async start(): Promise<void> {
@@ -972,10 +974,11 @@ class ReplicaController<Model extends ReplicaModelDefinition> implements AsyncDi
       const pull = await replicaRequest<ReplicaPull<Model>>(
         this.#dependencies.http,
         `/api/replicas/${this.#name}`,
-        this.#state.cursor ? { after: this.#state.cursor } : {},
+        this.#committed === undefined ? {} : { after: `${this.#sequence}` },
       );
       if (!this.#active(generation)) return this.#state;
       if (
+        pull.schema === undefined ||
         pull.version !== this.#version ||
         (this.#schema !== undefined && pull.schema !== this.#schema)
       ) {
@@ -1009,9 +1012,8 @@ class ReplicaController<Model extends ReplicaModelDefinition> implements AsyncDi
     if (!(operation in this.#definition.commands)) {
       throw new ReplicaError("unknown-command", `Unknown command ${operation}.`);
     }
-    if (this.#state.data === undefined) await this.synchronize();
     if (this.#state.data === undefined) {
-      throw new ReplicaError("rejected", "Replica state is unavailable while offline.");
+      throw new ReplicaError("rejected", "Replica local state is unavailable.");
     }
     const pending = {
       id: this.#dependencies.identifiers.create({}),
@@ -1022,9 +1024,9 @@ class ReplicaController<Model extends ReplicaModelDefinition> implements AsyncDi
     this.#setState({
       ...this.#state,
       pending: pendingCommands,
-      data: this.#replay(this.#committed!, pendingCommands),
+      data: this.#replay(this.#committed ?? this.#initial, pendingCommands),
     });
-    this.#persist();
+    await this.#persist();
     void this.#flush(this.#requirePrincipal(), this.#generation);
     return { id: pending.id };
   }
@@ -1037,7 +1039,7 @@ class ReplicaController<Model extends ReplicaModelDefinition> implements AsyncDi
       pending: [...this.#state.pending, rejection.pending],
       rejected: this.#state.rejected.filter(({ pending }) => pending.id !== id),
     });
-    this.#persist();
+    await this.#persist();
     await this.#flush(this.#requirePrincipal(), this.#generation);
     return this.#state;
   }
@@ -1047,7 +1049,7 @@ class ReplicaController<Model extends ReplicaModelDefinition> implements AsyncDi
       ...this.#state,
       rejected: this.#state.rejected.filter(({ pending }) => pending.id !== id),
     });
-    this.#persist();
+    await this.#persist();
     return this.#state;
   }
 
@@ -1067,6 +1069,7 @@ class ReplicaController<Model extends ReplicaModelDefinition> implements AsyncDi
     if (!principal) {
       this.#principal = undefined;
       this.#committed = undefined;
+      this.#deferredPulls = [];
       this.#generation += 1;
       this.#stopChanges();
       this.#setState({ status: "signed-out", pending: [], rejected: [] });
@@ -1092,13 +1095,19 @@ class ReplicaController<Model extends ReplicaModelDefinition> implements AsyncDi
       : [];
     this.#principal = principal;
     this.#committed = undefined;
+    this.#deferredPulls = [];
     this.#sequence = 0;
     this.#observations = {};
     const generation = ++this.#generation;
     this.#stopChanges();
     this.#retry?.[Symbol.dispose]();
     this.#retry = undefined;
-    this.#setState({ status: "loading", pending, rejected });
+    this.#setState({
+      status: "loading",
+      data: this.#replay(this.#initial, pending),
+      pending,
+      rejected,
+    });
     const stored = await this.#dependencies.storage.read<StoredReplica<Model>>({
       key: this.#storageKey(principal),
     });
@@ -1112,7 +1121,7 @@ class ReplicaController<Model extends ReplicaModelDefinition> implements AsyncDi
       this.#setState({
         status: migrated.committed ? "synchronized" : "loading",
         ...(stored.cursor ? { cursor: stored.cursor } : {}),
-        ...(migrated.committed ? { data: this.#replay(migrated.committed, migrated.pending) } : {}),
+        data: this.#replay(migrated.committed ?? this.#initial, migrated.pending),
         pending: migrated.pending,
         rejected: migrated.rejected,
       });
@@ -1124,11 +1133,7 @@ class ReplicaController<Model extends ReplicaModelDefinition> implements AsyncDi
         rejected: migrated.rejected,
       });
     }
-    if (this.#committed) {
-      void this.synchronize();
-      return;
-    }
-    await this.synchronize();
+    void this.synchronize();
   }
 
   #migrateStored(stored: StoredReplica<Model>): MigratedReplica<Model> {
@@ -1174,20 +1179,70 @@ class ReplicaController<Model extends ReplicaModelDefinition> implements AsyncDi
   }
 
   #accept(pull: ReplicaPull<Model>): void {
-    if (pull.sequence < this.#sequence) return;
-    this.#sequence = pull.sequence;
-    this.#observations = pull.observations;
-    if (pull.snapshot !== undefined) this.#committed = cloneData(pull.snapshot);
-    for (const change of pull.changes) {
-      this.#committed = cloneData(change.replace);
+    if (
+      pull.sequence < this.#sequence ||
+      (this.#committed !== undefined && pull.sequence === this.#sequence)
+    ) {
+      return;
     }
+    if (this.#state.pending.length) {
+      const latest = this.#deferredPulls.at(-1);
+      if (!latest || pull.sequence > latest.sequence) this.#deferredPulls.push(pull);
+      return;
+    }
+    this.#applyPull(pull);
+  }
+
+  #applyPull(pull: ReplicaPull<Model>): void {
+    if (!this.#mergePull(pull)) return;
     const committed = this.#committed;
     this.#setState({
       ...this.#state,
       cursor: pull.cursor,
       ...(committed === undefined ? {} : { data: this.#replay(committed, this.#state.pending) }),
     });
-    this.#persist();
+    void this.#persist();
+  }
+
+  #mergePull(pull: ReplicaPull<Model>): boolean {
+    if (
+      pull.sequence < this.#sequence ||
+      (this.#committed !== undefined && pull.sequence === this.#sequence)
+    ) {
+      return false;
+    }
+    this.#sequence = pull.sequence;
+    this.#observations = pull.observations;
+    if (pull.snapshot !== undefined) this.#committed = cloneData(pull.snapshot);
+    if (pull.changes.length) {
+      if (this.#committed === undefined) {
+        throw new ReplicaError("rejected", "Replica received changes before its initial snapshot.");
+      }
+      const state = cloneData(this.#committed) as Record<
+        string,
+        readonly Readonly<{ id: string }>[]
+      >;
+      for (const change of pull.changes) {
+        const current = state[change.row];
+        if (!current) {
+          throw new ReplicaError("rejected", `Replica change names unknown row ${change.row}.`);
+        }
+        const next: Readonly<{ id: string }>[] = [];
+        let replaced = false;
+        for (const value of current) {
+          if (value.id !== ("upsert" in change ? change.upsert.id : change.remove.id)) {
+            next.push(value);
+          } else if ("upsert" in change) {
+            next.push(change.upsert);
+            replaced = true;
+          }
+        }
+        if ("upsert" in change && !replaced) next.push(change.upsert);
+        state[change.row] = next;
+      }
+      this.#committed = state as Model["State"];
+    }
+    return true;
   }
 
   async #flush(principal: PrincipalOf<Model>, generation: number): Promise<void> {
@@ -1202,33 +1257,27 @@ class ReplicaController<Model extends ReplicaModelDefinition> implements AsyncDi
       while (this.#state.pending.length && this.#active(generation)) {
         const pending = this.#state.pending[0]!;
         try {
-          const response = await replicaRequest<ReplicaCommandResponse>(
+          const response = await replicaRequest<ReplicaCommandResponse<Model>>(
             this.#dependencies.http,
             `/api/replicas/${this.#name}/${pending.command}`,
             {},
             {
               method: "POST",
               body: JSON.stringify(pending.input),
-              headers: { "x-kit-command": pending.id },
+              headers: {
+                "x-kit-command": pending.id,
+                ...(this.#committed === undefined ? {} : { "x-kit-after": `${this.#sequence}` }),
+              },
             },
           );
           if (!this.#active(generation)) return;
           const remaining = this.#state.pending.slice(1);
-          if (response.pull.sequence >= this.#sequence) {
-            this.#sequence = response.pull.sequence;
-            this.#observations = response.pull.observations;
-            if (response.pull.snapshot !== undefined) {
-              this.#committed = cloneData(response.pull.snapshot as Model["State"]);
-            }
-            for (const change of response.pull.changes) {
-              this.#committed = cloneData(change.replace as Model["State"]);
-            }
-          }
+          const accepted = this.#mergePull(response.pull as ReplicaPull<Model>);
           this.#setState({
             ...this.#state,
             pending: remaining,
-            cursor: response.pull.cursor,
-            ...(this.#committed ? { data: this.#replay(this.#committed, remaining) } : {}),
+            ...(accepted ? { cursor: response.pull.cursor } : {}),
+            data: this.#replay(this.#committed ?? this.#initial, remaining),
           });
         } catch (error) {
           if (!this.#active(generation)) return;
@@ -1247,15 +1296,18 @@ class ReplicaController<Model extends ReplicaModelDefinition> implements AsyncDi
                 message: error instanceof Error ? error.message : "Command rejected.",
               },
             ],
-            ...(this.#committed === undefined
-              ? {}
-              : { data: this.#replay(this.#committed, remaining) }),
+            data: this.#replay(this.#committed ?? this.#initial, remaining),
           });
         }
-        this.#persist();
+        void this.#persist();
       }
     })().finally(() => {
       this.#flushing = undefined;
+      if (!this.#state.pending.length && this.#deferredPulls.length) {
+        const pulls = this.#deferredPulls;
+        this.#deferredPulls = [];
+        for (const pull of pulls) this.#accept(pull);
+      }
     });
     await this.#flushing;
   }
@@ -1271,9 +1323,9 @@ class ReplicaController<Model extends ReplicaModelDefinition> implements AsyncDi
     return state;
   }
 
-  #persist(): void {
+  #persist(): Promise<void> {
     const principal = this.#principal;
-    if (!principal) return;
+    if (!principal) return Promise.resolve();
     const stored: StoredReplica<Model> = {
       version: this.#version,
       ...(this.#schema ? { schema: this.#schema } : {}),
@@ -1293,6 +1345,7 @@ class ReplicaController<Model extends ReplicaModelDefinition> implements AsyncDi
           value: stored,
         }),
       );
+    return this.#write;
   }
 
   #setState(state: ReplicaState<Model>): void {
@@ -1315,16 +1368,16 @@ class ReplicaController<Model extends ReplicaModelDefinition> implements AsyncDi
       const response = await this.#dependencies.http.request({
         path: `/api/replicas/${this.#name}/changes?after=${encodeURIComponent(
           JSON.stringify(this.#observations),
-        )}`,
+        )}&sequence=${this.#sequence}`,
         signal,
       });
       if (!response.ok) {
         throw new Error(`Replica change stream failed (${response.status}).`);
       }
       if (!response.body) throw new Error("Replica change stream has no body.");
-      for await (const _change of replicaChangeRecords(response.body)) {
+      for await (const change of replicaChangeRecords<Model>(response.body)) {
         if (!this.#active(generation) || signal.aborted) return;
-        await this.synchronize();
+        this.#accept(change);
       }
       if (this.#active(generation) && !signal.aborted) {
         throw new Error("Replica change stream ended unexpectedly.");
@@ -1373,9 +1426,9 @@ class ReplicaController<Model extends ReplicaModelDefinition> implements AsyncDi
   }
 }
 
-async function* replicaChangeRecords(
+async function* replicaChangeRecords<Model extends ReplicaModelDefinition>(
   body: ReadableStream<Uint8Array>,
-): AsyncIterable<Readonly<{ cursor: string }>> {
+): AsyncIterable<ReplicaPull<Model>> {
   const reader = body.getReader();
   const decoder = new TextDecoder("utf-8", { fatal: true });
   let buffered = "";
@@ -1387,12 +1440,12 @@ async function* replicaChangeRecords(
       while (newline >= 0) {
         const line = buffered.slice(0, newline);
         buffered = buffered.slice(newline + 1);
-        if (line) yield replicaChangeRecord(line);
+        if (line) yield replicaChangeRecord<Model>(line);
         newline = buffered.indexOf("\n");
       }
       if (!done) continue;
       buffered += decoder.decode();
-      if (buffered) yield replicaChangeRecord(buffered);
+      if (buffered) yield replicaChangeRecord<Model>(buffered);
       return;
     }
   } finally {
@@ -1401,12 +1454,21 @@ async function* replicaChangeRecords(
   }
 }
 
-function replicaChangeRecord(line: string): Readonly<{ cursor: string }> {
-  const value = JSON.parse(line) as Readonly<{ cursor?: unknown }>;
-  if (typeof value.cursor !== "string") {
+function replicaChangeRecord<Model extends ReplicaModelDefinition>(
+  line: string,
+): ReplicaPull<Model> {
+  const value = JSON.parse(line) as Partial<ReplicaPull<Model>>;
+  if (
+    typeof value.version !== "number" ||
+    typeof value.sequence !== "number" ||
+    typeof value.cursor !== "string" ||
+    !value.observations ||
+    typeof value.observations !== "object" ||
+    !Array.isArray(value.changes)
+  ) {
     throw new TypeError("Replica change stream record is invalid.");
   }
-  return { cursor: value.cursor };
+  return value as ReplicaPull<Model>;
 }
 
 async function replicaRequest<Value>(
@@ -1470,6 +1532,7 @@ export async function createReplicaFixture<Model extends ReplicaModelDefinition>
       dropNextResponse(): void;
       principal(value: PrincipalOf<Model> | undefined): Promise<void>;
       storage: Map<string, unknown>;
+      responses: readonly Readonly<{ method: string; path: string; body: string }>[];
     }>
 > {
   const name = input.name ?? "replica";
@@ -1489,6 +1552,7 @@ export async function createReplicaFixture<Model extends ReplicaModelDefinition>
   let isOnline = input.online ?? true;
   let dropNextResponse = false;
   let identifier = 0;
+  const responses: Readonly<{ method: string; path: string; body: string }>[] = [];
   const sessionListeners = new Set<
     (session: Readonly<{ user: PrincipalOf<Model> }> | undefined) => void
   >();
@@ -1548,6 +1612,13 @@ export async function createReplicaFixture<Model extends ReplicaModelDefinition>
           })),
           body: request.body ?? "",
         });
+        if (response.stream === undefined && response.body !== undefined) {
+          responses.push({
+            method: request.method ?? "GET",
+            path: url.pathname,
+            body: response.body,
+          });
+        }
         if (dropNextResponse) {
           dropNextResponse = false;
           throw new Error("Fixture response was lost after authority execution.");
@@ -1590,6 +1661,7 @@ export async function createReplicaFixture<Model extends ReplicaModelDefinition>
     definition,
     browserDependencies,
     identityClient,
+    definition.state(),
     schema,
   );
   await controller.start();
@@ -1624,6 +1696,7 @@ export async function createReplicaFixture<Model extends ReplicaModelDefinition>
       await Promise.resolve();
     },
     storage,
+    responses,
     [Symbol.asyncDispose]: () => controller[Symbol.asyncDispose](),
   } as unknown as AsyncDisposable & {
     client: ReplicaClient<Model>;
@@ -1632,6 +1705,7 @@ export async function createReplicaFixture<Model extends ReplicaModelDefinition>
     dropNextResponse(): void;
     principal(value: PrincipalOf<Model> | undefined): Promise<void>;
     storage: Map<string, unknown>;
+    responses: readonly Readonly<{ method: string; path: string; body: string }>[];
   };
 }
 

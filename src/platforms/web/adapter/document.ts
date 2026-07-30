@@ -2708,6 +2708,22 @@ function capitalize(value: string): string {
 }
 
 function describe(value: unknown): string {
+  if (value && typeof value === "object") {
+    const object = value as Readonly<Record<string, unknown>>;
+    const fields = Object.keys(object).slice(0, 8);
+    const details = [
+      ...(typeof object.kind === "string" ? [`kind=${JSON.stringify(object.kind)}`] : []),
+      ...("tag" in object
+        ? [
+            typeof object.tag === "string"
+              ? `tag=${JSON.stringify(object.tag)}`
+              : `tagType=${typeof object.tag}`,
+          ]
+        : []),
+      ...(fields.length ? [`fields=${JSON.stringify(fields)}`] : []),
+    ];
+    if (details.length) return `${Object.prototype.toString.call(value)} (${details.join(", ")})`;
+  }
   return Object.prototype.toString.call(value);
 }
 

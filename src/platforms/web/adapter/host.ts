@@ -15,6 +15,12 @@ import type {
   WebServiceWorkerRuntime,
 } from "@/platforms/web";
 import { resolveWebDestination, type WebClientRouteIR } from "@/platforms/web/adapter/lowering";
+import {
+  parseWebRealtimeServerFrame,
+  WEB_REALTIME_PATH,
+  type WebRealtimeRequestFrame,
+  type WebRealtimeServerFrame,
+} from "@/platforms/web/adapter/transport";
 import type { WebDestination, WebNavigationType } from "@/platforms/web/routing";
 
 export type WebHostOptions<Dependencies extends readonly DependencyContractIR[]> = Readonly<{
@@ -107,10 +113,15 @@ export async function createWebHost(
 
   if (requested.has("http")) {
     const origin = input.serverOrigin ?? location.origin;
+    const realtime =
+      typeof WebSocket === "function" ? webRealtimeTransport(new URL(origin).origin) : undefined;
     host.http = Object.freeze({
       request({
         input: { path, ...init },
       }: Readonly<{ input: Parameters<HttpClient["request"]>[0] }>) {
+        if (realtime && path.startsWith("/api/replicas/")) {
+          return realtime.request({ path, ...init });
+        }
         return fetch(new URL(path, origin), { ...init, credentials: "include" });
       },
     });
@@ -200,6 +211,187 @@ export async function createWebHost(
   });
   host.navigation = navigation;
   return conformExternalDependencies(input.dependencies, host);
+}
+
+type RealtimePendingRequest = {
+  resolve(response: Response): void;
+  reject(error: unknown): void;
+  controller?: ReadableStreamDefaultController<Uint8Array>;
+  responded: boolean;
+  removeAbort?(): void;
+};
+
+const webRealtimeTransports = new Map<string, WebRealtimeTransport>();
+
+function webRealtimeTransport(origin: string): WebRealtimeTransport {
+  let transport = webRealtimeTransports.get(origin);
+  if (!transport) {
+    transport = new WebRealtimeTransport(origin);
+    webRealtimeTransports.set(origin, transport);
+  }
+  return transport;
+}
+
+class WebRealtimeTransport {
+  readonly #origin: string;
+  readonly #pending = new Map<string, RealtimePendingRequest>();
+  readonly #encoder = new TextEncoder();
+  #socket: WebSocket | undefined;
+  #opening: Promise<WebSocket> | undefined;
+
+  constructor(origin: string) {
+    this.#origin = origin;
+  }
+
+  request(input: {
+    path: string;
+    method?: string;
+    headers?: Readonly<Record<string, string>>;
+    body?: string;
+    signal?: AbortSignal;
+  }): Promise<Response> {
+    const id = crypto.randomUUID();
+    return new Promise<Response>((resolve, reject) => {
+      const pending: RealtimePendingRequest = { resolve, reject, responded: false };
+      const abort = () => {
+        this.#send({ type: "cancel", id });
+        this.#fail(id, input.signal?.reason ?? new DOMException("Request aborted.", "AbortError"));
+      };
+      if (input.signal?.aborted) {
+        reject(input.signal.reason ?? new DOMException("Request aborted.", "AbortError"));
+        return;
+      }
+      if (input.signal) {
+        input.signal.addEventListener("abort", abort, { once: true });
+        pending.removeAbort = () => input.signal?.removeEventListener("abort", abort);
+      }
+      this.#pending.set(id, pending);
+      const frame: WebRealtimeRequestFrame = {
+        type: "request",
+        id,
+        method: input.method ?? "GET",
+        path: input.path,
+        headers: input.headers ?? {},
+        ...(input.body === undefined ? {} : { body: input.body }),
+      };
+      void this.#connect()
+        .then(() => {
+          if (this.#pending.has(id)) this.#send(frame);
+        })
+        .catch((error: unknown) => this.#fail(id, error));
+    });
+  }
+
+  #connect(): Promise<WebSocket> {
+    if (this.#socket?.readyState === WebSocket.OPEN) return Promise.resolve(this.#socket);
+    if (this.#opening) return this.#opening;
+    const target = new URL(WEB_REALTIME_PATH, this.#origin);
+    target.protocol = target.protocol === "https:" ? "wss:" : "ws:";
+    this.#opening = new Promise<WebSocket>((resolve, reject) => {
+      const socket = new WebSocket(target);
+      let opened = false;
+      socket.addEventListener("open", () => {
+        opened = true;
+        this.#socket = socket;
+        resolve(socket);
+      });
+      socket.addEventListener("message", (event) => {
+        if (typeof event.data !== "string") {
+          this.#failAll(new TypeError("Realtime transport received a non-text frame."));
+          socket.close(1003, "Text frames required");
+          return;
+        }
+        try {
+          this.#receive(parseWebRealtimeServerFrame(event.data));
+        } catch (error) {
+          this.#failAll(error);
+          socket.close(1007, "Invalid frame");
+        }
+      });
+      socket.addEventListener("close", (event) => {
+        if (this.#socket === socket) this.#socket = undefined;
+        const detail = event.reason ? `: ${event.reason}` : "";
+        const error = new Error(`Realtime transport disconnected (${event.code})${detail}.`);
+        if (!opened) reject(error);
+        this.#failAll(error);
+      });
+      socket.addEventListener("error", () => undefined);
+    }).finally(() => {
+      this.#opening = undefined;
+    });
+    return this.#opening;
+  }
+
+  #send(frame: WebRealtimeRequestFrame | Readonly<{ type: "cancel"; id: string }>): void {
+    if (this.#socket?.readyState === WebSocket.OPEN) {
+      this.#socket.send(JSON.stringify(frame));
+    }
+  }
+
+  #receive(frame: WebRealtimeServerFrame): void {
+    const pending = this.#pending.get(frame.id);
+    if (!pending) return;
+    if (frame.type === "response") {
+      if (pending.responded) {
+        this.#fail(
+          frame.id,
+          new TypeError("Realtime request received duplicate response headers."),
+        );
+        return;
+      }
+      pending.responded = true;
+      const body = new ReadableStream<Uint8Array>({
+        start: (controller) => {
+          pending.controller = controller;
+        },
+        cancel: (reason) => {
+          this.#send({ type: "cancel", id: frame.id });
+          this.#finish(frame.id);
+          return reason;
+        },
+      });
+      pending.resolve(
+        new Response(body, {
+          status: frame.status,
+          headers: frame.headers.map(([name, value]) => [name, value]),
+        }),
+      );
+      return;
+    }
+    if (frame.type === "chunk") {
+      if (!pending.controller) {
+        this.#fail(frame.id, new TypeError("Realtime body arrived before response headers."));
+        return;
+      }
+      pending.controller.enqueue(this.#encoder.encode(frame.value));
+      return;
+    }
+    if (frame.type === "end") {
+      pending.controller?.close();
+      this.#finish(frame.id);
+      return;
+    }
+    this.#fail(frame.id, new Error(frame.message));
+  }
+
+  #finish(id: string): void {
+    const pending = this.#pending.get(id);
+    if (!pending) return;
+    pending.removeAbort?.();
+    this.#pending.delete(id);
+  }
+
+  #fail(id: string, error: unknown): void {
+    const pending = this.#pending.get(id);
+    if (!pending) return;
+    if (pending.responded) pending.controller?.error(error);
+    else pending.reject(error);
+    this.#finish(id);
+  }
+
+  #failAll(error: unknown): void {
+    for (const id of this.#pending.keys()) this.#fail(id, error);
+  }
 }
 
 function isWebHostDependency(value: string): value is WebAdapterHostDependency {

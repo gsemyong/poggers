@@ -58,6 +58,7 @@ export const webCompilerExtension: SourceCompilerExtension = Object.freeze({
     const routes = context.source.property(context.contract, "Routes", context.location);
     const values = context.source.object(context.source.member(context.implementation, "routes"));
     const ui = compileWebUI(context);
+    const sources = context.implementation ? [context.implementation.getSourceFile().fileName] : [];
     return {
       ir: {
         version: WEB_COMPILER_IR_VERSION,
@@ -65,6 +66,7 @@ export const webCompilerExtension: SourceCompilerExtension = Object.freeze({
         components: componentList(context),
         routes: routes ? routeList(context, routes, values) : [],
       } satisfies WebProgramCompilerIR,
+      ...(sources.length ? { sources } : {}),
     };
   },
   validate(ir) {

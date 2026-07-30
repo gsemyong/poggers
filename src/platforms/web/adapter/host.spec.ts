@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 
 import type { DependencyContractIR, DependencyOperationIR, TypeIR } from "@/compiler/ir";
 import { scopeDependency } from "@/execution/process";
-import type { Navigation } from "@/platforms/web";
+import type { HttpClient, Navigation } from "@/platforms/web";
 import { createWebHost, createWebServiceWorkerRuntime } from "@/platforms/web/adapter/host";
 import type { WebRouteIR } from "@/platforms/web/adapter/lowering";
 import type { WebNavigation } from "@/platforms/web/routing";
@@ -16,10 +16,57 @@ const navigationDependency = dependency("navigation", [
   operation("subscribe", true, { kind: "opaque", name: "Disposable" }),
 ]);
 const serviceWorkerDependency = dependency("serviceWorker", []);
+const httpDependency = dependency("http", [
+  {
+    name: "request",
+    mode: "asynchronous",
+    input: { kind: "opaque", name: "Request" },
+    output: { kind: "opaque", name: "Response" },
+  },
+]);
 
 afterEach(() => vi.unstubAllGlobals());
 
 describe("web host", () => {
+  test("multiplexes Replica traffic over one same-origin WebSocket", async () => {
+    const sockets: FakeWebSocket[] = [];
+    const fetched = vi.fn();
+    vi.stubGlobal("location", new URL("http://realtime.test/tasks"));
+    vi.stubGlobal("fetch", fetched);
+    vi.stubGlobal(
+      "WebSocket",
+      class extends FakeWebSocket {
+        constructor(url: URL) {
+          super(url);
+          sockets.push(this);
+        }
+      },
+    );
+
+    const host = await createWebHost({ dependencies: [httpDependency] });
+    const http = host.http as HttpClient;
+    const first = http.request({ path: "/api/replicas/tasks" });
+    const second = http.request({
+      path: "/api/replicas/tasks/create",
+      method: "POST",
+      body: '{"id":"one"}',
+    });
+
+    await expect(first.then((response) => response.json())).resolves.toEqual({ request: 1 });
+    await expect(second.then((response) => response.json())).resolves.toEqual({ request: 2 });
+    expect(sockets).toHaveLength(1);
+    expect(sockets[0]?.url).toBe("ws://realtime.test/_kit/realtime");
+    expect(sockets[0]?.requests).toEqual([
+      expect.objectContaining({ path: "/api/replicas/tasks" }),
+      expect.objectContaining({
+        path: "/api/replicas/tasks/create",
+        method: "POST",
+        body: '{"id":"one"}',
+      }),
+    ]);
+    expect(fetched).not.toHaveBeenCalled();
+  });
+
   test("creates only the Dependencies required by one Program instance", async () => {
     const added: string[] = [];
     const removed: string[] = [];
@@ -50,6 +97,7 @@ describe("web host", () => {
           feature: "owner",
           platform: "web",
           development: true,
+          developmentIdentity: "provider-v1",
           span: { file: "owner.ts", line: 1, column: 1 },
         },
       ],
@@ -301,4 +349,47 @@ function operation(name: string, input: boolean, output: TypeIR): DependencyOper
     input: input ? { kind: "opaque", name: "Input" } : { kind: "primitive", name: "void" },
     output,
   };
+}
+
+class FakeWebSocket extends EventTarget {
+  static readonly OPEN = 1;
+  readonly url: string;
+  readonly requests: object[] = [];
+  readyState = 0;
+
+  constructor(url: URL) {
+    super();
+    this.url = url.toString();
+    queueMicrotask(() => {
+      this.readyState = FakeWebSocket.OPEN;
+      this.dispatchEvent(new Event("open"));
+    });
+  }
+
+  send(value: string): void {
+    const request = JSON.parse(value) as Readonly<{ id: string; type: string }>;
+    if (request.type !== "request") return;
+    this.requests.push(request);
+    const ordinal = this.requests.length;
+    queueMicrotask(() => {
+      this.message({
+        type: "response",
+        id: request.id,
+        status: 200,
+        headers: [["content-type", "application/json"]],
+      });
+      this.message({
+        type: "chunk",
+        id: request.id,
+        value: JSON.stringify({ request: ordinal }),
+      });
+      this.message({ type: "end", id: request.id });
+    });
+  }
+
+  close(): void {}
+
+  private message(value: object): void {
+    this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(value) }));
+  }
 }

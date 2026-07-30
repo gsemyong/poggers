@@ -1,5 +1,14 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, parse, resolve, sep } from "node:path";
 
 import {
@@ -61,11 +70,11 @@ export function resolveSystemRealization<Adapter extends PlatformAdapterImplemen
   directory: string,
   adapters: Readonly<Record<string, Adapter>>,
   options: SystemRealizationOptions = {},
-  developmentCache = false,
+  compilationCache = false,
 ): SystemRealization<Adapter> {
   const paths = resolveSystem(directory);
   const extensions = Object.values(adapters).flatMap(({ compiler = [] }) => compiler);
-  const revisions = createSystemRevisionSource(paths.system, extensions, developmentCache);
+  const revisions = createSystemRevisionSource(paths.system, extensions, compilationCache);
   const outputs = selectSystemOutputs(revisions.current.ir, options.app);
   return {
     directory: paths.directory,
@@ -162,21 +171,32 @@ export function createSystemRevisionSource(
   cache = false,
 ): SystemRevisionSource {
   const compiler = createSystemCompiler(system, extensions);
-  const identity = cache ? systemCompilerIdentity(extensions) : undefined;
+  const compilerIdentity = systemCompilerIdentity(extensions);
+  const identity = cache ? compilerIdentity : undefined;
   const cached = identity ? readSystemCompilationCache(system, identity) : undefined;
   let revision = 0;
-  let current: SystemCompilationRevision;
+  let current: RetainedSystemCompilationRevision;
   let cacheInputs: Readonly<Record<string, string>>;
   if (cached?.exact) {
     compiler.restore(cached.compilation);
-    current = { ...cached.compilation, revision, cache: "hit" };
     cacheInputs = cached.inputs;
+    current = {
+      ...cached.compilation,
+      revision,
+      inputIdentity: systemCompilationInputIdentity(compilerIdentity, cacheInputs),
+      cache: "hit",
+    };
   } else {
     if (cached) compiler.restore(cached.compilation);
     const compilation = compiler.compile();
-    cacheInputs = identity ? systemCompilationSignatures(system, compilation.sourceFiles) : {};
+    cacheInputs = systemCompilationSignatures(system, compilation.sourceFiles);
     if (identity) writeSystemCompilationCache(system, identity, compilation, cacheInputs);
-    current = { ...compilation, revision, cache: "miss" };
+    current = {
+      ...compilation,
+      revision,
+      inputIdentity: systemCompilationInputIdentity(compilerIdentity, cacheInputs),
+      cache: "miss",
+    };
   }
   const signatures = new Map<string, string>();
   retainOutputSignatures(signatures, current);
@@ -190,18 +210,17 @@ export function createSystemRevisionSource(
       if (signatures.get(source) === signature) return current;
       const previous = current;
       const compiled = compiler.compile(changedFile);
-      if (identity) {
-        cacheInputs = updateSystemCompilationSignatures(
-          system,
-          previous,
-          compiled,
-          cacheInputs,
-          source,
-        );
-      }
+      cacheInputs = updateSystemCompilationSignatures(
+        system,
+        previous,
+        compiled,
+        cacheInputs,
+        source,
+      );
       current = {
         ...compiled,
         revision: ++revision,
+        inputIdentity: systemCompilationInputIdentity(compilerIdentity, cacheInputs),
         cache: "miss",
         change: {
           source,
@@ -216,17 +235,22 @@ export function createSystemRevisionSource(
   };
 }
 
-const SYSTEM_COMPILATION_CACHE_VERSION = 4;
+type RetainedSystemCompilationRevision = SystemCompilationRevision &
+  Pick<SystemCompilation, "semanticGraph">;
+
+const SYSTEM_COMPILATION_CACHE_VERSION = 5;
+const SYSTEM_COMPILATION_CACHE_RETAINED_OBJECTS = 64;
+const SYSTEM_COMPILATION_CACHE_HARD_LIMIT = 96;
 
 type CachedSystemCompilation = Readonly<{
   version: number;
   compiler: string;
   inputs: Readonly<Record<string, string>>;
   compilation: Readonly<{
-    ir: SystemCompilation["ir"];
+    ir: string;
     outputSources: SystemCompilation["outputSources"];
     sourceFiles: readonly string[];
-    semanticGraph: SystemCompilation["semanticGraph"];
+    features: readonly Readonly<{ id: string; object: string }>[];
   }>;
 }>;
 
@@ -241,26 +265,32 @@ function readSystemCompilationCache(
   compiler: string,
 ): LoadedSystemCompilationCache | undefined {
   try {
-    const cached = JSON.parse(
-      readFileSync(systemCompilationCachePath(system), "utf8"),
-    ) as CachedSystemCompilation;
+    const path = systemCompilationCachePath(system);
+    const cached = JSON.parse(readFileSync(path, "utf8")) as CachedSystemCompilation;
     if (cached.version !== SYSTEM_COMPILATION_CACHE_VERSION || cached.compiler !== compiler) {
       return undefined;
     }
+    const root = systemCompilationObjectDirectory(path);
+    const ir = readSystemCompilationObject<SystemCompilation["ir"]>(root, cached.compilation.ir);
+    const features = cached.compilation.features.map(({ id, object }) => {
+      const feature = readSystemCompilationObject<
+        SystemCompilation["semanticGraph"]["features"][number]
+      >(root, object);
+      if (feature.id !== id) throw new TypeError("Cached Feature identity does not match.");
+      return feature;
+    });
     const invalid = new Set(
       Object.entries(cached.inputs)
         .filter(([source, signature]) => sourceSignature(source) !== signature)
         .map(([source]) => source),
     );
-    const semanticSources = new Set(
-      cached.compilation.semanticGraph.features.flatMap(({ sourceFiles }) => sourceFiles),
-    );
+    const semanticSources = new Set(features.flatMap(({ sourceFiles }) => sourceFiles));
     const globallyInvalid = [...invalid].some((source) => !semanticSources.has(source));
     const semanticGraph = globallyInvalid
       ? { version: 1 as const, features: [] }
       : {
           version: 1 as const,
-          features: cached.compilation.semanticGraph.features.filter((unit) =>
+          features: features.filter((unit) =>
             unit.sourceFiles.every((source) => !invalid.has(source)),
           ),
         };
@@ -268,7 +298,7 @@ function readSystemCompilationCache(
       inputs: cached.inputs,
       exact: invalid.size === 0,
       compilation: {
-        ir: cached.compilation.ir,
+        ir,
         outputSources: cached.compilation.outputSources,
         sourceFiles: Object.freeze([...cached.compilation.sourceFiles]),
         semanticGraph,
@@ -276,6 +306,10 @@ function readSystemCompilationCache(
           features: {
             compiled: 0,
             reused: semanticGraph.features.length,
+          },
+          files: {
+            diagnosed: 0,
+            total: cached.compilation.sourceFiles.length,
           },
         },
       },
@@ -292,21 +326,79 @@ function writeSystemCompilationCache(
   inputs: Readonly<Record<string, string>>,
 ): void {
   const path = systemCompilationCachePath(system);
+  const root = systemCompilationObjectDirectory(path);
+  const ir = writeSystemCompilationObject(root, compilation.ir);
+  const features = compilation.semanticGraph.features.map((feature) => ({
+    id: feature.id,
+    object: writeSystemCompilationObject(root, feature),
+  }));
   const cached: CachedSystemCompilation = {
     version: SYSTEM_COMPILATION_CACHE_VERSION,
     compiler,
     inputs,
     compilation: {
-      ir: compilation.ir,
+      ir,
       outputSources: compilation.outputSources,
       sourceFiles: compilation.sourceFiles,
-      semanticGraph: compilation.semanticGraph,
+      features,
     },
   };
   mkdirSync(dirname(path), { recursive: true });
   const temporary = `${path}.${process.pid}.tmp`;
   writeFileSync(temporary, JSON.stringify(cached));
   renameSync(temporary, path);
+  retainSystemCompilationObjects(root, new Set([ir, ...features.map(({ object }) => object)]));
+}
+
+function systemCompilationObjectDirectory(manifest: string): string {
+  return resolve(dirname(manifest), "objects");
+}
+
+function writeSystemCompilationObject(directory: string, value: unknown): string {
+  const source = JSON.stringify(value);
+  const identity = createHash("sha256").update(source).digest("hex");
+  const path = resolve(directory, `${identity}.json`);
+  try {
+    if (readFileSync(path, "utf8") === source) return identity;
+  } catch {}
+  mkdirSync(directory, { recursive: true });
+  const temporary = `${path}.${process.pid}.tmp`;
+  writeFileSync(temporary, source);
+  renameSync(temporary, path);
+  return identity;
+}
+
+function readSystemCompilationObject<Value>(directory: string, identity: string): Value {
+  if (!/^[a-f0-9]{64}$/.test(identity)) {
+    throw new TypeError("Invalid cached compilation object identity.");
+  }
+  const source = readFileSync(resolve(directory, `${identity}.json`), "utf8");
+  if (createHash("sha256").update(source).digest("hex") !== identity) {
+    throw new TypeError("Cached compilation object does not match its identity.");
+  }
+  return JSON.parse(source) as Value;
+}
+
+function retainSystemCompilationObjects(directory: string, retained: ReadonlySet<string>): void {
+  let entries: readonly Readonly<{ identity: string; modified: number }>[];
+  try {
+    entries = readdirSync(directory, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && /^[a-f0-9]{64}\.json$/.test(entry.name))
+      .map((entry) => ({
+        identity: entry.name.slice(0, -5),
+        modified: statSync(resolve(directory, entry.name)).mtimeMs,
+      }));
+  } catch {
+    return;
+  }
+  if (entries.length <= SYSTEM_COMPILATION_CACHE_HARD_LIMIT) return;
+  const removable = entries
+    .filter(({ identity }) => !retained.has(identity))
+    .sort((left, right) => left.modified - right.modified);
+  const remove = Math.max(0, entries.length - SYSTEM_COMPILATION_CACHE_RETAINED_OBJECTS);
+  for (const { identity } of removable.slice(0, remove)) {
+    rmSync(resolve(directory, `${identity}.json`), { force: true });
+  }
 }
 
 function systemCompilationSignatures(
@@ -318,6 +410,13 @@ function systemCompilationSignatures(
       systemCompilationInputs(system, sources).map((source) => [source, sourceSignature(source)]),
     ),
   );
+}
+
+function systemCompilationInputIdentity(
+  compiler: string,
+  inputs: Readonly<Record<string, string>>,
+): string {
+  return createHash("sha256").update(JSON.stringify({ compiler, inputs })).digest("hex");
 }
 
 function updateSystemCompilationSignatures(
@@ -390,8 +489,8 @@ function sourceSignature(source: string): string {
 }
 
 function affectedOutputs(
-  previous: Pick<SystemCompilationRevision, "ir" | "outputSources">,
-  current: Pick<SystemCompilationRevision, "ir" | "outputSources">,
+  previous: Pick<RetainedSystemCompilationRevision, "ir" | "outputSources" | "semanticGraph">,
+  current: Pick<RetainedSystemCompilationRevision, "ir" | "outputSources" | "semanticGraph">,
   changedFile: string,
 ): readonly string[] {
   const source = canonicalSourceFile(changedFile);
@@ -402,8 +501,8 @@ function affectedOutputs(
   const affected = new Set<string>();
   for (const identity of identities) {
     if (
-      previous.outputSources[identity]?.includes(source) ||
-      current.outputSources[identity]?.includes(source) ||
+      outputConsumesSource(previous, identity, source) ||
+      outputConsumesSource(current, identity, source) ||
       outputMeaning(previous.ir, identity) !== outputMeaning(current.ir, identity)
     ) {
       affected.add(identity);
@@ -421,6 +520,43 @@ function affectedOutputs(
     }
   }
   return Object.freeze([...affected].sort());
+}
+
+function outputConsumesSource(
+  compilation: Pick<SystemCompilation, "ir" | "outputSources" | "semanticGraph">,
+  identity: string,
+  source: string,
+): boolean {
+  const { ir } = compilation;
+  const direct = new Set<string>();
+  const retainProgram = (program: ProgramIR): void => {
+    const contributions = new Set(program.contributions.map(({ id }) => id));
+    for (const unit of compilation.semanticGraph.features) {
+      for (const contribution of unit.programs) {
+        if (!contributions.has(contribution.id)) continue;
+        contribution.extensionSources?.forEach((path) => direct.add(canonicalSourceFile(path)));
+      }
+    }
+  };
+  if (identity.startsWith("program/")) {
+    const program = ir.programs.find(({ id }) => id === identity);
+    if (program) retainProgram(program);
+  } else {
+    const interface_ = ir.interfaces.find(({ id }) => id === identity);
+    for (const unit of compilation.semanticGraph.features) {
+      for (const candidate of unit.interfaces) {
+        if (candidate.path !== interface_?.path) continue;
+        candidate.extensionSources?.forEach((path) => direct.add(canonicalSourceFile(path)));
+      }
+    }
+    for (const program of ir.programs) {
+      if (program.interface === interface_?.path) retainProgram(program);
+    }
+  }
+  return (
+    direct.size > 0 &&
+    (direct.has(source) || compilation.outputSources[identity]?.includes(source) === true)
+  );
 }
 
 function outputMeaning(ir: SystemIR, identity: string): string {
@@ -449,12 +585,14 @@ export async function buildSystem(
 ): Promise<BuiltSystem> {
   const compilationStarted = performance.now();
   options.report?.({ kind: "phase", phase: "compile", status: "started" });
-  const realization = resolveSystemRealization(directory, adapters, options);
+  const realization = resolveSystemRealization(directory, adapters, options, true);
   options.report?.({
     kind: "phase",
     phase: "compile",
     status: "completed",
     durationMs: performance.now() - compilationStarted,
+    cache: realization.revisions.current.cache,
+    work: realization.revisions.current.work,
   });
   const results = await Promise.all(
     realization.adapters.map(async (adapter) => {
@@ -477,6 +615,11 @@ export async function buildSystem(
           ({ environment }) => environment.platform === adapter.name,
         ),
         interfaces: realization.interfaces.filter(({ platform }) => platform === adapter.name),
+        compilation: {
+          inputIdentity: realization.revisions.current.inputIdentity,
+          outputSources: realization.revisions.current.outputSources,
+          sourceFiles: realization.revisions.current.sourceFiles,
+        },
         output: platformOutput,
         ...(options.report ? { report: options.report } : {}),
       });

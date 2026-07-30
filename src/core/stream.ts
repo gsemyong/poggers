@@ -10,6 +10,20 @@ export function mapStream<Input, Output>(
   };
 }
 
+/** @portableIntrinsic stream-filter */
+export function filterStream<Value>(
+  source: AsyncIterable<Value>,
+  predicate: (value: Value) => boolean | PromiseLike<boolean>,
+): AsyncIterable<Value> {
+  return {
+    async *[Symbol.asyncIterator]() {
+      for await (const value of source) {
+        if (await predicate(value)) yield value;
+      }
+    },
+  };
+}
+
 /** @portableIntrinsic stream-distinct */
 export function distinctStream<Value>(
   source: AsyncIterable<Value>,

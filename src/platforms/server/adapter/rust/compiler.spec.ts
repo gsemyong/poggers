@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
@@ -50,8 +50,28 @@ test(
       output: resolve(directory, "first"),
       program: emptyProgram({ file: "first.ts", line: 1, column: 1 }),
     });
-    await rm(first.workspace, { force: true, recursive: true });
+    const generated = resolve(first.workspace, "program/src/lib.rs");
+    const generatedModified = (await stat(generated)).mtimeMs;
     const path = process.env.PATH;
+    const exact = await (async () => {
+      try {
+        process.env.PATH = "";
+        return await buildServerProgram({
+          system: "cache-fixture",
+          cache,
+          directory,
+          output: resolve(directory, "exact"),
+          program: emptyProgram({ file: "first.ts", line: 1, column: 1 }),
+        });
+      } finally {
+        process.env.PATH = path;
+      }
+    })();
+    expect(exact.cache).toBe("hit");
+    expect(exact.compiledCrates).toEqual([]);
+    expect((await stat(generated)).mtimeMs).toBe(generatedModified);
+
+    await rm(first.workspace, { force: true, recursive: true });
     const second = await (async () => {
       try {
         process.env.PATH = "";
@@ -72,7 +92,19 @@ test(
     expect(second.semanticHash).toBe(first.semanticHash);
     expect(second.workspace).toBe(first.workspace);
     await expect(access(second.executable)).resolves.toBeUndefined();
-    await expect(access(resolve(second.workspace, "src/program.rs"))).resolves.toBeUndefined();
+    await expect(access(resolve(second.workspace, "program/src/lib.rs"))).resolves.toBeUndefined();
+    await expect(readFile(resolve(second.workspace, "Cargo.toml"), "utf8")).resolves.toMatch(
+      /kit-generated-program = \{ package = "kit-generated-program-[0-9a-f]{64}", path = "program" \}/,
+    );
+    await expect(readFile(resolve(second.workspace, "Cargo.toml"), "utf8")).resolves.toMatch(
+      /\[profile\.release\.package\."kit-generated-program-[0-9a-f]{64}"\]\n(?:#[^\n]*\n)*opt-level = 0/,
+    );
+    await expect(readFile(resolve(second.workspace, "src/main.rs"), "utf8")).resolves.toContain(
+      "use kit_generated_program as program;",
+    );
+    await expect(
+      readFile(resolve(second.workspace, "program/Cargo.toml"), "utf8"),
+    ).resolves.toContain('serde_json = "1.0.145"');
   },
 );
 
@@ -219,7 +251,7 @@ test(
       output: executable,
       program,
     });
-    const generatedProgram = await readFile(resolve(build.workspace, "src/program.rs"), "utf8");
+    const generatedProgram = await readFile(resolve(build.workspace, "program/src/lib.rs"), "utf8");
     const generatedMain = await readFile(resolve(build.workspace, "src/main.rs"), "utf8");
     const generatedManifest = await readFile(resolve(build.workspace, "Cargo.toml"), "utf8");
     expect(generatedProgram).toContain("recorder");
@@ -362,7 +394,7 @@ test(
     });
 
     await expect(access(build.executable)).resolves.toBeUndefined();
-    const generated = await readFile(resolve(build.workspace, "src/program.rs"), "utf8");
+    const generated = await readFile(resolve(build.workspace, "program/src/lib.rs"), "utf8");
     const generatedMain = await readFile(resolve(build.workspace, "src/main.rs"), "utf8");
     const generatedManifest = await readFile(resolve(build.workspace, "Cargo.toml"), "utf8");
     expect(generated).toContain('"counter"');

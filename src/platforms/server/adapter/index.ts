@@ -3,11 +3,18 @@ import { resolve } from "node:path";
 
 import type { PlatformAdapter } from "@/adapter";
 import type { SourceCompilerExtension } from "@/compiler/extension";
-import type {
-  ExtensionIR,
-  PortableProgramExecutionIR,
-  ProgramContributionIR,
-  ProgramIR,
+import {
+  compactPortableProgramExecution,
+  compactPortableProgramModule,
+  expandPortableProgramExecution,
+  expandPortableProgramReference,
+  type CompactPortableProgramExecutionIR,
+  type CompactPortableProgramModuleIR,
+  type CompactPortableProgramReferenceIR,
+  type ExtensionIR,
+  type PortableProgramExecutionIR,
+  type ProgramContributionIR,
+  type ProgramIR,
 } from "@/compiler/ir";
 import { SystemDiagnostic } from "@/compiler/source";
 import type { ServerPlatform } from "@/platforms/server";
@@ -26,11 +33,21 @@ export type ServerPlatformAdapterOptions = ServerDevelopmentOptions &
     productionDependencies?: readonly ServerProductionDependency[];
   }>;
 
-export const SERVER_COMPILER_IR_VERSION = 1 as const;
+export const SERVER_COMPILER_IR_VERSION = 2 as const;
 
 export type ServerProgramCompilerIR = Readonly<{
   version: typeof SERVER_COMPILER_IR_VERSION;
-  execution: PortableProgramExecutionIR;
+  execution:
+    | CompactPortableProgramExecutionIR
+    | CompactPortableProgramReferenceIR
+    | PortableProgramExecutionIR;
+}>;
+
+const SERVER_PROGRAM_MODULE_IR_VERSION = 1 as const;
+
+type ServerProgramModuleCompilerIR = Readonly<{
+  version: typeof SERVER_PROGRAM_MODULE_IR_VERSION;
+  portable: CompactPortableProgramModuleIR;
 }>;
 
 export function serverProgramCompilerIR(value: ExtensionIR | undefined): ServerProgramCompilerIR {
@@ -52,18 +69,85 @@ export function serverProgramCompilerIR(value: ExtensionIR | undefined): ServerP
   }
   if (
     execution.kind === "portable" &&
-    (!execution.entry || typeof execution.entry !== "object" || !Array.isArray(execution.functions))
+    !(
+      (Array.isArray(execution.types) &&
+        execution.entry &&
+        typeof execution.entry === "object" &&
+        !Array.isArray(execution.entry) &&
+        Array.isArray(execution.functions)) ||
+      (!("types" in execution) &&
+        execution.entry &&
+        typeof execution.entry === "object" &&
+        !Array.isArray(execution.entry) &&
+        Array.isArray(execution.functions)) ||
+      (typeof execution.entry === "number" &&
+        Array.isArray(execution.functions) &&
+        execution.functions.every((reference) => typeof reference === "number"))
+    )
   ) {
     throw new Error("Invalid portable server Program execution meaning.");
   }
-  return record as ServerProgramCompilerIR;
+  const ir = record as ServerProgramCompilerIR;
+  if (ir.execution.kind === "portable" && "types" in ir.execution) {
+    expandPortableProgramExecution(ir.execution);
+  }
+  return ir;
 }
+
+const expandedExecutions = new WeakMap<object, PortableProgramExecutionIR>();
 
 /** Projects one server contribution into the generic portable execution engines. */
 export function serverProgramExecution(
   contribution: ProgramContributionIR,
+  program?: ProgramIR,
 ): PortableProgramExecutionIR {
-  return serverProgramCompilerIR(contribution.extensions?.server).execution;
+  const execution = serverProgramCompilerIR(contribution.extensions?.server).execution;
+  if (execution.kind !== "portable") return execution;
+  if (!isCompactPortableExecution(execution) && !isPortableExecutionReference(execution)) {
+    return execution;
+  }
+  const retained = expandedExecutions.get(execution);
+  if (retained) return retained;
+  const expanded = isCompactPortableExecution(execution)
+    ? expandPortableProgramExecution(execution)
+    : expandPortableProgramReference(
+        execution,
+        serverProgramModuleIR(program?.extensions?.server).portable,
+      );
+  expandedExecutions.set(execution, expanded);
+  return expanded;
+}
+
+function serverProgramModuleIR(value: ExtensionIR | undefined): ServerProgramModuleCompilerIR {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Missing assembled server Program module.");
+  }
+  const record = value as Readonly<Record<string, unknown>>;
+  if (
+    record.version !== SERVER_PROGRAM_MODULE_IR_VERSION ||
+    !record.portable ||
+    typeof record.portable !== "object" ||
+    Array.isArray(record.portable)
+  ) {
+    throw new Error("Unsupported assembled server Program module.");
+  }
+  const portable = record.portable as Readonly<Record<string, unknown>>;
+  if (!Array.isArray(portable.types) || !Array.isArray(portable.functions)) {
+    throw new Error("Invalid assembled server Program module.");
+  }
+  return record as ServerProgramModuleCompilerIR;
+}
+
+function isCompactPortableExecution(
+  execution: ServerProgramCompilerIR["execution"],
+): execution is Extract<CompactPortableProgramExecutionIR, Readonly<{ kind: "portable" }>> {
+  return execution.kind === "portable" && "types" in execution;
+}
+
+function isPortableExecutionReference(
+  execution: ServerProgramCompilerIR["execution"],
+): execution is Extract<CompactPortableProgramReferenceIR, Readonly<{ kind: "portable" }>> {
+  return execution.kind === "portable" && typeof execution.entry === "number";
 }
 
 export const serverCompilerExtension: SourceCompilerExtension = Object.freeze({
@@ -111,7 +195,7 @@ export const serverCompilerExtension: SourceCompilerExtension = Object.freeze({
       return {
         ir: {
           version: SERVER_COMPILER_IR_VERSION,
-          execution: { kind: "portable", ...portable },
+          execution: compactPortableProgramExecution(portable),
         } satisfies ServerProgramCompilerIR,
       };
     } catch (error) {
@@ -132,6 +216,35 @@ export const serverCompilerExtension: SourceCompilerExtension = Object.freeze({
       }
       throw error;
     }
+  },
+  assemble(program) {
+    const source = program.contributions.map((contribution) => {
+      const execution = serverProgramCompilerIR(contribution.extensions?.server).execution;
+      return isPortableExecutionReference(execution)
+        ? expandPortableProgramReference(
+            execution,
+            serverProgramModuleIR(program.extensions?.server).portable,
+          )
+        : isCompactPortableExecution(execution)
+          ? expandPortableProgramExecution(execution)
+          : execution;
+    });
+    const compact = compactPortableProgramModule(source);
+    return {
+      ir: {
+        version: SERVER_PROGRAM_MODULE_IR_VERSION,
+        portable: compact.module,
+      },
+      contributions: Object.fromEntries(
+        program.contributions.map((contribution, index) => [
+          contribution.id,
+          {
+            version: SERVER_COMPILER_IR_VERSION,
+            execution: compact.executions[index]!,
+          },
+        ]),
+      ),
+    };
   },
   validate(ir) {
     assertPortableServerPrograms(ir.programs);
@@ -228,7 +341,7 @@ function assertPortableServerPrograms(programs: readonly ProgramIR[]): void {
   for (const program of programs) {
     if (program.environment.platform !== "server") continue;
     for (const contribution of program.contributions) {
-      const implementation = serverProgramExecution(contribution);
+      const implementation = serverProgramExecution(contribution, program);
       if (implementation.kind !== "source") continue;
       const span = implementation.diagnostic?.span ?? implementation.span;
       const reason = implementation.diagnostic

@@ -53,6 +53,7 @@ export type PortableFunctionExecution = Readonly<{
 /** Procedural meaning selected by a Program-language extension for portable execution. */
 export type PortableProgramProjection = (
   contribution: ProgramContributionIR,
+  program: LinkedProgramIR["program"],
 ) => PortableProgramExecutionIR;
 
 export type DependencyCallTrace = Readonly<{
@@ -87,11 +88,12 @@ export async function executeProgramIR(
   project: PortableProgramProjection,
 ): Promise<ExecutionTrace> {
   assertSystemIRVersion(ir);
-  const program = ir.programs
-    .flatMap(({ contributions }) => contributions)
-    .find(({ id }) => id === programId);
-  if (!program) throw new Error(`Unknown Program ${JSON.stringify(programId)}.`);
-  return executeProgramContributionIR(program, project(program), dependencies);
+  const owner = ir.programs.find(({ contributions }) =>
+    contributions.some(({ id }) => id === programId),
+  );
+  const contribution = owner?.contributions.find(({ id }) => id === programId);
+  if (!owner || !contribution) throw new Error(`Unknown Program ${JSON.stringify(programId)}.`);
+  return executeProgramContributionIR(contribution, project(contribution, owner), dependencies);
 }
 
 export async function executeProgramContributionIR(
@@ -194,7 +196,7 @@ export async function executeLinkedProgramIR(
   let distribution: ProgramDistribution | undefined;
   try {
     for (const { contribution } of linked.contributions) {
-      const implementation = project(contribution);
+      const implementation = project(contribution, linked.program);
       if (implementation.kind === "none") continue;
       if (implementation.kind !== "portable") {
         throw new Error(
@@ -989,6 +991,42 @@ async function evaluate(
               return { done: true as const, value: undefined };
             },
           };
+        },
+      };
+    }
+    case "stream-filter": {
+      const source = await evaluate(expression.source, locals, dependencies, calls, functions);
+      const predicate = await evaluate(
+        expression.predicate,
+        locals,
+        dependencies,
+        calls,
+        functions,
+      );
+      if (!isAsyncIterable(source)) {
+        throw new Error("filterStream requires an asynchronous stream.");
+      }
+      const run = async (value: unknown) => {
+        if (typeof predicate === "function") return Reflect.apply(predicate, undefined, [value]);
+        if (!isPortableClosure(predicate)) {
+          throw new Error("filterStream requires a portable predicate.");
+        }
+        const function_ = functions.get(predicate.function);
+        if (!function_) throw new Error(`Unknown portable function ${predicate.function}.`);
+        return executePortableFunction(
+          function_,
+          predicate.captures,
+          [value],
+          dependencies,
+          calls,
+          functions,
+        );
+      };
+      return {
+        async *[Symbol.asyncIterator]() {
+          for await (const value of source) {
+            if (await run(value)) yield value;
+          }
         },
       };
     }

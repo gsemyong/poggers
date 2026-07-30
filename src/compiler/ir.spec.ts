@@ -1,16 +1,24 @@
+import { createHash } from "node:crypto";
+
 import fc from "fast-check";
 import { expect, test } from "vitest";
 
 import {
   SYSTEM_IR_VERSION,
   assertSystemIRVersion,
+  compactPortableProgramExecution,
+  compactPortableProgramModule,
   dependencyContractIdentity,
   dependencyOperationIdentity,
+  expandPortableProgramExecution,
+  expandPortableProgramReference,
   selectDependencyProviders,
   serializeSystemIR,
   typeIdentity,
   type SystemIR,
   type DependencyIR,
+  type ExtensionIR,
+  type FunctionIR,
   type ProgramContributionIR,
   type ProgramIR,
   type TypeIR,
@@ -60,12 +68,135 @@ test("rejects System IR from every other schema version", () => {
   );
 });
 
+test("interns portable types deterministically and rejects invalid references", () => {
+  const span = { file: "feature.ts", line: 1, column: 1 };
+  const shared: TypeIR = {
+    kind: "record",
+    fields: [
+      { name: "id", optional: false, type: { kind: "primitive", name: "string" } },
+      {
+        name: "status",
+        optional: false,
+        type: {
+          kind: "union",
+          variants: [
+            { kind: "literal", value: "active" },
+            { kind: "literal", value: "paused" },
+          ],
+        },
+      },
+    ],
+  };
+  const entry: FunctionIR = {
+    id: "start",
+    name: "start",
+    asynchronous: false,
+    captures: [],
+    parameters: [{ name: "input", optional: false, type: shared }],
+    result: shared,
+    body: Array.from({ length: 100 }, () => ({
+      kind: "expression" as const,
+      expression: {
+        kind: "local" as const,
+        name: "input",
+        type: shared,
+        span,
+      },
+      span,
+    })),
+    span,
+  };
+
+  const compact = compactPortableProgramExecution({ entry, functions: [] });
+  if (compact.kind !== "portable") throw new Error("Expected compact portable meaning.");
+  const expanded = expandPortableProgramExecution(compact);
+
+  expect(expanded).toEqual({ kind: "portable", entry, functions: [] });
+  expect(
+    compactPortableProgramExecution(
+      expanded.kind === "portable" ? expanded : { entry, functions: [] },
+    ),
+  ).toEqual(compact);
+  expect(JSON.stringify(compact).length).toBeLessThan(JSON.stringify(expanded).length / 2);
+  if (!compact.entry || typeof compact.entry !== "object" || Array.isArray(compact.entry)) {
+    throw new Error("Expected compact entry object.");
+  }
+  expect(() =>
+    expandPortableProgramExecution({
+      kind: "portable",
+      types: [],
+      entry: {
+        ...(compact.entry as Readonly<Record<string, ExtensionIR>>),
+        result: 999,
+      },
+      functions: [],
+    }),
+  ).toThrow("Invalid portable type reference");
+});
+
+test("stores one shared portable function module for a whole Program", () => {
+  const span = { file: "feature.ts", line: 1, column: 1 };
+  const voidType: TypeIR = { kind: "primitive", name: "void" };
+  const helper: FunctionIR = {
+    id: "shared",
+    name: "shared",
+    asynchronous: false,
+    captures: [],
+    parameters: [],
+    result: voidType,
+    body: [{ kind: "return", span }],
+    span,
+  };
+  const execution = (id: string) =>
+    ({
+      kind: "portable",
+      entry: {
+        id,
+        name: id,
+        asynchronous: false,
+        captures: [],
+        parameters: [],
+        result: voidType,
+        body: [
+          {
+            kind: "expression",
+            expression: {
+              kind: "call",
+              function: helper.id,
+              arguments: [],
+              awaited: false,
+              type: voidType,
+              span,
+            },
+            span,
+          },
+        ],
+        span,
+      },
+      functions: [helper],
+    }) as const;
+  const source = [execution("first"), execution("second")];
+  const compact = compactPortableProgramModule(source);
+
+  expect(compact.module.functions).toHaveLength(3);
+  expect(compact.module.types).toHaveLength(1);
+  expect(
+    compact.executions.map((value) => expandPortableProgramReference(value, compact.module)),
+  ).toEqual(source);
+  expect(compactPortableProgramModule(source)).toEqual(compact);
+  expect(JSON.stringify(compact.executions).length).toBeLessThan(200);
+  expect(() =>
+    expandPortableProgramReference({ kind: "portable", entry: 999, functions: [] }, compact.module),
+  ).toThrow("Invalid portable function reference");
+});
+
 test("selects visible Feature providers once and rejects conflicting ownership", () => {
   const program = fixtureProgram([contribution("owner.consumer", [repository])]);
   const provider = {
     dependency: "repository",
     platform: "server",
     development: true,
+    developmentIdentity: "provider-v1",
     span: { file: "provider.ts", line: 1, column: 1 },
   } as const;
   const ir: SystemIR = {
@@ -288,6 +419,28 @@ test("derives collision-free Dependency operation identities from canonical mean
       heartbeat: { kind: "record", fields: [] },
     }),
   ).not.toBe(dependencyOperationIdentity(operation));
+  expect(dependencyOperationIdentity(operation)).toMatch(/^sha256:[0-9a-f]{64}$/);
+  expect(dependencyOperationIdentity(operation)).toBe(
+    `sha256:${createHash("sha256")
+      .update(
+        JSON.stringify([
+          "kit.dependency.operation",
+          1,
+          "asynchronous",
+          [
+            "record",
+            [
+              ["a,b", false, ["primitive", "string"]],
+              ["c", true, ["primitive", "number"]],
+            ],
+          ],
+          ["primitive", "string"],
+          null,
+          null,
+        ]),
+      )
+      .digest("hex")}`,
+  );
 
   const contract = {
     name: "records",
@@ -302,6 +455,7 @@ test("derives collision-free Dependency operation identities from canonical mean
       operations: [...contract.operations, { ...operation, name: "inspect" }],
     }),
   ).not.toBe(dependencyContractIdentity(contract));
+  expect(dependencyContractIdentity(contract)).toMatch(/^sha256:[0-9a-f]{64}$/);
 });
 
 test("treats function parameter names as documentation rather than contract identity", () => {

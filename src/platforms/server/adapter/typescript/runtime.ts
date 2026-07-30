@@ -235,7 +235,7 @@ export async function startServerProgram<Contract extends SystemContract>(
 function canInterpretPortableProgram(program: ProgramIR): boolean {
   return program.contributions.every(
     (contribution) =>
-      ["none", "portable"].includes(serverProgramExecution(contribution).kind) &&
+      ["none", "portable"].includes(serverProgramExecution(contribution, program).kind) &&
       contribution.provides.every((dependency) =>
         collectDependencyOperations(dependency).every(
           (operation) => operation.mode !== "synchronous",

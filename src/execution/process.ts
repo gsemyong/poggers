@@ -954,6 +954,8 @@ export type ProgramAssemblyOptions = Readonly<{
   ownDependencies?: boolean;
   distribute?: ProgramDistributionFactory;
   initialState?: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
+  /** Defers Program activation until the caller has realized an initial snapshot. */
+  activation?: "eager" | "deferred";
   /** @internal Feature fixtures project type-checked providers without compiler IR. */
   uncheckedProviders?: boolean;
 }>;
@@ -1001,6 +1003,7 @@ export type ProgramAssembly = Readonly<{
   contributions: readonly ProgramContributionInstance[];
   dependencies: Readonly<Record<string, unknown>>;
   exposed: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
+  activate(): Promise<void>;
   dispose(): Promise<void>;
 }>;
 
@@ -1194,54 +1197,71 @@ export async function assembleProgram(options: ProgramAssemblyOptions): Promise<
   let distribution: ProgramDistribution | undefined;
   try {
     for (const contribution of plan.contributions) instantiate(contribution.feature);
-    for (const planned of plan.contributions) {
-      const instance = instances.get(planned.feature)!;
-      const provided = await instance.start();
-      const actual = Object.keys(provided).sort();
-      const declared = [...planned.manifest.provides].sort();
-      if (actual.join("\n") !== declared.join("\n")) {
-        throw new Error(
-          `${formatAddress(instance.address)} provided [${actual.join(", ")}] but its contract declares ` +
-            `[${declared.join(", ")}].`,
-        );
-      }
-      for (const [name, value] of Object.entries(provided)) {
-        const contract = plan.bindings.find((binding) => binding.name === name);
-        const dependency =
-          !contract && options.uncheckedProviders
-            ? createUncheckedDependencyClient(value as never)
-            : value;
-        deferredDependencies.get(name)?.bind(dependency as object);
-      }
-    }
-    if (options.distribute && providedNames.size) {
-      const contracts = plan.bindings.filter(({ name }) => providedNames.has(name));
-      const providers = Object.freeze(
-        Object.fromEntries(
-          [...instances.values()].flatMap((instance) => Object.entries(instance.provided)),
-        ),
-      );
-      distribution = await activateProgramDistribution(
-        options.distribute,
-        plan.name,
-        contracts,
-        providers,
-        (name, dependency) => deferredDependencies.get(name)?.replace(dependency),
-      );
-    }
   } catch (error) {
-    await distribution?.drain().catch(() => undefined);
     await disposeProgram([...instances.values()], externalScope).catch(() => undefined);
     throw error;
   }
 
   const contributions = plan.contributions.map(({ feature }) => instances.get(feature)!);
   let disposed = false;
-  return {
+  let activation: Promise<void> | undefined;
+  const activate = (): Promise<void> => {
+    if (activation) return activation;
+    if (disposed) {
+      return Promise.reject(new Error(`Program "${plan.name}" is disposed.`));
+    }
+    activation = (async () => {
+      try {
+        for (const planned of plan.contributions) {
+          const instance = instances.get(planned.feature)!;
+          const provided = await instance.start();
+          const actual = Object.keys(provided).sort();
+          const declared = [...planned.manifest.provides].sort();
+          if (actual.join("\n") !== declared.join("\n")) {
+            throw new Error(
+              `${formatAddress(instance.address)} provided [${actual.join(", ")}] but its contract declares ` +
+                `[${declared.join(", ")}].`,
+            );
+          }
+          for (const [name, value] of Object.entries(provided)) {
+            const contract = plan.bindings.find((binding) => binding.name === name);
+            const dependency =
+              !contract && options.uncheckedProviders
+                ? createUncheckedDependencyClient(value as never)
+                : value;
+            deferredDependencies.get(name)?.bind(dependency as object);
+          }
+        }
+        if (options.distribute && providedNames.size) {
+          const contracts = plan.bindings.filter(({ name }) => providedNames.has(name));
+          const providers = Object.freeze(
+            Object.fromEntries(
+              [...instances.values()].flatMap((instance) => Object.entries(instance.provided)),
+            ),
+          );
+          distribution = await activateProgramDistribution(
+            options.distribute,
+            plan.name,
+            contracts,
+            providers,
+            (name, dependency) => deferredDependencies.get(name)?.replace(dependency),
+          );
+        }
+      } catch (error) {
+        disposed = true;
+        await distribution?.drain().catch(() => undefined);
+        await disposeProgram(contributions, externalScope).catch(() => undefined);
+        throw error;
+      }
+    })();
+    return activation;
+  };
+  const assembly: ProgramAssembly = {
     name: options.name,
     contributions,
     dependencies: Object.freeze({ ...options.dependencies, ...providedDependencies }),
     exposed,
+    activate,
     async dispose() {
       if (disposed) return;
       disposed = true;
@@ -1262,6 +1282,8 @@ export async function assembleProgram(options: ProgramAssemblyOptions): Promise<
       }
     },
   };
+  if (options.activation !== "deferred") await activate();
+  return assembly;
 }
 
 /** Starts one live Process instance of a named Program. */

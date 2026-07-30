@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 
 import { afterEach, describe, expect, test } from "vitest";
 
+import type { ProductionEvent } from "@/adapter";
 import { SYSTEM_IR_VERSION, type ProgramIR } from "@/compiler/ir";
 import { compileSystem } from "@/compiler/source";
 import { createWebPlatformAdapter } from "@/platforms/web/adapter";
@@ -50,6 +51,7 @@ describe("web Platform Adapter", () => {
         revisions: {
           current: {
             revision: 0,
+            inputIdentity: "unsupported-environment",
             ir,
             outputSources: {},
             sourceFiles: [],
@@ -60,6 +62,7 @@ describe("web Platform Adapter", () => {
           },
           compile: () => ({
             revision: 0,
+            inputIdentity: "unsupported-environment",
             ir,
             outputSources: {},
             sourceFiles: [],
@@ -71,7 +74,7 @@ describe("web Platform Adapter", () => {
         },
         programs: [program],
         interfaces: [],
-        platform: "web",
+        platform: "web" as const,
       }),
     ).rejects.toThrow('does not yet realize "program/worker"');
   });
@@ -88,16 +91,24 @@ describe("web Platform Adapter", () => {
       await mkdir(source, { recursive: true });
       await writeFile(system, webProgramsSource());
       const ir = compileSystem(system, [webCompilerExtension]);
-
-      const result = await createWebPlatformAdapter().build({
+      const reports: ProductionEvent[] = [];
+      const input = {
         directory,
         system,
         ir,
         programs: ir.programs,
         interfaces: ir.interfaces,
-        platform: "web",
+        platform: "web" as const,
+        compilation: {
+          inputIdentity: "web-adapter-test",
+          outputSources: {},
+          sourceFiles: [system],
+        },
         output,
-      });
+        report: (event: ProductionEvent) => reports.push(event),
+      };
+      const adapter = createWebPlatformAdapter();
+      const result = await adapter.build(input);
 
       expect(
         result.entries.map(({ identity, kind, environment }) => [identity, kind, environment]),
@@ -144,6 +155,30 @@ describe("web Platform Adapter", () => {
           .map((path) => readFile(resolve(output, path), "utf8")),
       );
       expect(bundledJavaScript.join("\n")).toContain("/api/telemetry");
+
+      const warm = await adapter.build(input);
+      expect(
+        reports.filter((event) => event.kind === "artifact" && event.platform === "web"),
+      ).toEqual([
+        expect.objectContaining({ cache: "miss", identity: "interface/product.web" }),
+        expect.objectContaining({ cache: "hit", identity: "interface/product.web" }),
+      ]);
+      await Promise.all(warm.entries.map(({ path }) => access(path)));
+
+      const [cacheIdentity] = await readdir(resolve(directory, ".kit/cache/web/artifacts"));
+      if (!cacheIdentity) throw new Error("The web production cache was not created.");
+      await writeFile(
+        resolve(directory, ".kit/cache/web/artifacts", cacheIdentity, "artifact", "index.html"),
+        "corrupted",
+      );
+      const recovered = await adapter.build(input);
+      expect(
+        reports.filter((event) => event.kind === "artifact" && event.platform === "web"),
+      ).toHaveLength(3);
+      expect(
+        reports.filter((event) => event.kind === "artifact" && event.platform === "web")[2],
+      ).toMatchObject({ cache: "miss", identity: "interface/product.web" });
+      expect(await readFile(recovered.entries[0]!.entrypoint!, "utf8")).not.toBe("corrupted");
     },
   );
 });

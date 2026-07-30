@@ -231,6 +231,7 @@ export type SystemCompilationChange = Readonly<{
 
 export type SystemCompilationRevision = Readonly<{
   revision: number;
+  inputIdentity: string;
   ir: SystemIR;
   outputSources: SystemOutputSources;
   sourceFiles: readonly string[];
@@ -281,6 +282,8 @@ export type ProductionEvent =
       status: "started" | "completed";
       platform?: string;
       durationMs?: number;
+      cache?: "hit" | "miss";
+      work?: SystemCompilationWork;
     }>
   | Readonly<{
       kind: "artifact";
@@ -307,7 +310,15 @@ export type PlatformDevelopmentInput<Platform extends PlatformContract = Platfor
     }>;
 
 export type PlatformProductionInput<Platform extends PlatformContract = PlatformContract> =
-  PlatformInput<Platform> & Readonly<{ output: string; report?: ProductionReporter }>;
+  PlatformInput<Platform> &
+    Readonly<{
+      compilation: Pick<
+        SystemCompilationRevision,
+        "inputIdentity" | "outputSources" | "sourceFiles"
+      >;
+      output: string;
+      report?: ProductionReporter;
+    }>;
 
 /** A live development realization with one framework-owned cleanup path. */
 export type DevelopmentSession = AsyncDisposable &

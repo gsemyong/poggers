@@ -776,7 +776,9 @@ Generated native verification is similarly staged. Exact semantic matches use
 the bounded content-addressed cache without invoking Cargo. IR and lowering
 tests emit no executable, behavioral conformance defaults to debug artifacts,
 and release compilation is reserved for production smoke, performance, and
-release gates.
+release gates. The compilation graph, cache identities, work-avoidance
+invariants, and active optimization checklist are defined in
+[`compilation.md`](./compilation.md).
 
 In a consuming Workspace, `kit typecheck` and `kit check` also compile
 `src/system.ts` semantically after TypeScript succeeds. The selected compiler

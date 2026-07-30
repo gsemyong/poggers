@@ -156,7 +156,13 @@ describe("project template", () => {
 
       await rm(resolve(target, ".kit"), { force: true, recursive: true });
       await runCli(["build", "--dir", target, "--outdir", "dist"]);
-      await expect(access(resolve(target, ".kit"))).rejects.toHaveProperty("code", "ENOENT");
+      await expect(
+        access(resolve(target, ".kit/cache/compiler/system.json")),
+      ).resolves.toBeUndefined();
+      await expect(access(resolve(target, ".kit/deployments"))).rejects.toHaveProperty(
+        "code",
+        "ENOENT",
+      );
       await expect(access(resolve(target, "dist/system.ir.json"))).rejects.toHaveProperty(
         "code",
         "ENOENT",
@@ -450,16 +456,14 @@ while true; do sleep 1; done
     };
 
     try {
-      await runCli(["deploy", "--dir", directory], adapter);
+      await runCli(["deploy", directory], adapter);
       const state = JSON.parse(
         await readFile(resolve(directory, ".kit/deployments/local/state.json"), "utf8"),
       ) as { artifacts: readonly { processes?: readonly unknown[] }[] };
       expect(state.artifacts.flatMap(({ processes = [] }) => processes)).toHaveLength(2);
-      await expect(
-        runCli(["deploy", "--status", "--dir", directory], adapter),
-      ).resolves.toBeUndefined();
+      await expect(runCli(["deploy", "--status", directory], adapter)).resolves.toBeUndefined();
     } finally {
-      await runCli(["deploy", "--remove", "--dir", directory], adapter);
+      await runCli(["deploy", "--remove", directory], adapter);
     }
   });
 

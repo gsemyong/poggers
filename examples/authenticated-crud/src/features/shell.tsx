@@ -343,8 +343,10 @@ function redirectForSession<Name extends string>(
 ) {
   const current = navigation.current();
   const auth = navigation.href({ route: "auth" });
+  const workspace = navigation.href({ route: "workspace" });
   const onAuthRoute = `${current.pathname}${current.search}` === auth;
-  if (authenticated && onAuthRoute) {
+  const onWorkspaceRoot = `${current.pathname}${current.search}` === workspace;
+  if (authenticated && (onAuthRoute || onWorkspaceRoot)) {
     navigation.navigate({ feature: "tasks", route: "list", replace: true });
   } else if (!authenticated && !onAuthRoute) {
     navigation.navigate({ route: "auth", replace: true });

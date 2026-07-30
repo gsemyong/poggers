@@ -27,7 +27,7 @@ describe("Replica", () => {
     const replica = server?.contributions.find(
       ({ id }) => id === "feature/localOperations/program/server",
     );
-    expect(replica && serverProgramExecution(replica).kind).toBe("portable");
+    expect(replica && serverProgramExecution(replica, server).kind).toBe("portable");
     expect(JSON.stringify(compiled)).not.toContain('"kind":"replica"');
 
     const browser = compiled.programs.find(({ name }) => name === "browser");
@@ -80,6 +80,78 @@ describe("Replica", () => {
         operations: execution.dependencies.operations as Projection.Reference<typeof operations>,
         orders: execution.dependencies.orders as Aggregate.Reference<typeof orders>,
       };
+      await using coldReplica = await createReplicaFixture(
+        localOperations,
+        localOperationsDefinition,
+        {
+          principal: {
+            id: "cold-member",
+            organization: "cold-company",
+            roles: ["operator"],
+          },
+          projection: dependencies.operations,
+          rows: ["orders"],
+          dependencies: { orders: dependencies.orders },
+          name: "localOperations",
+          version: 2,
+          online: false,
+        },
+      );
+      let coldState: Awaited<ReturnType<typeof coldReplica.state>> | undefined;
+      using _coldObservation = coldReplica.client.subscribe((state) => {
+        coldState = state;
+      });
+      const coldAdmission = coldReplica.client.placeOrder({
+        id: "cold-order",
+        product: "product-cold",
+        quantity: 1,
+        note: "Admitted before the first network snapshot",
+      });
+      expect(coldState).toMatchObject({
+        data: { orders: [{ id: "cold-order", status: "placed" }] },
+        pending: [{ id: "fixture-command-1", command: "placeOrder" }],
+      });
+      await expect(coldAdmission).resolves.toEqual({ id: "fixture-command-1" });
+      expect(coldReplica.responses).toEqual([]);
+      coldReplica.online(true);
+      await coldReplica.client.synchronize();
+      await expect(coldReplica.state()).resolves.toMatchObject({
+        status: "synchronized",
+        pending: [],
+        data: { orders: [{ id: "cold-order", status: "placed" }] },
+      });
+      await using rejectedColdReplica = await createReplicaFixture(
+        localOperations,
+        localOperationsDefinition,
+        {
+          principal: {
+            id: "cold-viewer",
+            organization: "cold-viewer-company",
+            roles: ["viewer"],
+          },
+          projection: dependencies.operations,
+          rows: ["orders"],
+          dependencies: { orders: dependencies.orders },
+          name: "localOperations",
+          version: 2,
+          online: false,
+        },
+      );
+      await rejectedColdReplica.client.placeOrder({
+        id: "rejected-cold-order",
+        product: "product-cold",
+        quantity: 1,
+        note: "Must roll back to the local baseline",
+      });
+      rejectedColdReplica.online(true);
+      await rejectedColdReplica.client.synchronize();
+      await expect(rejectedColdReplica.state()).resolves.toMatchObject({
+        status: "synchronized",
+        pending: [],
+        rejected: [{ pending: { id: "fixture-command-1", command: "placeOrder" } }],
+        data: { orders: [] },
+      });
+
       await using replica = await createReplicaFixture(localOperations, localOperationsDefinition, {
         principal,
         projection: dependencies.operations,
@@ -89,18 +161,26 @@ describe("Replica", () => {
         version: 2,
         storage,
       });
-      await expect(replica.state()).resolves.toMatchObject({
-        status: "synchronized",
-        data: { orders: [] },
-      });
+      await expect
+        .poll(async () => await replica.state())
+        .toMatchObject({ status: "synchronized", data: { orders: [] } });
 
+      let observedState: Awaited<ReturnType<typeof replica.state>> | undefined;
+      using _immediateObservation = replica.client.subscribe((state) => {
+        observedState = state;
+      });
       replica.online(false);
-      const admission = await replica.client.placeOrder({
+      const pendingAdmission = replica.client.placeOrder({
         id: "order-1",
         product: "product-1",
         quantity: 2,
         note: "Handle carefully",
       });
+      expect(observedState).toMatchObject({
+        pending: [{ id: "fixture-command-1", command: "placeOrder" }],
+        data: { orders: [{ id: "order-1", status: "placed" }] },
+      });
+      const admission = await pendingAdmission;
       expect(admission.id).toBe("fixture-command-1");
       await expect.poll(async () => (await replica.state()).status).toBe("offline");
       await expect(replica.state()).resolves.toMatchObject({
@@ -116,6 +196,17 @@ describe("Replica", () => {
         rejected: [],
         data: { orders: [{ id: "order-1", note: "Handle carefully" }] },
       });
+      const firstCommandResponse = replica.responses.find(
+        ({ method, path }) => method === "POST" && path.endsWith("/placeOrder"),
+      );
+      expect(firstCommandResponse).toBeDefined();
+      const firstCommandPayload = JSON.parse(firstCommandResponse!.body) as {
+        pull: { snapshot?: object; changes: readonly object[] };
+      };
+      expect(firstCommandPayload.pull.snapshot).toBeUndefined();
+      expect(firstCommandPayload.pull.changes).toMatchObject([
+        { row: "orders", upsert: { id: "order-1", note: "Handle carefully" } },
+      ]);
       await expect(
         replica.client.orders({
           text: { value: "Handle", fields: ["note"] },
@@ -125,6 +216,10 @@ describe("Replica", () => {
         matches: [{ row: { id: "order-1" }, score: 1 }],
       });
 
+      const observedOrderIds: string[][] = [];
+      using _observation = replica.client.subscribe((state) => {
+        observedOrderIds.push(state.data?.orders.map(({ id }) => id) ?? []);
+      });
       replica.dropNextResponse();
       const uncertain = await replica.client.placeOrder({
         id: "order-2",
@@ -142,6 +237,10 @@ describe("Replica", () => {
           orders: [{ id: "order-1" }, { id: "order-2" }],
         },
       });
+      expect(
+        observedOrderIds.every((ids) => new Set(ids).size === ids.length),
+        "authoritative observation must not duplicate an optimistic row",
+      ).toBe(true);
       const orderTwo = (execution.dependencies.orders as Aggregate.Reference<typeof orders>).get({
         key: "order-2",
         principal,
@@ -195,7 +294,7 @@ describe("Replica", () => {
           },
         ],
       });
-      expect((await replica.state()).data).toBeUndefined();
+      expect((await replica.state()).data).toEqual({ orders: [] });
       replica.online(true);
       await replica.client.synchronize();
       await expect(replica.state()).resolves.toMatchObject({
@@ -217,13 +316,15 @@ describe("Replica", () => {
           authoritySchema: "authority-schema",
         },
       );
-      await expect(incompatible.state()).resolves.toMatchObject({
-        status: "upgrade-required",
-        compatibility: {
-          client: "2:client-schema",
-          authority: "2:authority-schema",
-        },
-      });
+      await expect
+        .poll(async () => await incompatible.state())
+        .toMatchObject({
+          status: "upgrade-required",
+          compatibility: {
+            client: "2:client-schema",
+            authority: "2:authority-schema",
+          },
+        });
     } finally {
       await disposeHost(host);
     }

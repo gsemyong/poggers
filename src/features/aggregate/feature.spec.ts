@@ -31,7 +31,7 @@ describe("Aggregate", () => {
     expect(
       server.contributions.map((contribution) => ({
         id: contribution.id,
-        kind: serverProgramExecution(contribution).kind,
+        kind: serverProgramExecution(contribution, server).kind,
       })),
     ).toEqual([
       { id: "feature/orders/program/server", kind: "portable" },

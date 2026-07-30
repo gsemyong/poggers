@@ -5,6 +5,7 @@ import type {
   ExtensionIR,
   ExpressionIR,
   FunctionIR,
+  ProgramIR,
   SourceSpan,
   SystemIR,
   TypeIR,
@@ -116,6 +117,12 @@ export type SourceDialectCompilation = Readonly<{
   sources?: readonly string[];
 }>;
 
+/** Platform-owned assembly of contribution meaning into one shared Program module. */
+export type ProgramAssemblyCompilation = Readonly<{
+  ir: VersionedExtensionIR;
+  contributions: Readonly<Record<string, VersionedExtensionIR>>;
+}>;
+
 /** Lets a Platform compiler own meaning carried by generic core as versioned extension IR. */
 export type SourceCompilerExtension = Readonly<{
   /** The Platform identity whose Program and Application-interface languages this owns. */
@@ -137,5 +144,6 @@ export type SourceCompilerExtension = Readonly<{
   call?(context: PortableCallSourceContext): PortableCallCompilation | undefined;
   interface?(context: InterfaceSourceContext): SourceDialectCompilation;
   program?(context: ProgramSourceContext): SourceDialectCompilation;
+  assemble?(program: ProgramIR): ProgramAssemblyCompilation;
   validate?(ir: SystemIR): void;
 }>;

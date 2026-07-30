@@ -12,8 +12,10 @@ import {
   ownedPresentationTargets,
 } from "@/platforms/web/adapter/ui/component/adapter";
 import { readScoped, type Child } from "@/platforms/web/adapter/ui/component/runtime";
+import { webUIRuntime } from "@/platforms/web/adapter/ui/runtime";
 import type { WebPresentationLanguage } from "@/platforms/web/presentation";
 import type { WebNavigationType } from "@/platforms/web/routing";
+import { activateWebUIRuntime, For } from "@/platforms/web/ui";
 
 type Program<Environment, Contract extends object = object> = Readonly<
   Contract & { Environment: Environment }
@@ -227,6 +229,60 @@ describe("Program UI composition", () => {
     await ui.dispose();
     expect(slowSignals[1]?.aborted).toBe(true);
     expect(subscribers.size).toBe(0);
+  });
+
+  test("warms every remaining Route definition after the initial Route commits", async () => {
+    vi.stubGlobal("Element", class {});
+    vi.stubGlobal("document", {
+      title: "",
+      documentElement: { dataset: {}, lang: "" },
+      head: { querySelectorAll: () => [], append() {} },
+      createElement: () => ({ setAttribute() {}, textContent: "" }),
+      getElementById: () => null,
+    });
+    const navigation = {
+      current: () => new URL("https://example.test/start"),
+      navigate() {},
+      subscribe(): Disposable {
+        return { [Symbol.dispose]() {} };
+      },
+    };
+    const loaded: string[] = [];
+    const definitions = {
+      start: { view: () => "start" },
+      finish: { view: () => "finish" },
+    };
+    const system = testSystem({
+      routes: {
+        programs: {
+          browser: {
+            routes: definitions,
+          },
+        },
+      },
+    });
+    const ui = await createInterfaceUI({
+      system,
+      interface: "web.main",
+      program: "web.browser",
+      logicalProgram: "browser",
+      presentation: emptyPresentation,
+      dependencies: { navigation },
+      programManifest: {
+        name: "web.browser",
+        bindings: [],
+        contributions: [{ feature: "web.routes", requires: ["navigation"], provides: [] }],
+      },
+      routes: [route("start", "/start"), route("finish", "/finish")],
+      loadRoute: async (current) => {
+        loaded.push(current.name);
+        return definitions[current.name as keyof typeof definitions];
+      },
+      boundary,
+    });
+
+    await vi.waitFor(() => expect(loaded).toEqual(["start", "finish"]));
+    await ui.dispose();
   });
 
   test("retains an unchanged parent Route while replacing its child branch", async () => {
@@ -895,6 +951,20 @@ test("evaluates each interface and child Feature Presentation scope once per roo
   expect(graph.scopes("@feature/web.dashboard/component/First")).toHaveLength(2);
   expect(featureEvaluations).toBe(1);
   graph.dispose();
+});
+
+test("disposes identical web runtime values by mount identity during replacement", () => {
+  const renderFor = vi.fn(() => null as never);
+  const runtime = { ...webUIRuntime, For: renderFor };
+  const previous = activateWebUIRuntime(runtime);
+  const replacement = activateWebUIRuntime(runtime);
+
+  previous[Symbol.dispose]();
+  For({ each: [], children: () => null });
+  expect(renderFor).toHaveBeenCalledOnce();
+
+  replacement[Symbol.dispose]();
+  expect(() => For({ each: [], children: () => null })).toThrow("No web UI adapter is active");
 });
 
 test("invalidates only compiler-identified consumers of shared Presentation motion", async () => {

@@ -1192,6 +1192,18 @@ impl Engine {
         })))
     }
 
+    pub async fn filter_stream(&self, source: Value, predicate: Value) -> NativeResult<Value> {
+        let iterator = self.method(source, "iterator", Vec::new()).await?;
+        let engine = self.clone();
+        Ok(Value::stream(Box::pin(async_stream::try_stream! {
+            while let Some(value) = engine.next(iterator.clone()).await? {
+                if engine.invoke(predicate.clone(), vec![value.clone()]).await?.truthy() {
+                    yield value;
+                }
+            }
+        })))
+    }
+
     pub async fn distinct_stream(&self, source: Value, select: Value) -> NativeResult<Value> {
         let iterator = self.method(source, "iterator", Vec::new()).await?;
         let engine = self.clone();
