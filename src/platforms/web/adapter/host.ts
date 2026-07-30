@@ -57,12 +57,16 @@ export function createWebHost<const Dependencies extends readonly DependencyCont
 export async function createWebHost(
   input: WebHostOptions<readonly DependencyContractIR[]>,
 ): Promise<Readonly<Record<string, unknown>>> {
+  const dependencies =
+    input.routes?.length && !input.dependencies.some(({ name }) => name === "navigation")
+      ? [...input.dependencies, routeNavigationContract]
+      : input.dependencies;
   const providerSelections = new Map(
     (input.providers ?? []).map((provider) => [provider.dependency, provider]),
   );
   const routeDependencies = new Set(input.routeDependencies ?? []);
   const requested = new Set<WebAdapterHostDependency>();
-  for (const dependency of input.dependencies) {
+  for (const dependency of dependencies) {
     if (
       !isWebHostDependency(dependency.name) &&
       !providerSelections.has(dependency.name) &&
@@ -93,7 +97,7 @@ export async function createWebHost(
       serverOrigin: input.serverOrigin ?? location.origin,
     });
   }
-  for (const dependency of input.dependencies) {
+  for (const dependency of dependencies) {
     if (
       isWebHostDependency(dependency.name) ||
       providerSelections.has(dependency.name) ||
@@ -149,7 +153,7 @@ export async function createWebHost(
     );
   }
   if (!requested.has("navigation")) {
-    return conformExternalDependencies(input.dependencies, host);
+    return conformExternalDependencies(dependencies, host);
   }
   if (input.context !== undefined && input.context !== "window") {
     throw new Error('The "navigation" Dependency is unavailable in a web worker.');
@@ -210,8 +214,56 @@ export async function createWebHost(
     },
   });
   host.navigation = navigation;
-  return conformExternalDependencies(input.dependencies, host);
+  return conformExternalDependencies(dependencies, host);
 }
+
+const routeNavigationContract: DependencyContractIR = {
+  name: "navigation",
+  operations: [
+    {
+      name: "back",
+      mode: "synchronous",
+      input: { kind: "primitive", name: "void" },
+      output: { kind: "primitive", name: "void" },
+    },
+    {
+      name: "current",
+      mode: "synchronous",
+      input: { kind: "primitive", name: "void" },
+      output: { kind: "opaque", name: "URL" },
+    },
+    {
+      name: "forward",
+      mode: "synchronous",
+      input: { kind: "primitive", name: "void" },
+      output: { kind: "primitive", name: "void" },
+    },
+    {
+      name: "href",
+      mode: "synchronous",
+      input: { kind: "opaque", name: "WebDestination" },
+      output: { kind: "primitive", name: "string" },
+    },
+    {
+      name: "navigate",
+      mode: "synchronous",
+      input: { kind: "opaque", name: "WebDestination" },
+      output: { kind: "primitive", name: "void" },
+    },
+    {
+      name: "reload",
+      mode: "synchronous",
+      input: { kind: "primitive", name: "void" },
+      output: { kind: "primitive", name: "void" },
+    },
+    {
+      name: "subscribe",
+      mode: "synchronous",
+      input: { kind: "opaque", name: "Subscription" },
+      output: { kind: "opaque", name: "Disposable" },
+    },
+  ],
+};
 
 type RealtimePendingRequest = {
   resolve(response: Response): void;

@@ -231,14 +231,14 @@ async function verifyDevelopment(definition: SystemTestDefinition): Promise<void
   const directory = testDirectory(definition.directory);
   const temporary = await mkdtemp(resolve(tmpdir(), "kit-system-development-"));
   const database = resolve(temporary, "system.sqlite");
+  const realization = resolveSystemRealization(directory, platformAdapters, {}, true);
+  const serverCount = realization.ir.programs.filter(
+    ({ environment }) => environment.platform === "server",
+  ).length;
   let system: RunningSystem | undefined;
   let allocation: Readonly<{ serverPort: number; webPort: number }> | undefined;
 
   const start = async () => {
-    const realization = resolveSystemRealization(directory, platformAdapters);
-    const serverCount = realization.ir.programs.filter(
-      ({ environment }) => environment.platform === "server",
-    ).length;
     for (let attempt = 0; attempt < 10; attempt += 1) {
       if (!allocation) {
         const serverPorts = await availablePortRange(Math.max(serverCount, 1));

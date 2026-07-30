@@ -190,7 +190,9 @@ describe("web host", () => {
       back: () => calls.push(["back"]),
       forward: () => calls.push(["forward"]),
     });
-    const host = await createWebHost({ dependencies: [navigationDependency], routes });
+    const host = (await createWebHost({ dependencies: [], routes })) as Readonly<{
+      navigation: Navigation & Disposable;
+    }>;
     const local = scopeDependency(host.navigation, {
       program: "browser",
       feature: "tasks",

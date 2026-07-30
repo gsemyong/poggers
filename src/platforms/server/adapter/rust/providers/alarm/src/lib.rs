@@ -614,8 +614,7 @@ impl SharedAlarm {
                     }) {
                         cancellation.request();
                     } else if current.as_ref().is_none_or(|current| {
-                        current.status != DurableAlarmStatus::Scheduled
-                            || current.generation != scheduled.generation
+                        current.status == DurableAlarmStatus::Cancelled
                     }) {
                         cancellation.request();
                         cancelled = true;
@@ -1466,6 +1465,67 @@ mod tests {
             .await
             .expect("unrelated shared delivery was blocked");
         release_blocked.notify_one();
+        alarm.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn shared_replacement_does_not_cancel_the_active_generation() {
+        let Some((_nats, servers)) = start_test_nats() else {
+            return;
+        };
+        let suffix = format!("replacement-{}", now_millis() as u64);
+        let alarm = create(shared_context(&servers, &suffix))
+            .await
+            .expect("create alarm");
+        let engine = Engine::new();
+        let started = Arc::new(AtomicUsize::new(0));
+        let cancelled = Arc::new(AtomicUsize::new(0));
+        let changed = Arc::new(tokio::sync::Notify::new());
+        engine
+            .register(
+                "recorder",
+                Arc::new(GenerationRecorder {
+                    started: started.clone(),
+                    cancelled: cancelled.clone(),
+                    changed: changed.clone(),
+                }),
+            )
+            .expect("register recorder");
+        alarm.start(engine.clone()).await.expect("start alarm");
+        alarm
+            .call(
+                engine.clone(),
+                "schedule",
+                scheduled("same-active", now_millis() + 10.0, "first"),
+                DependencyInvocation::direct("alarm", "schedule", 1).expect("invocation"),
+            )
+            .await
+            .expect("schedule first");
+        wait_for_mask(&started, 1, &changed).await;
+
+        alarm
+            .call(
+                engine.clone(),
+                "schedule",
+                scheduled("same-active", now_millis() + 1_000.0, "second"),
+                DependencyInvocation::direct("alarm", "schedule", 2).expect("invocation"),
+            )
+            .await
+            .expect("schedule replacement");
+        tokio::time::sleep(Duration::from_millis(75)).await;
+        assert_eq!(started.load(Ordering::SeqCst), 1);
+        assert_eq!(cancelled.load(Ordering::SeqCst), 0);
+
+        alarm
+            .call(
+                engine,
+                "cancel",
+                Value::record([("id".to_owned(), Value::String("same-active".to_owned()))]),
+                DependencyInvocation::direct("alarm", "cancel", 1).expect("invocation"),
+            )
+            .await
+            .expect("cancel replacement");
+        wait_for_mask(&cancelled, 1, &changed).await;
         alarm.shutdown().await.expect("shutdown");
     }
 

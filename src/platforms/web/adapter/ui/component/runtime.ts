@@ -2338,7 +2338,9 @@ function read<T>(value: T): T {
 }
 
 function readSource<T>(value: T | (() => T)): T {
-  return typeof value === "function" ? (value as () => T)() : read(value);
+  let current: unknown = value;
+  while (typeof current === "function") current = current();
+  return read(current as T);
 }
 
 export function reactiveValue<T>(source: () => T): T {

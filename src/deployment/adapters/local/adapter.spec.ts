@@ -281,6 +281,7 @@ process.on("SIGTERM", close);
       expect(scaled.state.gateways[0]!.targets).toHaveLength(3);
       await expect(readFile(database, "utf8")).resolves.toContain(scaledProcesses[2]!.id);
 
+      const failedLocation = scaledProcesses[0]!.locations![0]!;
       process.kill(scaledProcesses[0]!.pid!, "SIGKILL");
       await expect.poll(async () => (await recoveredAdapter.inspect())?.converged).toBe(false);
       const healed = await applyDeployment(three, fixture.release);
@@ -292,6 +293,7 @@ process.on("SIGTERM", close);
         expect.objectContaining({ type: "scale", from: 2, to: 3 }),
       ]);
       expect(healed.state.converged).toBe(true);
+      expect(healedProcesses.flatMap(({ locations = [] }) => locations)).toContain(failedLocation);
 
       const replacement = {
         ...fixture.release,

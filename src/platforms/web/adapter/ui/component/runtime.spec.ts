@@ -4,6 +4,7 @@ import {
   Await,
   createDeferredResource,
   createHydratedDeferredResource,
+  For,
   needsNativePropertyWrite,
 } from "@/platforms/web/adapter/ui/component/runtime";
 import { publishWebDeferredState } from "@/platforms/web/adapter/ui/stream";
@@ -13,6 +14,23 @@ describe("web Structure native property writes", () => {
     expect(needsNativePropertyWrite("", "", null)).toBe(true);
     expect(needsNativePropertyWrite("", "", "")).toBe(false);
     expect(needsNativePropertyWrite("warm.svg", "cool.svg", "warm.svg")).toBe(true);
+  });
+});
+
+describe("web keyed collections", () => {
+  it("reads through the JSX wrapper around a reactive collection selector", () => {
+    const each = (() => () => [{ id: "one", name: "One" }]) as unknown as () => readonly {
+      id: string;
+      name: string;
+    }[];
+
+    expect(
+      For({
+        each,
+        by: "id",
+        children: (item) => item.name,
+      }),
+    ).toEqual(["One"]);
   });
 });
 

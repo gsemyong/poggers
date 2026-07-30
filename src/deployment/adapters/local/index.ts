@@ -517,6 +517,7 @@ async function realizePlan(input: {
         !serviceChanged
           ? (previous.processes ?? []).filter(({ healthy }) => healthy)
           : [];
+      const failed = (previous?.processes ?? []).filter(({ healthy }) => !healthy);
       let processes = retained;
       const replicas = desiredArtifact.replicas ?? 1;
       while (processes.length > replicas) {
@@ -525,6 +526,7 @@ async function realizePlan(input: {
         processes = processes.slice(0, -1);
       }
       while (processes.length < replicas) {
+        const replaced = failed.shift();
         const process = await startProcess({
           artifact,
           artifacts: input.artifacts,
@@ -537,6 +539,7 @@ async function realizePlan(input: {
           resolveSecret: input.options.resolveSecret,
           system: input.plan.release.system,
           version,
+          ...(replaced ? { replaced } : {}),
         });
         started.push(process);
         processes = [...processes, process];
@@ -573,6 +576,7 @@ async function startProcess(input: {
   resolveSecret: LocalDeploymentAdapterOptions["resolveSecret"];
   system: string;
   version: string;
+  replaced?: DeploymentProcessState;
 }): Promise<DeploymentProcessState> {
   if (!input.artifact.entrypoint) {
     throw new Error(
@@ -601,6 +605,7 @@ async function startProcess(input: {
     input.stateDirectory,
     input.gateways,
     input.services,
+    input.replaced,
   );
   const stdout = await open(stdoutPath, "a");
   const stderr = await open(stderrPath, "a");
@@ -691,6 +696,7 @@ async function processEnvironment(
   stateDirectory: string,
   gateways: readonly PreparedLocalGateway[],
   services: readonly LocalServiceState[],
+  replaced?: DeploymentProcessState,
 ): Promise<
   Readonly<{
     environment: Readonly<Record<string, string>>;
@@ -701,13 +707,17 @@ async function processEnvironment(
   const bindings = new Map(dependencies.map((dependency) => [dependency.name, dependency]));
   const environment: Record<string, string> = { ...framework };
   const locations: string[] = [];
+  const reusablePorts = (replaced?.locations ?? []).flatMap((location) => {
+    const port = Number(new URL(location).port);
+    return Number.isSafeInteger(port) && port > 0 ? [port] : [];
+  });
   const deferred: ReleaseArtifact["configuration"][number][] = [];
   for (const field of artifact.configuration) {
     const binding = bindings.get(field.dependency);
     let value = binding ? Reflect.get(binding.configuration, field.name) : undefined;
     if (value === undefined && field.allocation) {
       if (field.allocation.kind === "port") {
-        value = await availablePort();
+        value = reusablePorts.shift() ?? (await availablePort());
       } else {
         const root =
           field.allocation.scope === "deployment"

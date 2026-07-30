@@ -262,6 +262,15 @@ export async function createInterfaceUI<Contract extends SystemContract>({
   const eventRevision = signal(0);
   const notifyActionEvent = () => eventRevision(eventRevision() + 1);
   const runtimeComponents = normalizeRuntimeComponents(components);
+  const manifest =
+    programManifest ??
+    inferEmptyProgramManifest(runtimeSystem, interfacePath, features, program, logicalProgram);
+  const programDependencyNames = new Set(
+    manifest.contributions.flatMap(({ requires }) => requires),
+  );
+  const programDependencies = Object.fromEntries(
+    Object.entries(dependencies).filter(([name]) => programDependencyNames.has(name)),
+  );
   const renderers: Record<string, (props?: RuntimeComponentProps) => Child> = Object.create(null);
   const componentGroups: RuntimeComponentComposition["componentGroups"] = {
     "": Object.create(null),
@@ -275,9 +284,8 @@ export async function createInterfaceUI<Contract extends SystemContract>({
     features,
     program,
     logicalProgram,
-    dependencies,
-    programManifest ??
-      inferEmptyProgramManifest(runtimeSystem, interfacePath, features, program, logicalProgram),
+    programDependencies,
+    manifest,
     hotState,
     notifyActionEvent,
     routes.length > 0,

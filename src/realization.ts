@@ -241,6 +241,8 @@ type RetainedSystemCompilationRevision = SystemCompilationRevision &
 const SYSTEM_COMPILATION_CACHE_VERSION = 5;
 const SYSTEM_COMPILATION_CACHE_RETAINED_OBJECTS = 64;
 const SYSTEM_COMPILATION_CACHE_HARD_LIMIT = 96;
+const SYSTEM_COMPILATION_CACHE_RETAINED_BYTES = 96 * 1024 * 1024;
+const SYSTEM_COMPILATION_CACHE_HARD_BYTES = 128 * 1024 * 1024;
 
 type CachedSystemCompilation = Readonly<{
   version: number;
@@ -380,24 +382,46 @@ function readSystemCompilationObject<Value>(directory: string, identity: string)
 }
 
 function retainSystemCompilationObjects(directory: string, retained: ReadonlySet<string>): void {
-  let entries: readonly Readonly<{ identity: string; modified: number }>[];
+  let entries: readonly Readonly<{
+    identity: string;
+    modified: number;
+    bytes: number;
+  }>[];
   try {
     entries = readdirSync(directory, { withFileTypes: true })
       .filter((entry) => entry.isFile() && /^[a-f0-9]{64}\.json$/.test(entry.name))
-      .map((entry) => ({
-        identity: entry.name.slice(0, -5),
-        modified: statSync(resolve(directory, entry.name)).mtimeMs,
-      }));
+      .map((entry) => {
+        const statistics = statSync(resolve(directory, entry.name));
+        return {
+          identity: entry.name.slice(0, -5),
+          modified: statistics.mtimeMs,
+          bytes: statistics.size,
+        };
+      });
   } catch {
     return;
   }
-  if (entries.length <= SYSTEM_COMPILATION_CACHE_HARD_LIMIT) return;
+  let bytes = entries.reduce((total, entry) => total + entry.bytes, 0);
+  if (
+    entries.length <= SYSTEM_COMPILATION_CACHE_HARD_LIMIT &&
+    bytes <= SYSTEM_COMPILATION_CACHE_HARD_BYTES
+  ) {
+    return;
+  }
   const removable = entries
     .filter(({ identity }) => !retained.has(identity))
     .sort((left, right) => left.modified - right.modified);
-  const remove = Math.max(0, entries.length - SYSTEM_COMPILATION_CACHE_RETAINED_OBJECTS);
-  for (const { identity } of removable.slice(0, remove)) {
+  let count = entries.length;
+  for (const { identity, bytes: objectBytes } of removable) {
+    if (
+      count <= SYSTEM_COMPILATION_CACHE_RETAINED_OBJECTS &&
+      bytes <= SYSTEM_COMPILATION_CACHE_RETAINED_BYTES
+    ) {
+      break;
+    }
     rmSync(resolve(directory, `${identity}.json`), { force: true });
+    count -= 1;
+    bytes -= objectBytes;
   }
 }
 
