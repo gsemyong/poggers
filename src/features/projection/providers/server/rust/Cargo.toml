@@ -1,0 +1,9 @@
+[package]
+name = "kit-server-projection-store"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+kit-server-runtime = { path = "../../../../../compiler/rust/runtime" }
+rusqlite = { version = "0.40.1", features = ["bundled"] }
+serde_json = "1.0.145"

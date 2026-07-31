@@ -21,12 +21,15 @@ import {
 } from "@/platforms/web/adapter/lowering";
 import {
   buildWebInterface,
+  collectReferencedClientResources,
   collectPresentationDependencies,
   createWebAssetManifest,
   inspectClientManifest,
+  isProjectableSourceModule,
   negotiateWebRepresentation,
   planWebRouteDelivery,
   productionPresentationAssetPlugin,
+  renderServiceWorkerBootstrap,
   renderWebDiscoveryResources,
   routeSourcePlugin,
   validateProductionWebRoute,
@@ -54,6 +57,23 @@ describe("web development workspace", () => {
     expect(webDevelopmentWorkspace("/tmp/company", "interface/operations.web")).toBe(first);
     expect(webDevelopmentWorkspace("/tmp/company", "interface/customer.web")).not.toBe(first);
     expect(first).toContain("/.kit/cache/web/interface-operations-web-");
+  });
+
+  it("projects application and Feature sources without cloning neutral runtime modules", () => {
+    const root = resolve(import.meta.dirname, "../../../..");
+    const application = resolve(root, "examples/authenticated-crud/src");
+
+    expect(isProjectableSourceModule(resolve(application, "features/tasks.tsx"), application)).toBe(
+      true,
+    );
+    expect(
+      isProjectableSourceModule(resolve(root, "src/features/data/index.ts"), application),
+    ).toBe(true);
+    expect(isProjectableSourceModule(resolve(root, "src/core/dependency.ts"), application)).toBe(
+      false,
+    );
+    expect(isProjectableSourceModule(resolve(root, "src/compiler/ir.ts"), application)).toBe(false);
+    expect(isProjectableSourceModule(resolve(root, "src/index.ts"), application)).toBe(false);
   });
 
   it(
@@ -104,11 +124,39 @@ describe("web development workspace", () => {
         `${tasksSource}?kit-program=${customerProgram!}&lang.tsx`,
       );
       const tasksCode = (typeof tasks === "string" ? tasks : tasks?.code) ?? "";
-      expect(tasksCode).toMatch(/features:\s*{\s*replica:\s*taskReplica\s*}/);
+      expect(tasksCode).toMatch(/features:\s*{\s*data:\s*taskData\s*}/);
       expect(tasksCode).not.toMatch(/features:\s*{[^}]*aggregate:\s*taskAggregate/s);
-      expect(tasksCode).toContain("/* @__PURE__ */ createWorkflow");
+      expect(tasksCode).not.toContain("createWorkflow(");
     },
   );
+});
+
+describe("web development service worker lifecycle", () => {
+  it("keeps an explicit PWA preview active across client redirects in one tab", () => {
+    const source = renderServiceWorkerBootstrap("./service-worker.generated.ts", true, false);
+
+    expect(source).toContain('previewParameter === "preview"');
+    expect(source).toContain('sessionStorage.setItem("kit:pwa-preview", "active")');
+    expect(source).toContain(
+      'const preview = development && sessionStorage.getItem("kit:pwa-preview") === "active"',
+    );
+    expect(source).toContain('previewParameter === "off"');
+    expect(source).toContain('sessionStorage.removeItem("kit:pwa-preview")');
+    expect(source).toContain('if (stale.length > 0 && "caches" in globalThis)');
+  });
+
+  it("activates production updates and reloads an already controlled client once", () => {
+    const source = renderServiceWorkerBootstrap("/service-worker.js", false, false);
+
+    expect(source).toContain('updateViaCache: "none"');
+    expect(source).toContain(
+      'navigator.serviceWorker.addEventListener("controllerchange", reloadForUpdate)',
+    );
+    expect(source).toContain("if (!controlledAtStart || reloading) return");
+    expect(source).toContain('registration.waiting?.postMessage("kit:activate")');
+    expect(source).toContain('addEventListener("visibilitychange"');
+    expect(source).toContain("setInterval(update, 60 * 60 * 1000)");
+  });
 });
 
 describe("web Presentation dependency manifest", () => {
@@ -290,6 +338,36 @@ describe("web client build manifest", () => {
         },
       }),
     ).toThrow("missing chunk");
+  });
+
+  it("retains generated worker and WASM resources omitted from Vite's manifest graph", async () => {
+    const directory = await mkdtemp(resolve(tmpdir(), "kit-web-client-resources-"));
+    try {
+      await mkdir(resolve(directory, "assets"), { recursive: true });
+      await writeFile(
+        resolve(directory, "assets/app-content.js"),
+        'new Worker(new URL("/assets/query-worker-content.js", import.meta.url));',
+      );
+      await writeFile(
+        resolve(directory, "assets/query-worker-content.js"),
+        'fetch("/assets/database-content.wasm");',
+      );
+      await writeFile(resolve(directory, "assets/database-content.wasm"), "wasm");
+      await writeFile(resolve(directory, "assets/discarded-content.js"), "discarded");
+
+      await expect(
+        collectReferencedClientResources(
+          directory,
+          new Set(["/assets/app-content.js"]),
+        ),
+      ).resolves.toEqual([
+        "/assets/app-content.js",
+        "/assets/database-content.wasm",
+        "/assets/query-worker-content.js",
+      ]);
+    } finally {
+      await rm(directory, { force: true, recursive: true });
+    }
   });
 });
 

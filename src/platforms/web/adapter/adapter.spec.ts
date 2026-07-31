@@ -147,8 +147,9 @@ describe("web Platform Adapter", () => {
       expect(worker).toContain("kit:dispose");
       expect(worker).toContain("kit:disposed");
       expect(worker).toContain(
-        "dependencies:[{name:`http`,operations:[{name:`request`,mode:`asynchronous`",
+        "bindings:[{name:`http`,operations:[{name:`request`,mode:`asynchronous`",
       );
+      expect(worker).toContain("dependencies:u(d,[`http`])");
       const bundledJavaScript = await Promise.all(
         (await readdir(output, { recursive: true }))
           .filter((path) => path.endsWith(".js"))

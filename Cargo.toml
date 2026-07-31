@@ -4,6 +4,7 @@ exclude = ["dist"]
 members = [
   "src/features/model/providers/server/rust",
   "src/features/identity/providers/server/rust",
+  "src/features/projection/providers/server/rust",
   "src/compiler/rust/runtime",
   "src/platforms/server/adapter/rust/distribution",
   "src/platforms/server/adapter/rust/providers/alarm",

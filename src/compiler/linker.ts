@@ -1,7 +1,6 @@
 import {
   assertSystemIRVersion,
   collectDependencyOperations,
-  orderDependencyGraph,
   typeIdentity,
   type SystemIR,
   type DependencyIR,
@@ -13,6 +12,7 @@ import {
   type SourceSpan,
   type TypeIR,
 } from "@/compiler/ir";
+import { orderDependencyGraph } from "@/core/graph";
 
 export class ProgramLinkError extends Error {
   constructor(

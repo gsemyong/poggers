@@ -1,4 +1,5 @@
 import type { DependencyContractIR, SelectedDependencyProviderIR } from "@/compiler/ir";
+import { cloneData } from "@/core/data";
 import {
   dependencyInvocation,
   type DependencyContract,
@@ -7,6 +8,7 @@ import {
 import { resolveFeatureProvider } from "@/core/feature";
 import { conformExternalDependencies, dependencyScope } from "@/execution/process";
 import type {
+  ConnectionContext,
   HttpClient,
   LocalStore,
   Navigation,
@@ -17,6 +19,7 @@ import type {
 import { resolveWebDestination, type WebClientRouteIR } from "@/platforms/web/adapter/lowering";
 import {
   parseWebRealtimeServerFrame,
+  serializeWebRealtimeClientFrame,
   WEB_REALTIME_PATH,
   type WebRealtimeRequestFrame,
   type WebRealtimeServerFrame,
@@ -42,6 +45,7 @@ type NavigationImplementation = DependencyImplementation<Navigation> &
     [dependencyScope](scope: Readonly<{ feature: string }>): Navigation;
   }>;
 type WebAdapterHostImplementations = Readonly<{
+  connection: DependencyImplementation<ConnectionContext>;
   http: DependencyImplementation<HttpClient>;
   navigation: NavigationImplementation;
   storage: DependencyImplementation<LocalStore> & Disposable;
@@ -65,7 +69,7 @@ export async function createWebHost(
     (input.providers ?? []).map((provider) => [provider.dependency, provider]),
   );
   const routeDependencies = new Set(input.routeDependencies ?? []);
-  const requested = new Set<WebAdapterHostDependency>();
+  const requested = new Set<string>();
   for (const dependency of dependencies) {
     if (
       !isWebHostDependency(dependency.name) &&
@@ -92,9 +96,11 @@ export async function createWebHost(
       input.system,
       selection,
     );
+    const origin = input.serverOrigin ?? location.origin;
     host[dependency] = await provider.development({
       context: input.context ?? "window",
-      serverOrigin: input.serverOrigin ?? location.origin,
+      serverOrigin: origin,
+      request: webRequest(origin),
     });
   }
   for (const dependency of dependencies) {
@@ -117,18 +123,17 @@ export async function createWebHost(
 
   if (requested.has("http")) {
     const origin = input.serverOrigin ?? location.origin;
-    const realtime =
-      typeof WebSocket === "function" ? webRealtimeTransport(new URL(origin).origin) : undefined;
     host.http = Object.freeze({
       request({
         input: { path, ...init },
       }: Readonly<{ input: Parameters<HttpClient["request"]>[0] }>) {
-        if (realtime && path.startsWith("/api/replicas/")) {
-          return realtime.request({ path, ...init });
-        }
         return fetch(new URL(path, origin), { ...init, credentials: "include" });
       },
     });
+  }
+  if (requested.has("connection")) {
+    const transport = webRealtimeTransport(new URL(input.serverOrigin ?? location.origin).origin);
+    host.connection = Object.freeze({ refresh: () => transport.refresh() });
   }
   if (requested.has("storage")) host.storage = createLocalStore();
   if (requested.has("identifiers")) {
@@ -265,6 +270,21 @@ const routeNavigationContract: DependencyContractIR = {
   ],
 };
 
+function webRequest(origin: string) {
+  const realtime =
+    typeof WebSocket === "function" ? webRealtimeTransport(new URL(origin).origin) : undefined;
+  return (input: {
+    path: string;
+    method?: string;
+    headers?: Readonly<Record<string, string>>;
+    body?: string;
+    signal?: AbortSignal;
+  }) =>
+    realtime
+      ? realtime.request(input)
+      : fetch(new URL(input.path, origin), { ...input, credentials: "include" });
+}
+
 type RealtimePendingRequest = {
   resolve(response: Response): void;
   reject(error: unknown): void;
@@ -289,7 +309,9 @@ class WebRealtimeTransport {
   readonly #pending = new Map<string, RealtimePendingRequest>();
   readonly #encoder = new TextEncoder();
   #socket: WebSocket | undefined;
+  #connecting: WebSocket | undefined;
   #opening: Promise<WebSocket> | undefined;
+  #generation = 0;
 
   constructor(origin: string) {
     this.#origin = origin;
@@ -334,16 +356,39 @@ class WebRealtimeTransport {
     });
   }
 
+  refresh(): void {
+    this.#generation += 1;
+    const socket = this.#socket;
+    const connecting = this.#connecting;
+    this.#socket = undefined;
+    this.#connecting = undefined;
+    this.#opening = undefined;
+    this.#failAll(new Error("Realtime transport connection context changed."));
+    socket?.close(1000, "Connection context changed");
+    if (connecting && connecting !== socket) {
+      connecting.close(1000, "Connection context changed");
+    }
+  }
+
   #connect(): Promise<WebSocket> {
     if (this.#socket?.readyState === WebSocket.OPEN) return Promise.resolve(this.#socket);
     if (this.#opening) return this.#opening;
     const target = new URL(WEB_REALTIME_PATH, this.#origin);
     target.protocol = target.protocol === "https:" ? "wss:" : "ws:";
-    this.#opening = new Promise<WebSocket>((resolve, reject) => {
+    const generation = this.#generation;
+    let opening: Promise<WebSocket>;
+    opening = new Promise<WebSocket>((resolve, reject) => {
       const socket = new WebSocket(target);
+      this.#connecting = socket;
       let opened = false;
       socket.addEventListener("open", () => {
+        if (generation !== this.#generation) {
+          socket.close(1000, "Connection context changed");
+          reject(new Error("Realtime transport connection context changed."));
+          return;
+        }
         opened = true;
+        if (this.#connecting === socket) this.#connecting = undefined;
         this.#socket = socket;
         resolve(socket);
       });
@@ -362,6 +407,7 @@ class WebRealtimeTransport {
       });
       socket.addEventListener("close", (event) => {
         if (this.#socket === socket) this.#socket = undefined;
+        if (this.#connecting === socket) this.#connecting = undefined;
         const detail = event.reason ? `: ${event.reason}` : "";
         const error = new Error(`Realtime transport disconnected (${event.code})${detail}.`);
         if (!opened) reject(error);
@@ -369,14 +415,15 @@ class WebRealtimeTransport {
       });
       socket.addEventListener("error", () => undefined);
     }).finally(() => {
-      this.#opening = undefined;
+      if (this.#opening === opening) this.#opening = undefined;
     });
-    return this.#opening;
+    this.#opening = opening;
+    return opening;
   }
 
   #send(frame: WebRealtimeRequestFrame | Readonly<{ type: "cancel"; id: string }>): void {
     if (this.#socket?.readyState === WebSocket.OPEN) {
-      this.#socket.send(JSON.stringify(frame));
+      this.#socket.send(serializeWebRealtimeClientFrame(frame));
     }
   }
 
@@ -447,9 +494,15 @@ class WebRealtimeTransport {
 }
 
 function isWebHostDependency(value: string): value is WebAdapterHostDependency {
-  return ["http", "identifiers", "navigation", "scheduler", "serviceWorker", "storage"].includes(
-    value,
-  );
+  return [
+    "connection",
+    "http",
+    "identifiers",
+    "navigation",
+    "scheduler",
+    "serviceWorker",
+    "storage",
+  ].includes(value);
 }
 
 type ExtendableEventLike = Readonly<{
@@ -600,7 +653,7 @@ function createLocalStore(): DependencyImplementation<LocalStore> & Disposable {
     async write<Value>({
       input: { key, value },
     }: Readonly<{ input: { key: string; value: Value } }>) {
-      await transaction("readwrite", (store) => store.put(value, key));
+      await transaction("readwrite", (store) => store.put(cloneData(value), key));
     },
     async remove({ input: { key } }: Readonly<{ input: { key: string } }>) {
       await transaction("readwrite", (store) => store.delete(key));

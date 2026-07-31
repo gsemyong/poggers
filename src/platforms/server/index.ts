@@ -59,6 +59,7 @@ export type ServerProviderConfiguration = Readonly<{
   environment: string;
   required?: true;
   default?: string;
+  sensitive?: true;
   allocation?:
     | Readonly<{ kind: "port" }>
     | Readonly<{
@@ -101,6 +102,7 @@ export type ServerProviderContext = Readonly<{
   configuration: Readonly<Record<string, string>>;
   origin: string;
   allowedOrigins: readonly string[];
+  /** Opens a host-owned database that remains valid for the provider lifetime. */
   sqlite(path: string): object & Disposable;
 }>;
 

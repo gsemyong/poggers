@@ -1,10 +1,9 @@
-import {
-  orderDependencyGraph,
-  type DependencyContractIR,
-  type DependencyOperationIR,
-  type ProgramContributionManifest,
-  type ProgramManifest,
-  type TypeIR,
+import type {
+  DependencyContractIR,
+  DependencyOperationIR,
+  ProgramContributionManifest,
+  ProgramManifest,
+  TypeIR,
 } from "@/compiler/ir";
 import {
   createUncheckedDependencyClient,
@@ -20,6 +19,7 @@ import {
   type ProgramContributionAddress,
 } from "@/core/dependency";
 import type { Feature, FeatureContract } from "@/core/feature";
+import { orderDependencyGraph } from "@/core/graph";
 import type { System, SystemContract } from "@/core/system";
 
 /** Internal protocol for a host Dependency whose API is scoped to one Feature contribution. */
@@ -784,11 +784,13 @@ export class ResourceScope {
 
   observeResult(value: unknown): void {
     if (!isPromiseLike(value)) {
-      this.adopt(value);
+      if (!isAsyncIterable(value)) this.adopt(value);
       return;
     }
     void Promise.resolve(value).then(
-      (resolved) => this.adopt(resolved),
+      (resolved) => {
+        if (!isAsyncIterable(resolved)) this.adopt(resolved);
+      },
       () => undefined,
     );
   }
@@ -1375,7 +1377,8 @@ export function bindDependenciesToScope(
   const proxies = new WeakMap<object, object>();
 
   const wrap = (value: unknown): unknown => {
-    if (!value || typeof value !== "object" || isPromiseLike(value)) return value;
+    if (!value || typeof value !== "object") return value;
+    if (isPromiseLike(value)) return Promise.resolve(value).then((resolved) => wrap(resolved));
     if (isDisposable(value)) return value;
     const cached = proxies.get(value);
     if (cached) return cached;
@@ -1406,6 +1409,14 @@ export function bindDependenciesToScope(
       };
       proxies.set(value, iterable);
       return iterable;
+    }
+    if (Array.isArray(value)) {
+      const array = Array.from<unknown>({ length: value.length });
+      proxies.set(value, array);
+      for (let index = 0; index < value.length; index += 1) {
+        array[index] = wrap(value[index]);
+      }
+      return array;
     }
 
     const shell =

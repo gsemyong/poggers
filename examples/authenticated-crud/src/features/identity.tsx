@@ -11,6 +11,7 @@ export type User = Readonly<{ id: string; name: string; email: string }>;
 
 export type Identity = IdentityModel<{
   Name: "identity";
+  Version: 1;
   Principal: User;
 }>;
 

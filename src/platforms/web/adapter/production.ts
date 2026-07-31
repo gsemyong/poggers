@@ -17,7 +17,7 @@ import { linkProgram } from "@/compiler/linker";
 import type { WebPlatform } from "@/platforms/web";
 import { buildWebInterface, type WebBuild } from "@/platforms/web/adapter/pipeline";
 
-const WEB_PRODUCTION_ARTIFACT_VERSION = 4;
+const WEB_PRODUCTION_ARTIFACT_VERSION = 7;
 const WEB_PRODUCTION_CACHE_RETAINED_ARTIFACTS = 12;
 const WEB_PRODUCTION_CACHE_HARD_LIMIT = 16;
 const WEB_PRODUCTION_CACHE_MANIFEST = "manifest.json";

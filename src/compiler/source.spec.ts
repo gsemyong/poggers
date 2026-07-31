@@ -2106,6 +2106,7 @@ async function projectFixture(source: string): Promise<string> {
         exclude: [],
         compilerOptions: {
           paths: { "@/*": [resolve(import.meta.dirname, "../*")] },
+          types: [],
         },
       }),
     ),

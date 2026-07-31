@@ -81,6 +81,8 @@ export type InterfaceUI = Readonly<{
   renderRoot(): Child;
   activate(): Promise<void>;
   captureHotState(): HotRenderState;
+  /** @internal Replaces Component view bodies after a compiler-proven view-only update. */
+  updateImplementation(system: System<SystemContract>): void;
   updatePresentation(presentation: RuntimeConfiguredPresentation): void;
   dispose(): Promise<void>;
 }>;
@@ -249,10 +251,12 @@ export async function createInterfaceUI<Contract extends SystemContract>({
   boundary,
   presentationAdapter,
 }: CreateInterfaceUIOptions<Contract>): Promise<InterfaceUI> {
-  const runtimeSystem = system as RuntimeSystem;
+  let runtimeSystem = system as RuntimeSystem;
   const appPath = interfaceAppPath(interfacePath);
   const appFeature = projectApplicationFeature(runtimeSystem, features);
   let configuredPresentation = presentation;
+  let implementationRevisionValue = 0;
+  const implementationRevision = signal(implementationRevisionValue);
   validatePresentation(configuredPresentation);
   const presentationInstance = presentationAdapter.mount({
     boundary,
@@ -321,9 +325,10 @@ export async function createInterfaceUI<Contract extends SystemContract>({
   for (const componentName of Object.keys(runtimeComponents).sort()) {
     renderers[componentName] = (props: RuntimeComponentProps = {}) =>
       createComponentInstance(componentName, {
-        system: runtimeSystem,
+        system: () => runtimeSystem,
         program: logicalProgram,
         config: runtimeComponents[componentName] ?? { elements: {} },
+        implementationRevision,
         presentationRevision: () => presentationRevision,
         presentationInstance,
         presentationGraph,
@@ -385,6 +390,10 @@ export async function createInterfaceUI<Contract extends SystemContract>({
     },
     activate: programUI.activate,
     captureHotState,
+    updateImplementation(next) {
+      runtimeSystem = next as RuntimeSystem;
+      implementationRevision(++implementationRevisionValue);
+    },
     updatePresentation(next) {
       validatePresentation(next);
       configuredPresentation = next;
@@ -718,10 +727,6 @@ async function createRouteRuntime(options: {
     if (activeResolution === initialResolution) break;
     initialResolution = activeResolution!;
   }
-  queueMicrotask(() => {
-    if (disposed || !routePrefetchAllowed()) return;
-    for (const route of options.routes) void loadDefinition(route).catch(() => undefined);
-  });
   return {
     render() {
       return renderedRoot();
@@ -736,20 +741,6 @@ async function createRouteRuntime(options: {
       routeNavigation[Symbol.dispose]();
     },
   };
-}
-
-function routePrefetchAllowed(): boolean {
-  if (typeof navigator === "undefined") return true;
-  const connection = (
-    navigator as Navigator & {
-      connection?: Readonly<{ saveData?: boolean; effectiveType?: string }>;
-    }
-  ).connection;
-  return (
-    !connection?.saveData &&
-    connection?.effectiveType !== "slow-2g" &&
-    connection?.effectiveType !== "2g"
-  );
 }
 
 function prepareDeferredRouteData(
@@ -1148,9 +1139,10 @@ function inferEmptyProgramManifest(
 function createComponentInstance(
   componentName: string,
   options: {
-    system: RuntimeSystem;
+    system(): RuntimeSystem;
     program: string;
     config: RuntimeComponentConfig;
+    implementationRevision(): number;
     presentationRevision: () => number;
     presentationInstance: PresentationAdapterInstance<WebPresentationLanguage, Element>;
     presentationGraph: RuntimePresentationGraph;
@@ -1174,7 +1166,11 @@ function createComponentInstance(
       },
     });
   }
-  const componentEntry = resolveComponentDefinition(options.system, options.program, componentName);
+  const componentEntry = resolveComponentDefinition(
+    options.system(),
+    options.program,
+    componentName,
+  );
   const definition =
     componentEntry && typeof componentEntry === "object"
       ? (componentEntry as RuntimeComponentDefinition)
@@ -1339,7 +1335,18 @@ function createComponentInstance(
       elements,
       components: componentsForComponent(componentName, options.composition),
     };
-    return definition.view(viewContext);
+    return scoped(() => {
+      options.implementationRevision();
+      const current = resolveComponentDefinition(options.system(), options.program, componentName);
+      const currentDefinition =
+        current && typeof current === "object"
+          ? (current as RuntimeComponentDefinition)
+          : undefined;
+      if (typeof currentDefinition?.view !== "function") {
+        throw new Error(`Component ${componentName} does not define view.`);
+      }
+      return currentDefinition.view(viewContext);
+    });
   };
 
   return renderComponent;

@@ -2,7 +2,6 @@ import {
   dependencyInvocation,
   dispatchDependency,
   type Dependency,
-  type DependencyContract,
   type DependencyImplementations,
   type DependencyReference,
 } from "@/core/dependency";
@@ -51,9 +50,10 @@ type AggregateModelInput = Readonly<{
   Key: string;
   State: object;
   Principal: object;
-  Dependencies?: Readonly<Record<string, DependencyContract>>;
   Commands: Readonly<Record<string, AggregateCommandDefinition>>;
   Events: Readonly<Record<string, AggregateEventDefinition>>;
+  Version?: number;
+  History?: Readonly<Record<number, object>>;
 }>;
 
 export type AggregateModelDefinition = Readonly<{
@@ -61,18 +61,18 @@ export type AggregateModelDefinition = Readonly<{
   Key: string;
   State: object;
   Principal: object;
-  Dependencies: Readonly<Record<string, DependencyContract>>;
   Commands: Readonly<Record<string, AggregateCommandDefinition>>;
   Events: Readonly<Record<string, AggregateEventDefinition>>;
+  Version: number;
+  History: Readonly<Record<number, object>>;
 }>;
 
 /** The complete semantic model of one event-sourced consistency boundary. */
 export type Aggregate<Model extends AggregateModelInput> = Readonly<
-  Omit<Model, "Dependencies"> & {
-    Dependencies: Model extends {
-      Dependencies: infer Dependencies extends Readonly<Record<string, DependencyContract>>;
-    }
-      ? Dependencies
+  Omit<Model, "Version" | "History"> & {
+    Version: Model extends { Version: infer Version extends number } ? Version : 1;
+    History: Model extends { History: infer History extends Readonly<Record<number, object>> }
+      ? History
       : Empty;
   }
 >;
@@ -124,7 +124,6 @@ type AggregateCommandContext<
   state: Readonly<Model["State"]>;
   principal: Model["Principal"];
   input: InputOf<Command>;
-  dependencies: Model["Dependencies"];
   invocation: Readonly<{ id: string; at: number }>;
   fail(failure: FailureOf<FailuresOf<Command>>): never;
 }>;
@@ -137,7 +136,6 @@ type AggregateAuthorizationContext<
   state: Readonly<Model["State"]>;
   principal: Model["Principal"];
   input: Input;
-  dependencies: Model["Dependencies"];
 }>;
 
 type AggregateEventContext<
@@ -175,6 +173,21 @@ type AggregateEventEvolution<Event extends AggregateEventDefinition> =
         }>;
       }>;
 
+type AggregateHistoricalState<Model extends AggregateModelDefinition> = {
+  [Version in Extract<keyof Model["History"], number>]: Readonly<{
+    key: Model["Key"];
+    version: Version;
+    state: Model["History"][Version];
+  }>;
+}[Extract<keyof Model["History"], number>];
+
+type AggregateStateEvolution<Model extends AggregateModelDefinition> =
+  keyof Model["History"] extends never
+    ? Readonly<{ evolve?: never }>
+    : Readonly<{
+        evolve(context: AggregateHistoricalState<Model>): Model["State"];
+      }>;
+
 export type AggregateImplementation<Model extends AggregateModelDefinition> = Readonly<{
   state(context: Readonly<{ key: Model["Key"] }>): Model["State"];
   commands: Readonly<{
@@ -197,7 +210,8 @@ export type AggregateImplementation<Model extends AggregateModelDefinition> = Re
       ) => MaybePromise<boolean>;
     }
   >;
-}>;
+}> &
+  AggregateStateEvolution<Model>;
 
 export type AggregateSnapshot<State extends object> = Readonly<{
   revision: number;
@@ -265,11 +279,20 @@ type RuntimeAggregateFailure =
   | Readonly<{ type: "domain"; data: Readonly<{ failure: object }> }>
   | Readonly<{ type: "forbidden"; data: Empty }>;
 
+type RuntimeAggregateHistory<Model extends AggregateModelDefinition> = {
+  [Version in Extract<keyof Model["History"], number>]: Readonly<{
+    revision: number;
+    value: Model["History"][Version];
+  }>;
+};
+
 type AggregateRuntime<Model extends AggregateModelDefinition> = Actor<{
   Name: `${Model["Name"]}:aggregate`;
   Key: Model["Key"];
   State: RuntimeAggregateState<Model>;
-  Dependencies: Model["Dependencies"];
+  Version: Model["Version"];
+  History: RuntimeAggregateHistory<Model>;
+  Dependencies: Empty;
   Methods: {
     $command: Actor.Method<
       RuntimeAggregateCommand,
@@ -540,7 +563,12 @@ export type AggregateFixture<Model extends AggregateModelDefinition> = Readonly<
       data: object;
     }>,
   ): AggregateMigratedEvent<Model>;
-}>;
+}> &
+  (keyof Model["History"] extends never
+    ? Empty
+    : Readonly<{
+        evolve(input: AggregateHistoricalState<Model>): Model["State"];
+      }>);
 
 type RuntimeAggregateFactory<Model extends AggregateModelDefinition> = Readonly<{
   name: Model["Name"];
@@ -552,7 +580,6 @@ type RuntimeAggregateCommandContext<Model extends AggregateModelDefinition> = Re
   key: Model["Key"];
   state: RuntimeAggregateState<Model>;
   input: RuntimeAggregateCommand;
-  dependencies: Model["Dependencies"];
   factory: RuntimeAggregateFactory<Model>;
   invocation: Readonly<{ id: string; at: number }>;
   fail(failure: RuntimeAggregateFailure): never;
@@ -563,7 +590,6 @@ type RuntimeAggregateReadContext<Model extends AggregateModelDefinition> = Reado
   key: Model["Key"];
   state: Readonly<RuntimeAggregateState<Model>>;
   input: Readonly<{ principal: Model["Principal"] }>;
-  dependencies: Model["Dependencies"];
   factory: RuntimeAggregateFactory<Model>;
 }>;
 
@@ -627,7 +653,6 @@ function aggregateRuntimeMethods<Model extends AggregateModelDefinition>(): Acto
         state: context.state.value,
         principal: context.input.principal as Model["Principal"],
         input: context.input.input,
-        dependencies: context.dependencies,
       });
       if (!allowed) context.fail({ type: "forbidden", data: {} });
       const decision = await command({
@@ -635,7 +660,6 @@ function aggregateRuntimeMethods<Model extends AggregateModelDefinition>(): Acto
         state: context.state.value,
         principal: context.input.principal as Model["Principal"],
         input: context.input.input,
-        dependencies: context.dependencies,
         invocation: context.invocation,
         fail(failure: object): never {
           return context.fail({ type: "domain", data: { failure } });
@@ -684,7 +708,6 @@ function aggregateRuntimeMethods<Model extends AggregateModelDefinition>(): Acto
         state: context.state.value,
         principal: context.input.principal,
         input: undefined,
-        dependencies: context.dependencies,
       });
       if (!allowed) throw new AggregateError("forbidden");
       return {
@@ -711,16 +734,37 @@ function applyAggregateEvent<Model extends AggregateModelDefinition>(
 function createAggregateRuntime<Model extends AggregateModelDefinition>(
   definition: AggregateImplementation<Model>,
 ): DefinedActor<AggregateRuntime<Model>> {
-  return createActorFactory<AggregateRuntime<Model>>(
-    {
-      state({ key }) {
-        return {
-          revision: 0,
-          value: definition.state({ key }),
+  const evolve =
+    definition.evolve === undefined
+      ? {}
+      : {
+          evolve({
+            key,
+            version,
+            state,
+          }: Actor.Historical<AggregateRuntime<Model>>): RuntimeAggregateState<Model> {
+            return {
+              revision: state.revision,
+              value: definition.evolve!({
+                key,
+                version,
+                state: state.value,
+              } as AggregateHistoricalState<Model>),
+            };
+          },
         };
-      },
-      methods: aggregateRuntimeMethods<Model>(),
+  const runtimeDefinition = {
+    state({ key }: Readonly<{ key: Model["Key"] }>) {
+      return {
+        revision: 0,
+        value: definition.state({ key }),
+      };
     },
+    methods: aggregateRuntimeMethods<Model>(),
+    ...evolve,
+  } as unknown as Actor.Definition<AggregateRuntime<Model>>;
+  return createActorFactory<AggregateRuntime<Model>>(
+    runtimeDefinition,
     () => typeLiteral<`${Model["Name"]}:aggregate`>(),
     () => ({ $command: "write", $state: "read" }),
     () => ({
@@ -728,7 +772,7 @@ function createAggregateRuntime<Model extends AggregateModelDefinition>(
       definition,
       versions: aggregateEventVersions(typeSchema<Model["Events"]>()),
     }),
-    () => 1,
+    () => typeLiteral<Model["Version"]>(),
     () => ({}),
     () => ({ kind: typeLiteral<Model["Name"]>(), retain: true }),
   );
@@ -799,7 +843,6 @@ class AggregateFixtureFailure extends Error {
 export function createAggregateFixture<Model extends AggregateModelDefinition>(
   _aggregate: DefinedAggregate<Model>,
   definition: AggregateImplementation<Model>,
-  input: Readonly<{ dependencies: Model["Dependencies"] }>,
 ): AggregateFixture<Model> {
   const migrate = (
     stored: Readonly<{
@@ -855,7 +898,6 @@ export function createAggregateFixture<Model extends AggregateModelDefinition>(
         state: request.state.state,
         principal: request.principal,
         input: request.input,
-        dependencies: input.dependencies,
       });
       if (!allowed) {
         return {
@@ -875,7 +917,6 @@ export function createAggregateFixture<Model extends AggregateModelDefinition>(
           state: request.state.state,
           principal: request.principal,
           input: request.input,
-          dependencies: input.dependencies,
           invocation,
           fail(failure): never {
             throw new AggregateFixtureFailure(failure);
@@ -930,7 +971,8 @@ export function createAggregateFixture<Model extends AggregateModelDefinition>(
       return { revision, state };
     },
     migrate,
-  });
+    ...(definition.evolve === undefined ? {} : { evolve: definition.evolve }),
+  }) as AggregateFixture<Model>;
 }
 
 function aggregateHasCommand(commands: readonly string[], operation: string): boolean {

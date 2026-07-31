@@ -5,18 +5,18 @@ import { describe, expect, it } from "vitest";
 
 import { projectDependencyContracts } from "@/compiler/ir";
 import { linkProgram } from "@/compiler/linker";
-import { compileSystem } from "@/compiler/source";
 import { dispatchDependency } from "@/core/dependency";
 import { type Aggregate, createAggregateFixture } from "@/features/aggregate";
 import { orderDefinition, orders } from "@/features/aggregate/feature.typecheck";
 import { serverCompilerExtension, serverProgramExecution } from "@/platforms/server/adapter";
 import { createNodeHost } from "@/platforms/server/adapter/typescript/host";
 import { executeServerLinkedProgramIR } from "@/platforms/server/adapter/typescript/runtime";
+import { compileSystemFixture } from "@/testing/compiler";
 
-let compiledFixture: ReturnType<typeof compileSystem> | undefined;
+let compiledFixture: ReturnType<typeof compileSystemFixture> | undefined;
 
 function aggregateFixtureServer() {
-  compiledFixture ??= compileSystem(resolve(import.meta.dirname, "feature.typecheck.ts"), [
+  compiledFixture ??= compileSystemFixture(resolve(import.meta.dirname, "feature.typecheck.ts"), [
     serverCompilerExtension,
   ]);
   const server = compiledFixture.programs.find(({ name }) => name === "server");
@@ -42,7 +42,7 @@ describe("Aggregate", () => {
   });
 
   it("owns a fast pure fixture for decisions, evolution, replay, and migration", async () => {
-    const fixture = createAggregateFixture(orders, orderDefinition, { dependencies: {} });
+    const fixture = createAggregateFixture(orders, orderDefinition);
     const principal = {
       id: "member-1",
       organization: "company-1",
@@ -117,7 +117,7 @@ describe("Aggregate", () => {
   });
 
   it("keeps incremental evolution equivalent to replay for arbitrary command sequences", async () => {
-    const fixture = createAggregateFixture(orders, orderDefinition, { dependencies: {} });
+    const fixture = createAggregateFixture(orders, orderDefinition);
     type OrderEvent = Parameters<typeof fixture.replay>[0]["events"][number];
     const principal = {
       id: "member-1",

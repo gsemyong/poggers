@@ -1,22 +1,66 @@
 import { resolve } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 import { describe, expect, it } from "vitest";
 
 import { projectDependencyContracts } from "@/compiler/ir";
 import { linkProgram } from "@/compiler/linker";
-import { compileSystem } from "@/compiler/source";
+import type { DependencyImplementation } from "@/core/dependency";
 import type { Aggregate } from "@/features/aggregate";
 import type { orders } from "@/features/aggregate/feature.typecheck";
-import { createProjectionFixture, type Projection } from "@/features/projection";
+import {
+  createMemoryProjectionStore,
+  createProjectionFixture,
+  createSqliteProjectionStore,
+  evaluateIndexedProjectionRows,
+  evaluateProjectionRows,
+  type Projection,
+  type ProjectionStore,
+} from "@/features/projection";
 import { operations, operationsDefinition } from "@/features/projection/feature.typecheck";
+import { projectionStoreConformance } from "@/features/projection/testing";
 import { serverCompilerExtension, serverProgramExecution } from "@/platforms/server/adapter";
+import { rustServerDependencyTarget } from "@/platforms/server/adapter/rust/testing";
 import { createNodeHost } from "@/platforms/server/adapter/typescript/host";
 import { executeServerLinkedProgramIR } from "@/platforms/server/adapter/typescript/runtime";
+import { compileSystemFixture } from "@/testing/compiler";
+import { dependencyImplementationTarget } from "@/testing/dependency";
 
-let compiledFixture: ReturnType<typeof compileSystem> | undefined;
+let compiledFixture: ReturnType<typeof compileSystemFixture> | undefined;
+
+projectionStoreConformance.test(
+  dependencyImplementationTarget("memory reference", createMemoryProjectionStore),
+);
+
+projectionStoreConformance.test(
+  dependencyImplementationTarget("TypeScript SQLite", () =>
+    createSqliteProjectionStore(new DatabaseSync(":memory:")),
+  ),
+);
+
+projectionStoreConformance.test(
+  rustServerDependencyTarget({
+    name: "Rust SQLite",
+    provider: {
+      name: "queries",
+      dependency: "queries",
+      ...operations.providers!.server.queries.production,
+      crate: {
+        ...operations.providers!.server.queries.production.crate,
+        directory: resolve(import.meta.dirname, "providers/server/rust"),
+      },
+    },
+    async configuration() {
+      return {
+        values: { database: ":memory:" },
+        dispose: () => undefined,
+      };
+    },
+  }),
+);
 
 function projectionFixtureServer() {
-  compiledFixture ??= compileSystem(resolve(import.meta.dirname, "feature.typecheck.ts"), [
+  compiledFixture ??= compileSystemFixture(resolve(import.meta.dirname, "feature.typecheck.ts"), [
     serverCompilerExtension,
   ]);
   const server = compiledFixture.programs.find(({ name }) => name === "server");
@@ -25,6 +69,94 @@ function projectionFixtureServer() {
 }
 
 describe("Projection", () => {
+  it("keeps every browser-local index semantically identical to the portable evaluator", () => {
+    const documents = [
+      { id: "one", title: "Durable local task", note: "actor journal" },
+      { id: "two", title: "Local search", note: "durable projection" },
+      { id: "three", title: "Unrelated", note: "other value" },
+    ] as const;
+    const queries = [
+      { text: { value: "durable", fields: ["title", "note"] } },
+      { text: { value: "durable local", fields: ["title", "note"] } },
+      {
+        text: { value: "durable", fields: ["title", "note"] },
+        select: { where: { id: { not: "two" } } },
+      },
+    ] as const;
+
+    for (const query of queries) {
+      expect(evaluateIndexedProjectionRows(documents, query)).toEqual(
+        evaluateProjectionRows(documents, query),
+      );
+    }
+
+    const vectors = [
+      { id: "one", embedding: [1, 0, 0] },
+      { id: "two", embedding: [0.5, 0.5, 0] },
+      { id: "three", embedding: [0, 1, 0] },
+    ] as const;
+    const vector = { vector: { field: "embedding", value: [1, 0, 0], limit: 2 } } as const;
+    expect(evaluateIndexedProjectionRows(vectors, vector)).toEqual(
+      evaluateProjectionRows(vectors, vector),
+    );
+
+    const edges = [
+      { id: "one", from: "a", to: "b" },
+      { id: "two", from: "b", to: "c" },
+      { id: "three", from: "d", to: "a" },
+    ] as const;
+    for (const direction of ["outgoing", "incoming", "both"] as const) {
+      const graph = { graph: { from: "from", to: "to", start: "a", depth: 2, direction } };
+      expect(evaluateIndexedProjectionRows(edges, graph)).toEqual(
+        evaluateProjectionRows(edges, graph),
+      );
+    }
+
+    const places = [
+      {
+        id: "near",
+        location: { latitude: 48.1486, longitude: 17.1077 },
+      },
+      {
+        id: "near-tie",
+        location: { latitude: 48.1486, longitude: 17.1077 },
+      },
+      {
+        id: "far",
+        location: { latitude: 49.1486, longitude: 18.1077 },
+      },
+    ] as const;
+    const geo = {
+      geo: {
+        field: "location",
+        origin: { latitude: 48.1486, longitude: 17.1077 },
+        within: 1_000,
+      },
+    } as const;
+    expect(evaluateIndexedProjectionRows(places, geo)).toEqual(evaluateProjectionRows(places, geo));
+
+    const values = [
+      { id: "one", group: "open", value: 4 },
+      { id: "two", group: "open", value: 6 },
+      { id: "three", group: "closed", value: 9 },
+    ] as const;
+    const analytics = {
+      analytics: {
+        groupBy: ["group"],
+        measures: {
+          count: { count: true },
+          sum: { sum: "value" },
+          minimum: { minimum: "value" },
+          maximum: { maximum: "value" },
+          average: { average: "value" },
+        },
+      },
+    } as const;
+    expect(evaluateIndexedProjectionRows(values, analytics)).toEqual(
+      evaluateProjectionRows(values, analytics),
+    );
+  });
+
   it("lowers Projection, Aggregate, and Actor as ordinary portable Programs", () => {
     const server = projectionFixtureServer();
 
@@ -42,9 +174,7 @@ describe("Projection", () => {
   });
 
   it("rebuilds deterministically and queries through its fast reference fixture", async () => {
-    const fixture = createProjectionFixture(operations, operationsDefinition, {
-      dependencies: {},
-    });
+    const fixture = createProjectionFixture(operations, operationsDefinition);
     const placed = {
       id: "placed-1:1",
       aggregate: "orders",
@@ -82,11 +212,118 @@ describe("Projection", () => {
     });
   });
 
+  it("checkpoints a projection backlog in bounded event-feed batches", async () => {
+    const linked = linkProgram(projectionFixtureServer());
+    const host = await createNodeHost({
+      dependencies: projectDependencyContracts(linked.external),
+      database: ":memory:",
+      configuration: { database: ":memory:" },
+      providers: operations.providers.server,
+    });
+    const principal = {
+      id: "member-batch",
+      organization: "company-batch",
+      roles: ["operator"],
+    } as const;
+
+    try {
+      await using execution = await executeServerLinkedProgramIR(
+        linked,
+        host as Parameters<typeof executeServerLinkedProgramIR>[1],
+      );
+      const authority = execution.dependencies.orders as Aggregate.Reference<typeof orders>;
+      await Promise.all(
+        Array.from({ length: 101 }, async (_, index) => {
+          const id = `batch-order-${index}`;
+          await authority
+            .get({ key: id, principal })
+            .place(
+              { product: `product-${index}`, quantity: 1, note: "Batched projection" },
+              { idempotencyKey: `batch-place-${index}` },
+            );
+        }),
+      );
+
+      const view = (
+        execution.dependencies.operations as Projection.Reference<typeof operations>
+      ).for({ principal });
+      await expect(view.orders({ find: { limit: 1 } })).resolves.toMatchObject({
+        kind: "rows",
+        revision: 2,
+        matches: [{ row: { id: expect.any(String) } }],
+      });
+    } finally {
+      await disposeHost(host);
+    }
+  });
+
+  it("reloads and resumes after another projection runner wins the checkpoint race", async () => {
+    const linked = linkProgram(projectionFixtureServer());
+    const reference = createMemoryProjectionStore();
+    let conflicts = 0;
+    const host = await createNodeHost({
+      dependencies: projectDependencyContracts(linked.external),
+      database: ":memory:",
+      configuration: { database: ":memory:" },
+      providers: {
+        ...operations.providers.server,
+        queries: {
+          ...operations.providers.server.queries,
+          development() {
+            return {
+              ...reference,
+              async commit(call) {
+                if (conflicts === 0) {
+                  conflicts += 1;
+                  await reference.commit(call);
+                  return undefined;
+                }
+                return reference.commit(call);
+              },
+            } satisfies DependencyImplementation<ProjectionStore>;
+          },
+        },
+      },
+    });
+    const principal = {
+      id: "member-race",
+      organization: "company-race",
+      roles: ["operator"],
+    } as const;
+
+    try {
+      await using execution = await executeServerLinkedProgramIR(
+        linked,
+        host as Parameters<typeof executeServerLinkedProgramIR>[1],
+      );
+      const authority = execution.dependencies.orders as Aggregate.Reference<typeof orders>;
+      await authority
+        .get({ key: "race-order", principal })
+        .place(
+          { product: "product-race", quantity: 1, note: "Checkpoint race" },
+          { idempotencyKey: "place-race-order" },
+        );
+
+      const view = (
+        execution.dependencies.operations as Projection.Reference<typeof operations>
+      ).for({ principal });
+      await expect(view.orders({ find: {} })).resolves.toMatchObject({
+        kind: "rows",
+        matches: [{ row: { id: "race-order" } }],
+      });
+      expect(conflicts).toBe(1);
+    } finally {
+      await disposeHost(host);
+    }
+  });
+
   it("checkpoints migrated Aggregate events and evaluates every declared query meaning", async () => {
     const linked = linkProgram(projectionFixtureServer());
     const host = await createNodeHost({
       dependencies: projectDependencyContracts(linked.external),
       database: ":memory:",
+      configuration: { database: ":memory:" },
+      providers: operations.providers.server,
     });
     const dependencies = host as Parameters<typeof executeServerLinkedProgramIR>[1];
     const principal = {

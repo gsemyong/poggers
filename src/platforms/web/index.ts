@@ -23,6 +23,13 @@ type WebDependency<Operations extends Readonly<Record<string, (input: never) => 
 export type WebProviderContext = Readonly<{
   context: "service-worker" | "window" | "worker";
   serverOrigin: string;
+  request(input: {
+    path: string;
+    method?: string;
+    headers?: Readonly<Record<string, string>>;
+    body?: string;
+    signal?: AbortSignal;
+  }): Promise<Response>;
 }>;
 
 export type WebProviderRequirements = Readonly<{
@@ -95,6 +102,16 @@ export type HttpClient = WebDependency<{
   }): Promise<Response>;
 }>;
 
+/**
+ * Browser connection context supplied by the web adapter.
+ *
+ * Features call `refresh` after credentials or other handshake authority
+ * changes. Persistent transports reconnect lazily with the current context.
+ */
+export type ConnectionContext = WebDependency<{
+  refresh(input?: never): void;
+}>;
+
 /** Browser history exposed without coupling Features to global objects. */
 export type Navigation<
   Routes extends Readonly<Record<string, unknown>> = Readonly<Record<string, WebRouteContract>>,
@@ -150,6 +167,7 @@ export type WebServiceWorkerRuntime<Message = string, NotificationData = Message
 }>;
 
 export type WebHost = Readonly<{
+  connection: ConnectionContext;
   http: HttpClient;
   navigation: Navigation;
   storage: LocalStore;

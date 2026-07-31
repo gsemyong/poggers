@@ -99,16 +99,12 @@ export const operationsDefinition = {
           },
         ];
   },
-  authorize: {
-    orders({ principal, row }) {
-      return principal.organization === row.organization;
-    },
-    substitutions() {
-      return true;
-    },
-    warehouses({ principal, row }) {
-      return principal.organization === row.organization;
-    },
+  authorize({ principal }) {
+    return {
+      orders: { where: { organization: { equal: principal.organization } } },
+      substitutions: {},
+      warehouses: { where: { organization: { equal: principal.organization } } },
+    };
   },
 } satisfies Projection.Definition<Operations>;
 

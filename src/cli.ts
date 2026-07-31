@@ -43,6 +43,10 @@ export async function runCli(
   const directory = selection.directory;
   const app = selection.app;
   const output = new CommandOutput(commandArguments.includes("--json"));
+  if (["build", "check", "deploy", "dev", "typecheck"].includes(command)) {
+    const { synchronizePackageSources } = await import("@/package");
+    await synchronizePackageSources();
+  }
 
   if (command === "create") {
     await createProject(commandArguments);

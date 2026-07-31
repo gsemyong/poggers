@@ -9,8 +9,7 @@ import { webUIRuntime } from "@/platforms/web/adapter/ui/runtime";
 import type { WebPresentationEnvironment } from "@/platforms/web/presentation";
 import { activateWebUIRuntime } from "@/platforms/web/ui";
 
-export { HotUpdateCoordinator } from "@/execution/interpreter";
-export { sameWebHotReplacementManifest } from "@/platforms/web/adapter/lowering";
+export { HotUpdateCoordinator } from "@/execution/hot";
 export { render } from "@/platforms/web/adapter/ui/component/runtime";
 export { webProgramLanguageRuntime } from "@/platforms/web/adapter/ui/process";
 
@@ -47,6 +46,7 @@ export function createWebUIAdapter(
         renderRoot: () => ui.renderRoot(),
         activate: () => ui.activate(),
         captureHotState: () => ui.captureHotState(),
+        updateImplementation: (next) => ui.updateImplementation(next),
         updatePresentation: (next) => ui.updatePresentation(next),
         async dispose() {
           if (disposed) return;

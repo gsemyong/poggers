@@ -1605,6 +1605,20 @@ impl Engine {
                     .string()?;
                 return Ok(Value::Boolean(receiver.string()?.starts_with(&prefix)));
             }
+            if method == "charCodeAt" {
+                let index = arguments
+                    .first()
+                    .cloned()
+                    .unwrap_or(Value::Number(0.0))
+                    .number()? as usize;
+                let value = receiver
+                    .string()?
+                    .chars()
+                    .nth(index)
+                    .map(|character| character as u32 as f64)
+                    .unwrap_or(f64::NAN);
+                return Ok(Value::Number(value));
+            }
             if method == "slice" {
                 let from = arguments
                     .first()
@@ -1639,6 +1653,9 @@ impl Engine {
             }
             if method == "trim" {
                 return Ok(Value::String(receiver.string()?.trim().to_owned()));
+            }
+            if method == "toLowerCase" {
+                return Ok(Value::String(receiver.string()?.to_lowercase()));
             }
             if method == "iterator" {
                 return match receiver {

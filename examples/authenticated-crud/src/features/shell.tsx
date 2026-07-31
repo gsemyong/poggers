@@ -160,6 +160,7 @@ export function createShell<const Name extends string>(input: Readonly<{ name: N
               await dependencies.identity.signOut();
               state.session = undefined;
               state.phase = "signed-out";
+              state.working = false;
               dependencies.navigation.navigate({ route: "auth", replace: true });
             } catch (error) {
               state.error = message(error);

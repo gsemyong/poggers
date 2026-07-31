@@ -20,6 +20,10 @@ type TaskReplicaCommand = Readonly<{
   pull: TaskReplicaPull;
 }>;
 
+type TaskCompletionVerification = Readonly<{
+  revision: number;
+}>;
+
 testSystem({
   name: "authenticated workspace System",
   directory: new URL("..", import.meta.url),
@@ -59,9 +63,17 @@ testSystem({
 
     const api =
       realization === "production" ? location : (locations["program/server"]?.[0] ?? location);
+    const guest = createHttpTestSession(api);
     const alice = createHttpTestSession(api);
     const bob = createHttpTestSession(api);
 
+    await expect(
+      guest.post(
+        "/api/tasks/completion",
+        { taskId: "durable-task" },
+        { headers: { "x-kit-command": "guest-verification" } },
+      ),
+    ).rejects.toMatchObject({ status: 401 });
     await expect(
       alice.post("/api/identity/sign-up/email", {
         name: "Alice",
@@ -80,7 +92,7 @@ testSystem({
       password: "password1234",
     });
 
-    const initial = await alice.get<TaskReplicaPull>("/api/replicas/taskReplica");
+    const initial = await alice.get<TaskReplicaPull>("/api/replicas/tasks");
     expect(initial).toMatchObject({
       version: 1,
       snapshot: { tasks: [] },
@@ -89,7 +101,7 @@ testSystem({
     expect(initial.schema).toContain('"create"');
     expect(initial.schema).toContain('"title"');
     const subscribing = alice.subscribe<TaskReplicaPull>(
-      `/api/replicas/taskReplica/changes?after=${encodeURIComponent(
+      `/api/replicas/tasks/changes?after=${encodeURIComponent(
         JSON.stringify(initial.observations),
       )}&sequence=${initial.sequence}`,
     );
@@ -98,29 +110,11 @@ testSystem({
       "x-kit-after": `${initial.sequence}`,
     };
     const created = await alice.post<TaskReplicaCommand>(
-      "/api/replicas/taskReplica/create",
+      "/api/replicas/tasks/create",
       { id: "durable-task", title: "Durable task" },
       { headers: createHeaders },
     );
-    {
-      await using changes = await subscribing;
-      const streamed = await changes.next();
-      expect(streamed).toMatchObject({
-        sequence: created.pull.sequence,
-        changes: [{ row: "tasks", upsert: { id: "durable-task" } }],
-      });
-      expect(streamed.schema).toBeUndefined();
-    }
-    const retried = await alice.post<TaskReplicaCommand>(
-      "/api/replicas/taskReplica/create",
-      { id: "durable-task", title: "Durable task" },
-      { headers: createHeaders },
-    );
-    expect(retried.result).toEqual(created.result);
-    expect(retried.pull.changes).toEqual(created.pull.changes);
-    expect(created.pull.schema).toBeUndefined();
-    expect(created.pull.snapshot).toBeUndefined();
-    expect(created.pull.changes).toEqual([
+    expect(created.pull.changes).toMatchObject([
       {
         row: "tasks",
         upsert: {
@@ -131,18 +125,44 @@ testSystem({
         },
       },
     ]);
-    expect((await bob.get<TaskReplicaPull>("/api/replicas/taskReplica")).snapshot).toEqual({
+    {
+      await using changes = await subscribing;
+      const streamed = await changes.next();
+      expect(streamed).toMatchObject({
+        changes: [{ row: "tasks", upsert: { id: "durable-task" } }],
+      });
+      expect(streamed.sequence).toBeGreaterThan(initial.sequence);
+      expect(streamed.sequence).toBeLessThanOrEqual(created.pull.sequence);
+      expect(streamed.schema).toBeUndefined();
+    }
+    const retried = await alice.post<TaskReplicaCommand>(
+      "/api/replicas/tasks/create",
+      { id: "durable-task", title: "Durable task" },
+      { headers: createHeaders },
+    );
+    expect(retried.result).toEqual(created.result);
+    expect(retried.pull.changes).toEqual(created.pull.changes);
+    expect(created.pull.schema).toBeUndefined();
+    expect(created.pull.snapshot).toBeUndefined();
+    await expect(
+      alice.post(
+        "/api/tasks/completion",
+        { taskId: "durable-task" },
+        { headers: { "x-kit-command": "verify-incomplete-task" } },
+      ),
+    ).rejects.toMatchObject({ status: 409 });
+    expect((await bob.get<TaskReplicaPull>("/api/replicas/tasks")).snapshot).toEqual({
       tasks: [],
     });
     await expect(
       bob.post(
-        "/api/replicas/taskReplica/toggle",
+        "/api/replicas/tasks/toggle",
         { id: "durable-task" },
         { headers: { "x-kit-command": "bob-update" } },
       ),
     ).rejects.toMatchObject({ status: 409 });
     const updated = await alice.post<TaskReplicaCommand>(
-      "/api/replicas/taskReplica/toggle",
+      "/api/replicas/tasks/toggle",
       { id: "durable-task" },
       {
         headers: {
@@ -155,8 +175,21 @@ testSystem({
     expect(updated.pull.changes).toMatchObject([
       { row: "tasks", upsert: { id: "durable-task", completed: true } },
     ]);
+    const verified = await alice.post<TaskCompletionVerification>(
+      "/api/tasks/completion",
+      { taskId: "durable-task" },
+      { headers: { "x-kit-command": "verify-completed-task" } },
+    );
+    expect(verified).toEqual({ revision: 2 });
+    expect(
+      await alice.post<TaskCompletionVerification>(
+        "/api/tasks/completion",
+        { taskId: "durable-task" },
+        { headers: { "x-kit-command": "verify-completed-task" } },
+      ),
+    ).toEqual(verified);
     const createdForRemoval = await alice.post<TaskReplicaCommand>(
-      "/api/replicas/taskReplica/create",
+      "/api/replicas/tasks/create",
       { id: "removed-task", title: "Remove me" },
       {
         headers: {
@@ -166,7 +199,7 @@ testSystem({
       },
     );
     const removed = await alice.post<TaskReplicaCommand>(
-      "/api/replicas/taskReplica/remove",
+      "/api/replicas/tasks/remove",
       { id: "removed-task" },
       {
         headers: {
@@ -189,11 +222,11 @@ testSystem({
       email: "alice@example.com",
       password: "password1234",
     });
-    expect((await alice.get<TaskReplicaPull>("/api/replicas/taskReplica")).snapshot).toMatchObject({
+    expect((await alice.get<TaskReplicaPull>("/api/replicas/tasks")).snapshot).toMatchObject({
       tasks: [{ id: "durable-task", completed: true }],
     });
     await alice.post("/api/identity/sign-out", {});
-    await expect(alice.get("/api/replicas/taskReplica")).rejects.toMatchObject({ status: 401 });
+    await expect(alice.get("/api/replicas/tasks")).rejects.toMatchObject({ status: 401 });
   },
 });
 

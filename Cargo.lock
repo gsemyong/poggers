@@ -327,6 +327,7 @@ dependencies = [
  "fiat-crypto",
  "rustc_version",
  "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -394,6 +395,7 @@ version = "2.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "115531babc129696a58c64a4fef0a8bf9e9698629fb97e9e40767d235cfbcd53"
 dependencies = [
+ "pkcs8",
  "signature",
 ]
 
@@ -405,9 +407,11 @@ checksum = "70e796c081cee67dc755e1a36a0a172b897fab85fc3f6bc48307991f64e4eca9"
 dependencies = [
  "curve25519-dalek",
  "ed25519",
+ "serde",
  "sha2",
  "signature",
  "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -867,6 +871,8 @@ name = "kit-server-authentication"
 version = "0.0.0"
 dependencies = [
  "argon2",
+ "base64",
+ "ed25519-dalek",
  "kit-server-runtime",
  "rusqlite",
  "serde_json",
@@ -968,6 +974,15 @@ dependencies = [
  "base64",
  "kit-server-runtime",
  "reqwest",
+ "serde_json",
+]
+
+[[package]]
+name = "kit-server-projection-store"
+version = "0.0.0"
+dependencies = [
+ "kit-server-runtime",
+ "rusqlite",
  "serde_json",
 ]
 

@@ -726,6 +726,30 @@ describe("Program runtime", () => {
     expect(() => bound.dependency.read()).toThrow("disposed");
   });
 
+  test("preserves arrays returned through a scoped Dependency", async () => {
+    const scope = new ResourceScope();
+    const bound = bindDependenciesToScope(
+      {
+        dependency: {
+          async read() {
+            return { changes: [{ id: "one" }] };
+          },
+        },
+      },
+      scope,
+    ) as {
+      dependency: {
+        read(): Promise<{ changes: readonly Readonly<{ id: string }>[] }>;
+      };
+    };
+
+    const result = await bound.dependency.read();
+
+    expect(Array.isArray(result.changes)).toBe(true);
+    expect(result.changes).toEqual([{ id: "one" }]);
+    await scope.dispose();
+  });
+
   test("aggregates cleanup failures after running every cleanup", async () => {
     const events: string[] = [];
     const instance = createProgramContributionInstance(
@@ -1307,6 +1331,42 @@ describe("Program runtime", () => {
     const bound = bindDependenciesToScope(source, scope) as typeof source;
     const iterator = bound.changes()[Symbol.asyncIterator]();
 
+    expect(await iterator.next()).toEqual({ done: false, value: 42 });
+    await scope.dispose();
+    expect(returned).toBe(true);
+  });
+
+  test("does not consume an asynchronously returned AsyncIterable before the caller", async () => {
+    let iterators = 0;
+    let returned = false;
+    const source = {
+      async changes(): Promise<AsyncIterable<number>> {
+        return {
+          [Symbol.asyncIterator]() {
+            iterators += 1;
+            let delivered = false;
+            return {
+              async next() {
+                if (!delivered) {
+                  delivered = true;
+                  return { done: false, value: 42 } as const;
+                }
+                return await new Promise<IteratorResult<number>>(() => undefined);
+              },
+              async return() {
+                returned = true;
+                return { done: true, value: undefined };
+              },
+            };
+          },
+        };
+      },
+    };
+    const scope = new ResourceScope();
+    const bound = bindDependenciesToScope(source, scope) as typeof source;
+    const iterator = (await bound.changes())[Symbol.asyncIterator]();
+
+    expect(iterators).toBe(1);
     expect(await iterator.next()).toEqual({ done: false, value: 42 });
     await scope.dispose();
     expect(returned).toBe(true);

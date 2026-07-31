@@ -32,12 +32,11 @@ import type {
   SystemRevisionSource,
 } from "@/adapter";
 import {
-  projectDependencyContracts,
   selectDependencyProviders,
   type SystemIR,
-  type DependencyContractIR,
   type PlatformInterfaceIR,
   type ProgramIR,
+  type ProgramManifest,
   type SelectedDependencyProviderIR,
 } from "@/compiler/ir";
 import { collectProgramManifest, linkProgram } from "@/compiler/linker";
@@ -97,6 +96,8 @@ import {
 import { compilePresentationSource } from "@/platforms/web/adapter/presentation/source";
 import {
   parseWebRealtimeClientFrame,
+  serializeWebRealtimeServerFrames,
+  WEB_REALTIME_MAX_FRAME_BYTES,
   WEB_REALTIME_PATH,
   type WebRealtimeServerFrame,
 } from "@/platforms/web/adapter/transport";
@@ -123,12 +124,14 @@ type PreparedInterface = Readonly<{
   presentationSources: ReadonlySet<string>;
   revision: number;
   crossOriginIsolated: boolean;
-  updateKind: "full" | "presentation";
+  updateKind: WebHotUpdateKind;
   routeEntries: readonly WebRouteEntry[];
   workers: readonly WebWorkerEntry[];
   serviceWorkerBootstrap?: string;
   serviceWorker?: string;
 }>;
+
+type WebHotUpdateKind = "full" | "presentation" | "view";
 
 type ProductionPresentationAssets = {
   readonly files: Map<string, Buffer>;
@@ -791,7 +794,7 @@ export async function buildWebInterface(options: {
       .filter(({ environment }) => environment === "browser-service-worker")
       .flatMap(({ output }) => client.chunks[output] ?? [])
       .filter((value, index, values) => values.indexOf(value) === index);
-    await pruneUnreachableClientAssets(
+    const retainedClientResources = await collectReferencedClientResources(
       outdir,
       new Set([
         ...(clientRequired ? client.resources : []),
@@ -800,6 +803,7 @@ export async function buildWebInterface(options: {
         ...presentationAssets.files.keys(),
       ]),
     );
+    await pruneUnreachableClientAssets(outdir, new Set(retainedClientResources));
     routeDocuments = routeDocuments.map(({ route, document, request }) => ({
       route,
       request,
@@ -848,14 +852,13 @@ export async function buildWebInterface(options: {
           ...document.preloads,
         ]),
       );
+      const precache = cacheable.filter((path) => criticalScripts.has(path));
       const plan = createWebServiceWorkerPlan({
         installation: contract.installation,
         assets: cacheable,
-        precache: cacheable.filter((path) => criticalScripts.has(path)),
+        precache,
         warmAssets: cacheable.filter(
-          (path) =>
-            !criticalScripts.has(path) &&
-            (Boolean(contract.installation) || routeScripts.has(path)),
+          (path) => !criticalScripts.has(path) && routeScripts.has(path),
         ),
         routes: deliveredRoutes
           .filter(({ delivery }) => delivery.worker.cacheDocument)
@@ -1180,6 +1183,42 @@ export function inspectClientManifest(
   });
 }
 
+/**
+ * Closes Vite's manifest graph over generated worker and asset URLs.
+ *
+ * Vite emits `new Worker(new URL(...))` chunks but does not link them from its
+ * client manifest. Following emitted URLs keeps reachable workers while the
+ * subsequent pruning pass still removes tree-shaken residue.
+ */
+export async function collectReferencedClientResources(
+  directory: string,
+  initial: ReadonlySet<string>,
+): Promise<readonly string[]> {
+  const resources = new Set(initial);
+  const pending = [...initial];
+  while (pending.length) {
+    const resource = pending.pop()!;
+    if (!resource.endsWith(".js") && !resource.endsWith(".css")) continue;
+    const file = resolve(directory, resource.slice(1));
+    const source = await readFile(file, "utf8");
+    for (const match of source.matchAll(/\/(?:assets|workers)\/[A-Za-z0-9._-]+/g)) {
+      const referenced = match[0];
+      if (resources.has(referenced)) continue;
+      try {
+        await stat(resolve(directory, referenced.slice(1)));
+      } catch {
+        throw new Error(
+          `Generated client resource ${JSON.stringify(resource)} references missing output ` +
+            `${JSON.stringify(referenced)}.`,
+        );
+      }
+      resources.add(referenced);
+      pending.push(referenced);
+    }
+  }
+  return Object.freeze([...resources].sort());
+}
+
 /** Removes assets emitted while transforming modules that final tree-shaking discarded. */
 async function pruneUnreachableClientAssets(
   directory: string,
@@ -1319,7 +1358,10 @@ function webRealtimeProxyPlugin(target: string): Plugin {
     configureServer(server) {
       const http = server.httpServer;
       if (!http) return;
-      const sockets = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
+      const sockets = new WebSocketServer({
+        noServer: true,
+        maxPayload: WEB_REALTIME_MAX_FRAME_BYTES,
+      });
       const upgrade = (
         request: Parameters<NonNullable<typeof http>["emit"]>[1] & {
           url?: string;
@@ -1337,7 +1379,8 @@ function webRealtimeProxyPlugin(target: string): Plugin {
       sockets.on("connection", (socket, request) => {
         const active = new Map<string, AbortController>();
         const send = (frame: WebRealtimeServerFrame): void => {
-          if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(frame));
+          if (socket.readyState !== socket.OPEN) return;
+          for (const value of serializeWebRealtimeServerFrames(frame)) socket.send(value);
         };
         const cancel = (): void => {
           for (const controller of active.values()) controller.abort();
@@ -1521,7 +1564,7 @@ async function prepareInterface(
   interfaceId: string,
   development: boolean,
   compilation: SystemCompilationRevision,
-  updateKind: "full" | "presentation" = "full",
+  updateKind: WebHotUpdateKind = "full",
   previous?: PreparedInterface,
   serverOrigin?: string,
 ): Promise<PreparedInterface> {
@@ -1582,7 +1625,7 @@ async function prepareInterface(
           ),
           program,
           manifest,
-          dependencies: projectDependencyContracts(linkProgram(program).external),
+          dependencies: linkProgram(program).external.map(({ name }) => name),
           providers: featureProviders(ir, program),
         }),
       );
@@ -1666,12 +1709,12 @@ async function prepareInterface(
       features: contract.interface.features,
       program: ui,
       programManifest,
-      dependencies: projectDependencyContracts(linkProgram(ui).external),
+      dependencies: linkProgram(ui).external.map(({ name }) => name),
       routeDependencies,
       providers: featureProviders(ir, ui),
       components: contract.components,
       presentationDependencies: collectPresentationDependencies(ir, contract.uiProgram),
-      hotManifest: createWebHotReplacementManifest(ir),
+      hotManifest: development ? createWebHotReplacementManifest(ir) : undefined,
       routes: contract.routes,
       routeEntries,
       headless: contract.headless.map((program) => {
@@ -1680,7 +1723,7 @@ async function prepareInterface(
           program: program.name,
           logicalProgram: program.logicalName,
           manifest,
-          dependencies: projectDependencyContracts(linkProgram(program).external),
+          dependencies: linkProgram(program).external.map(({ name }) => name),
           providers: featureProviders(ir, program),
         };
       }),
@@ -1745,7 +1788,6 @@ function viteConfiguration(
     logLevel: "silent" as const,
     customLogger: viteReporter(report),
     oxc: { jsx: { development } },
-    ...(development ? { optimizeDeps: { include: [], noDiscovery: true } } : {}),
     plugins: vitePlugins(paths, ir, presentationAssets, development),
     resolve: {
       alias: packageSourceAliases(),
@@ -2814,18 +2856,15 @@ function canonicalSourcePath(path: string): string {
   }
 }
 
-function isProjectableSourceModule(id: string, source: string): boolean {
+/** @internal Restricts semantic projection to authored and reusable Feature sources. */
+export function isProjectableSourceModule(id: string, source: string): boolean {
   const file = canonicalSourcePath(id);
   const sourceRoot = canonicalSourcePath(source);
   const sourceModule = /\.[cm]?[jt]sx?$/.test(file);
   if (insideSourceRoot(file, sourceRoot)) return sourceModule;
   const framework = canonicalSourcePath(resolve(import.meta.dirname, "../../.."));
-  const sharedRuntimeRoots = [
-    canonicalSourcePath(resolve(framework, "jsx")),
-    canonicalSourcePath(resolve(framework, "platforms/web")),
-  ];
-  if (sharedRuntimeRoots.some((root) => insideSourceRoot(file, root))) return false;
-  return insideSourceRoot(file, framework) && sourceModule;
+  const features = canonicalSourcePath(resolve(framework, "features"));
+  return insideSourceRoot(file, features) && sourceModule;
 }
 
 function insideSourceRoot(file: string, root: string): boolean {
@@ -3024,6 +3063,7 @@ function presentationContractPlugin(
   let prepared = state.current;
   let observedRevision = revisions.current.revision;
   let updates = Promise.resolve();
+  const sourceSnapshots = new Map<string, string>();
   const responseCache = createWebResponseCache<
     Awaited<ReturnType<typeof prepareDevelopmentDocument>>
   >({
@@ -3036,15 +3076,22 @@ function presentationContractPlugin(
   const refresh = async (context: HmrContext): Promise<ModuleNode[] | undefined> => {
     if (context.file.startsWith(work)) return [];
     if (!context.file.startsWith(paths.source)) return undefined;
+    const changed = canonicalSourcePath(context.file);
+    const previousSource = sourceSnapshots.get(changed);
+    const currentSource = await context.read();
+    sourceSnapshots.set(changed, currentSource);
     let modules: ModuleNode[] = [];
     updates = updates.then(async () => {
       try {
         const started = performance.now();
         const compilation = revisions.compile(context.file);
-        const updateKind =
-          presentationUpdate(context, prepared.presentationSources) &&
-          webPresentationOnlyChange(prepared.ir, compilation.ir, prepared.interface)
+        const updateKind = presentationUpdate(context, prepared.presentationSources)
+          ? webPresentationOnlyChange(prepared.ir, compilation.ir, prepared.interface)
             ? "presentation"
+            : "full"
+          : previousSource !== undefined &&
+              webComponentViewSourceOnlyChange(previousSource, currentSource, changed)
+            ? "view"
             : "full";
         if (compilation.revision === observedRevision) {
           modules = [];
@@ -3072,7 +3119,6 @@ function presentationContractPlugin(
         ];
         const invalidated = new Set<ModuleNode>();
         const timestamp = Date.now();
-        const changed = canonicalSourcePath(context.file);
         for (const module of context.server.moduleGraph.idToModuleMap.values()) {
           if (module.id && projectedSourceFile(module.id) === changed) {
             context.server.moduleGraph.invalidateModule(module, invalidated, timestamp, true);
@@ -3114,6 +3160,15 @@ function presentationContractPlugin(
   };
   return {
     name: "kit-presentation-contract",
+    async transform(_code, id) {
+      const file = canonicalSourcePath(cleanId(id));
+      if (sourceSnapshots.has(file) || !file.startsWith(paths.source) || file.startsWith(work)) {
+        return;
+      }
+      try {
+        sourceSnapshots.set(file, await readFile(file, "utf8"));
+      } catch {}
+    },
     configureServer(server) {
       server.middlewares.use((request, response, next) => {
         if (state.current.crossOriginIsolated) {
@@ -3641,7 +3696,7 @@ async function prepareDevelopmentDocument(input: {
     }
   }
   if (input.contract.installation) {
-    document = withWebInstallation(document);
+    document = withWebInstallation(document, input.contract.installation);
   }
   const hydration =
     document.hydration === false
@@ -4012,6 +4067,59 @@ function webPresentationOnlyChange(
   );
 }
 
+function webComponentViewSourceOnlyChange(
+  previous: string,
+  current: string,
+  file: string,
+): boolean {
+  if (previous === current) return false;
+  const mask = (sourceText: string): string => {
+    const source = ts.createSourceFile(
+      file,
+      sourceText,
+      ts.ScriptTarget.Latest,
+      true,
+      file.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+    );
+    const ranges: Array<Readonly<{ start: number; end: number }>> = [];
+    const visit = (node: ts.Node): void => {
+      if (
+        ts.isPropertyAssignment(node) &&
+        objectPropertyName(node.name) === "components" &&
+        ts.isObjectLiteralExpression(node.initializer)
+      ) {
+        for (const component of node.initializer.properties) {
+          if (
+            !ts.isPropertyAssignment(component) ||
+            !ts.isObjectLiteralExpression(component.initializer)
+          ) {
+            continue;
+          }
+          for (const member of component.initializer.properties) {
+            if (objectPropertyName(member.name) !== "view") continue;
+            if (ts.isMethodDeclaration(member) && member.body) {
+              ranges.push({ start: member.body.getStart(source), end: member.body.end });
+            } else if (ts.isPropertyAssignment(member)) {
+              ranges.push({
+                start: member.initializer.getStart(source),
+                end: member.initializer.end,
+              });
+            }
+          }
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
+    let masked = sourceText;
+    for (const range of ranges.sort((left, right) => right.start - left.start)) {
+      masked = `${masked.slice(0, range.start)}__KIT_COMPONENT_VIEW__${masked.slice(range.end)}`;
+    }
+    return masked;
+  };
+  return mask(previous) === mask(current);
+}
+
 async function prepareProductionDocuments(
   paths: SystemPaths,
   work: string,
@@ -4176,7 +4284,9 @@ export default { documents, presentation };
       routes: Object.freeze([
         Object.freeze({
           route,
-          document: contract.installation ? withWebInstallation(document) : document,
+          document: contract.installation
+            ? withWebInstallation(document, contract.installation)
+            : document,
           request: false,
         }),
       ]),
@@ -4197,7 +4307,9 @@ export default { documents, presentation };
     }
     return Object.freeze({
       route,
-      document: contract.installation ? withWebInstallation(document) : document,
+      document: contract.installation
+        ? withWebInstallation(document, contract.installation)
+        : document,
       request,
     });
   });
@@ -4408,10 +4520,27 @@ function withWebStyles(document: WebDocumentIR): WebDocumentIR {
   return Object.freeze({ ...document, styles: Object.freeze([stylesheet]) });
 }
 
-function withWebInstallation(document: WebDocumentIR): WebDocumentIR {
+function withWebInstallation(
+  document: WebDocumentIR,
+  installation: WebInstallationPlan,
+): WebDocumentIR {
+  const icons =
+    document.metadata.icons?.length || !installation.icons.length
+      ? document.metadata.icons
+      : installation.icons.slice(0, 1).map(({ src, sizes, type }) =>
+          Object.freeze({
+            url: src,
+            sizes,
+            ...(type ? { type } : {}),
+          }),
+        );
   return Object.freeze({
     ...document,
-    metadata: Object.freeze({ ...document.metadata, manifest: WEB_MANIFEST_PATH }),
+    metadata: Object.freeze({
+      ...document.metadata,
+      ...(icons ? { icons: Object.freeze(icons) } : {}),
+      manifest: WEB_MANIFEST_PATH,
+    }),
   });
 }
 
@@ -4434,12 +4563,12 @@ function defaultRouteDocument(
 function featureProviders(
   ir: SystemIR,
   program: ProgramIR,
-): readonly SelectedDependencyProviderIR[] {
+): readonly Pick<SelectedDependencyProviderIR, "dependency" | "feature" | "platform">[] {
   return selectDependencyProviders(
     ir,
     program,
     linkProgram(program).external.map(({ name }) => name),
-  );
+  ).map(({ dependency, feature, platform }) => ({ dependency, feature, platform }));
 }
 
 function workerSource(input: {
@@ -4450,9 +4579,9 @@ function workerSource(input: {
   runtime: string;
   processRuntime: string;
   program: ProgramIR;
-  manifest: unknown;
-  dependencies: readonly DependencyContractIR[];
-  providers: readonly SelectedDependencyProviderIR[];
+  manifest: ProgramManifest;
+  dependencies: readonly string[];
+  providers: readonly Pick<SelectedDependencyProviderIR, "dependency" | "feature" | "platform">[];
 }): string {
   const system = programSystemSpecifier(input.system, input.program.name);
   const serviceWorker = input.program.environment.name === "browser-service-worker";
@@ -4473,8 +4602,9 @@ addEventListener("message", (event) => {
 });`;
   const start = serviceWorker
     ? `globalThis.__kitServiceWorkerSubscriptions ??= new Set();
+const manifest = ${JSON.stringify(input.manifest)};
 const ready = createWebHost({
-  dependencies: ${JSON.stringify(input.dependencies)},
+  dependencies: externalContracts(manifest, ${JSON.stringify(input.dependencies)}),
 	  providers: ${JSON.stringify(input.providers)},
 	  system,
 	  context: "service-worker",
@@ -4482,12 +4612,13 @@ const ready = createWebHost({
   system,
   ${JSON.stringify(input.program.name)},
 	  dependencies,
-	  ${JSON.stringify(input.manifest)},
+	  manifest,
 	  webProgramLanguageRuntime,
 	  ${JSON.stringify(input.program.logicalName)},
 	));`
-    : `const dependencies = await createWebHost({
-  dependencies: ${JSON.stringify(input.dependencies)},
+    : `const manifest = ${JSON.stringify(input.manifest)};
+const dependencies = await createWebHost({
+  dependencies: externalContracts(manifest, ${JSON.stringify(input.dependencies)}),
 	  providers: ${JSON.stringify(input.providers)},
 	  system,
 	  context: "worker",
@@ -4496,7 +4627,7 @@ const ready = startProcess(
   system,
   ${JSON.stringify(input.program.name)},
 	  dependencies,
-	  ${JSON.stringify(input.manifest)},
+	  manifest,
 	  webProgramLanguageRuntime,
 	  ${JSON.stringify(input.program.logicalName)},
 	);`;
@@ -4504,6 +4635,11 @@ const ready = startProcess(
 	import { createWebHost } from ${JSON.stringify(input.host)};
 	import { webProgramLanguageRuntime } from ${JSON.stringify(input.runtime)};
 	import { startProcess } from ${JSON.stringify(input.processRuntime)};
+
+const externalContracts = (manifest, names) => {
+  const requested = new Set(names);
+  return manifest.bindings.filter(({ name }) => requested.has(name));
+};
 
 ${start}
 ${lifecycle}
@@ -4525,12 +4661,26 @@ export function renderServiceWorkerBootstrap(
   registerInDevelopment: boolean,
 ): string {
   return `const development = ${JSON.stringify(development)};
-const preview = development && new URL(location.href).searchParams.get("pwa") === "preview";
+const previewParameter = new URL(location.href).searchParams.get("pwa");
+if (development && previewParameter === "preview") {
+  sessionStorage.setItem("kit:pwa-preview", "active");
+} else if (development && previewParameter === "off") {
+  sessionStorage.removeItem("kit:pwa-preview");
+}
+const preview = development && sessionStorage.getItem("kit:pwa-preview") === "active";
 const requested = !development || ${JSON.stringify(registerInDevelopment)} || preview;
 const supported = typeof navigator.serviceWorker?.register === "function";
 const worker = ${JSON.stringify(worker)};
 const source = requested ? new URL(worker, import.meta.url) : undefined;
 if (preview) source?.searchParams.set("pwa", "preview");
+const controlledAtStart = supported && navigator.serviceWorker.controller !== null;
+let reloading = false;
+const reloadForUpdate = () => {
+  if (!controlledAtStart || reloading) return;
+  reloading = true;
+  location.reload();
+};
+if (supported) navigator.serviceWorker.addEventListener("controllerchange", reloadForUpdate);
 const resetDevelopmentWorker = async () => {
   if (!development || !supported) return;
   const scope = new URL("/", location.href).href;
@@ -4544,7 +4694,7 @@ const resetDevelopmentWorker = async () => {
       .every((worker) => worker.scriptURL !== target),
   );
   await Promise.all(stale.map((registration) => registration.unregister()));
-  if ("caches" in globalThis) {
+  if (stale.length > 0 && "caches" in globalThis) {
     const names = await caches.keys();
     await Promise.all(
       names.filter((name) => name.startsWith("kit-")).map((name) => caches.delete(name)),
@@ -4562,7 +4712,18 @@ const activate = async () => {
   try {
     await resetDevelopmentWorker();
     if (!requested || !supported || !source) return;
-    await navigator.serviceWorker.register(source, { type: "module", scope: "/" });
+    const registration = await navigator.serviceWorker.register(source, {
+      type: "module",
+      scope: "/",
+      updateViaCache: "none",
+    });
+    registration.waiting?.postMessage("kit:activate");
+    const update = () => void registration.update().catch(() => undefined);
+    addEventListener("online", update);
+    addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") update();
+    });
+    setInterval(update, 60 * 60 * 1000);
     const connection = navigator.connection;
     if (!connection?.saveData && connection?.effectiveType !== "slow-2g" && connection?.effectiveType !== "2g") {
       (await navigator.serviceWorker.ready).active?.postMessage("kit:warm");
@@ -4599,21 +4760,21 @@ function candidateSource(input: {
   runtime: string;
   presentationRuntime: string;
   program: ProgramIR;
-  programManifest: unknown;
-  providers: readonly SelectedDependencyProviderIR[];
+  programManifest: ProgramManifest;
+  providers: readonly Pick<SelectedDependencyProviderIR, "dependency" | "feature" | "platform">[];
   components: unknown;
   presentationDependencies: unknown;
-  hotManifest: unknown;
+  hotManifest?: unknown;
   routes: readonly WebRouteIR[];
   routeEntries: readonly WebRouteEntry[];
-  dependencies: readonly DependencyContractIR[];
+  dependencies: readonly string[];
   routeDependencies: readonly string[];
   headless: readonly Readonly<{
     program: string;
     logicalProgram: string;
-    manifest: unknown;
-    dependencies: readonly DependencyContractIR[];
-    providers: readonly SelectedDependencyProviderIR[];
+    manifest: ProgramManifest;
+    dependencies: readonly string[];
+    providers: readonly Pick<SelectedDependencyProviderIR, "dependency" | "feature" | "platform">[];
   }>[];
   workers: readonly Readonly<{
     source: string;
@@ -4632,6 +4793,9 @@ function candidateSource(input: {
   const routesWithLoaders = input.routeEntries
     .filter(({ loader }) => loader)
     .map(({ identity }) => identity);
+  const manifest = input.development
+    ? `export const manifest = ${JSON.stringify(input.hotManifest)};`
+    : "";
   const hotState = input.development
     ? `const hotState = {
     ...previous,
@@ -4680,10 +4844,11 @@ function candidateSource(input: {
   };`;
   return `import system from ${JSON.stringify(system)};
 import { createWebHost } from ${JSON.stringify(input.host)};
-	import { createWebUIAdapter, render, webProgramLanguageRuntime } from ${JSON.stringify(input.runtime)};
+		import { createWebUIAdapter, render, webProgramLanguageRuntime } from ${JSON.stringify(input.runtime)};
 import { startProcess } from ${JSON.stringify(input.processRuntime)};
 
-export const manifest = ${JSON.stringify(input.hotManifest)};
+${manifest}
+export { system };
 const application = system.applications?.[${JSON.stringify(input.application)}];
 const interfaceDefinition =
   application?.interfaces?.[${JSON.stringify(input.interface.slice(input.application.length + 1))}];
@@ -4691,6 +4856,7 @@ if (!interfaceDefinition?.presentation) {
   throw new Error(${JSON.stringify(`Web interface ${input.interface} has no Presentation.`)});
 }
 export const presentation = interfaceDefinition.presentation;
+const programManifest = ${JSON.stringify(input.programManifest)};
 const headlessPrograms = ${JSON.stringify(input.headless)};
 const workerPrograms = ${JSON.stringify(input.workers)};
 const routeModules = {
@@ -4715,8 +4881,13 @@ const loadRouteIdentity = (identity) => {
 const loadRoute = (route) =>
   loadRouteIdentity(route.feature + "." + route.name);
 
+const externalContracts = (manifest, names) => {
+  const requested = new Set(names);
+  return manifest.bindings.filter(({ name }) => requested.has(name));
+};
+
 const hostOptions = (definition) => ({
-  dependencies: definition.dependencies,
+  dependencies: externalContracts(definition.manifest, definition.dependencies),
 	  providers: definition.providers,
 	  system,
 	  routes: ${JSON.stringify(clientWebRoutes(input.routes))},
@@ -4778,11 +4949,11 @@ export async function activate(root${input.development ? ", previous = {}" : ""}
   const platform = createWebUIAdapter(presentationAdapter);
   const dependencies = await createWebHost({
     ...${JSON.stringify({
-      dependencies: input.dependencies,
       routeDependencies: input.routeDependencies,
       providers: input.providers,
       routes: input.routes,
     })},
+    dependencies: externalContracts(programManifest, ${JSON.stringify(input.dependencies)}),
     system,
   });
   let ui;
@@ -4793,7 +4964,7 @@ export async function activate(root${input.development ? ", previous = {}" : ""}
       features: ${JSON.stringify(input.features)},
       program: ${JSON.stringify(input.program.name)},
       logicalProgram: ${JSON.stringify(input.program.logicalName)},
-      programManifest: ${JSON.stringify(input.programManifest)},
+      programManifest,
       dependencies,
       presentation,
       components: ${JSON.stringify(input.components)},
@@ -5019,12 +5190,15 @@ addEventListener("pagehide", dispose, { once: true });
 `;
   }
   return `import * as initialCandidate from ${JSON.stringify(candidate)};
-import { HotUpdateCoordinator, sameWebHotReplacementManifest } from ${JSON.stringify(input.runtime)};
-import { startWebDeferredStream } from ${JSON.stringify(input.stream)};
+	import { HotUpdateCoordinator } from ${JSON.stringify(input.runtime)};
+	import { startWebDeferredStream } from ${JSON.stringify(input.stream)};
 
 startWebDeferredStream();
 const root = document.querySelector("#app");
 if (!root) throw new Error("Missing UI root.");
+const sameWebHotReplacementManifest = (previous, next) =>
+  previous.revision === next.revision &&
+  JSON.stringify(previous.programs) === JSON.stringify(next.programs);
 const coordinator =
   import.meta.hot?.data.coordinator ??
   new HotUpdateCoordinator(sameWebHotReplacementManifest);
@@ -5039,6 +5213,10 @@ const apply = async (candidate, updateKind) => {
       coordinator.value
     ) {
       coordinator.value.updatePresentation(candidate.presentation);
+      return;
+    }
+    if (updateKind === "view" && coordinator.value) {
+      coordinator.value.updateImplementation(candidate.system);
       return;
     }
     const result = await coordinator.replace({
@@ -5074,7 +5252,12 @@ if (import.meta.hot) {
   let pendingUpdateKind;
   import.meta.hot.data.coordinator = coordinator;
   import.meta.hot.on("kit:update-kind", ({ kind }) => {
-    pendingUpdateKind = pendingUpdateKind === "full" || kind === "full" ? "full" : kind;
+    pendingUpdateKind =
+      pendingUpdateKind === "full" || kind === "full"
+        ? "full"
+        : pendingUpdateKind === "view" || kind === "view"
+          ? "view"
+          : kind;
   });
   import.meta.hot.accept(${JSON.stringify(candidate)}, async (next) => {
     const updateKind = pendingUpdateKind ?? "full";

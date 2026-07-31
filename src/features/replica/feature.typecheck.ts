@@ -13,6 +13,7 @@ type Principal = Readonly<{
 
 type Users = IdentityModel<{
   Name: "identity";
+  Version: 1;
   Principal: Principal;
 }>;
 

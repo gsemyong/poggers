@@ -231,7 +231,7 @@ describe("Program UI composition", () => {
     expect(subscribers.size).toBe(0);
   });
 
-  test("warms every remaining Route definition after the initial Route commits", async () => {
+  test("loads only the active Route until navigation or intent requests another", async () => {
     vi.stubGlobal("Element", class {});
     vi.stubGlobal("document", {
       title: "",
@@ -281,7 +281,9 @@ describe("Program UI composition", () => {
       boundary,
     });
 
-    await vi.waitFor(() => expect(loaded).toEqual(["start", "finish"]));
+    await vi.waitFor(() => expect(loaded).toEqual(["start"]));
+    await Promise.resolve();
+    expect(loaded).toEqual(["start"]);
     await ui.dispose();
   });
 
@@ -599,12 +601,52 @@ describe("Program UI composition", () => {
     expect(ui.api.total).toBe(0);
     expect(increment({ feature: "first", by: 2 })).toBe(3);
     expect(ui.api.total).toBe(13);
-    ui.renderRoot();
+    readScoped(ui.renderRoot());
     await Promise.resolve();
     expect(renderedChildren).toEqual([3, 10]);
 
     await ui.dispose();
     expect(() => increment({ feature: "first", by: 1 })).toThrow("disposed");
+  });
+
+  test("replaces a live Component view without rebuilding its Program", async () => {
+    vi.stubGlobal("Element", class {});
+    const system = testSystem({
+      shell: {
+        programs: {
+          browser: {
+            components: { Root: { view: () => "before" } },
+            root: "Root",
+          },
+        },
+      },
+    });
+    const ui = await createInterfaceUI({
+      system,
+      interface: "web.main",
+      program: "web.browser",
+      logicalProgram: "browser",
+      presentation: emptyPresentation,
+      components: componentMetadata("web.shell.Root"),
+      boundary,
+    });
+    const child = ui.renderRoot();
+
+    ui.updateImplementation(
+      testSystem({
+        shell: {
+          programs: {
+            browser: {
+              components: { Root: { view: () => "after" } },
+              root: "Root",
+            },
+          },
+        },
+      }),
+    );
+
+    expect(readScoped(child)).toBe("after");
+    await ui.dispose();
   });
 
   test("requires exactly one root for a UI Program", async () => {

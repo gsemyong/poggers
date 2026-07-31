@@ -276,6 +276,14 @@ describe("System realization", { tags: ["compiler"] }, () => {
     );
     expect(Buffer.byteLength(manifest)).toBeLessThan(100_000);
     expect(objects).toHaveLength(4);
+    expect(objects.every((name) => /^[a-f0-9]{64}\.json\.br$/.test(name))).toBe(true);
+    expect(
+      (
+        await Promise.all(
+          objects.map(async (name) => (await stat(resolve(cache, "objects", name))).size),
+        )
+      ).reduce((total, bytes) => total + bytes, 0),
+    ).toBeLessThan(100_000);
 
     const second = createSystemRevisionSource(fixture.system, mockCompilerExtensions, true);
     expect(second.current.cache).toBe("hit");
@@ -295,6 +303,16 @@ describe("System realization", { tags: ["compiler"] }, () => {
         ),
       ),
     ).toEqual(modified);
+
+    const dedicatedCache = resolve(cache, "fixtures", "system.json");
+    expect(
+      createSystemRevisionSource(fixture.system, mockCompilerExtensions, dedicatedCache).current
+        .cache,
+    ).toBe("miss");
+    expect(
+      createSystemRevisionSource(fixture.system, mockCompilerExtensions, dedicatedCache).current
+        .cache,
+    ).toBe("hit");
 
     const extensionSource = resolve(fixture.system, "../../cache-extension.ts");
     await writeFile(extensionSource, "export const revision = 1;\n");

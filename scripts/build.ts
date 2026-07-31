@@ -8,7 +8,7 @@ import { pathToFileURL } from "node:url";
 import * as ts from "@typescript/typescript6";
 import { build } from "vite";
 
-import { packageSources } from "@/package";
+import { packageSources, synchronizePackageSources } from "@/package";
 
 const packageDir = resolve(import.meta.dirname, "..");
 const distDir = resolve(packageDir, "dist");
@@ -60,7 +60,7 @@ for (const pattern of ["**/*.spec.d.ts", "**/*.typecheck.d.ts"]) {
 }
 await rm(resolve(distDir, "scripts"), { force: true, recursive: true });
 await rewriteDeclarationAliases();
-await copySemanticSources();
+await synchronizePackageSources();
 await copyFeatureProviderSources();
 await copyPlatformNativeSources();
 
@@ -195,38 +195,6 @@ async function rewriteDeclarationAliases(): Promise<void> {
       },
     );
     if (rewritten !== contents) await writeFile(path, rewritten);
-  }
-}
-
-async function copySemanticSources(): Promise<void> {
-  const files: string[] = [];
-  for await (const file of glob("**/*.{ts,tsx}", { cwd: sourceDir })) {
-    if (
-      !file.split("/").includes("fixtures") &&
-      !/(?:^|\/)[^/]+\.(?:spec|typecheck)\./.test(file)
-    ) {
-      files.push(file);
-    }
-  }
-  const targets = sourceTargets(files, (file) => file.replace(/\.(?:ts|tsx)$/, ""));
-
-  for (const file of files) {
-    const output = resolve(distDir, "source", file);
-    const contents = await readFile(resolve(sourceDir, file), "utf8");
-    const rewritten = contents.replaceAll(
-      /(["'])@\/([^"']+)\1/g,
-      (_match, quote: string, target: string) => {
-        const targetFile = targets.get(target);
-        if (!targetFile) return _match;
-        let specifier = relative(dirname(output), resolve(distDir, "source", targetFile))
-          .replaceAll("\\", "/")
-          .replace(/\.(?:ts|tsx)$/, "");
-        if (!specifier.startsWith(".")) specifier = `./${specifier}`;
-        return `${quote}${specifier}${quote}`;
-      },
-    );
-    await mkdir(dirname(output), { recursive: true });
-    await writeFile(output, rewritten);
   }
 }
 

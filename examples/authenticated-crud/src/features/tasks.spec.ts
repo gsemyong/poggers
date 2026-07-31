@@ -1,13 +1,11 @@
-import { createAggregateFixture } from "kit/features/aggregate";
+import { createDataFixture } from "kit/features/data";
 import { describe, expect, test } from "vitest";
 
-import { taskAggregate, taskAggregateDefinition } from "@/features/tasks";
+import { taskData, taskDataDefinition, taskEmbedding } from "@/features/tasks";
 
 describe("tasks Feature", () => {
-  test("decides and replays its domain without infrastructure", async () => {
-    const fixture = createAggregateFixture(taskAggregate, taskAggregateDefinition, {
-      dependencies: {},
-    });
+  test("decides, replays, authorizes, and queries without infrastructure", async () => {
+    const fixture = await createDataFixture(taskData, taskDataDefinition);
     const principal = { id: "alice", name: "Alice", email: "alice@example.com" };
     const initial = fixture.initial({ key: "task-1" });
 
@@ -16,14 +14,14 @@ describe("tasks Feature", () => {
       key: "task-1",
       principal,
       state: initial,
-      input: { title: "Verify the feature" },
+      input: { id: "task-1", title: "Verify the feature" },
     });
     const completed = await fixture.execute({
       command: "toggle",
       key: "task-1",
       principal,
       state: created.snapshot,
-      input: undefined,
+      input: { id: "task-1" },
     });
 
     expect(created.outcome).toEqual({
@@ -35,6 +33,7 @@ describe("tasks Feature", () => {
       ownerId: "alice",
       title: "Verify the feature",
       completed: true,
+      embedding: taskEmbedding("Verify the feature"),
     });
     expect(
       fixture.replay({
@@ -42,6 +41,48 @@ describe("tasks Feature", () => {
         events: [...created.events, ...completed.events],
       }),
     ).toEqual(completed.snapshot);
+    await expect(
+      fixture.query({
+        rows: [completed.snapshot.state],
+        principal,
+        query: { text: { value: "Verify", fields: ["title"] } },
+      }),
+    ).resolves.toMatchObject({
+      kind: "rows",
+      matches: [{ row: { id: "task-1" }, score: 1 }],
+    });
+    await expect(
+      fixture.query({
+        rows: [completed.snapshot.state],
+        principal,
+        query: {
+          vector: {
+            field: "embedding",
+            value: taskEmbedding("Verify feature"),
+            limit: 1,
+          },
+        },
+      }),
+    ).resolves.toMatchObject({
+      kind: "rows",
+      matches: [{ row: { id: "task-1" }, score: expect.any(Number) }],
+    });
+    await expect(
+      fixture.query({
+        rows: [completed.snapshot.state],
+        principal,
+        query: {
+          analytics: {
+            groupBy: ["completed"],
+            measures: { count: { count: true } },
+          },
+        },
+      }),
+    ).resolves.toEqual({
+      kind: "analytics",
+      observations: {},
+      groups: [{ key: { completed: true }, measures: { count: 1 } }],
+    });
 
     await expect(
       fixture.execute({
@@ -49,7 +90,7 @@ describe("tasks Feature", () => {
         key: "task-1",
         principal: { ...principal, id: "mallory" },
         state: completed.snapshot,
-        input: { title: "Unauthorized" },
+        input: { id: "task-1", title: "Unauthorized" },
       }),
     ).resolves.toMatchObject({
       outcome: { status: "failed", failure: { type: "forbidden" } },

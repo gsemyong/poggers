@@ -10,6 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, parse, resolve, sep } from "node:path";
+import { brotliCompressSync, brotliDecompressSync, constants as zlibConstants } from "node:zlib";
 
 import {
   selectPlatformAdapters,
@@ -168,12 +169,17 @@ export async function developSystem<Adapter extends PlatformAdapterImplementatio
 export function createSystemRevisionSource(
   system: string,
   extensions: Parameters<typeof createSystemCompiler>[1],
-  cache = false,
+  cache: boolean | string = false,
 ): SystemRevisionSource {
   const compiler = createSystemCompiler(system, extensions);
   const compilerIdentity = systemCompilerIdentity(extensions);
-  const identity = cache ? compilerIdentity : undefined;
-  const cached = identity ? readSystemCompilationCache(system, identity) : undefined;
+  const cachePath =
+    typeof cache === "string"
+      ? resolve(cache)
+      : cache
+        ? systemCompilationCachePath(system)
+        : undefined;
+  const cached = cachePath ? readSystemCompilationCache(cachePath, compilerIdentity) : undefined;
   let revision = 0;
   let current: RetainedSystemCompilationRevision;
   let cacheInputs: Readonly<Record<string, string>>;
@@ -190,7 +196,9 @@ export function createSystemRevisionSource(
     if (cached) compiler.restore(cached.compilation);
     const compilation = compiler.compile();
     cacheInputs = systemCompilationSignatures(system, compilation.sourceFiles);
-    if (identity) writeSystemCompilationCache(system, identity, compilation, cacheInputs);
+    if (cachePath) {
+      writeSystemCompilationCache(cachePath, compilerIdentity, compilation, cacheInputs);
+    }
     current = {
       ...compilation,
       revision,
@@ -229,7 +237,9 @@ export function createSystemRevisionSource(
       };
       signatures.set(source, signature);
       retainOutputSignatures(signatures, current);
-      if (identity) writeSystemCompilationCache(system, identity, compiled, cacheInputs);
+      if (cachePath) {
+        writeSystemCompilationCache(cachePath, compilerIdentity, compiled, cacheInputs);
+      }
       return current;
     },
   };
@@ -238,11 +248,11 @@ export function createSystemRevisionSource(
 type RetainedSystemCompilationRevision = SystemCompilationRevision &
   Pick<SystemCompilation, "semanticGraph">;
 
-const SYSTEM_COMPILATION_CACHE_VERSION = 5;
+const SYSTEM_COMPILATION_CACHE_VERSION = 6;
 const SYSTEM_COMPILATION_CACHE_RETAINED_OBJECTS = 64;
 const SYSTEM_COMPILATION_CACHE_HARD_LIMIT = 96;
-const SYSTEM_COMPILATION_CACHE_RETAINED_BYTES = 96 * 1024 * 1024;
-const SYSTEM_COMPILATION_CACHE_HARD_BYTES = 128 * 1024 * 1024;
+const SYSTEM_COMPILATION_CACHE_RETAINED_BYTES = 32 * 1024 * 1024;
+const SYSTEM_COMPILATION_CACHE_HARD_BYTES = 48 * 1024 * 1024;
 
 type CachedSystemCompilation = Readonly<{
   version: number;
@@ -263,11 +273,10 @@ type LoadedSystemCompilationCache = Readonly<{
 }>;
 
 function readSystemCompilationCache(
-  system: string,
+  path: string,
   compiler: string,
 ): LoadedSystemCompilationCache | undefined {
   try {
-    const path = systemCompilationCachePath(system);
     const cached = JSON.parse(readFileSync(path, "utf8")) as CachedSystemCompilation;
     if (cached.version !== SYSTEM_COMPILATION_CACHE_VERSION || cached.compiler !== compiler) {
       return undefined;
@@ -322,12 +331,11 @@ function readSystemCompilationCache(
 }
 
 function writeSystemCompilationCache(
-  system: string,
+  path: string,
   compiler: string,
   compilation: SystemCompilation,
   inputs: Readonly<Record<string, string>>,
 ): void {
-  const path = systemCompilationCachePath(system);
   const root = systemCompilationObjectDirectory(path);
   const ir = writeSystemCompilationObject(root, compilation.ir);
   const features = compilation.semanticGraph.features.map((feature) => ({
@@ -359,13 +367,21 @@ function systemCompilationObjectDirectory(manifest: string): string {
 function writeSystemCompilationObject(directory: string, value: unknown): string {
   const source = JSON.stringify(value);
   const identity = createHash("sha256").update(source).digest("hex");
-  const path = resolve(directory, `${identity}.json`);
+  const path = resolve(directory, `${identity}.json.br`);
   try {
-    if (readFileSync(path, "utf8") === source) return identity;
+    if (brotliDecompressSync(readFileSync(path)).toString() === source) return identity;
   } catch {}
   mkdirSync(directory, { recursive: true });
   const temporary = `${path}.${process.pid}.tmp`;
-  writeFileSync(temporary, source);
+  writeFileSync(
+    temporary,
+    brotliCompressSync(source, {
+      params: {
+        [zlibConstants.BROTLI_PARAM_MODE]: zlibConstants.BROTLI_MODE_TEXT,
+        [zlibConstants.BROTLI_PARAM_QUALITY]: 4,
+      },
+    }),
+  );
   renameSync(temporary, path);
   return identity;
 }
@@ -374,7 +390,9 @@ function readSystemCompilationObject<Value>(directory: string, identity: string)
   if (!/^[a-f0-9]{64}$/.test(identity)) {
     throw new TypeError("Invalid cached compilation object identity.");
   }
-  const source = readFileSync(resolve(directory, `${identity}.json`), "utf8");
+  const source = brotliDecompressSync(
+    readFileSync(resolve(directory, `${identity}.json.br`)),
+  ).toString();
   if (createHash("sha256").update(source).digest("hex") !== identity) {
     throw new TypeError("Cached compilation object does not match its identity.");
   }
@@ -389,11 +407,18 @@ function retainSystemCompilationObjects(directory: string, retained: ReadonlySet
   }>[];
   try {
     entries = readdirSync(directory, { withFileTypes: true })
-      .filter((entry) => entry.isFile() && /^[a-f0-9]{64}\.json$/.test(entry.name))
+      .filter((entry) => {
+        if (!entry.isFile()) return false;
+        if (/^[a-f0-9]{64}\.json$/.test(entry.name)) {
+          rmSync(resolve(directory, entry.name), { force: true });
+          return false;
+        }
+        return /^[a-f0-9]{64}\.json\.br$/.test(entry.name);
+      })
       .map((entry) => {
         const statistics = statSync(resolve(directory, entry.name));
         return {
-          identity: entry.name.slice(0, -5),
+          identity: entry.name.slice(0, -8),
           modified: statistics.mtimeMs,
           bytes: statistics.size,
         };
@@ -419,7 +444,7 @@ function retainSystemCompilationObjects(directory: string, retained: ReadonlySet
     ) {
       break;
     }
-    rmSync(resolve(directory, `${identity}.json`), { force: true });
+    rmSync(resolve(directory, `${identity}.json.br`), { force: true });
     count -= 1;
     bytes -= objectBytes;
   }

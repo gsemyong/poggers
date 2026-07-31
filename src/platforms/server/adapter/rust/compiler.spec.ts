@@ -728,6 +728,7 @@ function compilerFixtureConfig(): string {
     extends: resolve(import.meta.dirname, "../../../../../tsconfig.json"),
     compilerOptions: {
       paths: { "@/*": [resolve(import.meta.dirname, "../../../../*")] },
+      types: [],
     },
   });
 }

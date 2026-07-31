@@ -2242,6 +2242,7 @@ async function writeResponse(
     response.end();
     return;
   }
+  response.flushHeaders();
   const reader = value.stream[Symbol.asyncIterator]();
   const cancel = () => void reader.return?.().catch(() => undefined);
   const stop = () => {

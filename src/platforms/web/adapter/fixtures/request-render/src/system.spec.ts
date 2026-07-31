@@ -30,6 +30,9 @@ testSystem({
     ).toBe(200);
     expect(adminHtml).toContain("<title>Admin</title>");
     expect(adminHtml).toContain('data-kit-rendering="client"');
+    expect(adminHtml).toMatch(
+      /<link rel="icon" href="data:image\/svg\+xml,[^"]+" type="image\/svg\+xml" sizes="192x192">/,
+    );
     expect(adminHtml).not.toContain("Administration");
     expect(adminHtml).not.toContain('data-interface="admin"');
 
@@ -50,6 +53,9 @@ testSystem({
     ]);
     expect(productWorker).toContain("kit-assets-");
     expect(adminWorker).toContain("kit-assets-");
+    if (realization === "production") {
+      expect(productWorker).toMatch(/const PRECACHE = \[[^\n]*route-/);
+    }
     expect(adminWorker).not.toBe(productWorker);
 
     const robots = await fetch(new URL("/robots.txt", productLocation));

@@ -6,14 +6,28 @@ import {
   type DependencyImplementations,
 } from "@/core/dependency";
 import { createFeature, type Feature } from "@/core/feature";
-import { typeKeys, typeLiteral, typeSchema } from "@/core/intrinsic";
+import { typeKeys, typeLiteral, typeSchema, type TypeSchema } from "@/core/intrinsic";
 import { distinctStream, filterStream, mapStream } from "@/core/stream";
-import type { Identity, IdentityModelDefinition } from "@/features/identity";
+import type {
+  Identity,
+  IdentityAuthorization,
+  IdentityModelDefinition,
+  IdentitySession,
+} from "@/features/identity";
+import type { Projection, ProjectionResult } from "@/features/projection";
 import {
-  evaluateProjectionRows,
-  type Projection,
-  type ProjectionResult,
-} from "@/features/projection";
+  browserReplicaCoordinationProvider,
+  browserReplicaStoreProvider,
+  createMemoryReplicaCoordination,
+  createMemoryReplicaStore,
+  type ReplicaCoordination,
+  type ReplicaStore,
+  type ReplicaStoreChange,
+  type ReplicaStoreCommand,
+  type ReplicaStoreDelta,
+  type ReplicaStoreRejection,
+  type ReplicaStoreState,
+} from "@/features/replica/store";
 import {
   getHttpValue,
   type HttpRequest,
@@ -23,10 +37,9 @@ import {
 } from "@/platforms/server";
 import type {
   BrowserMainThread,
-  HttpClient,
   Identifiers,
-  LocalStore,
   Scheduler,
+  WebDependencyProvider,
 } from "@/platforms/web";
 
 type Empty = Record<never, never>;
@@ -36,6 +49,52 @@ declare const replicaDefinition: unique symbol;
 export type ReplicaCommand<Input extends object, Result extends object = Empty> = Readonly<{
   Input: Input;
   Result: Result;
+}>;
+
+/** One portable materialized change carried by every Replication realization. */
+export type ReplicationChange =
+  | Readonly<{ row: string; upsert: Readonly<{ id: string }> }>
+  | Readonly<{ row: string; remove: Readonly<{ id: string }> }>;
+
+/**
+ * Versioned authoritative progress shared by in-process, browser, and future
+ * Replication transports. Product row meaning remains owned by the Replica.
+ */
+export type ReplicationEnvelope = Readonly<{
+  version: number;
+  schema?: string;
+  sequence: number;
+  observations: Readonly<Record<string, string>>;
+  invocations: readonly string[];
+  cursor: string;
+  snapshot?: object;
+  changes: readonly ReplicationChange[];
+}>;
+
+/** One admitted command result plus authoritative progress observed afterward. */
+export type ReplicationCommandResult = Readonly<{
+  result: object;
+  pull: ReplicationEnvelope;
+}>;
+
+/** Resumable command and change transport required by a local Replica. */
+export type Replication = Dependency<{
+  Operations: {
+    pull(input: { replica: string; after?: number }): Promise<ReplicationEnvelope>;
+    command(input: {
+      replica: string;
+      command: string;
+      value: object;
+      idempotencyKey: string;
+      after?: number;
+    }): Promise<ReplicationCommandResult>;
+    changes(input: {
+      replica: string;
+      observations: Readonly<Record<string, string>>;
+      sequence: number;
+      signal?: AbortSignal;
+    }): Promise<AsyncIterable<ReplicationEnvelope>>;
+  };
 }>;
 
 export type ReplicaHistory<
@@ -101,6 +160,7 @@ export type Replica<Model extends ReplicaModelInput> = Readonly<
 type InputOf<Command extends ReplicaCommand<object, object>> = Command["Input"];
 type ResultOf<Command extends ReplicaCommand<object, object>> = Command["Result"];
 type PrincipalOf<Model extends ReplicaModelDefinition> = Identity.Principal<Model["Identity"]>;
+type SessionOf<Model extends ReplicaModelDefinition> = IdentitySession<Model["Identity"]>;
 type VersionTuple<
   Version extends number,
   Values extends readonly unknown[] = [],
@@ -187,7 +247,9 @@ type ReplicaOptimisticContext<
   Model extends ReplicaModelDefinition,
   Name extends keyof Model["Commands"],
 > = Readonly<{
+  name: Model["Name"];
   state: Readonly<Model["State"]>;
+  principal: PrincipalOf<Model>;
   input: InputOf<Model["Commands"][Name]>;
 }>;
 
@@ -246,7 +308,8 @@ type ReplicaMigration<
       }>);
 
 export type ReplicaImplementation<Model extends ReplicaModelDefinition> = Readonly<{
-  state(): Model["State"];
+  retention?: "retain" | "clear-on-sign-out";
+  state(input: Readonly<{ name: Model["Name"] }>): Model["State"];
   commands: Readonly<{
     [Name in keyof Model["Commands"]]: Readonly<{
       commit(
@@ -264,24 +327,32 @@ export type ReplicaImplementation<Model extends ReplicaModelDefinition> = Readon
   }>;
 }>;
 
-type ReplicaCommits<Model extends ReplicaModelDefinition> = Readonly<{
-  [Name in keyof Model["Commands"]]: Pick<ReplicaImplementation<Model>["commands"][Name], "commit">;
+export type ReplicaDispatchImplementation<Model extends ReplicaModelDefinition> = Readonly<{
+  retention?: "retain" | "clear-on-sign-out";
+  state(input: Readonly<{ name: Model["Name"] }>): Model["State"];
+  dispatch: Readonly<{
+    commit(
+      command: Extract<keyof Model["Commands"], string>,
+      context: ReplicaCommandContext<Model, keyof Model["Commands"]>,
+    ): MaybePromise<object>;
+    optimistic(
+      command: Extract<keyof Model["Commands"], string>,
+      context: ReplicaOptimisticContext<Model, keyof Model["Commands"]>,
+    ): Model["State"];
+  }>;
+  migrate: ReplicaImplementation<Model>["migrate"];
 }>;
 
-type ReplicaClientImplementation<Model extends ReplicaModelDefinition> = Pick<
-  ReplicaImplementation<Model>,
-  "commands" | "optimistic" | "migrate"
+type ReplicaRuntimeImplementation<Model extends ReplicaModelDefinition> =
+  ReplicaDispatchImplementation<Model>;
+
+type ReplicaPull<Model extends ReplicaModelDefinition> = Readonly<
+  Omit<ReplicationEnvelope, "version" | "snapshot" | "changes"> & {
+    version: Model["Version"];
+    snapshot?: Model["State"];
+    changes: readonly ReplicaChange<Model>[];
+  }
 >;
-
-type ReplicaPull<Model extends ReplicaModelDefinition> = Readonly<{
-  version: Model["Version"];
-  schema?: string;
-  sequence: number;
-  observations: Readonly<Record<string, string>>;
-  cursor: string;
-  snapshot?: Model["State"];
-  changes: readonly ReplicaChange<Model>[];
-}>;
 
 type ReplicaChange<Model extends ReplicaModelDefinition> = {
   [Name in Extract<keyof Model["State"], string>]:
@@ -293,15 +364,11 @@ type ReplicaChange<Model extends ReplicaModelDefinition> = {
     | Readonly<{ row: Name; remove: Readonly<{ id: string }> }>;
 }[Extract<keyof Model["State"], string>];
 
-type ReplicaCommandResponse<Model extends ReplicaModelDefinition> = Readonly<{
-  result: object;
-  pull: ReplicaPull<Model>;
-}>;
-
-type ReplicaProtocolSchema<Model extends ReplicaModelDefinition> = Readonly<{
-  State: Model["State"];
-  Commands: Model["Commands"];
-}>;
+type ReplicaCommandResponse<Model extends ReplicaModelDefinition> = Readonly<
+  Omit<ReplicationCommandResult, "pull"> & {
+    pull: ReplicaPull<Model>;
+  }
+>;
 
 type ReplicaAuthorityWire<Model extends ReplicaModelDefinition> = Readonly<
   {
@@ -323,7 +390,7 @@ type ReplicaAuthority<Model extends ReplicaModelDefinition> = Dependency<{
 
 type ReplicaClientCommandOperation<Command extends ReplicaCommand<object, object>> = (
   input: Command["Input"],
-) => Promise<Readonly<{ id: string }>>;
+) => Readonly<{ id: string }>;
 
 type ReplicaClientOperations<Model extends ReplicaModelDefinition> = Readonly<
   {
@@ -337,9 +404,9 @@ type ReplicaClientOperations<Model extends ReplicaModelDefinition> = Readonly<
       input: Projection.Query<Model["Projection"], Name>,
     ) => Promise<
       ProjectionResult<
-        Model["State"][Name] extends readonly (infer Row extends Readonly<{ id: string }>)[]
-          ? Row
-          : never
+      Model["State"][Name] extends readonly (infer Row extends Readonly<{ id: string }>)[]
+        ? Row
+        : never
       >
     >;
   } & {
@@ -372,10 +439,11 @@ type ReplicaServerRequirements<Model extends ReplicaModelDefinition> = Readonly<
 
 type ReplicaBrowserRequirements<Model extends ReplicaModelDefinition> = Readonly<
   IdentityBrowserRequirement<Model> & {
-    http: HttpClient;
     identifiers: Identifiers;
+    replication: Replication;
+    replicaCoordination: ReplicaCoordination;
+    replicaStore: ReplicaStore;
     scheduler: Scheduler;
-    storage: LocalStore;
   }
 >;
 
@@ -388,6 +456,13 @@ type ReplicaBrowserProvision<Model extends ReplicaModelDefinition> = Readonly<{
 }>;
 
 type ReplicaFeatureContract<Model extends ReplicaModelDefinition> = Readonly<{
+  Providers: {
+    web: {
+      replication: WebDependencyProvider<Replication>;
+      replicaCoordination: WebDependencyProvider<ReplicaCoordination>;
+      replicaStore: WebDependencyProvider<ReplicaStore>;
+    };
+  };
   Programs: {
     server: {
       Environment: ServerProcess;
@@ -434,32 +509,171 @@ export namespace Replica {
       : never;
 }
 
+/** @internal Web realization of Replica's semantic transport Dependency. */
+export const browserReplicationProvider: WebDependencyProvider<Replication> = {
+  requirements: {},
+  development({ request }) {
+    const json = async <Value>(input: Parameters<typeof request>[0]): Promise<Value> => {
+      const response = await request(input);
+      if (!response.ok) {
+        const failure = (await response.json().catch(() => ({}))) as Readonly<{
+          message?: string;
+        }>;
+        const error = new Error(
+          failure.message ?? `Replication request failed (${response.status}).`,
+        );
+        if (response.status === 401) error.name = "ReplicationAuthenticationRequired";
+        else if (response.status >= 400 && response.status < 500) {
+          error.name = "ReplicationRejected";
+        }
+        throw error;
+      }
+      return (await response.json()) as Value;
+    };
+    return Object.freeze({
+      pull({
+        input,
+      }: Readonly<{
+        input: Parameters<Replication["pull"]>[0];
+      }>): Promise<ReplicationEnvelope> {
+        const query =
+          input.after === undefined ? "" : `?after=${encodeURIComponent(`${input.after}`)}`;
+        return json<ReplicationEnvelope>({ path: `/api/replicas/${input.replica}${query}` });
+      },
+      command({
+        input,
+      }: Readonly<{
+        input: Parameters<Replication["command"]>[0];
+      }>): Promise<ReplicationCommandResult> {
+        return json<ReplicationCommandResult>({
+          path: `/api/replicas/${input.replica}/${input.command}`,
+          method: "POST",
+          body: JSON.stringify(input.value),
+          headers: {
+            "x-kit-command": input.idempotencyKey,
+            ...(input.after === undefined ? {} : { "x-kit-after": `${input.after}` }),
+          },
+        });
+      },
+      async changes({
+        input,
+      }: Readonly<{
+        input: Parameters<Replication["changes"]>[0];
+      }>): Promise<AsyncIterable<ReplicationEnvelope>> {
+        const response = await request({
+          path: `/api/replicas/${input.replica}/changes?after=${encodeURIComponent(
+            JSON.stringify(input.observations),
+          )}&sequence=${input.sequence}`,
+          signal: input.signal,
+        });
+        if (!response.ok) {
+          throw new Error(`Replication change stream failed (${response.status}).`);
+        }
+        if (!response.body) throw new Error("Replication change stream has no body.");
+        return replicaWebRecords<ReplicationEnvelope>(response.body);
+      },
+    });
+  },
+};
+
+async function* replicaWebRecords<Value>(body: ReadableStream<Uint8Array>): AsyncIterable<Value> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  let buffered = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (value) buffered += decoder.decode(value, { stream: true });
+      let newline = buffered.indexOf("\n");
+      while (newline >= 0) {
+        const line = buffered.slice(0, newline);
+        buffered = buffered.slice(newline + 1);
+        if (line) yield JSON.parse(line) as Value;
+        newline = buffered.indexOf("\n");
+      }
+      if (!done) continue;
+      buffered += decoder.decode();
+      if (buffered) yield JSON.parse(buffered) as Value;
+      return;
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+  }
+}
+
 /** Defines one authorized local-first Replica over existing semantic Dependencies. */
 export function createReplica<const Model extends ReplicaModelDefinition>(
   definition: ReplicaImplementation<Model>,
 ): DefinedReplica<Model> {
-  const commits: ReplicaCommits<Model> = definition.commands;
+  return createReplicaRuntime(
+    replicaDispatchImplementation(definition),
+    () => ({
+      kind: "record",
+      fields: [
+        {
+          name: "Commands",
+          optional: false,
+          type: typeSchema<Model["Commands"]>(),
+        },
+        {
+          name: "State",
+          optional: false,
+          type: typeSchema<Model["State"]>(),
+        },
+      ],
+    }),
+    undefined,
+  );
+}
+
+/** @internal Composite Feature-factory entry point; not part of the package surface. */
+export function createDispatchedReplica<const Model extends ReplicaModelDefinition>(
+  definition: ReplicaDispatchImplementation<Model>,
+  schema: () => TypeSchema,
+): DefinedReplica<Model> {
+  return createReplicaRuntime(definition, schema, true);
+}
+
+function createReplicaRuntime<const Model extends ReplicaModelDefinition>(
+  definition: ReplicaRuntimeImplementation<Model>,
+  schema: () => TypeSchema,
+  singleRow = false,
+): DefinedReplica<Model> {
   return createFeature<ReplicaFeatureContract<Model>>({
+    providers: {
+      web: {
+        replication: browserReplicationProvider,
+        replicaCoordination: browserReplicaCoordinationProvider,
+        replicaStore: browserReplicaStoreProvider,
+      },
+    },
     programs: {
       server: {
         start({ dependencies, provides }) {
           const name = provides[0] as Model["Name"];
           const identityName = typeLiteral<Model["Identity"]["Name"]>();
           const projectionName = typeLiteral<Model["ProjectionName"]>();
-          const rowNames = typeKeys<Model["State"]>();
+          const rowNames = singleRow
+            ? ([name] as unknown as readonly Extract<keyof Model["State"], string>[])
+            : typeKeys<Model["State"]>();
           const modelDependencies = replicaModelDependencies<Model>(
             dependencies,
             identityName,
             projectionName,
           );
-          const schema = JSON.stringify(typeSchema<ReplicaProtocolSchema<Model>>());
+          const protocolSchema = JSON.stringify(schema());
           const authority = replicaAuthority(
             dependencies[projectionName],
             rowNames,
-            commits,
+            (operation, context) =>
+              definition.dispatch.commit(
+                operation as Extract<keyof Model["Commands"], string>,
+                context,
+              ),
             modelDependencies,
             typeLiteral<Model["Version"]>(),
-            schema,
+            protocolSchema,
           );
           const path = `/api/replicas/${name}`;
           const route = dependencies.http.route({
@@ -468,7 +682,6 @@ export function createReplica<const Model extends ReplicaModelDefinition>(
               authority,
               replicaIdentity<Model>(dependencies, identityName),
               path,
-              Object.keys(commits),
             ),
           });
           return {
@@ -490,15 +703,22 @@ export function createReplica<const Model extends ReplicaModelDefinition>(
         async start({ dependencies, provides }) {
           const name = provides[0] as Model["Name"];
           const identityName = replicaBrowserIdentityName(dependencies);
+          const initial = definition.state({ name });
+          const rowNames = Object.keys(initial) as unknown as readonly Extract<
+            keyof Model["State"],
+            string
+          >[];
           const controller = new ReplicaController(
             name,
-            replicaImplementationVersion(definition),
+            replicaImplementationVersion(definition.migrate),
+            definition.retention ?? "retain",
             definition,
+            rowNames,
             dependencies,
             (dependencies as Readonly<Record<string, object>>)[identityName] as Identity.Client<
               Model["Identity"]
             >,
-            definition.state(),
+            initial,
           );
           await controller.start();
           const operations = new Map<string, (context: Readonly<{ input: unknown }>) => unknown>();
@@ -529,6 +749,47 @@ export function createReplica<const Model extends ReplicaModelDefinition>(
   }) as DefinedReplica<Model>;
 }
 
+function replicaDispatchImplementation<Model extends ReplicaModelDefinition>(
+  definition: ReplicaImplementation<Model>,
+): ReplicaDispatchImplementation<Model> {
+  return {
+    state: definition.state,
+    dispatch: {
+      commit(command, context) {
+        const operation = command as string;
+        const commands = definition.commands as Readonly<
+          Record<
+            string,
+            Readonly<{
+              commit(
+                value: ReplicaCommandContext<Model, keyof Model["Commands"]>,
+              ): MaybePromise<object>;
+            }>
+          >
+        >;
+        const implementation = commands[operation];
+        if (implementation === undefined) {
+          throw new ReplicaError("unknown-command", `Unknown command ${operation}.`);
+        }
+        return implementation.commit(context);
+      },
+      optimistic(command, context) {
+        const operation = command as string;
+        const optimistic = definition.optimistic as Readonly<
+          Record<
+            string,
+            (value: ReplicaOptimisticContext<Model, keyof Model["Commands"]>) => Model["State"]
+          >
+        >;
+        const implementation = optimistic[operation];
+        if (implementation === undefined) return context.state;
+        return implementation(context);
+      },
+    },
+    migrate: definition.migrate,
+  };
+}
+
 function replicaImplementationVersion(migrate: Readonly<Record<number, unknown>>): number {
   let version = 1;
   while (migrate[version] !== undefined) version += 1;
@@ -543,7 +804,13 @@ function replicaImplementationVersion(migrate: Readonly<Record<number, unknown>>
 function replicaBrowserIdentityName(dependencies: Readonly<Record<string, object>>): string {
   const identities = [];
   for (const name of Object.keys(dependencies)) {
-    if (name !== "http" && name !== "identifiers" && name !== "scheduler" && name !== "storage") {
+    if (
+      name !== "identifiers" &&
+      name !== "replication" &&
+      name !== "replicaCoordination" &&
+      name !== "replicaStore" &&
+      name !== "scheduler"
+    ) {
       identities.push(name);
     }
   }
@@ -579,7 +846,10 @@ function replicaIdentity<Model extends ReplicaModelDefinition>(
 function replicaAuthority<Model extends ReplicaModelDefinition>(
   projection: Projection.Reference<Model["Projection"]>,
   rowNames: readonly Extract<keyof Model["State"], string>[],
-  commands: ReplicaCommits<Model>,
+  commit: (
+    operation: string,
+    context: ReplicaCommandContext<Model, keyof Model["Commands"]>,
+  ) => MaybePromise<object>,
   dependencies: Model["Dependencies"],
   version: Model["Version"],
   schema: string,
@@ -604,6 +874,7 @@ function replicaAuthority<Model extends ReplicaModelDefinition>(
     const current = await dispatchDependency<{
       revision: number;
       observations: Readonly<Record<string, string>>;
+      invocations: readonly string[];
       snapshot?: Model["State"];
       changes: readonly ReplicaChange<Model>[];
     }>(projection, "$synchronize", {
@@ -616,6 +887,7 @@ function replicaAuthority<Model extends ReplicaModelDefinition>(
       ...(input.metadata ? { schema } : {}),
       sequence: current.revision,
       observations: current.observations,
+      invocations: current.invocations,
       cursor: `${current.revision}`,
       ...(current.snapshot === undefined ? {} : { snapshot: current.snapshot }),
       changes: current.changes,
@@ -630,14 +902,23 @@ function replicaAuthority<Model extends ReplicaModelDefinition>(
         { principal, after },
       );
       let current = sequence;
+      const observed = mapStream(source, async () => {
+        const previous = current;
+        const change = await pull({ principal, after: current });
+        if (change.sequence > current) current = change.sequence;
+        return {
+          change,
+          advanced:
+            change.sequence > previous &&
+            (change.snapshot !== undefined ||
+              change.changes.length > 0 ||
+              change.invocations.length > 0),
+        };
+      });
       return distinctStream(
-        filterStream(
-          mapStream(source, async () => {
-            const change = await pull({ principal, after: current });
-            if (change.sequence > current) current = change.sequence;
-            return change;
-          }),
-          (change) => change.sequence > sequence,
+        mapStream(
+          filterStream(observed, ({ advanced }) => advanced),
+          ({ change }) => change,
         ),
         (change) => change.sequence,
       );
@@ -648,18 +929,7 @@ function replicaAuthority<Model extends ReplicaModelDefinition>(
         input: object;
         idempotencyKey: string;
       }>;
-      const command = commands[operation] as
-        | Readonly<{
-            commit(context: {
-              principal: PrincipalOf<Model>;
-              input: object;
-              idempotencyKey: string;
-              dependencies: Model["Dependencies"];
-            }): MaybePromise<object>;
-          }>
-        | undefined;
-      if (!command) throw new ReplicaError("unknown-command", `Unknown command ${operation}.`);
-      const result = await command.commit({
+      const result = await commit(operation, {
         principal: request.principal,
         input: request.input,
         idempotencyKey: request.idempotencyKey,
@@ -677,7 +947,6 @@ function replicaHttpHandler<Model extends ReplicaModelDefinition>(
   authority: ReturnType<typeof replicaAuthority<Model>>,
   identity: Identity.Service<Model["Identity"]>,
   path: string,
-  commands: readonly string[],
 ): (request: HttpRequest) => Promise<HttpResponse> {
   return async (request) => {
     try {
@@ -720,7 +989,7 @@ function replicaHttpHandler<Model extends ReplicaModelDefinition>(
       const command = request.path.startsWith(commandPrefix)
         ? request.path.slice(commandPrefix.length)
         : "";
-      if (request.method !== "POST" || !replicaCommandExists(commands, command)) {
+      if (request.method !== "POST" || command.length === 0) {
         return replicaJson({ message: "Not found." }, 404);
       }
       const idempotencyKey = getHttpValue(request.headers, { name: "x-kit-command" });
@@ -782,13 +1051,6 @@ function replicaObservations(value: string | undefined): Readonly<Record<string,
   return result;
 }
 
-function replicaCommandExists(commands: readonly string[], command: string): boolean {
-  for (const candidate of commands) {
-    if (candidate === command) return true;
-  }
-  return false;
-}
-
 class ReplicaError extends Error {
   constructor(
     readonly code: "unauthenticated" | "invalid-command" | "unknown-command" | "rejected",
@@ -803,20 +1065,12 @@ function replicaErrorStatus(code: ReplicaError["code"]): number {
   return code === "unauthenticated" ? 401 : code === "unknown-command" ? 404 : 409;
 }
 
-type StoredReplica<Model extends ReplicaModelDefinition> = Readonly<{
-  version: number;
-  schema?: string;
-  principal: PrincipalOf<Model>;
-  cursor?: string;
-  sequence?: number;
-  observations?: Readonly<Record<string, string>>;
-  committed?: object;
-  pending: readonly Readonly<{ id: string; command: string; input: object }>[];
-  rejected: readonly Readonly<{
-    pending: Readonly<{ id: string; command: string; input: object }>;
-    message: string;
-  }>[];
-}>;
+type StoredReplica<Model extends ReplicaModelDefinition> = Readonly<
+  Omit<ReplicaStoreState, "principal" | "committed"> & {
+    principal: PrincipalOf<Model>;
+    committed?: object;
+  }
+>;
 
 type MigratedReplica<Model extends ReplicaModelDefinition> = Readonly<{
   committed?: Model["State"];
@@ -824,16 +1078,8 @@ type MigratedReplica<Model extends ReplicaModelDefinition> = Readonly<{
   rejected: readonly ReplicaRejection<Model>[];
 }>;
 
-type StoredReplicaCommand = Readonly<{
-  id: string;
-  command: string;
-  input: object;
-}>;
-
-type StoredReplicaRejection = Readonly<{
-  pending: StoredReplicaCommand;
-  message: string;
-}>;
+type StoredReplicaCommand = ReplicaStoreCommand;
+type StoredReplicaRejection = ReplicaStoreRejection;
 
 type RuntimeReplicaCommandMigrations = Readonly<
   Record<
@@ -888,7 +1134,9 @@ function migrateReplicaRejections(
 class ReplicaController<Model extends ReplicaModelDefinition> implements AsyncDisposable {
   readonly #name: string;
   readonly #version: number;
-  readonly #definition: ReplicaClientImplementation<Model>;
+  readonly #retention: "retain" | "clear-on-sign-out";
+  readonly #definition: ReplicaRuntimeImplementation<Model>;
+  readonly #rows: readonly string[];
   readonly #dependencies: ReplicaBrowserRequirements<Model>;
   readonly #identity: Identity.Client<Model["Identity"]>;
   readonly #initial: Model["State"];
@@ -903,21 +1151,35 @@ class ReplicaController<Model extends ReplicaModelDefinition> implements AsyncDi
   #sequence = 0;
   #observations: Readonly<Record<string, string>> = {};
   #principal: PrincipalOf<Model> | undefined;
+  #authorization: IdentityAuthorization | undefined;
   #identitySubscription: Disposable | undefined;
+  #coordinationSubscription: Disposable | undefined;
+  #principalTransition: Promise<void> = Promise.resolve();
+  #storeNotification: Promise<void> = Promise.resolve();
   #changeAbort: AbortController | undefined;
   #changes: Promise<void> | undefined;
   #retry: Disposable | undefined;
   #generation = 0;
   #retryAttempt = 0;
   #flushing: Promise<void> | undefined;
-  #deferredPulls: ReplicaPull<Model>[] = [];
   #write: Promise<void> = Promise.resolve();
+  #persistScheduled: Promise<void> | undefined;
+  #persistVersion = 0;
+  #persistedVersion = 0;
+  #storeReplacement: Readonly<Record<string, readonly Readonly<{ id: string }>[]>> | undefined;
+  #storeChanges: ReplicaStoreChange[] = [];
+  readonly #pendingUpserts = new Map<string, ReplicaStoreCommand>();
+  readonly #pendingRemovals = new Set<string>();
+  readonly #rejectionUpserts = new Map<string, ReplicaStoreRejection>();
+  readonly #rejectionRemovals = new Set<string>();
   #disposed = false;
 
   constructor(
     name: string,
     version: number,
-    definition: ReplicaClientImplementation<Model>,
+    retention: "retain" | "clear-on-sign-out",
+    definition: ReplicaRuntimeImplementation<Model>,
+    rows: readonly string[],
     dependencies: ReplicaBrowserRequirements<Model>,
     identity: Identity.Client<Model["Identity"]>,
     initial: Model["State"],
@@ -925,22 +1187,22 @@ class ReplicaController<Model extends ReplicaModelDefinition> implements AsyncDi
   ) {
     this.#name = name;
     this.#version = version;
+    this.#retention = retention;
     this.#schema = schema;
     this.#definition = definition;
+    this.#rows = rows;
     this.#dependencies = dependencies;
     this.#identity = identity;
-    this.#initial = cloneData(initial);
+    this.#initial = cloneData(initial, "Replica initial state");
   }
 
   async start(): Promise<void> {
     this.#identitySubscription ??= this.#identity.subscribe((session) => {
-      void this.#usePrincipal(session?.user as PrincipalOf<Model> | undefined).catch(
-        (error: unknown) => this.#offline(error),
+      void this.#queueSession(session as SessionOf<Model> | undefined).catch((error: unknown) =>
+        this.#offline(error),
       );
     });
-    await this.#usePrincipal(
-      (await this.#identity.session())?.user as PrincipalOf<Model> | undefined,
-    );
+    await this.#queueSession((await this.#identity.session()) as SessionOf<Model> | undefined);
   }
 
   invoke(operation: string, input: unknown): unknown {
@@ -954,14 +1216,25 @@ class ReplicaController<Model extends ReplicaModelDefinition> implements AsyncDi
       receive(this.#state);
       return { [Symbol.dispose]: () => this.#listeners.delete(receive) };
     }
-    if (operation in this.#definition.commands) return this.command(operation, input as object);
     const data = this.#state.data as
       | Readonly<Record<string, readonly Readonly<{ id: string }>[] | undefined>>
       | undefined;
-    if (data !== undefined && Object.hasOwn(data, operation)) {
-      return Promise.resolve(evaluateProjectionRows(data[operation] ?? [], input as object));
+    if (this.#rows.includes(operation)) {
+      const principal = this.#requirePrincipal();
+      const authorization = this.#authorization;
+      if (!authorization) {
+        throw new ReplicaError("unauthenticated", "Identity session has no authorization context.");
+      }
+      return this.#dependencies.replicaStore.query({
+        replica: this.#name,
+        principal: principal.id,
+        authorization: authorization.version,
+        row: operation,
+        rows: data?.[operation] ?? [],
+        query: input as object,
+      });
     }
-    throw new ReplicaError("unknown-command", `Unknown Replica operation ${operation}.`);
+    return this.command(operation, input as object);
   }
 
   async synchronize(): Promise<ReplicaState<Model>> {
@@ -971,11 +1244,11 @@ class ReplicaController<Model extends ReplicaModelDefinition> implements AsyncDi
       this.#setState({ ...this.#state, status: "synchronizing" });
     }
     try {
-      const pull = await replicaRequest<ReplicaPull<Model>>(
-        this.#dependencies.http,
-        `/api/replicas/${this.#name}`,
-        this.#committed === undefined ? {} : { after: `${this.#sequence}` },
-      );
+      const received = await this.#dependencies.replication.pull({
+        replica: this.#name,
+        ...(this.#committed === undefined ? {} : { after: this.#sequence }),
+      });
+      const pull = canonicalReplicationEnvelope(received) as ReplicaPull<Model>;
       if (!this.#active(generation)) return this.#state;
       if (
         pull.schema === undefined ||
@@ -1007,33 +1280,38 @@ class ReplicaController<Model extends ReplicaModelDefinition> implements AsyncDi
     return this.#state;
   }
 
-  async command(operation: string, input: object): Promise<Readonly<{ id: string }>> {
+  command(operation: string, input: object): Readonly<{ id: string }> {
     this.#requirePrincipal();
-    if (!(operation in this.#definition.commands)) {
-      throw new ReplicaError("unknown-command", `Unknown command ${operation}.`);
-    }
     if (this.#state.data === undefined) {
       throw new ReplicaError("rejected", "Replica local state is unavailable.");
     }
     const pending = {
       id: this.#dependencies.identifiers.create({}),
       command: operation,
-      input: cloneData(input),
+      input: cloneData(input, "Replica command input"),
     } as ReplicaPending<Model>;
+    this.#upsertPending(pending);
     const pendingCommands = [...this.#state.pending, pending];
     this.#setState({
       ...this.#state,
       pending: pendingCommands,
       data: this.#replay(this.#committed ?? this.#initial, pendingCommands),
     });
-    await this.#persist();
-    void this.#flush(this.#requirePrincipal(), this.#generation);
+    const principal = this.#requirePrincipal();
+    const generation = this.#generation;
+    void this.#persist()
+      .then(() => this.#flush(principal, generation))
+      .catch((error: unknown) => {
+        if (this.#active(generation)) this.#offline(error);
+      });
     return { id: pending.id };
   }
 
   async retry(id: string): Promise<ReplicaState<Model>> {
     const rejection = this.#state.rejected.find(({ pending }) => pending.id === id);
     if (!rejection) return this.#state;
+    this.#upsertPending(rejection.pending);
+    this.#removeRejection(rejection.pending.id);
     this.#setState({
       ...this.#state,
       pending: [...this.#state.pending, rejection.pending],
@@ -1045,6 +1323,7 @@ class ReplicaController<Model extends ReplicaModelDefinition> implements AsyncDi
   }
 
   async dismiss(id: string): Promise<ReplicaState<Model>> {
+    this.#removeRejection(id);
     this.#setState({
       ...this.#state,
       rejected: this.#state.rejected.filter(({ pending }) => pending.id !== id),
@@ -1058,29 +1337,93 @@ class ReplicaController<Model extends ReplicaModelDefinition> implements AsyncDi
     this.#disposed = true;
     this.#generation += 1;
     this.#identitySubscription?.[Symbol.dispose]();
+    this.#coordinationSubscription?.[Symbol.dispose]();
     this.#stopChanges();
     this.#retry?.[Symbol.dispose]();
-    await Promise.allSettled([this.#changes, this.#flushing, this.#write].filter(Boolean));
+    await Promise.allSettled(
+      [
+        this.#principalTransition,
+        this.#changes,
+        this.#flushing,
+        this.#persistScheduled,
+        this.#write,
+        this.#storeNotification,
+      ].filter(Boolean),
+    );
     this.#listeners.clear();
   }
 
-  async #usePrincipal(principal: PrincipalOf<Model> | undefined): Promise<void> {
+  #queueSession(session: SessionOf<Model> | undefined): Promise<void> {
+    const transition = this.#principalTransition
+      .catch(() => undefined)
+      .then(() => this.#useSession(session));
+    this.#principalTransition = transition;
+    return transition;
+  }
+
+  async #useSession(session: SessionOf<Model> | undefined): Promise<void> {
     if (this.#disposed) return;
+    const principal = session?.user as PrincipalOf<Model> | undefined;
+    const authorization = session?.authorization;
+    if (
+      this.#principal !== undefined &&
+      (principal === undefined ||
+        this.#principal.id !== principal.id ||
+        this.#authorization?.version !== authorization?.version)
+    ) {
+      await this.#persistScheduled?.catch(() => undefined);
+    }
     if (!principal) {
+      const previousPrincipal = this.#principal;
+      const previousAuthorization = this.#authorization;
       this.#principal = undefined;
+      this.#authorization = undefined;
       this.#committed = undefined;
-      this.#deferredPulls = [];
       this.#generation += 1;
+      this.#coordinationSubscription?.[Symbol.dispose]();
+      this.#coordinationSubscription = undefined;
       this.#stopChanges();
       this.#setState({ status: "signed-out", pending: [], rejected: [] });
+      if (
+        this.#retention === "clear-on-sign-out" &&
+        previousPrincipal !== undefined &&
+        previousAuthorization !== undefined
+      ) {
+        await this.#dependencies.replicaStore.remove({
+          replica: this.#name,
+          principal: previousPrincipal.id,
+          authorization: previousAuthorization.version,
+        });
+      }
       return;
     }
-    if (this.#principal?.id === principal.id && equalData(this.#principal, principal)) {
+    if (!authorization) {
+      throw new ReplicaError("unauthenticated", "Identity session has no authorization context.");
+    }
+    if (
+      this.#principal?.id === principal.id &&
+      equalData(this.#principal, principal) &&
+      this.#authorization?.version === authorization.version
+    ) {
+      const credentialRotated =
+        this.#authorization.session !== authorization.session ||
+        this.#authorization.expiresAt !== authorization.expiresAt;
       this.#principal = principal;
+      this.#authorization = authorization;
+      if (credentialRotated) {
+        const generation = ++this.#generation;
+        this.#stopChanges();
+        void this.synchronize().then(() => {
+          if (this.#active(generation)) this.#startChanges(generation);
+        });
+      }
       return;
     }
     const sameIdentity = this.#principal?.id === principal.id;
-    const authorityChanged = sameIdentity && !equalData(this.#principal, principal);
+    const authorityChanged =
+      sameIdentity &&
+      (!equalData(this.#principal, principal) ||
+        this.#authorization?.version !== authorization.version);
     const pending = sameIdentity && !authorityChanged ? this.#state.pending : [];
     const rejected = sameIdentity
       ? [
@@ -1093,12 +1436,18 @@ class ReplicaController<Model extends ReplicaModelDefinition> implements AsyncDi
             : []),
         ]
       : [];
+    this.#pendingUpserts.clear();
+    this.#pendingRemovals.clear();
+    this.#rejectionUpserts.clear();
+    this.#rejectionRemovals.clear();
+    for (const rejection of rejected) this.#upsertRejection(rejection);
     this.#principal = principal;
+    this.#authorization = authorization;
     this.#committed = undefined;
-    this.#deferredPulls = [];
     this.#sequence = 0;
     this.#observations = {};
     const generation = ++this.#generation;
+    this.#observeStore(principal, authorization.version, generation);
     this.#stopChanges();
     this.#retry?.[Symbol.dispose]();
     this.#retry = undefined;
@@ -1108,9 +1457,12 @@ class ReplicaController<Model extends ReplicaModelDefinition> implements AsyncDi
       pending,
       rejected,
     });
-    const stored = await this.#dependencies.storage.read<StoredReplica<Model>>({
-      key: this.#storageKey(principal),
-    });
+    const stored = (await this.#dependencies.replicaStore.load({
+      replica: this.#name,
+      principal: principal.id,
+      authorization: authorization.version,
+      rows: this.#rows,
+    })) as StoredReplica<Model> | undefined;
     if (!this.#active(generation)) return;
     if (stored && equalData(stored.principal, principal)) {
       this.#schema = stored.schema;
@@ -1132,6 +1484,11 @@ class ReplicaController<Model extends ReplicaModelDefinition> implements AsyncDi
         pending: migrated.pending,
         rejected: migrated.rejected,
       });
+    } else if (stored === undefined) {
+      this.#storeReplacement = cloneData(this.#initial) as Readonly<
+        Record<string, readonly Readonly<{ id: string }>[]>
+      >;
+      this.#storeChanges = [];
     }
     void this.synchronize();
   }
@@ -1172,9 +1529,14 @@ class ReplicaController<Model extends ReplicaModelDefinition> implements AsyncDi
       version += 1;
     }
     return {
-      ...(state === undefined ? {} : { committed: cloneData(state) as Model["State"] }),
-      pending: cloneData(pending) as readonly ReplicaPending<Model>[],
-      rejected: cloneData(rejected) as readonly ReplicaRejection<Model>[],
+      ...(state === undefined
+        ? {}
+        : { committed: cloneData(state, "Replica stored state") as Model["State"] }),
+      pending: cloneData(pending, "Replica stored commands") as readonly ReplicaPending<Model>[],
+      rejected: cloneData(
+        rejected,
+        "Replica stored rejections",
+      ) as readonly ReplicaRejection<Model>[],
     };
   }
 
@@ -1185,21 +1547,24 @@ class ReplicaController<Model extends ReplicaModelDefinition> implements AsyncDi
     ) {
       return;
     }
-    if (this.#state.pending.length) {
-      const latest = this.#deferredPulls.at(-1);
-      if (!latest || pull.sequence > latest.sequence) this.#deferredPulls.push(pull);
-      return;
-    }
     this.#applyPull(pull);
   }
 
   #applyPull(pull: ReplicaPull<Model>): void {
-    if (!this.#mergePull(pull)) return;
+    const pending = this.#state.pending.filter(
+      ({ id }) => !replicaIncludes(pull.invocations, `idempotency:${id}`),
+    );
+    for (const command of this.#state.pending) {
+      if (!pending.includes(command)) this.#removePending(command.id);
+    }
+    const accepted = this.#mergePull(pull);
+    if (!accepted && pending.length === this.#state.pending.length) return;
     const committed = this.#committed;
     this.#setState({
       ...this.#state,
       cursor: pull.cursor,
-      ...(committed === undefined ? {} : { data: this.#replay(committed, this.#state.pending) }),
+      pending,
+      ...(committed === undefined ? {} : { data: this.#replay(committed, pending) }),
     });
     void this.#persist();
   }
@@ -1213,12 +1578,18 @@ class ReplicaController<Model extends ReplicaModelDefinition> implements AsyncDi
     }
     this.#sequence = pull.sequence;
     this.#observations = pull.observations;
-    if (pull.snapshot !== undefined) this.#committed = cloneData(pull.snapshot);
+    if (pull.snapshot !== undefined) {
+      this.#committed = cloneData(pull.snapshot, "Replica authority snapshot");
+      this.#storeReplacement = this.#committed as Readonly<
+        Record<string, readonly Readonly<{ id: string }>[]>
+      >;
+      this.#storeChanges = [];
+    }
     if (pull.changes.length) {
       if (this.#committed === undefined) {
         throw new ReplicaError("rejected", "Replica received changes before its initial snapshot.");
       }
-      const state = cloneData(this.#committed) as Record<
+      const state = cloneData(this.#committed, "Replica committed state") as Record<
         string,
         readonly Readonly<{ id: string }>[]
       >;
@@ -1241,6 +1612,9 @@ class ReplicaController<Model extends ReplicaModelDefinition> implements AsyncDi
         state[change.row] = next;
       }
       this.#committed = state as Model["State"];
+      this.#storeChanges.push(
+        ...(cloneData(pull.changes, "Replica authority changes") as readonly ReplicaStoreChange[]),
+      );
     }
     return true;
   }
@@ -1253,99 +1627,287 @@ class ReplicaController<Model extends ReplicaModelDefinition> implements AsyncDi
       }
       return;
     }
-    this.#flushing = (async () => {
-      while (this.#state.pending.length && this.#active(generation)) {
-        const pending = this.#state.pending[0]!;
-        try {
-          const response = await replicaRequest<ReplicaCommandResponse<Model>>(
-            this.#dependencies.http,
-            `/api/replicas/${this.#name}/${pending.command}`,
-            {},
-            {
-              method: "POST",
-              body: JSON.stringify(pending.input),
-              headers: {
-                "x-kit-command": pending.id,
-                ...(this.#committed === undefined ? {} : { "x-kit-after": `${this.#sequence}` }),
-              },
-            },
-          );
-          if (!this.#active(generation)) return;
-          const remaining = this.#state.pending.slice(1);
-          const accepted = this.#mergePull(response.pull as ReplicaPull<Model>);
-          this.#setState({
-            ...this.#state,
-            pending: remaining,
-            ...(accepted ? { cursor: response.pull.cursor } : {}),
-            data: this.#replay(this.#committed ?? this.#initial, remaining),
-          });
-        } catch (error) {
-          if (!this.#active(generation)) return;
-          if (!(error instanceof ReplicaError)) {
-            this.#offline(error);
-            break;
-          }
-          const remaining = this.#state.pending.slice(1);
-          this.#setState({
-            ...this.#state,
-            pending: remaining,
-            rejected: [
-              ...this.#state.rejected,
-              {
+    this.#flushing = this.#dependencies.replicaCoordination
+      .exclusive({
+        scope: this.#scope(principal.id, this.#authorization?.version ?? 0),
+        task: async () => {
+          await this.#reloadStore(principal, generation);
+          while (this.#state.pending.length && this.#active(generation)) {
+            const pending = this.#state.pending[0]!;
+            try {
+              const received = await this.#dependencies.replication.command({
+                replica: this.#name,
+                command: pending.command,
+                value: pending.input,
+                idempotencyKey: pending.id,
+                ...(this.#committed === undefined ? {} : { after: this.#sequence }),
+              });
+              if (!this.#active(generation)) return;
+              const response = {
+                result: cloneData(received.result, "Replica command result"),
+                pull: canonicalReplicationEnvelope(received.pull) as ReplicaPull<Model>,
+              } as ReplicaCommandResponse<Model>;
+              const pull = response.pull;
+              const accepted = this.#mergePull(pull);
+              const observed =
+                replicaIncludes(pull.invocations, `idempotency:${pending.id}`) ||
+                pull.snapshot !== undefined;
+              const remaining = observed
+                ? this.#state.pending.filter(({ id }) => id !== pending.id)
+                : this.#state.pending;
+              if (observed) this.#removePending(pending.id);
+              this.#setState({
+                ...this.#state,
+                status: "synchronized",
+                error: undefined,
+                pending: remaining,
+                ...(accepted ? { cursor: pull.cursor } : {}),
+                data: this.#replay(this.#committed ?? this.#initial, remaining),
+              });
+              this.#retryAttempt = 0;
+              this.#retry?.[Symbol.dispose]();
+              this.#retry = undefined;
+              this.#startChanges(generation);
+              if (!observed) break;
+            } catch (error) {
+              if (!this.#active(generation)) return;
+              if (
+                !(error instanceof ReplicaError) &&
+                (!(error instanceof Error) || error.name !== "ReplicationRejected")
+              ) {
+                this.#offline(error);
+                break;
+              }
+              const remaining = this.#state.pending.filter(({ id }) => id !== pending.id);
+              this.#removePending(pending.id);
+              const rejection = {
                 pending,
                 message: error instanceof Error ? error.message : "Command rejected.",
-              },
-            ],
-            data: this.#replay(this.#committed ?? this.#initial, remaining),
-          });
-        }
-        void this.#persist();
-      }
-    })().finally(() => {
-      this.#flushing = undefined;
-      if (!this.#state.pending.length && this.#deferredPulls.length) {
-        const pulls = this.#deferredPulls;
-        this.#deferredPulls = [];
-        for (const pull of pulls) this.#accept(pull);
-      }
-    });
+              };
+              this.#upsertRejection(rejection);
+              this.#setState({
+                ...this.#state,
+                pending: remaining,
+                rejected: [...this.#state.rejected, rejection],
+                data: this.#replay(this.#committed ?? this.#initial, remaining),
+              });
+            }
+            await this.#persist();
+          }
+        },
+      })
+      .finally(() => {
+        this.#flushing = undefined;
+      });
     await this.#flushing;
   }
 
   #replay(committed: Model["State"], pending: readonly ReplicaPending<Model>[]): Model["State"] {
-    let state = cloneData(committed);
+    let state = cloneData(committed, "Replica replay state");
     for (const command of pending) {
-      const optimistic = this.#definition.optimistic[command.command] as
-        | ((context: { state: Model["State"]; input: object }) => Model["State"])
-        | undefined;
-      if (optimistic) state = optimistic({ state, input: command.input });
+      state = this.#definition.dispatch.optimistic(
+        command.command as Extract<keyof Model["Commands"], string>,
+        {
+          name: this.#name,
+          state,
+          principal: this.#requirePrincipal(),
+          input: command.input,
+        } as ReplicaOptimisticContext<Model, keyof Model["Commands"]>,
+      );
     }
     return state;
   }
 
+  #upsertPending(command: ReplicaStoreCommand): void {
+    this.#pendingRemovals.delete(command.id);
+    this.#pendingUpserts.set(command.id, command);
+  }
+
+  #removePending(id: string): void {
+    this.#pendingUpserts.delete(id);
+    this.#pendingRemovals.add(id);
+  }
+
+  #upsertRejection(rejection: ReplicaStoreRejection): void {
+    this.#rejectionRemovals.delete(rejection.pending.id);
+    this.#rejectionUpserts.set(rejection.pending.id, rejection);
+  }
+
+  #removeRejection(id: string): void {
+    this.#rejectionUpserts.delete(id);
+    this.#rejectionRemovals.add(id);
+  }
+
+  #clearPersistedDelta(
+    pending: ReplicaStoreDelta<ReplicaStoreCommand>,
+    rejected: ReplicaStoreDelta<ReplicaStoreRejection>,
+  ): void {
+    for (const command of pending.upsert) {
+      if (this.#pendingUpserts.get(command.id) === command) {
+        this.#pendingUpserts.delete(command.id);
+      }
+    }
+    for (const id of pending.remove) this.#pendingRemovals.delete(id);
+    for (const rejection of rejected.upsert) {
+      if (this.#rejectionUpserts.get(rejection.pending.id) === rejection) {
+        this.#rejectionUpserts.delete(rejection.pending.id);
+      }
+    }
+    for (const id of rejected.remove) this.#rejectionRemovals.delete(id);
+  }
+
+  #scope(principal: string, authorization: number): string {
+    return `replica:${this.#name}:${principal}:${authorization}`;
+  }
+
+  #observeStore(principal: PrincipalOf<Model>, authorization: number, generation: number): void {
+    this.#coordinationSubscription?.[Symbol.dispose]();
+    this.#coordinationSubscription = this.#dependencies.replicaCoordination.subscribe({
+      scope: this.#scope(principal.id, authorization),
+      receive: () => {
+        const notification = this.#storeNotification
+          .catch(() => undefined)
+          .then(async () => {
+            await this.#reloadStore(principal, generation);
+            if (this.#active(generation) && this.#state.pending.length) {
+              await this.#flush(principal, generation);
+            }
+          })
+          .catch((error: unknown) => {
+            if (this.#active(generation)) this.#offline(error);
+          });
+        this.#storeNotification = notification;
+      },
+    });
+  }
+
+  async #reloadStore(principal: PrincipalOf<Model>, generation: number): Promise<void> {
+    const authorization = this.#authorization;
+    if (!authorization || !this.#active(generation)) return;
+    const stored = (await this.#dependencies.replicaStore.load({
+      replica: this.#name,
+      principal: principal.id,
+      authorization: authorization.version,
+      rows: this.#rows,
+    })) as StoredReplica<Model> | undefined;
+    if (!stored || !this.#active(generation) || !equalData(stored.principal, principal)) {
+      return;
+    }
+    const migrated = this.#migrateStored(stored);
+    if (stored.sequence >= this.#sequence && migrated.committed !== undefined) {
+      this.#schema = stored.schema;
+      this.#sequence = stored.sequence;
+      this.#observations = stored.observations;
+      this.#committed = migrated.committed;
+    }
+    const pending = mergeReplicaStoreValues(
+      migrated.pending,
+      this.#pendingUpserts.values(),
+      this.#pendingRemovals,
+      ({ id }) => id,
+    ) as readonly ReplicaPending<Model>[];
+    const rejected = mergeReplicaStoreValues(
+      migrated.rejected,
+      this.#rejectionUpserts.values(),
+      this.#rejectionRemovals,
+      ({ pending: command }) => command.id,
+    ) as readonly ReplicaRejection<Model>[];
+    this.#setState({
+      ...this.#state,
+      ...(stored.cursor ? { cursor: stored.cursor } : {}),
+      pending,
+      rejected,
+      ...(this.#committed === undefined ? {} : { data: this.#replay(this.#committed, pending) }),
+    });
+  }
+
   #persist(): Promise<void> {
     const principal = this.#principal;
-    if (!principal) return Promise.resolve();
-    const stored: StoredReplica<Model> = {
-      version: this.#version,
-      ...(this.#schema ? { schema: this.#schema } : {}),
-      principal: cloneData(principal),
-      ...(this.#state.cursor ? { cursor: this.#state.cursor } : {}),
-      sequence: this.#sequence,
-      observations: this.#observations,
-      ...(this.#committed ? { committed: this.#committed } : {}),
-      pending: this.#state.pending,
-      rejected: this.#state.rejected,
-    };
-    this.#write = this.#write
-      .catch(() => undefined)
-      .then(() =>
-        this.#dependencies.storage.write({
-          key: this.#storageKey(principal),
-          value: stored,
-        }),
-      );
-    return this.#write;
+    const authorization = this.#authorization;
+    if (!principal || !authorization) return Promise.resolve();
+    this.#persistVersion += 1;
+    return this.#schedulePersistence(principal.id, authorization.version);
+  }
+
+  #schedulePersistence(principalId: string, authorization: number): Promise<void> {
+    if (this.#persistScheduled) return this.#persistScheduled;
+    const scheduled = Promise.resolve()
+      .then(() => this.#drainPersistence(principalId, authorization))
+      .finally(() => {
+        if (this.#persistScheduled !== scheduled) return;
+        this.#persistScheduled = undefined;
+        if (
+          !this.#disposed &&
+          this.#persistedVersion < this.#persistVersion &&
+          this.#principal?.id === principalId &&
+          this.#authorization?.version === authorization
+        ) {
+          void this.#schedulePersistence(principalId, authorization).catch((error: unknown) =>
+            this.#offline(error),
+          );
+        }
+      });
+    this.#persistScheduled = scheduled;
+    return scheduled;
+  }
+
+  async #drainPersistence(principalId: string, authorization: number): Promise<void> {
+    while (
+      this.#persistedVersion < this.#persistVersion &&
+      this.#principal?.id === principalId &&
+      this.#authorization?.version === authorization
+    ) {
+      const current = this.#principal;
+      const version = this.#persistVersion;
+      const replacement = this.#storeReplacement;
+      const changes = this.#storeChanges;
+      const pending = {
+        upsert: [...this.#pendingUpserts.values()],
+        remove: [...this.#pendingRemovals],
+      } satisfies ReplicaStoreDelta<ReplicaStoreCommand>;
+      const rejected = {
+        upsert: [...this.#rejectionUpserts.values()],
+        remove: [...this.#rejectionRemovals],
+      } satisfies ReplicaStoreDelta<ReplicaStoreRejection>;
+      this.#storeReplacement = undefined;
+      this.#storeChanges = [];
+      const input = {
+        replica: this.#name,
+        principal: current.id,
+        authorization,
+        metadata: {
+          version: this.#version,
+          ...(this.#schema ? { schema: this.#schema } : {}),
+          principal: cloneData(current, "Replica principal"),
+          ...(this.#state.cursor ? { cursor: this.#state.cursor } : {}),
+          sequence: this.#sequence,
+          observations: this.#observations,
+        },
+        ...(replacement === undefined ? {} : { replace: replacement }),
+        changes,
+        pending: cloneData(pending, "Replica pending command changes"),
+        rejected: cloneData(rejected, "Replica rejection changes"),
+      };
+      this.#write = this.#write
+        .catch(() => undefined)
+        .then(() => this.#dependencies.replicaStore.commit(input));
+      try {
+        await this.#write;
+        this.#clearPersistedDelta(pending, rejected);
+        this.#persistedVersion = version;
+        this.#dependencies.replicaCoordination.publish({
+          scope: this.#scope(current.id, authorization),
+        });
+      } catch (error) {
+        if (this.#principal?.id === current.id && this.#committed !== undefined) {
+          this.#storeReplacement = cloneData(this.#committed) as Readonly<
+            Record<string, readonly Readonly<{ id: string }>[]>
+          >;
+          this.#storeChanges = [];
+        }
+        throw error;
+      }
+    }
   }
 
   #setState(state: ReplicaState<Model>): void {
@@ -1354,30 +1916,35 @@ class ReplicaController<Model extends ReplicaModelDefinition> implements AsyncDi
   }
 
   #startChanges(generation: number): void {
-    if (this.#changes || !this.#active(generation) || !this.#principal) return;
+    if (!this.#active(generation) || !this.#principal) return;
+    if (this.#changes) {
+      if (!this.#changeAbort?.signal.aborted) return;
+      const stopping = this.#changes;
+      void stopping.then(() => {
+        if (this.#active(generation)) this.#startChanges(generation);
+      });
+      return;
+    }
     const abort = new AbortController();
     this.#changeAbort = abort;
-    this.#changes = this.#followChanges(generation, abort.signal).finally(() => {
+    const changes = this.#followChanges(generation, abort.signal).finally(() => {
       if (this.#changeAbort === abort) this.#changeAbort = undefined;
-      this.#changes = undefined;
+      if (this.#changes === changes) this.#changes = undefined;
     });
+    this.#changes = changes;
   }
 
   async #followChanges(generation: number, signal: AbortSignal): Promise<void> {
     try {
-      const response = await this.#dependencies.http.request({
-        path: `/api/replicas/${this.#name}/changes?after=${encodeURIComponent(
-          JSON.stringify(this.#observations),
-        )}&sequence=${this.#sequence}`,
+      const changes = await this.#dependencies.replication.changes({
+        replica: this.#name,
+        observations: this.#observations,
+        sequence: this.#sequence,
         signal,
       });
-      if (!response.ok) {
-        throw new Error(`Replica change stream failed (${response.status}).`);
-      }
-      if (!response.body) throw new Error("Replica change stream has no body.");
-      for await (const change of replicaChangeRecords<Model>(response.body)) {
+      for await (const change of changes) {
         if (!this.#active(generation) || signal.aborted) return;
-        this.#accept(change);
+        this.#accept(canonicalReplicationEnvelope(change) as ReplicaPull<Model>);
       }
       if (this.#active(generation) && !signal.aborted) {
         throw new Error("Replica change stream ended unexpectedly.");
@@ -1389,7 +1956,6 @@ class ReplicaController<Model extends ReplicaModelDefinition> implements AsyncDi
 
   #stopChanges(): void {
     this.#changeAbort?.abort();
-    this.#changeAbort = undefined;
   }
 
   #offline(error: unknown): void {
@@ -1417,85 +1983,89 @@ class ReplicaController<Model extends ReplicaModelDefinition> implements AsyncDi
     throw new ReplicaError("unauthenticated", "Authentication is required.");
   }
 
-  #storageKey(principal: PrincipalOf<Model>): string {
-    return `replica:${this.#name}:${principal.id}`;
-  }
-
   #active(generation: number): boolean {
     return !this.#disposed && generation === this.#generation;
   }
 }
 
-async function* replicaChangeRecords<Model extends ReplicaModelDefinition>(
-  body: ReadableStream<Uint8Array>,
-): AsyncIterable<ReplicaPull<Model>> {
-  const reader = body.getReader();
-  const decoder = new TextDecoder("utf-8", { fatal: true });
-  let buffered = "";
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (value) buffered += decoder.decode(value, { stream: true });
-      let newline = buffered.indexOf("\n");
-      while (newline >= 0) {
-        const line = buffered.slice(0, newline);
-        buffered = buffered.slice(newline + 1);
-        if (line) yield replicaChangeRecord<Model>(line);
-        newline = buffered.indexOf("\n");
-      }
-      if (!done) continue;
-      buffered += decoder.decode();
-      if (buffered) yield replicaChangeRecord<Model>(buffered);
-      return;
-    }
-  } finally {
-    await reader.cancel().catch(() => undefined);
-    reader.releaseLock();
+function mergeReplicaStoreValues<Value>(
+  stored: readonly Value[],
+  local: Iterable<Value>,
+  removed: ReadonlySet<string>,
+  identity: (value: Value) => string,
+): readonly Value[] {
+  const additions = new Map<string, Value>();
+  for (const value of local) additions.set(identity(value), value);
+  const merged: Value[] = [];
+  for (const value of stored) {
+    const id = identity(value);
+    if (removed.has(id)) continue;
+    merged.push(additions.get(id) ?? value);
+    additions.delete(id);
   }
+  for (const value of additions.values()) merged.push(value);
+  return merged;
 }
 
-function replicaChangeRecord<Model extends ReplicaModelDefinition>(
-  line: string,
-): ReplicaPull<Model> {
-  const value = JSON.parse(line) as Partial<ReplicaPull<Model>>;
+function replicaIncludes(values: readonly string[], value: string): boolean {
+  for (const candidate of values) {
+    if (candidate === value) return true;
+  }
+  return false;
+}
+
+function canonicalReplicationEnvelope(value: unknown): ReplicationEnvelope {
+  const envelope = cloneData(value, "Replication envelope") as Partial<ReplicationEnvelope>;
+  const observations = envelope.observations;
   if (
-    typeof value.version !== "number" ||
-    typeof value.sequence !== "number" ||
-    typeof value.cursor !== "string" ||
-    !value.observations ||
-    typeof value.observations !== "object" ||
-    !Array.isArray(value.changes)
+    dataKind(envelope) !== "record" ||
+    !Number.isInteger(envelope.version) ||
+    (envelope.version ?? 0) < 1 ||
+    !Number.isInteger(envelope.sequence) ||
+    (envelope.sequence ?? -1) < 0 ||
+    typeof envelope.cursor !== "string" ||
+    observations === undefined ||
+    dataKind(observations) !== "record" ||
+    !Array.isArray(envelope.invocations) ||
+    !Array.isArray(envelope.changes) ||
+    (envelope.schema !== undefined && typeof envelope.schema !== "string") ||
+    (envelope.snapshot !== undefined && dataKind(envelope.snapshot) !== "record")
   ) {
-    throw new TypeError("Replica change stream record is invalid.");
+    throw new TypeError("Replication envelope is invalid.");
   }
-  return value as ReplicaPull<Model>;
-}
-
-async function replicaRequest<Value>(
-  http: HttpClient,
-  path: string,
-  query: Readonly<Record<string, string>>,
-  request: Readonly<{
-    method?: string;
-    headers?: Readonly<Record<string, string>>;
-    body?: string;
-  }> = {},
-): Promise<Value> {
-  const search = new URLSearchParams(query).toString();
-  const response = await http.request({
-    path: search ? `${path}?${search}` : path,
-    ...request,
-  });
-  if (!response.ok) {
-    const failure = (await response.json().catch(() => ({}))) as Readonly<{
-      message?: string;
-    }>;
-    throw new ReplicaError(
-      "rejected",
-      failure.message ?? `Replica request failed (${response.status}).`,
-    );
+  for (const name of Object.keys(observations)) {
+    if (typeof observations[name] !== "string") {
+      throw new TypeError("Replication observation cursor is invalid.");
+    }
   }
-  return (await response.json()) as Value;
+  for (const identity of envelope.invocations) {
+    if (typeof identity !== "string" || identity.length === 0) {
+      throw new TypeError("Replication invocation identity is invalid.");
+    }
+  }
+  for (const change of envelope.changes) {
+    if (
+      dataKind(change) !== "record" ||
+      typeof change.row !== "string" ||
+      change.row.length === 0
+    ) {
+      throw new TypeError("Replication change is invalid.");
+    }
+    const upsert = "upsert" in change ? change.upsert : undefined;
+    const remove = "remove" in change ? change.remove : undefined;
+    if (
+      (upsert === undefined) === (remove === undefined) ||
+      (upsert !== undefined &&
+        (dataKind(upsert) !== "record" ||
+          typeof (upsert as Readonly<{ id?: unknown }>).id !== "string")) ||
+      (remove !== undefined &&
+        (dataKind(remove) !== "record" ||
+          typeof (remove as Readonly<{ id?: unknown }>).id !== "string"))
+    ) {
+      throw new TypeError("Replication change payload is invalid.");
+    }
+  }
+  return envelope as ReplicationEnvelope;
 }
 
 function replicaJson(value: unknown, status = 200): HttpResponse {
@@ -1521,7 +2091,12 @@ export async function createReplicaFixture<Model extends ReplicaModelDefinition>
     schema?: string;
     authoritySchema?: string;
     storage?: Map<string, unknown>;
+    beforeStorageWrite?(): MaybePromise<void>;
+    beforeCommand?(): MaybePromise<void>;
+    identifierPrefix?: string;
     online?: boolean;
+    authorizationVersion?: number;
+    retention?: "retain" | "clear-on-sign-out";
   }>,
 ): Promise<
   AsyncDisposable &
@@ -1530,7 +2105,10 @@ export async function createReplicaFixture<Model extends ReplicaModelDefinition>
       state(): Promise<ReplicaState<Model>>;
       online(value: boolean): void;
       dropNextResponse(): void;
-      principal(value: PrincipalOf<Model> | undefined): Promise<void>;
+      principal(
+        value: PrincipalOf<Model> | undefined,
+        authorizationVersion?: number,
+      ): Promise<void>;
       storage: Map<string, unknown>;
       responses: readonly Readonly<{ method: string; path: string; body: string }>[];
     }>
@@ -1540,102 +2118,179 @@ export async function createReplicaFixture<Model extends ReplicaModelDefinition>
   const schema = input.schema ?? `fixture:${version}`;
   const authoritySchema = input.authoritySchema ?? schema;
   const storage = input.storage ?? new Map<string, unknown>();
+  const runtimeDefinition = replicaDispatchImplementation(definition);
   const authority = replicaAuthority(
     input.projection,
     input.rows,
-    definition.commands,
+    (operation, context) =>
+      runtimeDefinition.dispatch.commit(
+        operation as Extract<keyof Model["Commands"], string>,
+        context,
+      ),
     input.dependencies,
     version,
     authoritySchema,
   );
   let currentPrincipal: PrincipalOf<Model> | undefined = input.principal;
+  let currentAuthorizationVersion = input.authorizationVersion ?? 1;
   let isOnline = input.online ?? true;
   let dropNextResponse = false;
   let identifier = 0;
+  const identifierPrefix = input.identifierPrefix ?? "fixture";
   const responses: Readonly<{ method: string; path: string; body: string }>[] = [];
-  const sessionListeners = new Set<
-    (session: Readonly<{ user: PrincipalOf<Model> }> | undefined) => void
-  >();
-  const identityService = {
-    async authenticate() {
-      return currentPrincipal;
-    },
-  } as unknown as Identity.Service<Model["Identity"]>;
-  const handler = replicaHttpHandler(
-    authority,
-    identityService,
-    `/api/replicas/${name}`,
-    Object.keys(definition.commands),
-  );
+  const fixtureSession = (): SessionOf<Model> | undefined =>
+    currentPrincipal
+      ? {
+          user: currentPrincipal,
+          authorization: {
+            session: `fixture:${currentPrincipal.id}`,
+            version: currentAuthorizationVersion,
+            expiresAt: Number.MAX_SAFE_INTEGER,
+          },
+        }
+      : undefined;
+  const sessionListeners = new Set<(session: SessionOf<Model> | undefined) => void>();
   const identityClient = {
     async session() {
-      return currentPrincipal ? { user: currentPrincipal } : undefined;
+      return fixtureSession();
     },
     async signIn() {
       if (!currentPrincipal) throw new Error("No fixture principal is configured.");
-      return { user: currentPrincipal };
+      return fixtureSession()!;
     },
     async signUp() {
       if (!currentPrincipal) throw new Error("No fixture principal is configured.");
-      return { user: currentPrincipal };
+      return fixtureSession()!;
     },
     async signOut() {
       currentPrincipal = undefined;
       for (const receive of sessionListeners) receive(undefined);
     },
-    subscribe(receive: (session: Readonly<{ user: PrincipalOf<Model> }> | undefined) => void) {
+    subscribe(receive: (session: SessionOf<Model> | undefined) => void) {
       sessionListeners.add(receive);
       return { [Symbol.dispose]: () => sessionListeners.delete(receive) };
     },
   } as unknown as Identity.Client<Model["Identity"]>;
+  const replicaStore = createMemoryReplicaStore(
+    storage,
+    input.beforeStorageWrite,
+  ) as unknown as Readonly<{
+    load(input: { input: Parameters<ReplicaStore["load"]>[0] }): ReturnType<ReplicaStore["load"]>;
+    commit(input: {
+      input: Parameters<ReplicaStore["commit"]>[0];
+    }): ReturnType<ReplicaStore["commit"]>;
+    query(input: {
+      input: Parameters<ReplicaStore["query"]>[0];
+    }): ReturnType<ReplicaStore["query"]>;
+    remove(input: {
+      input: Parameters<ReplicaStore["remove"]>[0];
+    }): ReturnType<ReplicaStore["remove"]>;
+  }>;
+  const replicaCoordination = createMemoryReplicaCoordination(storage) as unknown as Readonly<{
+    exclusive(input: {
+      input: Parameters<ReplicaCoordination["exclusive"]>[0];
+    }): ReturnType<ReplicaCoordination["exclusive"]>;
+    publish(input: {
+      input: Parameters<ReplicaCoordination["publish"]>[0];
+    }): ReturnType<ReplicaCoordination["publish"]>;
+    subscribe(input: {
+      input: Parameters<ReplicaCoordination["subscribe"]>[0];
+    }): ReturnType<ReplicaCoordination["subscribe"]>;
+  }>;
   const browserDependencies = {
-    http: {
-      async request(request: {
-        path: string;
-        method?: string;
-        headers?: Readonly<Record<string, string>>;
-        body?: string;
-        signal?: AbortSignal;
-      }) {
+    replication: {
+      async pull({
+        replica,
+        after,
+      }: Readonly<{ replica: string; after?: number }>): Promise<ReplicaPull<Model>> {
         if (!isOnline) throw new Error("Fixture network is offline.");
-        const url = new URL(request.path, "http://fixture");
-        const response = await handler({
-          method: request.method ?? "GET",
-          path: url.pathname,
-          query: [...url.searchParams].map(([fieldName, value]) => ({
-            name: fieldName,
-            value,
-          })),
-          headers: Object.entries(request.headers ?? {}).map(([fieldName, value]) => ({
-            name: fieldName,
-            value,
-          })),
-          body: request.body ?? "",
-        });
-        if (response.stream === undefined && response.body !== undefined) {
-          responses.push({
-            method: request.method ?? "GET",
-            path: url.pathname,
-            body: response.body,
-          });
+        if (!currentPrincipal) {
+          throw new ReplicaError("unauthenticated", "Authentication is required.");
         }
+        const response = await authority.pull({
+          principal: currentPrincipal,
+          after,
+          metadata: true,
+        });
+        responses.push({
+          method: "GET",
+          path: `/api/replicas/${replica}`,
+          body: JSON.stringify(response),
+        });
+        return response;
+      },
+      async command({
+        replica,
+        command,
+        value,
+        idempotencyKey,
+        after,
+      }: Readonly<{
+        replica: string;
+        command: string;
+        value: object;
+        idempotencyKey: string;
+        after?: number;
+      }>): Promise<ReplicaCommandResponse<Model>> {
+        if (!isOnline) throw new Error("Fixture network is offline.");
+        if (!currentPrincipal) {
+          throw new ReplicaError("unauthenticated", "Authentication is required.");
+        }
+        await input.beforeCommand?.();
+        let response: ReplicaCommandResponse<Model>;
+        try {
+          response = await authority.command(
+            command,
+            {
+              principal: currentPrincipal,
+              input: value,
+              idempotencyKey,
+            },
+            after,
+          );
+        } catch (error) {
+          throw new ReplicaError(
+            "rejected",
+            error instanceof Error ? error.message : "Replica command was rejected.",
+          );
+        }
+        responses.push({
+          method: "POST",
+          path: `/api/replicas/${replica}/${command}`,
+          body: JSON.stringify(response),
+        });
         if (dropNextResponse) {
           dropNextResponse = false;
           throw new Error("Fixture response was lost after authority execution.");
         }
-        const headers = new Headers();
-        for (const field of response.headers) headers.append(field.name, field.value);
-        const body =
-          response.stream === undefined
-            ? response.body
-            : replicaFixtureBody(response.stream, request.signal);
-        return new Response(body, { status: response.status, headers });
+        return response;
+      },
+      async changes({
+        observations,
+        sequence,
+        signal,
+      }: Readonly<{
+        replica: string;
+        observations: Readonly<Record<string, string>>;
+        sequence: number;
+        signal?: AbortSignal;
+      }>): Promise<AsyncIterable<ReplicaPull<Model>>> {
+        if (!isOnline) throw new Error("Fixture network is offline.");
+        if (!currentPrincipal) {
+          throw new ReplicaError("unauthenticated", "Authentication is required.");
+        }
+        const source = await authority.observe({
+          principal: currentPrincipal,
+          after: observations,
+          sequence,
+        });
+        return signal ? abortableReplicaChanges(source, signal) : source;
       },
     },
     identifiers: {
       create() {
         identifier += 1;
-        return `fixture-command-${identifier}`;
+        return `${identifierPrefix}-command-${identifier}`;
       },
     },
     scheduler: {
@@ -1643,25 +2298,41 @@ export async function createReplicaFixture<Model extends ReplicaModelDefinition>
         return { [Symbol.dispose]() {} };
       },
     },
-    storage: {
-      async read<Value>({ key }: { key: string }) {
-        return storage.get(key) as Value | undefined;
+    replicaCoordination: {
+      exclusive(value: Parameters<ReplicaCoordination["exclusive"]>[0]) {
+        return replicaCoordination.exclusive({ input: value });
       },
-      async write<Value>({ key, value }: { key: string; value: Value }) {
-        storage.set(key, cloneData(value));
+      publish(value: Parameters<ReplicaCoordination["publish"]>[0]) {
+        return replicaCoordination.publish({ input: value });
       },
-      async remove({ key }: { key: string }) {
-        storage.delete(key);
+      subscribe(value: Parameters<ReplicaCoordination["subscribe"]>[0]) {
+        return replicaCoordination.subscribe({ input: value });
+      },
+    },
+    replicaStore: {
+      load(value: Parameters<ReplicaStore["load"]>[0]) {
+        return replicaStore.load({ input: value });
+      },
+      commit(value: Parameters<ReplicaStore["commit"]>[0]) {
+        return replicaStore.commit({ input: value });
+      },
+      query(value: Parameters<ReplicaStore["query"]>[0]) {
+        return replicaStore.query({ input: value });
+      },
+      remove(value: Parameters<ReplicaStore["remove"]>[0]) {
+        return replicaStore.remove({ input: value });
       },
     },
   } as unknown as ReplicaBrowserRequirements<Model>;
   const controller = new ReplicaController(
     name,
     version,
-    definition,
+    input.retention ?? "retain",
+    runtimeDefinition,
+    input.rows,
     browserDependencies,
     identityClient,
-    definition.state(),
+    definition.state({ name }),
     schema,
   );
   await controller.start();
@@ -1689,9 +2360,10 @@ export async function createReplicaFixture<Model extends ReplicaModelDefinition>
     dropNextResponse() {
       dropNextResponse = true;
     },
-    async principal(value: PrincipalOf<Model> | undefined) {
+    async principal(value: PrincipalOf<Model> | undefined, authorizationVersion = 1) {
       currentPrincipal = value;
-      const session = value ? { user: value } : undefined;
+      currentAuthorizationVersion = authorizationVersion;
+      const session = fixtureSession();
       for (const receive of sessionListeners) receive(session);
       await Promise.resolve();
     },
@@ -1703,44 +2375,35 @@ export async function createReplicaFixture<Model extends ReplicaModelDefinition>
     state(): Promise<ReplicaState<Model>>;
     online(value: boolean): void;
     dropNextResponse(): void;
-    principal(value: PrincipalOf<Model> | undefined): Promise<void>;
+    principal(value: PrincipalOf<Model> | undefined, authorizationVersion?: number): Promise<void>;
     storage: Map<string, unknown>;
     responses: readonly Readonly<{ method: string; path: string; body: string }>[];
   };
 }
 
-function replicaFixtureBody(
-  source: AsyncIterable<string>,
-  signal: AbortSignal | undefined,
-): ReadableStream<Uint8Array> {
-  const iterator = source[Symbol.asyncIterator]();
-  const encoder = new TextEncoder();
-  let cancelled = false;
-  let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
-  const abort = () => {
-    cancelled = true;
-    streamController?.error(new Error("Fixture request was aborted."));
-    void iterator.return?.();
-  };
-  return new ReadableStream({
-    start(controller) {
-      streamController = controller;
-      signal?.addEventListener("abort", abort, { once: true });
-    },
-    async pull(controller) {
-      if (cancelled || signal?.aborted) {
-        await iterator.return?.();
-        controller.close();
-        return;
+function abortableReplicaChanges<Value>(
+  source: AsyncIterable<Value>,
+  signal: AbortSignal,
+): AsyncIterable<Value> {
+  return {
+    async *[Symbol.asyncIterator]() {
+      const iterator = source[Symbol.asyncIterator]();
+      let abort: (() => void) | undefined;
+      const aborted = new Promise<IteratorResult<Value>>((resolve) => {
+        abort = () => resolve({ done: true, value: undefined });
+        signal.addEventListener("abort", abort, { once: true });
+        if (signal.aborted) abort();
+      });
+      try {
+        while (!signal.aborted) {
+          const result = await Promise.race([iterator.next(), aborted]);
+          if (result.done) return;
+          yield result.value;
+        }
+      } finally {
+        if (abort) signal.removeEventListener("abort", abort);
+        void iterator.return?.();
       }
-      const result = await iterator.next();
-      if (result.done) controller.close();
-      else controller.enqueue(encoder.encode(result.value));
     },
-    cancel() {
-      cancelled = true;
-      signal?.removeEventListener("abort", abort);
-      void iterator.return?.();
-    },
-  });
+  };
 }

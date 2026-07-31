@@ -1,4 +1,5 @@
 export const WEB_REALTIME_PATH = "/_kit/realtime";
+export const WEB_REALTIME_MAX_FRAME_BYTES = 64 * 1024;
 
 export type WebRealtimeRequestFrame = Readonly<{
   type: "request";
@@ -46,8 +47,37 @@ export type WebRealtimeServerFrame =
   | WebRealtimeEndFrame
   | WebRealtimeErrorFrame;
 
+const realtimeEncoder = new TextEncoder();
+
+/** Serializes one bounded browser-to-server frame. Large values use another Dependency. */
+export function serializeWebRealtimeClientFrame(frame: WebRealtimeClientFrame): string {
+  const value = JSON.stringify(frame);
+  assertWebRealtimeFrameSize(value);
+  return value;
+}
+
+/** Serializes and safely partitions a server body chunk into bounded text frames. */
+export function serializeWebRealtimeServerFrames(frame: WebRealtimeServerFrame): readonly string[] {
+  const value = JSON.stringify(frame);
+  if (webRealtimeFrameBytes(value) <= WEB_REALTIME_MAX_FRAME_BYTES) return [value];
+  if (frame.type !== "chunk" || frame.value.length < 2) {
+    throw new TypeError("Realtime server frame exceeds the transport limit.");
+  }
+  let middle = Math.floor(frame.value.length / 2);
+  const before = frame.value.charCodeAt(middle - 1);
+  const after = frame.value.charCodeAt(middle);
+  if (before >= 0xd800 && before <= 0xdbff && after >= 0xdc00 && after <= 0xdfff) {
+    middle -= 1;
+  }
+  return [
+    ...serializeWebRealtimeServerFrames({ ...frame, value: frame.value.slice(0, middle) }),
+    ...serializeWebRealtimeServerFrames({ ...frame, value: frame.value.slice(middle) }),
+  ];
+}
+
 /** Parses one bounded transport frame without assigning product meaning to it. */
 export function parseWebRealtimeClientFrame(value: string): WebRealtimeClientFrame {
+  assertWebRealtimeFrameSize(value);
   const frame = JSON.parse(value) as Partial<WebRealtimeClientFrame>;
   if (!frame || typeof frame !== "object" || typeof frame.id !== "string") {
     throw new TypeError("Realtime client frame is invalid.");
@@ -69,6 +99,7 @@ export function parseWebRealtimeClientFrame(value: string): WebRealtimeClientFra
 
 /** Parses one server frame before it reaches a browser Dependency implementation. */
 export function parseWebRealtimeServerFrame(value: string): WebRealtimeServerFrame {
+  assertWebRealtimeFrameSize(value);
   const frame = JSON.parse(value) as Partial<WebRealtimeServerFrame>;
   if (!frame || typeof frame !== "object" || typeof frame.id !== "string") {
     throw new TypeError("Realtime server frame is invalid.");
@@ -95,4 +126,14 @@ export function parseWebRealtimeServerFrame(value: string): WebRealtimeServerFra
     return frame as WebRealtimeResponseFrame;
   }
   throw new TypeError("Realtime server frame is invalid.");
+}
+
+function assertWebRealtimeFrameSize(value: string): void {
+  if (webRealtimeFrameBytes(value) > WEB_REALTIME_MAX_FRAME_BYTES) {
+    throw new TypeError("Realtime frame exceeds the transport limit.");
+  }
+}
+
+function webRealtimeFrameBytes(value: string): number {
+  return realtimeEncoder.encode(value).byteLength;
 }

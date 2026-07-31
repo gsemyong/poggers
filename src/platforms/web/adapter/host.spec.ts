@@ -2,9 +2,21 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 
 import type { DependencyContractIR, DependencyOperationIR, TypeIR } from "@/compiler/ir";
 import { scopeDependency } from "@/execution/process";
-import type { HttpClient, Navigation } from "@/platforms/web";
+import {
+  browserReplicationProvider,
+  type Replication,
+  type ReplicationCommandResult,
+  type ReplicationEnvelope,
+} from "@/features/replica";
+import { replicationConformance, replicationConformanceRecords } from "@/features/replica/testing";
+import type { ConnectionContext, Navigation } from "@/platforms/web";
 import { createWebHost, createWebServiceWorkerRuntime } from "@/platforms/web/adapter/host";
 import type { WebRouteIR } from "@/platforms/web/adapter/lowering";
+import {
+  parseWebRealtimeServerFrame,
+  serializeWebRealtimeServerFrames,
+  WEB_REALTIME_MAX_FRAME_BYTES,
+} from "@/platforms/web/adapter/transport";
 import type { WebNavigation } from "@/platforms/web/routing";
 
 const navigationDependency = dependency("navigation", [
@@ -16,18 +28,79 @@ const navigationDependency = dependency("navigation", [
   operation("subscribe", true, { kind: "opaque", name: "Disposable" }),
 ]);
 const serviceWorkerDependency = dependency("serviceWorker", []);
-const httpDependency = dependency("http", [
+const connectionDependency = dependency("connection", [
+  operation("refresh", false, { kind: "primitive", name: "void" }),
+]);
+const replicationDependency = dependency("replication", [
   {
-    name: "request",
+    name: "pull",
     mode: "asynchronous",
-    input: { kind: "opaque", name: "Request" },
-    output: { kind: "opaque", name: "Response" },
+    input: { kind: "opaque", name: "Pull" },
+    output: { kind: "opaque", name: "Result" },
+  },
+  {
+    name: "command",
+    mode: "asynchronous",
+    input: { kind: "opaque", name: "Command" },
+    output: { kind: "opaque", name: "Result" },
+  },
+  {
+    name: "changes",
+    mode: "asynchronous",
+    input: { kind: "opaque", name: "Changes" },
+    output: { kind: "opaque", name: "Stream" },
   },
 ]);
 
 afterEach(() => vi.unstubAllGlobals());
 
+replicationConformance.test({
+  name: "web WebSocket",
+  async create() {
+    const sockets: FakeWebSocket[] = [];
+    vi.stubGlobal("location", new URL("http://replication-conformance.test/tasks"));
+    vi.stubGlobal(
+      "WebSocket",
+      class extends FakeWebSocket {
+        constructor(url: URL) {
+          super(url);
+          sockets.push(this);
+        }
+      },
+    );
+    const host = await createReplicationHost();
+    return {
+      api: host.replication,
+      dispose() {
+        for (const socket of sockets) socket.close();
+      },
+    };
+  },
+});
+
 describe("web host", () => {
+  test("partitions large streaming bodies into bounded lossless frames", () => {
+    const value = `${'"\\\n'.repeat(40_000)}${"content".repeat(20_000)}😀`;
+    const serialized = serializeWebRealtimeServerFrames({
+      type: "chunk",
+      id: "large-response",
+      value,
+    });
+
+    expect(serialized.length).toBeGreaterThan(1);
+    expect(
+      serialized.every(
+        (frame) => new TextEncoder().encode(frame).byteLength <= WEB_REALTIME_MAX_FRAME_BYTES,
+      ),
+    ).toBe(true);
+    expect(
+      serialized
+        .map((frame) => parseWebRealtimeServerFrame(frame))
+        .map((frame) => (frame.type === "chunk" ? frame.value : ""))
+        .join(""),
+    ).toBe(value);
+  });
+
   test("multiplexes Replica traffic over one same-origin WebSocket", async () => {
     const sockets: FakeWebSocket[] = [];
     const fetched = vi.fn();
@@ -43,17 +116,21 @@ describe("web host", () => {
       },
     );
 
-    const host = await createWebHost({ dependencies: [httpDependency] });
-    const http = host.http as HttpClient;
-    const first = http.request({ path: "/api/replicas/tasks" });
-    const second = http.request({
-      path: "/api/replicas/tasks/create",
-      method: "POST",
-      body: '{"id":"one"}',
+    const host = await createReplicationHost();
+    const replication = host.replication;
+    const first = replication.pull({ replica: "tasks" });
+    const second = replication.command({
+      replica: "tasks",
+      command: "create",
+      value: { id: "one" },
+      idempotencyKey: "command-one",
     });
 
-    await expect(first.then((response) => response.json())).resolves.toEqual({ request: 1 });
-    await expect(second.then((response) => response.json())).resolves.toEqual({ request: 2 });
+    await expect(first).resolves.toEqual(replicationEnvelope(1));
+    await expect(second).resolves.toEqual({
+      result: { request: 2 },
+      pull: replicationEnvelope(2),
+    });
     expect(sockets).toHaveLength(1);
     expect(sockets[0]?.url).toBe("ws://realtime.test/_kit/realtime");
     expect(sockets[0]?.requests).toEqual([
@@ -62,9 +139,82 @@ describe("web host", () => {
         path: "/api/replicas/tasks/create",
         method: "POST",
         body: '{"id":"one"}',
+        headers: { "x-kit-command": "command-one" },
       }),
     ]);
     expect(fetched).not.toHaveBeenCalled();
+  });
+
+  test("keeps Replica change streams open across independently framed records", async () => {
+    const sockets: FakeWebSocket[] = [];
+    vi.stubGlobal("location", new URL("http://realtime-stream.test/tasks"));
+    vi.stubGlobal(
+      "WebSocket",
+      class extends FakeWebSocket {
+        constructor(url: URL) {
+          super(url);
+          sockets.push(this);
+        }
+      },
+    );
+
+    const host = await createReplicationHost();
+    const replication = host.replication;
+    const changes = await replication.changes({
+      replica: "tasks",
+      observations: {},
+      sequence: 0,
+    });
+    const received: ReplicationEnvelope[] = [];
+    for await (const change of changes) received.push(change);
+
+    expect(received).toEqual([replicationEnvelope(1), replicationEnvelope(2)]);
+    expect(sockets).toHaveLength(1);
+    expect(sockets[0]?.requests).toEqual([
+      expect.objectContaining({
+        path: "/api/replicas/tasks/changes?after=%7B%7D&sequence=0",
+      }),
+    ]);
+  });
+
+  test("reconnects persistent transports after the connection context changes", async () => {
+    const sockets: FakeWebSocket[] = [];
+    vi.stubGlobal("location", new URL("http://realtime-refresh.test/tasks"));
+    vi.stubGlobal(
+      "WebSocket",
+      class extends FakeWebSocket {
+        constructor(url: URL) {
+          super(url);
+          sockets.push(this);
+        }
+      },
+    );
+
+    const host = await createReplicationHost(true);
+    const replication = host.replication;
+    const connection = host.connection;
+
+    await expect(replication.pull({ replica: "tasks" })).resolves.toEqual(replicationEnvelope(1));
+    connection.refresh();
+    await expect(replication.pull({ replica: "tasks" })).resolves.toEqual(replicationEnvelope(1));
+
+    expect(sockets).toHaveLength(2);
+    expect(sockets[0]?.closed).toBe(true);
+  });
+
+  test("keeps commands pending when replication authentication must be refreshed", async () => {
+    vi.stubGlobal("location", new URL("http://replication-auth.test/tasks"));
+    vi.stubGlobal("WebSocket", undefined);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Response.json({ message: "Authentication is required." }, { status: 401 })),
+    );
+    const host = await createReplicationHost();
+
+    await expect(host.replication.pull({ replica: "tasks" })).rejects.toMatchObject({
+      name: "ReplicationAuthenticationRequired",
+      message: "Authentication is required.",
+    });
   });
 
   test("creates only the Dependencies required by one Program instance", async () => {
@@ -337,6 +487,43 @@ type TestNavigation = WebNavigation<{
   edit: { Params: { id: string }; SearchInput: Record<never, never> };
 }>;
 
+async function createReplicationHost(connection = false): Promise<
+  Readonly<{
+    replication: Replication;
+    connection: ConnectionContext;
+  }>
+> {
+  return (await createWebHost({
+    dependencies: connection
+      ? [connectionDependency, replicationDependency]
+      : [replicationDependency],
+    providers: [
+      {
+        dependency: "replication",
+        feature: "replica",
+        platform: "web",
+        development: true,
+        developmentIdentity: "replication-v1",
+        span: { file: "replica.ts", line: 1, column: 1 },
+      },
+    ],
+    system: {
+      features: {
+        replica: {
+          providers: {
+            web: {
+              replication: browserReplicationProvider,
+            },
+          },
+        },
+      },
+    },
+  })) as unknown as Readonly<{
+    replication: Replication;
+    connection: ConnectionContext;
+  }>;
+}
+
 function dependency<const Name extends string>(
   name: Name,
   operations: readonly DependencyOperationIR[],
@@ -357,6 +544,7 @@ class FakeWebSocket extends EventTarget {
   static readonly OPEN = 1;
   readonly url: string;
   readonly requests: object[] = [];
+  closed = false;
   readyState = 0;
 
   constructor(url: URL) {
@@ -369,7 +557,13 @@ class FakeWebSocket extends EventTarget {
   }
 
   send(value: string): void {
-    const request = JSON.parse(value) as Readonly<{ id: string; type: string }>;
+    const request = JSON.parse(value) as Readonly<{
+      id: string;
+      type: string;
+      path?: string;
+      method?: string;
+      headers?: Readonly<Record<string, string>>;
+    }>;
     if (request.type !== "request") return;
     this.requests.push(request);
     const ordinal = this.requests.length;
@@ -380,18 +574,70 @@ class FakeWebSocket extends EventTarget {
         status: 200,
         headers: [["content-type", "application/json"]],
       });
+      if ("path" in request && `${request.path}`.includes("/changes?")) {
+        const conformance = this.url.includes("replication-conformance.test");
+        this.message({
+          type: "chunk",
+          id: request.id,
+          value: `${JSON.stringify(
+            conformance ? replicationConformanceRecords.changed : replicationEnvelope(1),
+          )}\n${JSON.stringify(
+            conformance ? replicationConformanceRecords.admitted.pull : replicationEnvelope(2),
+          )}\n`,
+        });
+        this.message({ type: "end", id: request.id });
+        return;
+      }
+      const conformancePayload = !this.url.includes("replication-conformance.test")
+        ? undefined
+        : request.path === "/api/replicas/tasks?after=10"
+          ? replicationConformanceRecords.changed
+          : request.path === "/api/replicas/tasks"
+            ? replicationConformanceRecords.initial
+            : request.path === "/api/replicas/tasks/complete"
+              ? replicationConformanceRecords.admitted
+              : undefined;
+      const payload =
+        conformancePayload ??
+        (request.method === "POST"
+          ? ({
+              result: { request: ordinal },
+              pull: replicationEnvelope(ordinal),
+            } satisfies ReplicationCommandResult)
+          : replicationEnvelope(ordinal));
       this.message({
         type: "chunk",
         id: request.id,
-        value: JSON.stringify({ request: ordinal }),
+        value: JSON.stringify(payload),
       });
       this.message({ type: "end", id: request.id });
     });
   }
 
-  close(): void {}
+  close(code = 1000, reason = ""): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.readyState = 3;
+    const event = new Event("close") as Event & { code: number; reason: string };
+    Object.defineProperties(event, {
+      code: { value: code },
+      reason: { value: reason },
+    });
+    this.dispatchEvent(event);
+  }
 
   private message(value: object): void {
     this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(value) }));
   }
+}
+
+function replicationEnvelope(sequence: number): ReplicationEnvelope {
+  return {
+    version: 1,
+    sequence,
+    observations: { source: `${sequence}` },
+    invocations: [],
+    cursor: `${sequence}`,
+    changes: [],
+  };
 }

@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { beforeAll, describe, expect, test } from "vitest";
 
 import type { SystemIR } from "@/compiler/ir";
-import { compileSystem, compileSystemSources } from "@/compiler/source";
+import { compileSystemSources } from "@/compiler/source";
 import type { TypeSchema } from "@/core/intrinsic";
 import { executePortableFunctionIR } from "@/execution/interpreter";
 import {
@@ -38,6 +38,7 @@ import {
   type WorkflowIRReplayTrace,
 } from "@/features/workflow/ir";
 import { serverCompilerExtension } from "@/platforms/server/adapter";
+import { compileSystemFixture } from "@/testing/compiler";
 
 const schema = {} as TypeSchema;
 let compiledSystem: SystemIR;
@@ -45,7 +46,7 @@ let cleanupSystem: SystemIR | undefined;
 
 describe("canonical Workflow IR", { tags: ["compiler"] }, () => {
   beforeAll(() => {
-    compiledSystem = compileSystem(resolve(import.meta.dirname, "ir.typecheck.ts"), [
+    compiledSystem = compileSystemFixture(resolve(import.meta.dirname, "ir.typecheck.ts"), [
       serverCompilerExtension,
       workflowCompilerExtension,
     ]);
@@ -1216,7 +1217,7 @@ export default createWorkflow<Interactive>({
     "lowers authored try/finally and shield to reference-equivalent portable frames",
     { timeout: 60_000 },
     async () => {
-      cleanupSystem ??= compileSystem(resolve(import.meta.dirname, "feature.typecheck.ts"), [
+      cleanupSystem ??= compileSystemFixture(resolve(import.meta.dirname, "feature.typecheck.ts"), [
         serverCompilerExtension,
         workflowCompilerExtension,
       ]);

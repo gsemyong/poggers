@@ -1,14 +1,20 @@
-import { createFeature, type FeatureContractOf } from "kit";
-import { createAggregate, type Aggregate } from "kit/features/aggregate";
-import { createProjection, type Projection } from "kit/features/projection";
-import { createReplica, type Replica } from "kit/features/replica";
+import {
+  createFeature,
+  type Dependency,
+  type DependencyImplementation,
+  type FeatureContractOf,
+} from "kit";
+import { createData, type Data } from "kit/features/data";
+import type { Identity as IdentityFeature } from "kit/features/identity";
 import { createWorkflow, type Workflow } from "kit/features/workflow";
+import { getHttpValue, type HttpResponse, type HttpServer, type ServerProcess } from "kit/server";
 import {
   For,
   type BrowserMainThread,
   type Identifiers,
   type Navigation,
   type UUID,
+  type WebDependencyProvider,
   type WebDestination,
 } from "kit/web";
 
@@ -19,54 +25,91 @@ export type Task = Readonly<{
   ownerId: string;
   title: string;
   completed: boolean;
+  embedding: readonly number[];
 }>;
 
-type TaskAggregate = Aggregate<{
+type TaskRecord = Readonly<
+  Task & {
+    exists: boolean;
+    deleted: boolean;
+  }
+>;
+
+type TaskData = Data<{
   Name: "tasks";
-  Key: string;
-  State: Readonly<
-    Task & {
-      exists: boolean;
-      deleted: boolean;
-    }
-  >;
-  Principal: User;
+  Version: 1;
+  Identity: Identity;
+  Record: TaskRecord;
   Commands: {
-    create: Aggregate.Command<
-      Readonly<{ title: string }>,
+    create: Data.Command<
+      Readonly<{ id: string; title: string }>,
       Readonly<{ id: string }>,
       { exists: Record<never, never> }
     >;
-    update: Aggregate.Command<
-      Readonly<{ title: string }>,
+    update: Data.Command<
+      Readonly<{ id: string; title: string }>,
       Record<never, never>,
       { missing: Record<never, never> }
     >;
-    toggle: Aggregate.Command<
-      undefined,
+    toggle: Data.Command<
+      Readonly<{ id: string }>,
       Readonly<{ completed: boolean }>,
       { missing: Record<never, never> }
     >;
-    remove: Aggregate.Command<undefined, Record<never, never>, { missing: Record<never, never> }>;
+    remove: Data.Command<
+      Readonly<{ id: string }>,
+      Record<never, never>,
+      { missing: Record<never, never> }
+    >;
   };
   Events: {
-    created: Aggregate.Event<1, Readonly<{ ownerId: string; title: string }>>;
-    updated: Aggregate.Event<1, Readonly<{ title?: string; completed?: boolean }>>;
-    removed: Aggregate.Event<1, Record<never, never>>;
+    created: Data.Event<
+      1,
+      Readonly<{ ownerId: string; title: string; embedding: readonly number[] }>
+    >;
+    updated: Data.Event<
+      1,
+      Readonly<{ title?: string; completed?: boolean; embedding?: readonly number[] }>
+    >;
+    removed: Data.Event<1, Record<never, never>>;
+  };
+  Queries: {
+    Text: "title";
+    Vector: { Field: "embedding"; Dimensions: 4 };
+    Analytics: true;
   };
 }>;
 
-export const taskAggregateDefinition = {
+export function taskEmbedding(value: string): readonly number[] {
+  const normalized = value.trim().toLowerCase();
+  let first = 1;
+  let second = 1;
+  let third = 1;
+  let fourth = 1;
+  for (let index = 0; index < normalized.length; index += 1) {
+    const code = normalized.charCodeAt(index);
+    const bucket = code % 4;
+    if (bucket === 0) first += code;
+    else if (bucket === 1) second += code;
+    else if (bucket === 2) third += code;
+    else fourth += code;
+  }
+  return [first, second, third, fourth];
+}
+
+export const taskDataDefinition = {
+  retention: "retain",
   state: ({ key }) => ({
     id: key,
     ownerId: "",
     title: "",
     completed: false,
+    embedding: [1, 1, 1, 1],
     exists: false,
     deleted: false,
   }),
   commands: {
-    create({ key, state, principal, input, fail }) {
+    create({ state, principal, input, fail }) {
       if (state.exists && !state.deleted) fail({ type: "exists", data: {} });
       return {
         events: [
@@ -74,16 +117,17 @@ export const taskAggregateDefinition = {
             created: {
               ownerId: principal.id,
               title: input.title,
+              embedding: taskEmbedding(input.title),
             },
           },
         ],
-        result: { id: key },
+        result: { id: input.id },
       };
     },
     update({ state, input, fail }) {
       if (!state.exists || state.deleted) fail({ type: "missing", data: {} });
       return {
-        events: [{ updated: input }],
+        events: [{ updated: { title: input.title, embedding: taskEmbedding(input.title) } }],
         result: {},
       };
     },
@@ -111,6 +155,7 @@ export const taskAggregateDefinition = {
           ownerId: event.ownerId,
           title: event.title,
           completed: false,
+          embedding: event.embedding,
           exists: true,
           deleted: false,
         };
@@ -123,6 +168,7 @@ export const taskAggregateDefinition = {
           ownerId: state.ownerId,
           title: event.title ?? state.title,
           completed: event.completed ?? state.completed,
+          embedding: event.embedding ?? state.embedding,
           exists: state.exists,
           deleted: state.deleted,
         };
@@ -135,6 +181,7 @@ export const taskAggregateDefinition = {
           ownerId: state.ownerId,
           title: state.title,
           completed: state.completed,
+          embedding: state.embedding,
           exists: state.exists,
           deleted: true,
         };
@@ -157,69 +204,18 @@ export const taskAggregateDefinition = {
     remove({ state, principal }) {
       return state.exists && !state.deleted && state.ownerId === principal.id;
     },
-  },
-} satisfies Aggregate.Definition<TaskAggregate>;
-
-export const taskAggregate = createAggregate<TaskAggregate>(taskAggregateDefinition);
-
-type TaskProjection = Projection<{
-  Name: "taskList";
-  Version: 1;
-  Principal: User;
-  Sources: {
-    tasks: Aggregate.Events<typeof taskAggregate>;
-  };
-  Rows: {
-    tasks: Task;
-  };
-  Queries: {
-    Text: { tasks: "title" };
-    Analytics: { tasks: true };
-  };
-}>;
-
-export const taskProjectionDefinition = {
-  reduce({ event, rows }) {
-    if (event.type === "created") {
-      return [
-        {
-          upsert: {
-            tasks: {
-              id: event.key,
-              ownerId: event.data.ownerId,
-              title: event.data.title,
-              completed: false,
-            },
-          },
+    query({ principal }) {
+      return {
+        where: {
+          ownerId: { equal: principal.id },
+          deleted: { equal: false },
         },
-      ];
-    }
-    if (event.type === "removed") {
-      return [{ remove: { tasks: { id: event.key } } }];
-    }
-    const current = rows.tasks.find(({ id }) => id === event.key);
-    if (!current) return [];
-    return [
-      {
-        upsert: {
-          tasks: {
-            id: current.id,
-            ownerId: current.ownerId,
-            title: event.data.title ?? current.title,
-            completed: event.data.completed ?? current.completed,
-          },
-        },
-      },
-    ];
-  },
-  authorize: {
-    tasks({ principal, row }) {
-      return principal.id === row.ownerId;
+      };
     },
   },
-} satisfies Projection.Definition<TaskProjection>;
+} satisfies Data.Definition<TaskData>;
 
-export const taskProjection = createProjection<TaskProjection>(taskProjectionDefinition);
+export const taskData = createData<TaskData>(taskDataDefinition);
 
 type TaskCompletion = Workflow<{
   Name: "taskCompletion";
@@ -234,7 +230,7 @@ type TaskCompletion = Workflow<{
     notCompleted: Readonly<{ taskId: string }>;
   };
   Dependencies: {
-    tasks: Aggregate.Reference<typeof taskAggregate>;
+    tasksAuthority: Data.Authority<typeof taskData>;
   };
   Actions: {};
 }>;
@@ -243,7 +239,7 @@ export const taskCompletionDefinition = {
   state: () => ({ phase: "verifying", revision: 0 }),
   actions: {},
   async run({ input, state, dependencies, fail }) {
-    const snapshot = await dependencies.tasks
+    const snapshot = await dependencies.tasksAuthority
       .get({ key: input.taskId, principal: input.principal })
       .state();
     if (!snapshot.state.completed) {
@@ -257,140 +253,34 @@ export const taskCompletionDefinition = {
 
 export const taskCompletion = createWorkflow<TaskCompletion>(taskCompletionDefinition);
 
-type TaskReplica = Replica<{
-  Name: "taskReplica";
-  Version: 1;
-  Identity: Identity;
-  Projection: typeof taskProjection;
-  Rows: "tasks";
-  Dependencies: {
-    tasks: Aggregate.Reference<typeof taskAggregate>;
-    taskCompletion: Workflow.Reference<typeof taskCompletion>;
-  };
-  Commands: {
-    create: Replica.Command<Readonly<{ id: string; title: string }>>;
-    update: Replica.Command<Readonly<{ id: string; title: string }>>;
-    toggle: Replica.Command<Readonly<{ id: string }>>;
-    remove: Replica.Command<Readonly<{ id: string }>>;
+type TaskCompletionVerification = Dependency<{
+  Operations: {
+    verify(input: Readonly<{ taskId: string }>): Promise<Readonly<{ revision: number }>>;
   };
 }>;
 
-export const taskReplicaDefinition = {
-  state: () => ({ tasks: [] }),
-  commands: {
-    create: {
-      async commit({ principal, dependencies, input, idempotencyKey }) {
-        const outcome = await dependencies.tasks
-          .get({ key: input.id, principal })
-          .create({ title: input.title }, { idempotencyKey });
-        if (outcome.status === "failed") throw new Error(outcome.failure.type);
-        return {};
-      },
-    },
-    update: {
-      async commit({ principal, dependencies, input, idempotencyKey }) {
-        const outcome = await dependencies.tasks
-          .get({ key: input.id, principal })
-          .update({ title: input.title }, { idempotencyKey });
-        if (outcome.status === "failed") throw new Error(outcome.failure.type);
-        return {};
-      },
-    },
-    toggle: {
-      async commit({ principal, dependencies, input, idempotencyKey }) {
-        const outcome = await dependencies.tasks
-          .get({ key: input.id, principal })
-          .toggle({ idempotencyKey });
-        if (outcome.status === "failed") throw new Error(outcome.failure.type);
-        if (outcome.value.completed) {
-          const execution = dependencies.taskCompletion.get({
-            id: `${input.id}:${idempotencyKey}`,
-          });
-          await execution.start({
-            input: { taskId: input.id, principal },
-          });
-          const completion = await execution.join();
-          if (completion.status !== "succeeded") {
-            throw new Error("Task completion Workflow did not succeed.");
-          }
+const completionVerificationProvider: WebDependencyProvider<TaskCompletionVerification> = {
+  requirements: {},
+  development({ request }) {
+    return {
+      async verify({ input, invocation }) {
+        const response = await request({
+          path: "/api/tasks/completion",
+          method: "POST",
+          headers: { "x-kit-command": invocation.id },
+          body: JSON.stringify(input),
+        });
+        if (!response.ok) {
+          const failure = (await response.json().catch(() => undefined)) as
+            | Readonly<{ message?: string }>
+            | undefined;
+          throw new Error(failure?.message ?? `Task verification failed (${response.status}).`);
         }
-        return {};
+        return (await response.json()) as Readonly<{ revision: number }>;
       },
-    },
-    remove: {
-      async commit({ principal, dependencies, input, idempotencyKey }) {
-        const outcome = await dependencies.tasks
-          .get({ key: input.id, principal })
-          .remove({ idempotencyKey });
-        if (outcome.status === "failed") throw new Error(outcome.failure.type);
-        return {};
-      },
-    },
+    } satisfies DependencyImplementation<TaskCompletionVerification>;
   },
-  optimistic: {
-    create({ state, input }) {
-      const next = [];
-      for (const task of state.tasks) next.push(task);
-      next.push({
-        id: input.id,
-        ownerId: "",
-        title: input.title,
-        completed: false,
-      });
-      return {
-        tasks: next,
-      };
-    },
-    update({ state, input }) {
-      const next = [];
-      for (const task of state.tasks) {
-        next.push(
-          task.id === input.id
-            ? {
-                id: task.id,
-                ownerId: task.ownerId,
-                title: input.title,
-                completed: task.completed,
-              }
-            : task,
-        );
-      }
-      return {
-        tasks: next,
-      };
-    },
-    toggle({ state, input }) {
-      const next = [];
-      for (const task of state.tasks) {
-        next.push(
-          task.id === input.id
-            ? {
-                id: task.id,
-                ownerId: task.ownerId,
-                title: task.title,
-                completed: !task.completed,
-              }
-            : task,
-        );
-      }
-      return {
-        tasks: next,
-      };
-    },
-    remove({ state, input }) {
-      const next = [];
-      for (const task of state.tasks) {
-        if (task.id !== input.id) next.push(task);
-      }
-      return {
-        tasks: next,
-      };
-    },
-  },
-  migrate: {},
-} satisfies Replica.Definition<TaskReplica>;
-
-export const taskReplica = createReplica<TaskReplica>(taskReplicaDefinition);
+};
 
 type TaskRoutes = {
   root: {
@@ -425,20 +315,37 @@ type TasksBrowser = {
   Requires: {
     navigation: Navigation<TaskRoutes>;
     identifiers: Identifiers;
-    taskReplica: Replica.Client<typeof taskReplica>;
+    tasks: Data.Client<typeof taskData>;
+    completionVerification: TaskCompletionVerification;
   };
   State: {
     error: string | undefined;
-    replica: Replica.State<typeof taskReplica>;
+    replica: Data.State<typeof taskData>;
+    query: string;
+    queryVersion: number;
+    searchMode: "text" | "related";
+    matches: readonly string[] | undefined;
+    open: number;
+    completed: number;
+    verification:
+      | Readonly<{
+          taskId: string;
+          status: "verifying" | "verified" | "failed";
+          revision?: number;
+          message?: string;
+        }>
+      | undefined;
   };
   Actions: {
-    receive(input: { replica: Replica.State<typeof taskReplica> }): void;
+    receive(input: { replica: Data.State<typeof taskData> }): Promise<void>;
+    search(input: { query: string; mode: "text" | "related" }): Promise<void>;
     create(): void;
     edit(input: { id: string }): void;
     back(): void;
     save(input: { destination: TaskDestination; title: string }): void;
     toggle(input: { id: string }): void;
     remove(input: { id: string }): void;
+    verify(input: { id: string }): Promise<void>;
   };
   Components: {
     Admin: {
@@ -454,6 +361,17 @@ type TasksBrowser = {
         Copy: "p";
         New: "button";
         Status: "p";
+        Search: "div";
+        SearchLabel: "label";
+        SearchInput: "input";
+        SearchModes: "div";
+        TextMode: "button";
+        RelatedMode: "button";
+        Summary: "dl";
+        SummaryItem: "div";
+        SummaryValue: "dd";
+        SummaryLabel: "dt";
+        Results: "p";
         Empty: "div";
         EmptyTitle: "h3";
         EmptyCopy: "p";
@@ -462,9 +380,11 @@ type TasksBrowser = {
         TaskBody: "div";
         TaskTitle: "h3";
         TaskState: "p";
+        Verification: "p";
         Actions: "div";
         Edit: "button";
         Toggle: "button";
+        Verify: "button";
         Remove: "button";
         Form: "form";
         FormHeader: "div";
@@ -480,29 +400,101 @@ type TasksBrowser = {
   Routes: TaskRoutes;
 };
 
+type TasksServer = {
+  Environment: ServerProcess;
+  Requires: {
+    http: HttpServer;
+    identity: IdentityFeature.Service<Identity>;
+    taskCompletion: Workflow.Reference<typeof taskCompletion>;
+  };
+};
+
 type TasksFeatureDefinition = Readonly<{
   Features: {
-    aggregate: FeatureContractOf<typeof taskAggregate>;
+    data: FeatureContractOf<typeof taskData>;
     completion: FeatureContractOf<typeof taskCompletion>;
-    projection: FeatureContractOf<typeof taskProjection>;
-    replica: FeatureContractOf<typeof taskReplica>;
   };
-  Programs: { browser: TasksBrowser };
+  Programs: { browser: TasksBrowser; server: TasksServer };
+  Providers: { web: { completionVerification: WebDependencyProvider<TaskCompletionVerification> } };
 }>;
 
 export type TasksFeature = TasksFeatureDefinition;
 
 export const tasks = createFeature<TasksFeatureDefinition>({
   features: {
-    aggregate: taskAggregate,
+    data: taskData,
     completion: taskCompletion,
-    projection: taskProjection,
-    replica: taskReplica,
+  },
+  providers: {
+    web: { completionVerification: completionVerificationProvider },
   },
   programs: {
+    server: {
+      start({ dependencies }) {
+        const respond = (status: number, value: object): HttpResponse => ({
+          status,
+          headers: [{ name: "content-type", value: "application/json" }],
+          body: JSON.stringify(value),
+          stream: undefined,
+        });
+        return dependencies.http.route({
+          path: "/api/tasks/completion",
+          async handle(request) {
+            if (request.method !== "POST") {
+              return respond(405, { message: "Method not allowed." });
+            }
+            const principal = await dependencies.identity.authenticate({
+              cookie: getHttpValue(request.headers, { name: "cookie" }),
+            });
+            if (!principal) {
+              return respond(401, { message: "Authentication required." });
+            }
+            let taskId: string | undefined;
+            try {
+              const input = JSON.parse(request.body) as Readonly<{ taskId?: string }>;
+              if (input.taskId !== undefined && input.taskId.length > 0) {
+                taskId = input.taskId;
+              }
+            } catch {}
+            if (!taskId) {
+              return respond(400, { message: "A task id is required." });
+            }
+            const invocation =
+              getHttpValue(request.headers, { name: "x-kit-command" }) ?? "task-verification";
+            const execution = dependencies.taskCompletion.get({
+              id: `${taskId}:${invocation}`,
+            });
+            await execution.start(
+              {
+                input: { taskId, principal },
+                conflict: "use",
+                reuse: "failed",
+              },
+              { idempotencyKey: invocation },
+            );
+            const result = await execution.join();
+            return result.status === "succeeded"
+              ? respond(200, result.value)
+              : respond(409, {
+                  message:
+                    result.status === "failed"
+                      ? "The durable completion check failed."
+                      : `The durable completion check ${result.status}.`,
+                });
+          },
+        });
+      },
+    },
     browser: {
       state: {
         error: undefined,
+        query: "",
+        queryVersion: 0,
+        searchMode: "text",
+        matches: undefined,
+        open: 0,
+        completed: 0,
+        verification: undefined,
         replica: {
           status: "signed-out",
           pending: [],
@@ -510,8 +502,39 @@ export const tasks = createFeature<TasksFeatureDefinition>({
         },
       },
       actions: {
-        receive({ state }, { replica }) {
+        async receive({ dependencies, state }, { replica }) {
           state.replica = replica;
+          const query = state.query;
+          const mode = state.searchMode;
+          const version = ++state.queryVersion;
+          try {
+            const [summary, matches] = await Promise.all([
+              taskSummary(dependencies.tasks),
+              query ? taskMatches(dependencies.tasks, query, mode) : undefined,
+            ]);
+            if (state.queryVersion !== version) return;
+            state.error = undefined;
+            state.open = summary.open;
+            state.completed = summary.completed;
+            state.matches = matches;
+          } catch (error) {
+            if (state.queryVersion === version) state.error = message(error);
+          }
+        },
+        async search({ dependencies, state }, { query, mode }) {
+          state.query = query;
+          state.searchMode = mode;
+          const version = ++state.queryVersion;
+          try {
+            const matches = query.trim()
+              ? await taskMatches(dependencies.tasks, query, mode)
+              : undefined;
+            if (state.queryVersion !== version) return;
+            state.error = undefined;
+            state.matches = matches;
+          } catch (error) {
+            if (state.queryVersion === version) state.error = message(error);
+          }
         },
         create({ dependencies }) {
           dependencies.navigation.navigate({ route: "create" });
@@ -527,45 +550,56 @@ export const tasks = createFeature<TasksFeatureDefinition>({
           if (!title) return;
           state.error = undefined;
           try {
-            const command =
-              destination.route === "edit"
-                ? dependencies.taskReplica.update({
-                    id: destination.params.id,
-                    title,
-                  })
-                : dependencies.taskReplica.create({
-                    id: dependencies.identifiers.create({}),
-                    title,
-                  });
+            if (destination.route === "edit") {
+              dependencies.tasks.update({
+                id: destination.params.id,
+                title,
+              });
+            } else {
+              dependencies.tasks.create({
+                id: dependencies.identifiers.create({}),
+                title,
+              });
+            }
             dependencies.navigation.navigate({ route: "list" });
-            void command.catch((error: unknown) => {
-              state.error = message(error);
-            });
           } catch (error) {
             state.error = message(error);
           }
         },
         toggle({ dependencies, state }, { id }) {
           try {
-            void dependencies.taskReplica.toggle({ id }).catch((error: unknown) => {
-              state.error = message(error);
-            });
+            dependencies.tasks.toggle({ id });
           } catch (error) {
             state.error = message(error);
           }
         },
         remove({ dependencies, state }, { id }) {
           try {
-            void dependencies.taskReplica.remove({ id }).catch((error: unknown) => {
-              state.error = message(error);
-            });
+            dependencies.tasks.remove({ id });
           } catch (error) {
             state.error = message(error);
           }
         },
+        async verify({ dependencies, state }, { id }) {
+          state.verification = { taskId: id, status: "verifying" };
+          try {
+            const result = await dependencies.completionVerification.verify({ taskId: id });
+            state.verification = {
+              taskId: id,
+              status: "verified",
+              revision: result.revision,
+            };
+          } catch (error) {
+            state.verification = {
+              taskId: id,
+              status: "failed",
+              message: message(error),
+            };
+          }
+        },
       },
       start({ dependencies, actions }) {
-        return dependencies.taskReplica.subscribe((replica) => actions.receive({ replica }));
+        return dependencies.tasks.subscribe((replica) => actions.receive({ replica }));
       },
       components: {
         Admin: {
@@ -585,6 +619,17 @@ export const tasks = createFeature<TasksFeatureDefinition>({
               Copy,
               New,
               Status,
+              Search,
+              SearchLabel,
+              SearchInput,
+              SearchModes,
+              TextMode,
+              RelatedMode,
+              Summary,
+              SummaryItem,
+              SummaryValue,
+              SummaryLabel,
+              Results,
               Empty,
               EmptyTitle,
               EmptyCopy,
@@ -593,9 +638,11 @@ export const tasks = createFeature<TasksFeatureDefinition>({
               TaskBody,
               TaskTitle,
               TaskState,
+              Verification,
               Actions,
               Edit,
               Toggle,
+              Verify,
               Remove,
               Form,
               FormHeader,
@@ -607,6 +654,14 @@ export const tasks = createFeature<TasksFeatureDefinition>({
               Back,
             } = elements;
             const tasks = () => feature.replica.data?.tasks ?? [];
+            const visibleTasks = () => {
+              if (feature.matches === undefined) return tasks();
+              const byId = new Map(tasks().map((task) => [task.id, task]));
+              return feature.matches.flatMap((id) => {
+                const task = byId.get(id);
+                return task === undefined ? [] : [task];
+              });
+            };
             const title = () => {
               const destination = props.destination;
               return (
@@ -625,7 +680,7 @@ export const tasks = createFeature<TasksFeatureDefinition>({
                   <Heading>
                     <Eyebrow>Workspace</Eyebrow>
                     <Title>Tasks</Title>
-                    <Copy>Plan the work, keep it moving, and close the loop.</Copy>
+        <Copy>Plan the work, keep it moving, and close the loop.</Copy>
                   </Heading>
                   {() =>
                     props.destination.route === "list" ? (
@@ -652,40 +707,125 @@ export const tasks = createFeature<TasksFeatureDefinition>({
                   }
                 </Status>
                 {props.destination.route === "list" ? (
-                  <List>
-                    <For
-                      each={() => tasks()}
-                      by="id"
-                      fallback={
-                        <Empty>
-                          <EmptyTitle>No tasks yet</EmptyTitle>
-                          <EmptyCopy>Create the first task to start this workspace.</EmptyCopy>
-                        </Empty>
+                  <>
+                    <Search>
+                      <SearchLabel for="task-search">Find tasks</SearchLabel>
+                      <SearchInput
+                        id="task-search"
+                        type="search"
+                        value={() => feature.query}
+                        placeholder={
+                          feature.searchMode === "text"
+                            ? "Search exact words"
+                            : "Find conceptually related tasks"
+                        }
+                        onInput={(event) =>
+                          feature.search({
+                            query: event.currentTarget.value,
+                            mode: feature.searchMode,
+                          })
+                        }
+                      />
+                      <SearchModes aria-label="Search mode">
+                        <TextMode
+                          type="button"
+                          aria-pressed={() => feature.searchMode === "text"}
+                          onClick={() => feature.search({ query: feature.query, mode: "text" })}
+                        >
+                          Words
+                        </TextMode>
+                        <RelatedMode
+                          type="button"
+                          aria-pressed={() => feature.searchMode === "related"}
+                          onClick={() => feature.search({ query: feature.query, mode: "related" })}
+                        >
+                          Related
+                        </RelatedMode>
+                      </SearchModes>
+                    </Search>
+                    <Summary>
+                      <SummaryItem>
+                        <SummaryValue>{() => `${tasks().length}`}</SummaryValue>
+                        <SummaryLabel>Total</SummaryLabel>
+                      </SummaryItem>
+                      <SummaryItem>
+                        <SummaryValue>{() => `${feature.open}`}</SummaryValue>
+                        <SummaryLabel>Open</SummaryLabel>
+                      </SummaryItem>
+                      <SummaryItem>
+                        <SummaryValue>{() => `${feature.completed}`}</SummaryValue>
+                        <SummaryLabel>Completed</SummaryLabel>
+                      </SummaryItem>
+                    </Summary>
+                    <Results aria-live="polite">
+                      {() =>
+                        feature.query
+                          ? `${visibleTasks().length} ${feature.searchMode === "text" ? "text" : "similarity"} results`
+                          : "All locally available tasks"
                       }
-                    >
-                      {(task) => (
-                        <Row>
-                          <TaskBody>
-                            <TaskTitle>{() => task.title}</TaskTitle>
-                            <TaskState>
-                              {() => (task.completed ? "Completed" : "In progress")}
-                            </TaskState>
-                          </TaskBody>
-                          <Actions>
-                            <Edit type="button" onClick={() => feature.edit({ id: task.id })}>
-                              Edit
-                            </Edit>
-                            <Toggle type="button" onClick={() => feature.toggle({ id: task.id })}>
-                              {() => (task.completed ? "Reopen" : "Complete")}
-                            </Toggle>
-                            <Remove type="button" onClick={() => feature.remove({ id: task.id })}>
-                              Delete
-                            </Remove>
-                          </Actions>
-                        </Row>
-                      )}
-                    </For>
-                  </List>
+                    </Results>
+                    <List>
+                      <For
+                        each={() => visibleTasks()}
+                        by="id"
+                        fallback={
+                          <Empty>
+                            <EmptyTitle>
+                              {feature.query ? "No matching tasks" : "No tasks yet"}
+                            </EmptyTitle>
+                            <EmptyCopy>
+                              {feature.query
+                                ? "Try another phrase or search mode."
+                                : "Create the first task to start this workspace."}
+                            </EmptyCopy>
+                          </Empty>
+                        }
+                      >
+                        {(task) => (
+                          <Row>
+                            <TaskBody>
+                              <TaskTitle>{() => task.title}</TaskTitle>
+                              <TaskState>
+                                {() => (task.completed ? "Completed" : "In progress")}
+                              </TaskState>
+                              {() =>
+                                feature.verification?.taskId === task.id ? (
+                                  <Verification role="status">
+                                    {feature.verification.status === "verifying"
+                                      ? "Verifying durable state"
+                                      : feature.verification.status === "verified"
+                                        ? `Workflow verified revision ${feature.verification.revision}`
+                                        : feature.verification.message}
+                                  </Verification>
+                                ) : null
+                              }
+                            </TaskBody>
+                            <Actions>
+                              <Edit type="button" onClick={() => feature.edit({ id: task.id })}>
+                                Edit
+                              </Edit>
+                              <Toggle type="button" onClick={() => feature.toggle({ id: task.id })}>
+                                {() => (task.completed ? "Reopen" : "Complete")}
+                              </Toggle>
+                              {() =>
+                                task.completed ? (
+                                  <Verify
+                                    type="button"
+                                    onClick={() => void feature.verify({ id: task.id })}
+                                  >
+                                    Verify workflow
+                                  </Verify>
+                                ) : null
+                              }
+                              <Remove type="button" onClick={() => feature.remove({ id: task.id })}>
+                                Delete
+                              </Remove>
+                            </Actions>
+                          </Row>
+                        )}
+                      </For>
+                    </List>
+                  </>
                 ) : (
                   () =>
                     props.destination.route === "edit" &&
@@ -766,4 +906,42 @@ export const tasks = createFeature<TasksFeatureDefinition>({
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+async function taskMatches(
+  tasks: Data.Client<typeof taskData>,
+  query: string,
+  mode: "text" | "related",
+): Promise<readonly string[]> {
+  const result = await (
+    mode === "text"
+      ? tasks.tasks({ text: { value: query, fields: ["title"] } })
+      : tasks.tasks({
+          vector: { field: "embedding", value: taskEmbedding(query), limit: 20 },
+        })
+  );
+  return result.kind === "rows" ? result.matches.map(({ row }) => row.id) : [];
+}
+
+async function taskSummary(tasks: Data.Client<typeof taskData>): Promise<
+  Readonly<{
+  open: number;
+  completed: number;
+  }>
+> {
+  const result = await tasks.tasks({
+    analytics: {
+      groupBy: ["completed"],
+      measures: { count: { count: true } },
+    },
+  });
+  let open = 0;
+  let completed = 0;
+  if (result.kind === "analytics") {
+    for (const group of result.groups) {
+      if (group.key.completed === true) completed = group.measures.count ?? 0;
+      else if (group.key.completed === false) open = group.measures.count ?? 0;
+    }
+  }
+  return { open, completed };
 }

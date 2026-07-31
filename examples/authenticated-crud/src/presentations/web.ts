@@ -244,6 +244,34 @@ const createClean = (({ parameters: values }) => {
         Copy: muted,
         New: button("primary"),
         Status: muted,
+        Search: {
+          layout: {
+            model: { kind: "flow", direction: "block", gap: 8 },
+          },
+        },
+        SearchLabel: { text: { size: 13, weight: "semibold" } },
+        SearchInput: input,
+        SearchModes: {
+          layout: { model: { kind: "flow", direction: "inline", gap: 6, align: "center" } },
+        },
+        TextMode: button(),
+        RelatedMode: button(),
+        Summary: {
+          layout: {
+            model: {
+              kind: "grid",
+              columns: [{ fraction: 1 }, { fraction: 1 }, { fraction: 1 }],
+              gap: 8,
+            },
+          },
+        },
+        SummaryItem: {
+          layout: { model: { kind: "flow", direction: "block", gap: 2 }, padding: 12 },
+          paint: { fill: values.color.accentSoft, radius: values.radius.control },
+        },
+        SummaryValue: { text: { size: 20, weight: 720 } },
+        SummaryLabel: muted,
+        Results: muted,
         Empty: {
           layout: {
             model: { kind: "flow", direction: "block", gap: 6 },
@@ -290,6 +318,7 @@ const createClean = (({ parameters: values }) => {
         TaskBody: { layout: { model: { kind: "flow", direction: "block", gap: 3 } } },
         TaskTitle: { text: { size: 15, weight: 650 } },
         TaskState: muted,
+        Verification: { text: { color: values.color.accent, size: 12, weight: "semibold" } },
         Actions: {
           layout: { model: { kind: "flow", direction: "inline", gap: 7, align: "center" } },
           rules: [
@@ -305,6 +334,7 @@ const createClean = (({ parameters: values }) => {
         },
         Edit: button(),
         Toggle: button(),
+        Verify: button("primary"),
         Remove: button("danger"),
         Form: {
           layout: {

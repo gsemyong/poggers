@@ -159,7 +159,9 @@ export function scoped(read: () => Child): Child {
 
 /** @internal Evaluates an owned subtree without mounting it. */
 export function readScoped(child: Child): Child {
-  return isScopedChild(child) ? child[scopedChild]() : child;
+  let current = child;
+  while (isScopedChild(current)) current = current[scopedChild]();
+  return current;
 }
 
 const virtualCollectionHosts = new WeakMap<

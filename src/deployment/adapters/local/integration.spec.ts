@@ -57,6 +57,7 @@ test.skipIf(spawnSync("nats-server", ["--version"], { stdio: "ignore" }).status 
       JSON.stringify({
         extends: resolve(import.meta.dirname, "../../../../tsconfig.json"),
         compilerOptions: {
+          types: [],
           paths: {
             "@/*": [resolve(import.meta.dirname, "../../../*")],
             kit: [resolve(import.meta.dirname, "../../../index.ts")],

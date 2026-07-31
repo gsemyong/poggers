@@ -21,7 +21,7 @@ export function dataKind(value: unknown): DataKind {
  * objects fail before reaching a host implementation.
  */
 export function cloneData<Value>(value: Value, label = "Value"): Value {
-  return clone(value, label, new Set(), "root") as Value;
+  return clone(value, label, new Set(), "root", "$") as Value;
 }
 
 /** Compares values after applying the same canonical durable-data semantics. */
@@ -34,6 +34,7 @@ function clone(
   label: string,
   ancestors: Set<object>,
   position: "array" | "record" | "root",
+  path: string,
 ): unknown {
   if (value === undefined)
     return position === "array" ? null : position === "record" ? omitted : value;
@@ -42,40 +43,44 @@ function clone(
   }
   if (typeof value === "number") {
     if (!Number.isFinite(value)) {
-      throw new TypeError(`${label} contains a non-finite number.`);
+      throw new TypeError(`${label} contains a non-finite number at ${path}.`);
     }
     return Object.is(value, -0) ? 0 : value;
   }
   if (typeof value !== "object") {
-    throw new TypeError(`${label} contains unsupported ${typeof value} data.`);
+    throw new TypeError(`${label} contains unsupported ${typeof value} data at ${path}.`);
   }
   if (ancestors.has(value)) {
-    throw new TypeError(`${label} contains a circular reference.`);
+    throw new TypeError(`${label} contains a circular reference at ${path}.`);
   }
 
   ancestors.add(value);
   try {
     if (Array.isArray(value)) {
       return Array.from({ length: value.length }, (_, index) =>
-        clone(value[index], label, ancestors, "array"),
+        clone(value[index], label, ancestors, "array", `${path}[${index}]`),
       );
     }
 
     const prototype = Object.getPrototypeOf(value) as object | null;
     if (prototype !== Object.prototype && prototype !== null) {
-      throw new TypeError(`${label} contains a non-data object.`);
+      const name =
+        typeof (prototype as { constructor?: { name?: unknown } }).constructor?.name === "string"
+          ? (prototype as { constructor: { name: string } }).constructor.name
+          : "unknown";
+      throw new TypeError(`${label} contains a non-data ${name} object at ${path}.`);
     }
     if (Object.getOwnPropertySymbols(value).length) {
-      throw new TypeError(`${label} contains a symbol property.`);
+      throw new TypeError(`${label} contains a symbol property at ${path}.`);
     }
 
     const result: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
     for (const name of Object.keys(value)) {
       const descriptor = Object.getOwnPropertyDescriptor(value, name);
       if (!descriptor || !("value" in descriptor)) {
-        throw new TypeError(`${label} contains an accessor property.`);
+        throw new TypeError(`${label} contains an accessor property at ${path}.${name}.`);
       }
-      const item = clone(descriptor.value, label, ancestors, "record");
+      const item = clone(descriptor.value, label, ancestors, "record", `${path}.${name}`);
       if (item !== omitted) result[name] = item;
     }
     return result;

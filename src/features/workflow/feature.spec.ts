@@ -77,6 +77,7 @@ import {
 } from "@/platforms/server/adapter/rust/fixtures/conformance";
 import { defineServerProductionDependency } from "@/platforms/server/adapter/rust/providers";
 import { executeServerLinkedProgramIR } from "@/platforms/server/adapter/typescript/runtime";
+import { compileSystemFixture } from "@/testing/compiler";
 import { createMemoryEventStore } from "@/testing/event-store";
 
 type Search = Dependency<{
@@ -201,7 +202,7 @@ function workflowCancellationFixtureSystem(): ReturnType<typeof compileSystem> {
 }
 
 function selectWorkflowFixture(root: string): SystemIR {
-  compiledWorkflowSourceFixture ??= compileSystem(
+  compiledWorkflowSourceFixture ??= compileSystemFixture(
     resolve(import.meta.dirname, "feature.typecheck.ts"),
     [serverCompilerExtension, workflowCompilerExtension],
   );
@@ -217,15 +218,15 @@ function selectWorkflowFixture(root: string): SystemIR {
 }
 
 function workflowIRFixtureSystem(): ReturnType<typeof compileSystem> {
-  compiledWorkflowIRFixture ??= compileSystem(resolve(import.meta.dirname, "ir.typecheck.ts"), [
-    serverCompilerExtension,
-    workflowCompilerExtension,
-  ]);
+  compiledWorkflowIRFixture ??= compileSystemFixture(
+    resolve(import.meta.dirname, "ir.typecheck.ts"),
+    [serverCompilerExtension, workflowCompilerExtension],
+  );
   return compiledWorkflowIRFixture;
 }
 
 function workflowChildrenFixtureSystem(): ReturnType<typeof compileSystem> {
-  compiledWorkflowChildrenFixture ??= compileSystem(
+  compiledWorkflowChildrenFixture ??= compileSystemFixture(
     resolve(import.meta.dirname, "children.typecheck.ts"),
     [serverCompilerExtension, workflowCompilerExtension],
   );
@@ -233,7 +234,7 @@ function workflowChildrenFixtureSystem(): ReturnType<typeof compileSystem> {
 }
 
 function workflowFulfillmentFixtureSystem(): ReturnType<typeof compileSystem> {
-  compiledWorkflowFulfillmentFixture ??= compileSystem(
+  compiledWorkflowFulfillmentFixture ??= compileSystemFixture(
     resolve(import.meta.dirname, "fulfillment.typecheck.ts"),
     [serverCompilerExtension, workflowCompilerExtension],
   );
@@ -241,7 +242,7 @@ function workflowFulfillmentFixtureSystem(): ReturnType<typeof compileSystem> {
 }
 
 function dynamicWorkflowFixtureSystem(): ReturnType<typeof compileSystem> {
-  compiledDynamicWorkflowFixture ??= compileSystem(
+  compiledDynamicWorkflowFixture ??= compileSystemFixture(
     resolve(import.meta.dirname, "dynamic.typecheck.ts"),
     [serverCompilerExtension, workflowCompilerExtension],
   );
@@ -368,7 +369,7 @@ test(
 
 test(
   "lowers a dynamic Workflow registry to ordinary Actor and Dependency meaning",
-  { timeout: 30_000 },
+  { tags: ["compiler"], timeout: 30_000 },
   () => {
     const ir = dynamicWorkflowFixtureSystem();
     const server = ir.programs.find(({ name }) => name === "server");
@@ -387,7 +388,7 @@ test(
 
 test(
   "persists dynamic definitions, pins execution meaning, and enforces lifecycle authority",
-  { timeout: 60_000 },
+  { tags: ["compiler"], timeout: 60_000 },
   async () => {
     const server = dynamicWorkflowFixtureSystem().programs.find(({ name }) => name === "server");
     if (!server) throw new Error("Dynamic Workflow fixture has no server Program.");
@@ -691,7 +692,7 @@ test(
 
 test(
   "rejects unauthorized, invalid, forged, and excessive dynamic Workflow source",
-  { timeout: 30_000 },
+  { tags: ["compiler"], timeout: 30_000 },
   async () => {
     const server = dynamicWorkflowFixtureSystem().programs.find(({ name }) => name === "server");
     if (!server) throw new Error("Dynamic Workflow fixture has no server Program.");
@@ -1705,6 +1706,7 @@ test(
           extends: resolve(import.meta.dirname, "../../../tsconfig.json"),
           compilerOptions: {
             paths: { "@/*": [resolve(import.meta.dirname, "../../*")] },
+            types: [],
           },
         }),
       );
@@ -3350,7 +3352,7 @@ test(
 
 test(
   "retains pinned meaning and admits only replay-compatible worker migration",
-  { timeout: 60_000 },
+  { tags: ["compiler"], timeout: 60_000 },
   async () => {
     const directory = await mkdtemp(resolve(tmpdir(), "kit-workflow-upgrade-"));
     try {
@@ -3361,6 +3363,7 @@ test(
           extends: resolve(import.meta.dirname, "../../../tsconfig.json"),
           compilerOptions: {
             paths: { "@/*": [resolve(import.meta.dirname, "../../*")] },
+            types: [],
           },
         }),
       );

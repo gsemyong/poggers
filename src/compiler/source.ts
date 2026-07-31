@@ -304,6 +304,7 @@ function sourceCompilerAPI(
   root?: string,
   extensions: readonly SourceCompilerExtension[] = [],
 ): SourceCompilerAPI {
+  const resolvedScopes = new Map<ts.Node, StaticValue>();
   return Object.freeze({
     properties: (type) => sortedSymbols(type?.getProperties() ?? []),
     property: (type, name, at) => propertyType(checker, type, name, at),
@@ -354,7 +355,10 @@ function sourceCompilerAPI(
             new Set(),
           )
         : undefined;
-      if (resolved?.node && isFunctionImplementation(resolved.node)) return resolved.node;
+      if (resolved?.node && isFunctionImplementation(resolved.node)) {
+        resolvedScopes.set(resolved.node, resolved);
+        return resolved.node;
+      }
       return member && (isFunctionImplementation(member) || functionFromMember(member))
         ? member
         : undefined;
@@ -410,10 +414,12 @@ function sourceCompilerAPI(
       const dependencyName = options.context
         ? (contextBindingName(contextParameter, options.context.dependencies) ?? "@dependencies")
         : (dependencyBinding(functionLike.parameters[0]) ?? "@dependencies");
+      const portableScope =
+        resolvedScopes.get(functionLike) ?? resolvedScopes.get(declaration) ?? scope;
       const lowering = createPortableLowering(
         checker,
-        scope?.bindings,
-        scope?.types,
+        portableScope?.bindings,
+        portableScope?.types,
         options.provides,
         (call, awaited, bindings, types) =>
           extensionConstant(program, checker, call, awaited, bindings, types, root, extensions),
@@ -964,7 +970,6 @@ function compilerOptions(file: string): ts.CompilerOptions {
     skipLibCheck: true,
     strict: true,
     target: ts.ScriptTarget.ESNext,
-    types: [],
   };
 }
 
@@ -2519,7 +2524,7 @@ function lowerType(
   substitutions: ReadonlyMap<ts.Type, ts.Type> = new Map(),
   allowCallbackCycle = false,
 ): TypeIR {
-  const substituted = resolvedSubstitutedType(checker, type, at, substitutions);
+  const substituted = resolvedSubstitutedType(checker, type, substitutions);
   if (substituted !== type) {
     return lowerType(checker, substituted, at, active, path, substitutions, allowCallbackCycle);
   }
@@ -2754,7 +2759,6 @@ function instantiatedSignatureParameterType(
 function resolvedSubstitutedType(
   checker: ts.TypeChecker,
   type: ts.Type,
-  at: ts.Node,
   substitutions: ReadonlyMap<ts.Type, ts.Type>,
   active: Set<ts.Type> = new Set(),
 ): ts.Type {
@@ -2765,8 +2769,8 @@ function resolvedSubstitutedType(
   active.add(substituted);
   try {
     const indexed = substituted as ts.IndexedAccessType;
-    const owner = resolvedSubstitutedType(checker, indexed.objectType, at, substitutions, active);
-    const index = resolvedSubstitutedType(checker, indexed.indexType, at, substitutions, active);
+    const owner = resolvedSubstitutedType(checker, indexed.objectType, substitutions, active);
+    const index = resolvedSubstitutedType(checker, indexed.indexType, substitutions, active);
     if (owner === indexed.objectType && index === indexed.indexType) return substituted;
     const propertyName =
       index.flags & ts.TypeFlags.StringLiteral
@@ -2774,15 +2778,16 @@ function resolvedSubstitutedType(
         : index.flags & ts.TypeFlags.NumberLiteral
           ? String((index as ts.NumberLiteralType).value)
           : undefined;
-    const property = propertyName === undefined ? undefined : owner.getProperty(propertyName);
+    const property =
+      propertyName === undefined
+        ? undefined
+        : (
+            checker as unknown as Readonly<{
+              getTypeOfPropertyOfType(owner: ts.Type, name: string): ts.Type | undefined;
+            }>
+          ).getTypeOfPropertyOfType(owner, propertyName);
     return property
-      ? resolvedSubstitutedType(
-          checker,
-          checker.getTypeOfSymbolAtLocation(property, property.valueDeclaration ?? at),
-          at,
-          substitutions,
-          active,
-        )
+      ? resolvedSubstitutedType(checker, property, substitutions, active)
       : substituted;
   } finally {
     active.delete(substituted);
@@ -2794,7 +2799,14 @@ function substitutedType(type: ts.Type, substitutions: ReadonlyMap<ts.Type, ts.T
   let current = type;
   while (!seen.has(current)) {
     seen.add(current);
-    const next = substitutions.get(current);
+    const next =
+      substitutions.get(current) ??
+      (current.flags & ts.TypeFlags.TypeParameter
+        ? [...substitutions].find(
+            ([candidate]) =>
+              candidate.flags & ts.TypeFlags.TypeParameter && candidate.symbol === current.symbol,
+          )?.[1]
+        : undefined);
     if (!next || next === current) return current;
     current = next;
   }
@@ -3818,10 +3830,11 @@ function lowerStaticValue(
   dependenciesName: string,
   at: ts.Node,
 ): ExpressionIR {
-  if (!ts.isExpression(binding.node)) {
+  const resolved = resolveStaticValue(lowering.checker, binding, new Set()) ?? binding;
+  if (!ts.isExpression(resolved.node)) {
     throw diagnostic(at, "Static portable bindings must resolve to expressions.");
   }
-  const value = unwrapExpression(binding.node);
+  const value = unwrapExpression(resolved.node);
   if (symbol && lowering.activeStatic.has(symbol)) {
     if (ts.isArrowFunction(value) || ts.isFunctionExpression(value)) {
       const captures = capturedSymbols(lowering, value);
@@ -3838,18 +3851,18 @@ function lowerStaticValue(
   const bindingChanges: Array<Readonly<{ symbol: ts.Symbol; previous?: StaticValue }>> = [];
   const typeChanges: Array<Readonly<{ source: ts.Type; previous?: ts.Type }>> = [];
   try {
-    for (const [nested, value] of flattenStaticBindings(binding.bindings)) {
+    for (const [nested, value] of flattenStaticBindings(resolved.bindings)) {
       bindingChanges.push({ symbol: nested, previous: lowering.staticBindings.get(nested) });
       lowering.staticBindings.set(nested, value);
     }
-    for (const [source, target] of binding.types ?? []) {
+    for (const [source, target] of resolved.types ?? []) {
       typeChanges.push({ source, previous: lowering.typeSubstitutions.get(source) });
       lowering.typeSubstitutions.set(source, target);
     }
     if (ts.isArrowFunction(value) || ts.isFunctionExpression(value)) {
       return lowerClosure(lowering, value, dependenciesName, true);
     }
-    return lowerExpression(lowering, binding.node, dependenciesName);
+    return lowerExpression(lowering, resolved.node, dependenciesName);
   } finally {
     for (const { source, previous } of typeChanges.reverse()) {
       if (previous) lowering.typeSubstitutions.set(source, previous);
@@ -4844,7 +4857,9 @@ function portableMethod(
   const owner = lowering.checker.getTypeAtLocation(expression.expression);
   const category = portableTypeCategory(lowering.checker, owner);
   if (category === "string") {
-    return ["slice", "startsWith", "trim"].includes(expression.name.text);
+    return ["charCodeAt", "slice", "startsWith", "toLowerCase", "trim"].includes(
+      expression.name.text,
+    );
   }
   const member = owner.getProperty(expression.name.text);
   return Boolean(
@@ -6055,9 +6070,39 @@ function staticCallTypes(
   const arguments_ = checker.getTypeArgumentsForResolvedSignature(resolved) ?? [];
   for (const [index, parameter] of declared.typeParameters.entries()) {
     const argument = arguments_[index];
-    if (argument) types.set(parameter, substitutedType(argument, types));
+    if (argument) {
+      const substituted = substitutedType(argument, types);
+      registerAliasTypeSubstitutions(checker, substituted, types);
+      types.set(parameter, substituted);
+    }
   }
   return types;
+}
+
+function registerAliasTypeSubstitutions(
+  checker: ts.TypeChecker,
+  type: ts.Type,
+  substitutions: Map<ts.Type, ts.Type>,
+  active: Set<ts.Type> = new Set(),
+): void {
+  if (active.has(type)) return;
+  active.add(type);
+  try {
+    const declaration = type.aliasSymbol?.declarations?.find(ts.isTypeAliasDeclaration);
+    const parameters = declaration?.typeParameters;
+    const arguments_ = type.aliasTypeArguments;
+    if (!parameters || !arguments_) return;
+    for (const [index, parameter] of parameters.entries()) {
+      const argument = arguments_[index];
+      if (!argument) continue;
+      const parameterType = checker.getTypeAtLocation(parameter.name);
+      const substituted = substitutedType(argument, substitutions);
+      substitutions.set(parameterType, substituted);
+      registerAliasTypeSubstitutions(checker, substituted, substitutions, active);
+    }
+  } finally {
+    active.delete(type);
+  }
 }
 
 function staticFunctionResult(

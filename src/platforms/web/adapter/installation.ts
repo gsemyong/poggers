@@ -221,7 +221,8 @@ export function createWebServiceWorkerPlan(input: {
 export function renderWebServiceWorker(plan: WebServiceWorkerPlan): string {
   const imports = plan.modules.map((module) => `import ${JSON.stringify(module)};`).join("\n");
   return `${imports}${imports ? "\n" : ""}const VERSION = ${JSON.stringify(plan.version)};
-const CACHE_ENABLED = ${plan.caching === "always" ? "true" : 'new URL(self.location.href).searchParams.get("pwa") === "preview"'};
+const PREVIEW = new URL(self.location.href).searchParams.get("pwa") === "preview";
+const CACHE_ENABLED = ${plan.caching === "always" ? "true" : "PREVIEW"};
 const PROGRAMS = self.__kitServiceWorkerPrograms ?? [];
 const SUBSCRIPTIONS = self.__kitServiceWorkerSubscriptions ??= new Set();
 const ASSET_CACHE = "kit-assets-" + VERSION;
@@ -235,22 +236,26 @@ const WARM_DOCUMENTS = ${JSON.stringify(plan.warmDocuments)};
 const FALLBACK = ${JSON.stringify(plan.fallback ?? null)};
 
 self.addEventListener("install", (event) => {
-  event.waitUntil(Promise.all([
-    Promise.all(PROGRAMS),
-    ...(CACHE_ENABLED ? [
-      caches.open(ASSET_CACHE).then((cache) => cache.addAll(PRECACHE)),
-      caches.open(DOCUMENT_CACHE).then((cache) => cache.addAll(INSTALL_DOCUMENTS)),
-    ] : []),
-  ]));
+  event.waitUntil((async () => {
+    await Promise.all([
+      Promise.all(PROGRAMS),
+      ...(CACHE_ENABLED ? [
+        caches.open(ASSET_CACHE).then((cache) => cache.addAll(PRECACHE)),
+        caches.open(DOCUMENT_CACHE).then((cache) => cache.addAll(INSTALL_DOCUMENTS)),
+      ] : []),
+    ]);
+    await self.skipWaiting();
+  })());
 });
 
 self.addEventListener("activate", (event) => {
-  if (!CACHE_ENABLED) return;
   event.waitUntil(Promise.all([
-    caches.keys().then((names) => Promise.all(names
-      .filter((name) => name.startsWith("kit-") && name !== ASSET_CACHE && name !== DOCUMENT_CACHE)
-      .map((name) => caches.delete(name)))),
-    self.registration.navigationPreload?.enable(),
+    ...(CACHE_ENABLED ? [
+      caches.keys().then((names) => Promise.all(names
+        .filter((name) => name.startsWith("kit-") && name !== ASSET_CACHE && name !== DOCUMENT_CACHE)
+        .map((name) => caches.delete(name)))),
+      self.registration.navigationPreload?.enable(),
+    ] : []),
     self.clients.claim(),
   ]));
 });
@@ -315,6 +320,19 @@ self.addEventListener("fetch", (event) => {
       return await documents.match(request)
         || await documents.match(FALLBACK, { ignoreVary: true })
         || Response.error();
+    })());
+    return;
+  }
+  if (PREVIEW && ["script", "style", "font", "image", "audio", "video", "worker", "sharedworker"].includes(request.destination)) {
+    event.respondWith((async () => {
+      const assets = await caches.open(ASSET_CACHE);
+      try {
+        const response = await fetch(request);
+        if (response.ok) event.waitUntil(assets.put(request, response.clone()));
+        return response;
+      } catch {
+        return await assets.match(request, { ignoreVary: true }) || Response.error();
+      }
     })());
     return;
   }

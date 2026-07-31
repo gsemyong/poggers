@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 
-import { HotUpdateCoordinator, type HotCandidate } from "@/execution/interpreter";
+import { HotUpdateCoordinator, type HotCandidate } from "@/execution/hot";
 
 describe("hot update coordination", () => {
   test("keeps the live revision when prepare or activation fails", async () => {

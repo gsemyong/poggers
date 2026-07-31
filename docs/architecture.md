@@ -715,8 +715,10 @@ Use the validation ladder while editing:
 ```sh
 nub exec vitest run path/to/feature.spec.ts -t "changed behavior"
 nub run typecheck
+nub run typecheck:examples
 nub run check:source
-nub run check:workflow
+nub run check:workflow:source
+nub run check:workflow:compiler
 nub run check:compiler
 nub run check:providers
 nub run check:presentation
@@ -726,12 +728,19 @@ nub run check:production
 The targeted test and incremental typecheck are the application and
 Feature-factory inner loop. They never invoke Cargo. `check:source` is the
 routine TypeScript milestone: typecheck, lint, formatting, and source tests
-whose fixtures do not perform semantic System compilation. `check:workflow`
-owns the compiler-backed Workflow conformance matrix and its focused debug
-TypeScript/Rust differential evidence. It isolates runtime, compiler-backed,
-and canonical-IR groups in separate Vitest processes so TypeScript compiler
-graphs are released between them. Compiler, provider, adapter, browser, and
-production gates run only for changes to their owned surfaces. `check`
+whose fixtures do not perform semantic System compilation.
+`typecheck:examples` checks all examples in one incremental TypeScript build
+process; an unchanged warm invocation reuses each example's own build info.
+`check:workflow:source` runs only Workflow behavior through TypeScript;
+`check:workflow:compiler` owns Workflow authoring and versioned-IR extraction;
+and `check:workflow` combines those two milestone gates. Static Workflow
+conformance fixtures use the same input-validated, content-addressed semantic
+compilation cache as development. Direct compiler tests bypass that cache when
+extraction or invalidation is the behavior under test. Generic portable
+TypeScript/Rust differential evidence runs once under `check:compiler`, while a
+complete generated Workflow is reserved for the release-mode production smoke.
+Compiler, provider, adapter, browser, and production gates run only for changes
+to their owned surfaces. `check`
 remains the complete repository acceptance gate and builds the package at most
 once. It runs `check:source`, Workflow conformance, generic compiler
 differential conformance, provider/native conformance, one package build,

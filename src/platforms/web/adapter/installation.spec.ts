@@ -50,7 +50,7 @@ describe("web installation planning", () => {
     });
   });
 
-  it("emits one versioned worker without forcing activation", () => {
+  it("emits one versioned worker that activates after its caches are complete", () => {
     const installation = planWebInstallation(system(), interfaceId, routes)!;
     const plan = createWebServiceWorkerPlan({
       installation,
@@ -78,9 +78,18 @@ describe("web installation planning", () => {
     expect(source).toContain("Promise.all(PROGRAMS)");
     expect(source).toContain("navigationPreload?.enable()");
     expect(source).toContain("clients.claim()");
-    expect(source).not.toContain('"install", (event) => event.waitUntil(self.skipWaiting())');
+    expect(source).toContain("await self.skipWaiting()");
     expect(source).toContain("DOCUMENTS.includes(url.pathname)");
     expect(source).toContain("documents.match(FALLBACK, { ignoreVary: true })");
+    expect(source).toContain(
+      'const PREVIEW = new URL(self.location.href).searchParams.get("pwa") === "preview"',
+    );
+    expect(source).toContain(
+      'PREVIEW && ["script", "style", "font", "image", "audio", "video", "worker", "sharedworker"].includes(request.destination)',
+    );
+    expect(source).toContain(
+      "return await assets.match(request, { ignoreVary: true }) || Response.error()",
+    );
     expect(source).toContain("assets.match(request, { ignoreVary: true })");
     expect(source).toContain("assets.put(request, response.clone())");
     expect(source).toContain('const PRECACHE = ["/assets/app-a1b2c3d4.js"]');

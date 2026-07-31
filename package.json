@@ -92,20 +92,25 @@
       "types": "./dist/src/features/actor/public.d.ts",
       "default": "./dist/src/features/actor/public.js"
     },
+    "./features/data": {
+      "source": "./dist/source/features/data/public.ts",
+      "types": "./dist/src/features/data/public.d.ts",
+      "default": "./dist/src/features/data/public.js"
+    },
     "./features/aggregate": {
       "source": "./dist/source/features/aggregate/index.ts",
       "types": "./dist/src/features/aggregate/index.d.ts",
       "default": "./dist/src/features/aggregate/index.js"
     },
     "./features/projection": {
-      "source": "./dist/source/features/projection/index.ts",
-      "types": "./dist/src/features/projection/index.d.ts",
-      "default": "./dist/src/features/projection/index.js"
+      "source": "./dist/source/features/projection/public.ts",
+      "types": "./dist/src/features/projection/public.d.ts",
+      "default": "./dist/src/features/projection/public.js"
     },
     "./features/replica": {
-      "source": "./dist/source/features/replica/index.ts",
-      "types": "./dist/src/features/replica/index.d.ts",
-      "default": "./dist/src/features/replica/index.js"
+      "source": "./dist/source/features/replica/public.ts",
+      "types": "./dist/src/features/replica/public.d.ts",
+      "default": "./dist/src/features/replica/public.js"
     },
     "./features/identity": {
       "source": "./dist/source/features/identity/index.ts",
@@ -127,15 +132,15 @@
   "scripts": {
     "build": "nub scripts/build.ts",
     "check:distribution": "tsc -p src/platforms/web/adapter/fixtures/request-render/tsconfig.json && vitest run --tagsFilter='package && !production' src/realization.spec.ts src/platforms/web/adapter/pipeline.spec.ts src/platforms/web/adapter/fixtures/request-render/src/system.spec.ts",
-    "check:examples": "tsc --noEmit -p examples/basic && tsc --noEmit -p examples/authenticated-crud && tsc --noEmit -p examples/presentation && vitest run --tagsFilter='!production' examples && vitest run --tagsFilter=package src/cli.spec.ts",
+    "check:examples": "nub run typecheck:examples && vitest run --tagsFilter='!production' examples && vitest run --tagsFilter=package src/cli.spec.ts",
     "check:compiler": "vitest run --no-file-parallelism --tagsFilter='compiler && !package' src/compiler src/features/actor/feature.spec.ts src/realization.spec.ts src/platforms/server/adapter/rust",
     "check:providers": "vitest run --tagsFilter=provider src/features src/platforms/server && cargo test --workspace",
     "check:presentation": "vitest run src/platforms/web/presentation src/platforms/web/adapter/presentation src/platforms/web/adapter/ui/component/adapter.spec.ts",
     "check:production": "KIT_NATIVE_PROFILE=release vitest run --no-file-parallelism --tagsFilter=production src examples",
     "check:source": "nub run typecheck && nub run lint && nub run fmt:check && nub run test",
-    "check:workflow": "nub run check:workflow:source && nub run check:workflow:native",
-    "check:workflow:native": "vitest run --no-file-parallelism --tagsFilter='native && !production' src/features/workflow/feature.spec.ts",
-    "check:workflow:source": "vitest run --no-file-parallelism --tagsFilter='!compiler && !native && !package && !provider && !production' src/features/workflow/feature.spec.ts && vitest run --no-file-parallelism --tagsFilter='compiler && !native && !package && !production' src/features/workflow/feature.spec.ts && vitest run --no-file-parallelism src/features/workflow/ir.spec.ts",
+    "check:workflow": "nub run check:workflow:source && nub run check:workflow:compiler",
+    "check:workflow:compiler": "vitest run --no-file-parallelism --tagsFilter='compiler && !native && !package && !provider && !production' src/features/workflow/feature.spec.ts src/features/workflow/ir.spec.ts",
+    "check:workflow:source": "vitest run --no-file-parallelism --tagsFilter='!compiler && !native && !package && !provider && !production' src/features/workflow/feature.spec.ts",
     "dev": "nub src/cli.ts dev --dir examples/basic",
     "fmt": "oxfmt --config config/format.json .",
     "fmt:check": "oxfmt --config config/format.json --check .",
@@ -144,16 +149,17 @@
     "release:check": "nub scripts/release.ts --check",
     "test": "vitest run --no-file-parallelism --tagsFilter='!compiler && !package && !provider && !production' --exclude='examples/**' --exclude='src/features/workflow/**'",
     "typecheck": "tsc --noEmit",
+    "typecheck:examples": "tsc -b --pretty false examples/basic examples/authenticated-crud examples/presentation",
     "check": "nub run check:source && nub run check:workflow && nub run check:compiler && nub run check:providers && nub run build && nub run check:examples && nub run check:distribution && nub run check:production"
   },
   "dependencies": {
     "@nats-io/jetstream": "3.4.0",
     "@nats-io/transport-node": "3.4.0",
     "@tanstack/virtual-core": "^3.17.6",
+    "@tursodatabase/database-wasm": "0.7.2",
     "@types/node": "^26.1.1",
     "@typescript/typescript6": "^6.0.2",
     "alien-signals": "^3.2.1",
-    "better-auth": "^1.6.25",
     "oxfmt": "^0.60.0",
     "oxlint": "^1.75.0",
     "typescript": "^7.0.2",
